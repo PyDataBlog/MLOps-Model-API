@@ -1,4 +1,6 @@
 import os
+import sys
+import pathlib
 import logging
 import logging.config
 import uvicorn
@@ -6,10 +8,13 @@ import yaml
 import tensorflow as tf
 from fastapi import FastAPI, Request
 from typing import Dict, Union
-from .utils import lang_mappings, Prediction, Features
+sys.path.append(str(pathlib.Path(__file__).parent.parent))
+from app.utils import lang_mappings, Prediction, Features
 
 
-os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
+# Detect if GPU is available
+if tf.test.is_gpu_available():
+    os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 # Load logging config
 with open("app/logging.yaml", "r") as f:
@@ -25,7 +30,7 @@ loaded_model = tf.keras.models.load_model(f"app/models/{model_name}")
 
 app = FastAPI(
     title="FastKube",
-    description="A simple demo API for serving a trained ML model using Kubernetes",
+    description="A simple demo API for serving a trained ML model using Minikube",
     version="0.1.0",
 )
 

@@ -6,8 +6,8 @@ class SwarmUsers(HttpUser):
 
     @task
     def index_page(self):
-        self.client.get("/")
+        self.client.get("/", verify=False)
 
     @task
     def predict_page(self):
-        self.client.post("/predict", json={"code_snippet": "'#include <string>'"})
+        self.client.post("/predict", json={"code_snippet": "'#include <string>'"}, verify=False)

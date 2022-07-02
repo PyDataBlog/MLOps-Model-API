@@ -1,8 +1,7 @@
-from operator import ge
 import os
 import logging
 import tensorflow as tf
-from typing import List, Dict, Optional, Tuple, Union, Any
+from typing import Dict, Tuple
 from tensorflow.keras import layers
 from tensorflow.keras import losses
 from tensorflow.keras.layers import TextVectorization
@@ -88,6 +87,7 @@ def train_model() -> Dict[str, str]:
     logger.info(f"Tensorflow version: {tf.__version__}")
     final_train, final_val, final_test = transform_datasets(train_set=train_ds, val_set=val_ds, test_set=test_ds)
     generate_model(train_set=final_train, val_set=final_val, test_set=final_test)
+    logger.info("Model training complete")
     return {"Message": "Model trained successfully"}
 
 
