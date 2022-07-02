@@ -8,6 +8,7 @@ import yaml
 import tensorflow as tf
 from fastapi import FastAPI, Request
 from typing import Dict, Union
+
 sys.path.append(str(pathlib.Path(__file__).parent.parent))
 from app.utils import lang_mappings, Prediction, Features
 
