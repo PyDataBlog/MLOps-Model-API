@@ -1,0 +1,706 @@
+;Copyright 2015 Sergey Ilmukhin
+;
+;Licensed under the Apache License, Version 2.0 (the "License");
+;you may not use this file except in compliance with the License.
+;You may obtain a copy of the License at
+;
+;    http://www.apache.org/licenses/LICENSE-2.0
+;
+;Unless required by applicable law or agreed to in writing, software
+;distributed under the License is distributed on an "AS IS" BASIS,
+;WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+;See the License for the specific language governing permissions and
+;limitations under the License.
+
+;------------------------------;
+;----	CR1(socket command)
+SockOpenCmd		=	01h
+SockListenCmd	=	02h
+SockConnectCmd	=	04h
+SockDisconCmd	=	08h
+SockCloseCmd	=	10h
+SockSendCmd		=	20h
+SockSendKeepCmd	=	22h
+SockRecvCmd		=	40h
+
+;----	SIR1(socket interrupt)
+SockConIr		=	01h
+SockDisconIr	=	02h
+SockRecvIr		=	04h
+SockTimeoutIr	=	08h
+SockSendOkIr	=	10h
+
+;----	SR1(socket status)
+SockClosedSt	=	00h
+SockInitSt	=	13h
+SockListenSt	=	14h
+SockEstblshdSt	=	17h
+SockCloseWaitSt	=	1Ch
+SockUDPSt         =   22h
+SockMacRawSt      =   42h
+
+SockSynSentSt	=	15h
+SockSynRecvSt	=	16h
+SockFinWaitSt	=	18h
+SockTimeWaitSt	=	1Bh
+SockLastAckSt	=	1Dh
+SockArpSt		=	01h
+
+;------------------------------;
+
+Init:	;init socket
+;  Input:
+;	bp = channel memory
+;	es = device address
+;	bx = socket address
+	pushs	<es,ds,cx>
+
+	mov	[bp+ActCnt],0		;
+	mov	[SIMR1+bx],00000000b		;disable all
+	mov	al,[SIR1+bx]
+	mov	[SIR1+bx],al			;clear
+
+    cmp [bp+Mode],2000h ; is MACRAW?
+    jnz UDP
+    call MACRAWInit
+    call ARPAnnounce
+    jmp i8
+    
+UDP:
+    cmp [bp+Mode],3000h ; is UDP?
+    jnz TCP
+    call UDPInit
+    jmp i8
+            
+TCP:
+    mov	[SIMR1+bx],00001111b		;enable Tot,Recv,Discn,Con
+	mov	[CR1+bx],SockCloseCmd
+	mov	[SMR1+bx],01h			;TCP
+	mov	ax,[bp+SourcePort]
+	mov	[PORT0+bx],aH			;Source Port No.
+	mov	[PORT1+bx],aL			;Source Port No.
+    
+i4:	mov	[CR1+bx],SockOpenCmd		;Open
+	cmp	[SR1+bx],SockInitSt
+	jnz	i4
+    cmp	[bp+Mode],1234h	;is master?
+	jz	i8		;yes, master
+	call	Listen		;no, slave
+i8:
+	pops	<cx,ds,es>
+	ret
+
+
+
+;------------------------------;
+; MACRAW Init
+MACRAWInit:
+;  Input:
+;	bp = channel memory
+;	es = device address
+;	bx = socket address
+    mov	[CR1+bx],SockCloseCmd
+    mov	[SMR1+bx],04h			;MACRAW
+    mov	[bp+Mode],2000h         ;MACRAW_mode
+mraw_init_wait:
+    mov	[CR1+bx],SockOpenCmd		;Open
+	cmp	[SR1+bx],SockMacRawSt
+	jnz	mraw_init_wait
+ret
+;------------------------------;
+
+;------------------------------;
+; UDP Init
+UDPInit:
+;  Input:
+;	bp = channel memory
+;	es = device address
+;	bx = socket address
+    push ax
+    ;mov	[SIMR1+bx],00011100b		;enable SendOk,Tot,Recv
+    mov	[SIMR1+bx],00000100b		    ;enable Recv
+    mov	[CR1+bx],SockCloseCmd
+    mov	[SMR1+bx],02h			;UDP
+	mov	ax,[bp+SourcePort]
+	mov	[PORT0+bx],aH			;Source Port No.
+	mov	[PORT1+bx],aL			;Source Port No
+udp_init_wait:
+    mov	[CR1+bx],SockOpenCmd		;Open
+	cmp	[SR1+bx],SockUDPSt
+	jnz	udp_init_wait
+    pop ax
+ret
+;------------------------------;
+
+;------------------------------;
+; NTP Send
+NTPSend:
+;  Input:
+;	bp = channel memory
+;	es = device address
+;	bx = socket address
+;   es = device address
+    pushs<ax,bx,cx,si>
+    
+    ; Assigning NTP-server IP-address
+    mov al, [NTPServerIp+0] ; 1 byte of NTP-server IP 
+    mov [DIPR0+bx], al 	
+	mov al, [NTPServerIp+1] ; 2 byte of NTP-server IP 
+    mov [DIPR1+bx], al
+    mov al, [NTPServerIp+2] ; 3 byte of NTP-server IP 
+    mov [DIPR2+bx], al
+    mov al, [NTPServerIp+3] ; 4 byte of NTP-server IP 
+    mov [DIPR3+bx], al
+    
+    ; Assigning NTP-server port(123)
+    mov al, 0h 
+	mov [DPORT0+bx], al
+	mov al, 7bh 
+	mov [DPORT1+bx], al
+    
+    ; Assigning NTP-version and client-mode
+    mov	ax, 2300h
+	mov	[TX_FIFO0+bx],ah
+	mov	[TX_FIFO1+bx],al
+        
+    mov cx, 23
+ntpsend_fill:
+    mov	[TX_FIFO0+bx],al
+    mov	[TX_FIFO1+bx],al
+    loop ntpsend_fill
+    
+;    ;!!!!!!!! TEEEESTING !!!!!!!
+;    mov cx, 7
+;ntpsend_1:
+;    mov	[TX_FIFO0+bx],al
+;    mov	[TX_FIFO1+bx],al  
+;    loop ntpsend_1
+;    
+;    mov cx, 4
+;    xor si, si
+;ntpsend_2:    
+;    mov ax, word ptr [NTPLastTime+si]
+;    mov	[TX_FIFO0+bx],ah
+;    mov	[TX_FIFO1+bx],al
+;    
+;    inc si
+;    inc si
+;    loop ntpsend_2
+;    
+;    xor ax, ax
+;    mov cx, 12
+;ntpsend_3:
+;    mov	[TX_FIFO0+bx],al
+;    mov	[TX_FIFO1+bx],al  
+;    loop ntpsend_3
+;    ;!!!!!!!! TEEEESTING !!!!!!!
+    
+    mov cx, 48
+    mov	[TX_WRS0+bx],0
+	mov	[TX_WRS1+bx],0
+	mov	[TX_WRS2+bx],ch
+	mov	[TX_WRS3+bx],cl
+    
+    mov	[CR1+bx],SockSendCmd
+    
+    pops<si,cx,bx,ax>
+ret
+
+;------------------------------;
+; NTP receive handler
+NTPReceiveHnd:
+;  Input:
+;   bp = channel memory
+;	es = device address
+;	bx = socket address
+;   ds = dual memory
+    pushs<ax,cx,dx,di>
+
+    ; dl will be summary flag of packet correctness, if 0 then packet is bad
+    mov dl, 1 
+        
+    ;extract source IP address
+    mov	al,[RX_FIFO0+bx]	;get 1-st byte of IP
+	mov	ah,[RX_FIFO1+bx]	;get 2-nd byte of IP    
+    
+    ;check first two bytes of ip
+    cmp ax, word ptr [NTPServerIp+0]
+    jz ntprcv1
+    and dl, 0
+    
+ntprcv1:
+    mov	al,[RX_FIFO0+bx]	;get 3-rd byte of IP
+	mov	ah,[RX_FIFO1+bx]	;get 4-th byte of IP
+    
+    ;check second two bytes of ip
+    cmp ax, word ptr [NTPServerIp+2]
+    jz ntprcv2
+    and dl, 0
+
+ntprcv2:
+    ;extract source port
+    mov	ah,[RX_FIFO0+bx]	;get 1-st byte of port
+	mov	al,[RX_FIFO1+bx]	;get 2-nd byte of port
+    
+    ;check source port, if not 123, then isn't NTP
+    cmp ax, 123
+    jz ntprcv3
+    and dl, 0
+    
+ntprcv3:
+    ;extract DATA size
+    mov	ch,[RX_FIFO0+bx]	;get received size (hi)
+	mov	cl,[RX_FIFO1+bx]	;get received size (lo)
+    
+    ;check length of DATA, if not 48 - packet is bad
+    cmp cx, 48
+    jz ntprcv4
+    and dl, 0
+
+ntprcv4:
+    test	cx,0001h		;is cx odd?
+	jz	ntprcv5			    ;no, cx is even
+	inc	cx			        ;yes, cx is odd, make it even
+    
+ntprcv5:
+    shr cx, 1
+    xor di, di
+    
+ntprcv6:
+    mov	ah,[RX_FIFO0+bx]
+	mov	al,[RX_FIFO1+bx]
+    
+    cmp dl, 0
+    jz ntprcv7
+    cmp di, 40
+    jb ntprcv7
+    cmp di, 46
+    ja ntprcv7
+    
+    ;mov word ptr ds:[di], ax ;testing
+    
+    mov byte ptr [di-40+NTPLastTime],   al
+    mov byte ptr [di-40+1+NTPLastTime], ah
+
+ntprcv7:
+    inc di
+    inc di
+    
+    loop ntprcv6
+          
+    mov	[CR1+bx],SockRecvCmd
+    
+    cmp dl, 0
+    jz ntprcvend
+    mov [TimeSyncFlag], 1
+    
+;    ;----Copy time to Dual Memory for CPU
+;ntprcv8:
+;    cmp	[XicbInt],0	;Is Dual free?
+;    jnz	ntprcv8		;no, exit
+;    
+;    call CopyTimeToDual
+;    
+;    mov	[XicbInt],1	;int
+;    ;----Copy time to Dual Memory for CPU
+    
+ntprcvend:
+    pops<di,dx,cx,ax>
+ret
+;------------------------------;
+
+CopyTimeToDual:
+    pushs<ds,ax,cx,di,si>
+    
+    mov ax, seg DualRam
+    mov ds, ax
+        
+    mov	[XicbLen], 0Bh
+    mov	[XicbAddr],offset DualBufferX
+    mov	[XicbCtrl],08h	;data
+    mov al, byte ptr [NTPSocketNum]
+    mov	[XicbChnl],al
+    
+    cli
+    
+    mov	di,offset DualBufferX
+
+    ;first 3 bytes for CPU to recognize timesync
+    mov byte ptr ds:[di], 00h
+    inc di
+    
+    mov byte ptr ds:[di], 19h
+    inc di
+    
+    mov byte ptr ds:[di], 08h
+    inc di
+    
+    mov cx, 4
+    xor si, si
+    ;time from NTP-server
+cptime1:    
+    mov ax, word ptr [NTPLastTime+si]
+    mov word ptr ds:[di], ax
+    inc di
+    inc di
+    inc si
+    inc si
+    loop cptime1
+    sti
+    
+    pops<si,di,cx,ax,ds>
+    ret
+
+;------------------------------;
+; ARP Announcement
+ARPAnnounce:
+    pushs	<ax,cx>
+    
+    mov ax, 0
+    ; assigning destination broadcast DHAR
+	mov al, 0FFh 
+	mov [DHAR0+bx], al 	
+	mov [DHAR1+bx], al
+	mov [DHAR2+bx], al
+	mov [DHAR3+bx], al
+	mov [DHAR4+bx], al
+	mov [DHAR5+bx], al
+    
+    ; destination MAC-address
+	mov cx, 3
+aa_dst_mac_fill:
+    mov	[TX_FIFO0+bx],al
+    mov	[TX_FIFO1+bx],al
+    loop aa_dst_mac_fill
+    
+    ; source MAC-address
+    mov al, [bp+Mac+0]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Mac+1]
+    mov	[TX_FIFO1+bx],al
+    mov al, [bp+Mac+2]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Mac+3]
+    mov	[TX_FIFO1+bx],al
+    mov al, [bp+Mac+4]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Mac+5]
+    mov	[TX_FIFO1+bx],al
+    
+    ; Ethernet type - ARP(0x0806)
+    mov al, 08h
+    mov	[TX_FIFO0+bx],al
+    mov al, 06h
+    mov	[TX_FIFO1+bx],al
+    
+    ; ====== Begin generating ARP Payload =======
+    
+    ; HTYPE(Hardware Type) field, Ethernet code
+    mov al, 00h
+    mov	[TX_FIFO0+bx],al
+    mov al, 01h
+    mov	[TX_FIFO1+bx],al
+    
+    ; PTYPE(Protocol Type) field, IPv4 code
+    mov al, 08h
+    mov	[TX_FIFO0+bx],al
+    mov al, 00h
+    mov	[TX_FIFO1+bx],al
+    
+    ; HLEN(Hardware Length) field, MAC-address length
+    mov al, 06h
+    mov	[TX_FIFO0+bx],al
+    
+	; PLEN(Protocol Length) field, IPv4-address length
+    mov al, 04h
+    mov	[TX_FIFO1+bx],al
+		
+	; OPER(Operation) field, Opertaion Code(1 - request)
+    mov al, 00h
+    mov	[TX_FIFO0+bx],al
+    mov al, 01h
+    mov	[TX_FIFO1+bx],al
+    
+    ; Sender hardware address (SHA) field
+    mov al, [bp+Mac+0]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Mac+1]
+    mov	[TX_FIFO1+bx],al
+    mov al, [bp+Mac+2]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Mac+3]
+    mov	[TX_FIFO1+bx],al
+    mov al, [bp+Mac+4]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Mac+5]
+    mov	[TX_FIFO1+bx],al
+    
+    ; Sender protocol address (SPA) field
+    mov al, [bp+Ip+0]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Ip+1]
+    mov	[TX_FIFO1+bx],al
+    mov al, [bp+Ip+2]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Ip+3]
+    mov	[TX_FIFO1+bx],al
+    
+    ; Target hardware address (THA) field
+    mov al, 00h 
+	mov cx, 3
+aa_tha_fill:
+    mov	[TX_FIFO0+bx],al
+    mov	[TX_FIFO1+bx],al
+    loop aa_tha_fill
+    
+    ; Target protocol address (TPA) field
+    mov al, [bp+Ip+0]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Ip+1]
+    mov	[TX_FIFO1+bx],al
+    mov al, [bp+Ip+2]
+    mov	[TX_FIFO0+bx],al
+    mov al, [bp+Ip+3]
+    mov	[TX_FIFO1+bx],al
+    
+    ; ====== End generating ARP Payload =========
+    
+    mov ax, 48
+    mov	[TX_WRS0+bx],0
+	mov	[TX_WRS1+bx],0
+	mov	[TX_WRS2+bx],ah
+	mov	[TX_WRS3+bx],al
+    mov	[CR1+bx],SockSendCmd
+    
+    pops    <cx,ax>
+ret
+;------------------------------;
+
+;------------------------------;
+ChkAct:
+    cmp	[bp+Mode],1234h	;
+	jz	wa2		;	;master, goto
+    
+    cmp	[bp+Mode],3000h	;
+	jz	wa2		;	;UDP, goto
+    
+    cmp	[bp+Mode],2000h	;
+	jz	wa_mraw		;MACRAW, goto
+    jmp wa_mbslave     
+
+wa_mraw:
+    inc	[bp+ActCnt]
+    cmp [bp+ActCnt],2*100+10
+    jb wa2
+    
+    call Init
+    
+    mov [bp+Mode], 0    ;slave
+    call Init
+    jmp wa2    
+    
+wa_mbslave:    
+    inc	[bp+ActCnt]
+	cmp	[bp+ActCnt],5*100	;5s
+	jb	wa2
+    cmp [bx+SR1], SockListenSt ;if in Listen mode - do not reinitialise
+    je wa2
+	mov	[bp+ActCnt],0		;[]
+	call	Init
+wa2:
+    ret    
+;------------------------------;
+
+;------------------------------;
+;Checking Link LED's state of Wiznets
+ChkLink:
+    pushs<ax,bx,cx,ds,si>
+    
+    xor bx, bx
+    
+    mov ax, seg DualRam
+    mov ds, ax
+        
+    cmp [ChkLinkCounter], 1*100 ; 1s
+    jae chklink01
+    jmp chklinkend
+ 
+ chklink01:
+    mov [ChkLinkCounter], 0
+ 
+    ; Wiznet0
+    rd_	PIODATA1
+	and	ax, Wiznet0_Link
+    shr ax, 1
+    or bx, ax
+    
+    ; Wiznet1
+    rd_	PIODATA1
+	and	ax, Wiznet1_Link
+    shr ax, 1
+    or bx, ax
+    
+    mov byte ptr ds:[0EFFEh], bl
+    
+    mov cx, 2
+    xor si, si
+    mov bh, 1
+chklink05:
+    test bl, bh
+    jnz chklink10
+    jmp chklink12
+    
+chklink10:
+    inc byte ptr [WizLinkTimer+si]
+    jmp chklink19
+
+chklink12:
+    cmp byte ptr [WizLinkTimer+si], 0
+    jz chklink19
+    cmp byte ptr [WizLinkTimer+si], 5
+    jb chklink18
+    
+    pushs<bp,bx,es>
+    cmp si, 0
+    jnz chklink13    
+    lea	bp,ChnlMem_0
+	jmp chklink14
+    
+chklink13:
+    lea	bp,ChnlMem_8
+    
+chklink14:
+    mov	[bp+Mode],2000h     ;MACRAW-mode for initialization(Socket0 only!!!)
+    mov	ax,[bp+DeviceBase]
+	mov	es,ax
+	mov	bx,[bp+SocketBase]
+	call	Init			;init socket
+    pops<es,bx,bp>
+    
+chklink18:
+    mov byte ptr [WizLinkTimer+si], 0
+    
+chklink19:
+    cmp [WizLinkTimer+si], 254
+    jb chklink20
+    mov [WizLinkTimer+si], 5
+chklink20:
+    inc si
+    shl bh, 1
+    loop chklink05
+    
+    ;mov al, [WizLinkTimer+0] ;for testing
+    ;mov byte ptr ds:[200+0], al
+    ;mov al, [WizLinkTimer+1] ;for testing
+    ;mov byte ptr ds:[200+1], al
+    ;
+chklinkend:
+    
+    inc [ChkLinkCounter]
+    pops<si,ds,cx,bx,ax>
+ret 
+;------------------------------;
+
+
+;------------------------------;
+;Get states of sockets, of Wiznet
+GetSocketStates:
+    ;input:
+    ;bl - number of wiznet
+    ;bp - starting channel memory(ChnlMem_0 or ChnlMem_8)
+    pushs<ax,bx,cx,ds,es,di,bp>
+    
+    mov	ax,[bp+DeviceBase]
+	mov	es,ax
+        
+    ;getting buffer
+    push bx
+    mov	bx,1		;bx = # of parags
+	mov	ah,1		;get mem
+	int	1Fh		;ax = addr of user seg
+	pop	bx
+	jnc	gss1	;ok
+	jmp	gssend	;ng
+    
+gss1:
+    mov	ds,ax			;ds = addr of buff
+    mov byte ptr ds:[2], 09h
+    mov byte ptr ds:[4], bl
+    mov byte ptr ds:[5], 8  ;len
+    
+    push bx
+    mov di, 6
+    mov cx, NumOfSock
+gss5:
+	mov	bx,[bp+SocketBase]
+    mov al, byte ptr[SR1+bx]
+    mov byte ptr ds:[di], al
+    inc di
+    add	bp,size ChnlMem
+    loop gss5
+    pop bx
+    
+gss10:
+    mov	ax, ds
+	call PutIn			;Put the buffer addr (ds) into fifo
+	jnc	gssend
+gss15:
+    push	es
+	push	ds
+	pop	es
+	mov	ah,2			;free mem
+	int	1Fh
+	pop	es		;JC??
+    
+gssend:
+    
+    pops <bp,di,es,ds,cx,bx,ax>
+    ret
+;------------------------------;
+
+
+;------------------------------;
+;Get states of sockets, of Wiznet
+GetSocketStates2:
+    ;input:
+    ;bl - number of wiznet
+    ;bp - starting channel memory(ChnlMem_0 or ChnlMem_8)
+    pushs<ax,bx,cx,ds,es,di,bp>
+    
+    mov ax, seg DualRam
+    mov ds, ax
+    
+    mov	ax,[bp+DeviceBase]
+	mov	es,ax
+            
+    cmp bl, 0
+    jz gss2_1
+    cmp bl, 1
+    jz gss2_2
+    jmp gss2_end
+    
+gss2_1:
+    mov di, 0EFEEh
+    xor si, si ; debug
+    jmp gss2_3
+gss2_2:
+    mov di, 0EFF6h
+    mov si, 20 ; debug
+
+gss2_3:
+    mov cx, NumOfSock
+gss2_4:
+	mov	bx,[bp+SocketBase]
+    mov al, byte ptr[SR1+bx]
+    mov byte ptr ds:[di], al
+    mov byte ptr ds:[60020+si], al ; debug
+    inc si ;debug
+    inc di
+    add	bp,size ChnlMem
+    loop gss2_4
+    
+gss2_end:
+    
+    pops <bp,di,es,ds,cx,bx,ax>
+    ret
+;------------------------------;

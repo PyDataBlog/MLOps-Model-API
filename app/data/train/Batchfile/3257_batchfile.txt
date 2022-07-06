@@ -1,0 +1,1 @@
+cmd_net/sched/sch_codel.ko := ../tools/arm-bcm2708/arm-bcm2708hardfp-linux-gnueabi/bin/arm-bcm2708hardfp-linux-gnueabi-ld -EL -r  -T ./scripts/module-common.lds --build-id  -o net/sched/sch_codel.ko net/sched/sch_codel.o net/sched/sch_codel.mod.o

@@ -1,0 +1,485 @@
+<?php
+
+namespace cupidphp\common\Util;
+
+use cupidphp\common\Debug;
+use cupidphp\common\Util;
+use DateTime;
+
+use function cupidphp\main\debug;
+use function cupidphp\main\dump;
+use function cupidphp\main\xdiff_string_merge3;
+use function cupidphp\main\array_walk_recursive;
+
+class ArrayHelper
+{
+	private static $_masks = array();
+
+	static public function index($arr, $indexKey = 'id')
+	{
+		$array = [];
+
+		array_walk_recursive($arr, function($element) use (&$array, $indexKey)
+		{
+			if (is_array($element))
+			{
+				$array[$element[$indexKey]] = $element;
+			}
+		});
+
+		return $array;
+	}
+
+	static public function avg($values, $weights)
+	{
+		if (!empty($values))
+		{
+			if (!empty($weights))
+			{
+				for ($i = 0, $l = count($values); $i < $l && isset($weights[$i]); ++$i)
+				{
+					$values[$i] *= $weights[$i];
+				}
+
+				return array_sum($values) / array_sum($weights);
+			}
+			else
+			{
+				return array_sum($values) / count($values);
+			}
+		}
+		else
+		{
+			return 0;
+		}
+	}
+
+	static public function ksort_recursive(&$arr)
+	{
+		ksort($arr);
+
+		foreach ($arr as &$a)
+		{
+			if (is_array($a) && !empty($a))
+			{
+				self::ksort_recursive($a);
+			}
+		}
+	}
+
+	/**
+	 *
+	 * @param array $hash
+	 * @param array $subject
+	 * @return int number of replacements
+	 */
+	static public function replace_assoc($hash, &$subject, $decode = true)
+	{
+		$copy = $subject;
+
+		if (!is_string($subject))
+		{
+			$subject = json_encode($subject);
+		}
+
+		$subject = preg_replace_callback('@"(?<key>' . addcslashes(implode('|', array_keys($hash)), '.') . ')":(?:(?<str>".*?(?<!\\\)")|(?<bool>true|false)|(?<!\{)(?<int>[^,\}]+))@sS', function ($m) use(&$hash, &$copy, $decode)
+		{
+			static $count = [];
+
+			if (isset($count[$m['key']]))
+			{
+				++$count[$m['key']];
+			}
+			else
+			{
+				$count[$m['key']] = 0;
+			}
+
+			if (isset($m['int']))
+			{
+				$value = $m['int'];
+			}
+			elseif (isset($m['bool']))
+			{
+				$value = json_decode($m['bool']);
+			}
+			else
+			{
+				$value = json_decode($m['str']);
+			}
+
+			if (is_callable($replace = $hash[$m['key']]))
+			{
+				$replace = call_user_func($replace, $value, $m['key'], $copy, $count[$m['key']]);
+
+				if ($decode)
+				{
+					$replace = json_encode($replace);
+				}
+			}
+			else
+			{
+				$replace = json_encode($replace);
+			}
+
+			return '"' . $m['key'] . '":' . $replace;
+		}, $subject, -1, $count);
+
+		if ($decode)
+		{
+			$subject = json_decode($subject, true);
+		}
+
+		return $count;
+	}
+
+	static public function array_intersect_key()
+	{
+		$args = func_get_args();
+
+		$intersect = call_user_func_array('array_intersect_key', $args);
+
+		$res = array();
+
+		foreach($intersect as $key => &$value)
+		{
+			foreach ($args as &$array)
+			{
+				$res[$key][] = $array[$key];
+			}
+		}
+
+		return $res;
+	}
+
+	static public function diffsum()
+	{
+		$arrays = func_get_args();
+
+		$default = array_shift($arrays);
+
+		foreach ($arrays as $array)
+		{
+			$default = $array + $default;
+		}
+
+		return $default;
+	}
+
+	static public function extend()
+	{
+		$arrays = func_get_args();
+
+		$default = array_shift($arrays);
+
+		foreach ($arrays as $array)
+		{
+			$default = array_intersect_key($array, $default) + $default;
+		}
+
+		return $default;
+	}
+
+	static public function replace($search, $replacement, &$subject)
+	{
+		return $subject = json_decode(str_replace($search, $replacement, json_encode($subject)), true);
+	}
+
+	static public function walk_recursive(&$subject, $function, $array = false)
+	{
+		array_walk($subject, function (&$item, $key) use($function, &$subject, $array)
+		{
+			if (is_array($item))
+			{
+				if (true == $array)
+				{
+					$function($item, $key, $subject);
+				}
+
+				ArrayHelper::walk_recursive($item, $function, $array);
+			}
+			else
+			{
+				$function($item, $key, $subject);
+			}
+		});
+	}
+
+	static public function multisort(&$subject)
+	{
+		if (empty($subject))
+		{
+			return ;
+		}
+
+		$cols = func_get_args();
+
+		array_shift($cols);
+
+		$computed = array();
+
+		foreach ($subject as $key => $value)
+		{
+			for ($i = 0, $l = count($cols); $i < $l; $i += 2)
+			{
+				$colName = $cols[$i];
+
+				$computed[$colName][$key] = $value[$colName];
+			}
+		}
+
+		$mutliArgs = array();
+
+		for ($i = 0, $l = count($cols), $last = $l - 1; $i < $l; $i += 2)
+		{
+			$colName = $cols[$i];
+			$sortOption = $cols[$i + 1];
+
+			$mutliArgs[] = $computed[$colName];
+			$mutliArgs[] = $sortOption;
+		}
+
+		$mutliArgs[] = &$subject;
+
+		call_user_func_array('array_multisort', $mutliArgs);
+	}
+
+	static public function remove(&$subject, $ndx)
+	{
+		array_splice($subject, $ndx, 1);
+	}
+
+	static public function lowercase_keys(&$subject)
+	{
+		$subject = json_decode(preg_replace_callback('@(?<=")([^"]+)(?=":)@sS', function ($m)
+		{
+			return strtolower($m[1]);
+		}, json_encode($subject)), true);
+
+		return $subject;
+	}
+
+	static public function filter_keys($subject)
+	{
+		$keys = func_get_args();
+
+		array_shift($keys);
+
+		self::set_mask('__filter_keys__', $keys);
+
+		return self::apply_mask('__filter_keys__', $subject);
+	}
+
+	static public function filter($hash, $callback)
+	{
+		$filtered = array();
+
+		foreach($hash as $key => $value)
+		{
+			if (true !== $callback($value, $key))
+			{
+				$filtered[$key] = $value;
+			}
+		}
+
+		return $filtered;
+	}
+
+	static public function unprefix_keys($prefix, &$subject)
+	{
+		$subject = json_decode(preg_replace_callback('@(?<=")(\w+)(?=":)@sS', function ($m) use($prefix)
+		{
+			return str_replace($prefix, '', $m[1]);
+		}, json_encode($subject)), true);
+
+		return $subject;
+	}
+
+	static public function apply_keys(\Closure $func, array &$subject, array &$mapping = [])
+	{
+		$subject = json_decode(preg_replace_callback('@(?<=")(\w+)(?=":)@sS', function ($m) use($func, &$mapping)
+		{
+			$mapping[$m[1]] = $func($m[1]);
+
+			return $mapping[$m[1]];
+		}, json_encode($subject)), true);
+
+		return $subject;
+	}
+
+	static public function prefix_keys($prefix, &$subject)
+	{
+		$subject = json_decode(preg_replace_callback('@(?<=")(\w+)(?=":)@sS', function ($m) use($prefix)
+		{
+			return $prefix . $m[1];
+		}, json_encode($subject)), true);
+
+		return $subject;
+	}
+
+	static public function rename_keys($hash, &$subject, $flip = false)
+	{
+		if ($flip)
+		{
+			$hash = array_flip($hash);
+		}
+
+		$subject = json_decode(preg_replace_callback('@(?<=")(' . addcslashes(implode('|', array_keys($hash)), '.') . ')(?=":)@sS', function ($m) use(&$hash)
+		{
+			return $hash[$m[1]];
+		}, json_encode($subject)), true);
+
+		return $subject;
+	}
+
+	static public function cast($subject)
+	{
+		$subject = json_decode(preg_replace_callback('@:"\((?<type>\w+)\)(?<mixed>.*?)(?<!\\\)"@sS', function ($m)
+		{
+			$value = json_decode('"' . $m['mixed'] . '"');
+			return ':' . json_encode(Util::cast($value, $m['type']));
+		}, json_encode($subject)), true);
+
+		return $subject;
+	}
+
+	static public function apply_mask($key, $arr)
+	{
+		if (isset(self::$_masks[$key]))
+		{
+			return array_intersect_key($arr, self::$_masks[$key]);
+		}
+		else
+		{
+			return $arr;
+		}
+	}
+
+	static public function set_mask($key, $mask)
+	{
+		self::$_masks[$key] = array_flip($mask);
+	}
+
+	static public function insert(&$array, $position, $elm)
+	{
+		return array_splice($array, $position, 0, $elm);
+	}
+
+	static public function &current($array)
+	{
+		return $array[0];
+	}
+
+	static public function &end(&$array)
+	{
+		return $array[count($array) - 1];
+	}
+
+	static public function add(&$array, $elm)
+	{
+		return array_splice($array, count($array) - 1, 0, $elm);
+	}
+
+	static public function toTree($list, $key = 'id', $leafName = 'children', $sep = '-', $root = 'root', $sort = false)
+	{
+		if ($sort)
+		{
+			usort($list, function ($a, $b) use($key)
+			{
+				return strcmp($a[$key], $b[$key]);
+			});
+		}
+
+		$tree = array(
+			'name' => $root,
+			$leafName => array(),
+			'maxDepth' => 0,
+			'count' => count($list)
+		);
+
+		$cache = array(
+			'/' => array(
+				'id' => $id = 0,
+				'lbound' => 0,
+				'rbound' => 1
+			)
+		);
+
+		foreach ($list as $leaf)
+		{
+			$current = &$tree[$leafName];
+
+			$path = '';
+
+			$nodes = explode($sep, ltrim($leaf[$key], '/'));
+
+			$last = count($nodes) - 1;
+
+			foreach ($nodes as $i => $nodeName)
+			{
+				$path .= '/' . $nodeName;
+
+				$depth = $i + 1;
+
+				$parent = dirname($path);
+
+				if (!isset($cache[$path]))
+				{
+					$leaf['name'] = $nodeName;
+
+					if (!isset($leaf['id']))
+					{
+						$leaf['id'] = $id + 1;
+					}
+/*
+					$leaf['parent_id'] = $cache[$parent]['id'];
+					$leaf['lbound'] = $cache[$parent]['rbound'];
+					$leaf['rbound'] = $leaf['lbound'] + 1;
+					$leaf['size'] = 1;
+					$leaf['type'] = 'leaf';
+
+					if ('/' != $parent)
+					{
+						do
+						{
+							$cache[$parent]['type'] = 'node';
+							$cache[$parent]['rbound'] += 2;
+							$cache[$parent]['size'] = $cache[$parent]['rbound'] - $cache[$parent]['lbound'];
+						}
+						while('/' != ($parent = dirname($parent)));
+					}
+
+					$cache[$parent]['rbound'] += 2;
+					$cache[$parent]['size'] = $cache[$parent]['rbound'] - $cache[$parent]['lbound'];
+//*/
+					$leaf['class'] = $i == $last ? 'leaf' : 'node';
+
+					$leaf['depth'] = $depth;
+
+					$leaf[$leafName] = array();
+
+					$cache[$path] = $leaf;
+
+					$current[] = &$cache[$path];
+
+					if ($tree['maxDepth'] < $leaf['depth'])
+					{
+						$tree['maxDepth'] = $leaf['depth'];
+					}
+				}
+				else
+				{
+					$tmpLeaf = &$cache[$path];
+
+					$tmpLeaf['class'] = $i == $last ? 'leaf' : 'node';
+				}
+
+				$current = &$cache[$path][$leafName];
+
+				++$id;
+			}
+		}
+
+		return $tree;
+	}
+}

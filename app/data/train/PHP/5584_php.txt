@@ -1,0 +1,225 @@
+<?php
+class ThietkewebSlider {
+	protected static $instance;
+	protected function __clone(){}
+	protected function __construct(){}
+	protected static function get_instance() {
+		if(self::$instance === null) {
+			self::$instance = new ThietkewebSlider();
+		}
+		return self::$instance;
+	}
+
+	public static function run() {
+		$instance = self::get_instance();
+
+		//register post type
+		add_action('init', [$instance, 'register_post_type']);
+
+		//register meta box
+		add_action('admin_init', [$instance, 'register_meta_box']);
+
+		//register scripts
+		add_action('admin_enqueue_scripts', [$instance, 'register_scripts']);
+
+		//save meta box
+		add_action('save_post', [$instance, 'save_meta_box']);
+
+		//register columns
+		// add_filter('manage_edit-slider_columns'); // hook old
+		add_filter('manage_slider_posts_columns', [$instance, 'register_columns']); //hook new like above
+
+		// register column as sortable
+		add_filter('manage_edit-slider_sortable_columns', [$instance, 'sortable_columns']);
+
+		//show list slider
+		add_action('manage_slider_posts_custom_column', [$instance, 'list_sliders'], 10, 2); //two argument
+
+		//force open post thumbnail if not open
+		add_action('after_setup_theme', function(){
+			add_theme_support('post-thumbnails');
+		});
+
+		return $instance;
+	}
+
+	// Register Custom Post Type
+	public static function register_post_type(){
+		$instance = self::get_instance();
+		$labels = array(
+			'name'                  => _x( 'Sliders', 'Post Type General Name', 'thietkeweb' ),
+			'singular_name'         => _x( 'Slider', 'Post Type Singular Name', 'thietkeweb' ),
+			'menu_name'             => __( 'Slider', 'thietkeweb' ),
+			'name_admin_bar'        => __( 'Post Type', 'thietkeweb' ),
+			'archives'              => __( 'Item Archives', 'thietkeweb' ),
+			'parent_item_colon'     => __( 'Parent Item:', 'thietkeweb' ),
+			'all_items'             => __( 'All Items', 'thietkeweb' ),
+			'add_new_item'          => __( 'Add New Item', 'thietkeweb' ),
+			'add_new'               => __( 'Add New', 'thietkeweb' ),
+			'new_item'              => __( 'New Item', 'thietkeweb' ),
+			'edit_item'             => __( 'Edit Item', 'thietkeweb' ),
+			'update_item'           => __( 'Update Item', 'thietkeweb' ),
+			'view_item'             => __( 'View Item', 'thietkeweb' ),
+			'search_items'          => __( 'Search Item', 'thietkeweb' ),
+			'not_found'             => __( 'Not found', 'thietkeweb' ),
+			'not_found_in_trash'    => __( 'Not found in Trash', 'thietkeweb' ),
+			'featured_image'        => __( 'Featured Image', 'thietkeweb' ),
+			'set_featured_image'    => __( 'Set featured image', 'thietkeweb' ),
+			'remove_featured_image' => __( 'Remove featured image', 'thietkeweb' ),
+			'use_featured_image'    => __( 'Use as featured image', 'thietkeweb' ),
+			'insert_into_item'      => __( 'Insert into item', 'thietkeweb' ),
+			'uploaded_to_this_item' => __( 'Uploaded to this item', 'thietkeweb' ),
+			'items_list'            => __( 'Items list', 'thietkeweb' ),
+			'items_list_navigation' => __( 'Items list navigation', 'thietkeweb' ),
+			'filter_items_list'     => __( 'Filter items list', 'thietkeweb' ),
+		);
+		$args = array(
+			'label'                 => __( 'Slider', 'thietkeweb' ),
+			'description'           => __( 'Post Type Description', 'thietkeweb' ),
+			'labels'                => $labels,
+			'supports'              => array( 'title', 'editor', 'thumbnail', ),
+			'hierarchical'          => false,
+			'public'                => true,
+			'show_ui'               => true,
+			'show_in_menu'          => true,
+			'menu_position'         => 5,
+			'show_in_admin_bar'     => true,
+			'show_in_nav_menus'     => true,
+			'can_export'            => true,
+			'has_archive'           => true,
+			'exclude_from_search'   => false,
+			'publicly_queryable'    => true,
+			'capability_type'       => 'page',
+		);
+
+		register_post_type('slider', $args);
+		return $instance;
+	}
+
+	public static function register_meta_box() {
+		$instance = self::get_instance();
+		add_meta_box(
+			'slider_property'
+			,__( 'Slider Property', 'thietkeweb' )
+			, function($post) {
+				$post_meta = get_post_meta( $post->ID, 'slider');
+				require(TH_THEME_DIR.'/views/admin/slider-metabox.php');
+			}
+			,'slider'
+			,'advanced'
+			,'high'
+		);
+
+		return $instance;
+	}
+
+	public static function save_meta_box($post_id) {
+		/*
+		 * We need to verify this came from our screen and with proper authorization,
+		 * because the save_post action can be triggered at other times.
+		 */
+
+		// Check if our nonce is set.
+		if ( ! isset( $_POST['th_slider_security'] ) ) {
+			return;
+		}
+
+		// Verify that the nonce is valid.
+		if ( ! wp_verify_nonce( $_POST['th_slider_security'], $post_id ) ) {
+			return;
+		}
+
+		// If this is an autosave, our form has not been submitted, so we don't want to do anything.
+		if ( defined( 'DOING_AUTOSAVE' ) && DOING_AUTOSAVE ) {
+			return;
+		}
+
+		// Check the user's permissions.
+		if ( isset( $_POST['post_type'] ) && 'page' == $_POST['post_type'] ) {
+
+			if ( ! current_user_can( 'edit_page', $post_id ) ) {
+				return;
+			}
+
+		} else {
+
+			if ( ! current_user_can( 'edit_post', $post_id ) ) {
+				return;
+			}
+		}
+
+		/* OK, it's safe for us to save the data now. */
+
+		// Make sure that it is set.
+		if ( ! isset( $_POST['slider'] ) ) {
+			return;
+		}
+
+ 		$data = $_POST['slider'];
+		$data['link']     = (isset($data['link'])) ? sanitize_text_field($data['link']) : '';
+		$data['priority'] = (isset($data['priority'])) ? sanitize_text_field($data['priority']) : '1';
+		$data['status']   = (isset($data['status'])) ? sanitize_text_field($data['status']) : '0';
+
+		// Sanitize user input.
+		// $data = sanitize_text_field( $data );
+
+		// Update the meta field in the database.
+		update_post_meta( $post_id, 'slider', $data );
+
+		update_post_meta( $post_id, 'slider_priority', $data['priority'] );
+	}
+
+	public static function register_scripts() {
+		wp_register_style('thietkeweb_admin_css', TH_THEME_URL.'/css/admin/admin-style.css');
+		wp_enqueue_style('thietkeweb_admin_css');
+		wp_register_script('thietkeweb_admin_js', TH_THEME_URL.'/js/admin/admin.js');
+		wp_enqueue_script('thietkeweb_admin_js');
+	}
+
+	public static function register_columns($columns) {
+		$columns = [
+			'cb'         => $columns['cb'],
+			'title'      => $columns['title'],
+			'post_thumb' => __('Image', 'thietkeweb'),
+			'link'       => __('Link', 'thietkeweb'),
+			'priority'   => __('Priority', 'thietkeweb'),
+			'status'     => __('Status', 'thietkeweb'),
+			'date'       => $columns['date']
+		];
+
+		return $columns;
+	}
+
+	public static function sortable_columns($sortable_columns) {
+		$sortable_columns = [
+			'title'    => 'title',
+			'priority' => 'priority',
+			'status'   => 'status',
+		];
+		 return $sortable_columns;
+	}
+
+	public static function list_sliders($columns, $post_id) {
+		$data = get_post_meta($post_id, 'slider')[0];
+		switch ($columns) {
+			case 'post_thumb':
+				if(has_post_thumbnail( $post_id )) {
+					echo get_the_post_thumbnail( $post_id, 'thumbnail' );
+				}
+				break;
+			case 'link':
+				echo $data['link'];
+				break;
+			case 'priority':
+				echo $data['priority'];
+				break;
+			case 'status':
+				echo ($data['status'] == 1) ? __('Active', 'thietkeweb') :  __('Deactive', 'thietkeweb');
+				break;
+
+			default:
+				# code...
+				break;
+		}
+	}
+}

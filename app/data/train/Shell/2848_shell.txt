@@ -1,0 +1,101 @@
+#!/bin/bash
+#
+# This script creates a new running dev environment from scratch.
+# WARNING! It will remove any existing dev environment.
+#
+#   Usage: dev.sh
+#
+BASE_DIR=$( cd "$( dirname "${BASH_SOURCE[0]}" )" && cd ../ && pwd )
+cd ${BASE_DIR}/.docker/development
+
+fedora_bypass_check () {
+    MANDATORY_VARS=(AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY FEZ_S3_BUCKET FEZ_S3_CACHE_BUCKET FEZ_S3_SRC_PREFIX)
+
+    ERRORS=''
+    for VAR in "${MANDATORY_VARS[@]}";
+    do
+        if [[ -z "$(eval echo \$$VAR)" ]]; then
+            ERRORS="${ERRORS}\n\t\tMissing env var ${VAR} i.g. export ${VAR}=VALUE";
+        fi
+    done;
+
+    [[ "$ERRORS" != '' ]] && echo -e "
+    You are trying to run Fez without Fedora bypass option enabled.
+    Please see https://github.com/uqlibrary/fez#bypass-setup-experimental
+
+        ERROR: ${ERRORS}
+
+    Set the missing variables and retry.
+
+    In case that is intended, retry using ${0} up\n" && exit 1;
+}
+
+up () {
+    CONTAINER_BASE_DIR=/var/app/current
+    VIRTUAL_HOST=dev-fez.library.uq.edu.au
+    function waitForServices() {
+        MAX_LOOPS="60"
+        i=0
+        MYSQL_HEALTH_CMD="docker exec development_fezdb_1 mysqladmin ping -hlocalhost -ufez -pfez"
+        HEALTH_MSG=$(${MYSQL_HEALTH_CMD} 2>&1)
+        while ! [[ -n "${HEALTH_MSG}" && ${HEALTH_MSG} != *"failed"* && ${HEALTH_MSG} != *"denied"* ]]; do
+          i=`expr ${i} + 1`
+          if [ ${i} -ge ${MAX_LOOPS} ]; then
+            echo "$(date) - MySQL still not reachable, giving up"
+            exit 1
+          fi
+          echo "$(date) - waiting for MySQL..."
+          sleep 1
+          HEALTH_MSG=$(${MYSQL_HEALTH_CMD} 2>&1)
+        done
+    }
+
+    down
+    docker-compose up --build --remove-orphans -d
+    waitForServices
+
+    echo "final mysql health - ${HEALTH_MSG}"
+    sleep 3
+    if [ ! -f "../../public/config.inc.php" ]; then
+        cp config.inc.php ../../public/
+    fi
+
+    echo Creating dev environment..
+    docker exec development_fezdevelopmentrunner_1 sh -c 'cd '"'${CONTAINER_BASE_DIR}/tests/application'"' && php init.php schema'
+    UPGRADE_RES=$(curl -s http://${VIRTUAL_HOST}:8080/upgrade/index.php?upgradeOnly=1)
+    echo ${UPGRADE_RES}
+    UPGRADE_SUCCESS=$(echo ${UPGRADE_RES} | grep succeeded)
+    if [ "${UPGRADE_SUCCESS}" == "" ]; then
+      echo "failed to run upgrade scripts! :("
+      exit 1
+    fi
+
+    docker exec development_fezdevelopmentrunner_1 sh -c 'export AWS_ACCESS_KEY_ID='"'${AWS_ACCESS_KEY_ID}'"' && export AWS_SECRET_ACCESS_KEY='"'${AWS_SECRET_ACCESS_KEY}'"' && export FEZ_S3_CACHE_BUCKET='"'${FEZ_S3_CACHE_BUCKET}'"' && export FEZ_S3_BUCKET='"'${FEZ_S3_BUCKET}'"' && export FEZ_S3_SRC_PREFIX='"'${FEZ_S3_SRC_PREFIX}'"' && export AWS_CLOUDFRONT_KEY_PAIR_ID='"'${AWS_CLOUDFRONT_KEY_PAIR_ID}'"' && export AWS_CLOUDFRONT_PRIVATE_KEY_FILE='"'${AWS_CLOUDFRONT_PRIVATE_KEY_FILE}'"' && export AWS_CLOUDFRONT_FILE_SERVE_URL='"'${AWS_CLOUDFRONT_FILE_SERVE_URL}'"' && cd '"'${CONTAINER_BASE_DIR}/tests/application'"' && php init.php seed'
+
+    # Setup AWS
+    docker exec development_fezdevelopmentrunner_1 sh -c 'export AWS_ACCESS_KEY_ID='"'${AWS_ACCESS_KEY_ID}'"' && export AWS_SECRET_ACCESS_KEY='"'${AWS_SECRET_ACCESS_KEY}'"' && export FEZ_S3_CACHE_BUCKET='"'${FEZ_S3_CACHE_BUCKET}'"' && export FEZ_S3_BUCKET='"'${FEZ_S3_BUCKET}'"' && export FEZ_S3_SRC_PREFIX='"'${FEZ_S3_SRC_PREFIX}'"' && export AWS_CLOUDFRONT_KEY_PAIR_ID='"'${AWS_CLOUDFRONT_KEY_PAIR_ID}'"' && export AWS_CLOUDFRONT_PRIVATE_KEY_FILE='"'${AWS_CLOUDFRONT_PRIVATE_KEY_FILE}'"' && export AWS_CLOUDFRONT_FILE_SERVE_URL='"'${AWS_CLOUDFRONT_FILE_SERVE_URL}'"' && cd '"'${CONTAINER_BASE_DIR}/tests/application'"' && php init.php setupaws'
+
+    # Run a Fedora Bypass migration if prefix is set
+    docker exec development_fezdevelopmentrunner_1 sh -c 'export AWS_ACCESS_KEY_ID='"'${AWS_ACCESS_KEY_ID}'"' && export AWS_SECRET_ACCESS_KEY='"'${AWS_SECRET_ACCESS_KEY}'"' && export FEZ_S3_CACHE_BUCKET='"'${FEZ_S3_CACHE_BUCKET}'"' && export FEZ_S3_BUCKET='"'${FEZ_S3_BUCKET}'"' && export FEZ_S3_SRC_PREFIX='"'${FEZ_S3_SRC_PREFIX}'"' && export AWS_CLOUDFRONT_KEY_PAIR_ID='"'${AWS_CLOUDFRONT_KEY_PAIR_ID}'"' && export AWS_CLOUDFRONT_PRIVATE_KEY_FILE='"'${AWS_CLOUDFRONT_PRIVATE_KEY_FILE}'"' && export AWS_CLOUDFRONT_FILE_SERVE_URL='"'${AWS_CLOUDFRONT_FILE_SERVE_URL}'"' && cd '"'${CONTAINER_BASE_DIR}/tests/application'"' && php init.php migrate'
+
+    # Setup the ElasticSearch index and mapping
+    docker exec development_fezdevelopmentrunner_1 sh -c 'export AWS_ACCESS_KEY_ID='"'${AWS_ACCESS_KEY_ID}'"' && export AWS_SECRET_ACCESS_KEY='"'${AWS_SECRET_ACCESS_KEY}'"' && export FEZ_S3_CACHE_BUCKET='"'${FEZ_S3_CACHE_BUCKET}'"' && export FEZ_S3_BUCKET='"'${FEZ_S3_BUCKET}'"' && export FEZ_S3_SRC_PREFIX='"'${FEZ_S3_SRC_PREFIX}'"' && export AWS_CLOUDFRONT_KEY_PAIR_ID='"'${AWS_CLOUDFRONT_KEY_PAIR_ID}'"' && export AWS_CLOUDFRONT_PRIVATE_KEY_FILE='"'${AWS_CLOUDFRONT_PRIVATE_KEY_FILE}'"' && export AWS_CLOUDFRONT_FILE_SERVE_URL='"'${AWS_CLOUDFRONT_FILE_SERVE_URL}'"' && cd '"'${CONTAINER_BASE_DIR}/public/misc'"' && php es_setup.php'
+
+    # Optionally seed dev by running tests tagged with @seed
+    docker exec development_fezdevelopmentrunner_1 sh -c 'cd '"'${CONTAINER_BASE_DIR}/tests/application'"' && ./seed-development.sh'
+
+    echo Done!
+}
+
+down () {
+    docker-compose stop
+    docker system prune -f
+    docker volume prune -f
+}
+
+if declare -f "$1" > /dev/null; then
+    "$@"
+else
+    fedora_bypass_check
+    up
+fi

@@ -1,0 +1,298 @@
+<#
+.SYNOPSIS
+This PowerShell script module file contains common, reusable functions that
+are intended to be included in all PowerShell scripts that reside within the
+automation framework.
+
+.DESCRIPTION
+Note: This script module is NOT intended to be executed independent of another
+PowerShell script referencing and using it.
+#>
+
+function Invoke-ProcessByRef {
+    <#
+    .SYNOPSIS
+    Executes a process. 
+
+    .DESCRIPTION
+    This function returns the exit code of the invoked process at the specified
+    process path using the specified process arguments and other parameters. The
+    standard and error output is captured, streamed to the console output, and
+    made available as reference parameters to calling scripts.
+
+    .EXAMPLE
+    All parameters are optional except
+        -processPath
+        -processStandardOutput
+        -processStandardErrorOutput
+
+    $processStandardOutput = [string]::Empty
+    $processStandardErrorOutput = [string]::Empty
+ 
+    $exitCode = Invoke-ProcessByRef `
+                    -processPath "/developer/bin/process" `
+                    -processArgs "-arg1 value1 -arg2 value2" `
+                    -timeout 10000 `
+                    -newProcessWindow $true `
+                    -setLocation $false `
+                    -workingDirPath "/developer/temp" `
+                    -outputToMask "myPassword" `
+                    -ignoreOutput $false `
+                    -ignoreErrorOutput $false `
+                    -processStandardOutput ([ref] $processStandardOutput) `
+                    -processStandardErrorOutput ([ref] $processStandardErrorOutput)
+
+    #>
+
+    # function parameters
+    [CmdletBinding(SupportsShouldProcess = $true, DefaultParameterSetName = 'Invoke')]
+    Param(
+        [Parameter(
+            Mandatory = $true,
+            ParameterSetName = '',
+            HelpMessage = "The absolute path of the process to execute. Example: `"/developer/bin/process`"",
+            ValueFromPipeline = $false)]
+            [string]$processPath = $(throw "-processPath is required"),
+        [Parameter(
+            Mandatory = $false,
+            ParameterSetName = '',
+            HelpMessage = "The optional arguments of the process. Example: `"-arg1 value1 -arg2 value2`"",
+            ValueFromPipeline = $false)]
+            [string]$processArgs,
+        [Parameter(
+            Mandatory = $false,
+            ParameterSetName = '',
+            HelpMessage = "The optional process timeout. Example: 10000",
+            ValueFromPipeline = $false)]
+            [int]$timeout = $null,
+        [Parameter(
+            Mandatory = $false,
+            ParameterSetName = '',
+            HelpMessage = "The optional value indicating if a new process window should be opened. Example: true",
+            ValueFromPipeline = $false)]
+            [bool]$newProcessWindow = $false,
+        [Parameter(
+            Mandatory = $false,
+            ParameterSetName = '',
+            HelpMessage = "The optional value indicating if the current location should be set to the process's directory. Example: true",
+            ValueFromPipeline = $false)]
+            [bool]$setLocation = $true,
+        [Parameter(
+            Mandatory = $false,
+            ParameterSetName = '',
+            HelpMessage = "The optional absolute path to the working directory for the process to invoke in. Example: '/developer/temp7'",
+            ValueFromPipeline = $false)]
+            [string]$workingDirPath = $null,
+        [Parameter(
+            Mandatory = $false,
+            ParameterSetName = '',
+            HelpMessage = "The optional output to mask. Example: myPassword",
+            ValueFromPipeline = $false)]
+            [string]$outputToMask,
+        [Parameter(
+            Mandatory = $false,
+            ParameterSetName = '',
+            HelpMessage = "The optional value indicating if output should be ignored by not writing it to the console. Example: false",
+            ValueFromPipeline = $false)]
+            [bool]$ignoreOutput = $false,
+        [Parameter(
+            Mandatory = $false,
+            ParameterSetName = '',
+            HelpMessage = "The optional value indicating if error output should be ignored and allow processing to continue. Example: false",
+            ValueFromPipeline = $false)]
+            [bool]$ignoreErrorOutput = $false,
+        [Parameter(
+            Mandatory = $true,
+            ParameterSetName = '',
+            HelpMessage = "The required process standard output to be set by this command",
+            ValueFromPipeline = $false)]
+            [ref]$processStandardOutput = $(throw "-processStandardOutput is required"),
+        [Parameter(
+            Mandatory = $true,
+            ParameterSetName = '',
+            HelpMessage = "The required process standard error output to be set by this command",
+            ValueFromPipeline = $false)]
+            [ref]$processStandardErrorOutput = $(throw "-processStandardErrorOutput is required")
+    )
+
+    # set process timeout
+    $processExitTimeout = 100
+
+    # mask process arguments if specified
+    if (![string]::IsNullOrWhiteSpace($outputToMask)) {
+        $maskedOutput = ""
+        $maskedOutput = $maskedOutput.PadLeft($outputToMask.Length, "*")
+
+        $args = $processArgs.Replace($outputToMask, $maskedOutput)
+    }
+    else {
+        $args = $processArgs
+    }
+
+    # get current location
+    $currentLocation = (Split-Path $processPath -Parent)
+
+    # set current location to process directory, if specified
+    if ($setLocation -eq $true) {
+        Set-Location -Path $currentLocation
+    }
+
+    # set working directory, for process to invoke in, to current location, if not specified
+    # otherwise, set working directory to specified working directory path
+    if (![string]::IsNullOrWhiteSpace($workingDirPath)) {
+        $workingDirectory = $workingDirPath
+    }
+    else {
+        $workingDirectory = $currentLocation
+    }
+
+    # create ProcessStartInfo object
+    $processInfo = New-Object System.Diagnostics.ProcessStartInfo
+    $processInfo.WorkingDirectory = $workingDirectory
+    $processInfo.FileName = $processPath
+    $processInfo.Arguments = $processArgs
+    $processInfo.UseShellExecute = $newProcessWindow
+    $processInfo.RedirectStandardOutput = !$newProcessWindow
+    $processInfo.RedirectStandardError = !$newProcessWindow
+
+    # create Process object
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $processInfo
+
+    # define hashtable for message data to pass to object events for standard and error output
+    $messageData = @{
+        "ignoreOutput" = $ignoreOutput;
+        "outputToMask" = $outputToMask;
+        "maskedOutput" = $maskedOutput;
+        "out" = [string]::Empty;
+        "err" = [string]::Empty;
+    }
+
+    # register object events for standard and error output capture and streaming to console
+    $stdOutEvent = Register-ObjectEvent `
+        -InputObject $process `
+        -MessageData $messageData `
+        -EventName OutputDataReceived `
+        -Action {
+
+        # mask output if specified
+        if (![string]::IsNullOrWhiteSpace($Event.MessageData["outputToMask"])) {
+            if ($Event.SourceEventArgs.Data) {
+                $Event.MessageData["out"] += $Event.SourceEventArgs.Data.Replace($Event.MessageData["outputToMask"], $Event.MessageData["maskedOutput"])
+
+                if ($Event.MessageData["ignoreOutput"] -eq $false) {
+                    Write-Host $Event.SourceEventArgs.Data.Replace($Event.MessageData["outputToMask"], $Event.MessageData["maskedOutput"])
+                }
+            }
+        }
+        else {
+            if ($Event.SourceEventArgs.Data) {
+                $Event.MessageData["out"] += $Event.SourceEventArgs.Data
+
+                if ($Event.MessageData["ignoreOutput"] -eq $false) {
+                    Write-Host $Event.SourceEventArgs.Data
+                }
+            }
+        }
+    }
+
+    $stdErrOutEvent = Register-ObjectEvent `
+        -InputObject $process `
+        -MessageData $messageData `
+        -EventName ErrorDataReceived `
+        -Action {
+
+        # mask output if specified
+        if (![string]::IsNullOrWhiteSpace($Event.MessageData["outputToMask"])) {
+            if ($Event.SourceEventArgs.Data) {
+                $Event.MessageData["err"] += $Event.SourceEventArgs.Data.Replace($Event.MessageData["outputToMask"], $Event.MessageData["maskedOutput"])
+
+                if ($Event.MessageData["ignoreOutput"] -eq $false) {
+                    Write-Host $Event.SourceEventArgs.Data.Replace($Event.MessageData["outputToMask"], $Event.MessageData["maskedOutput"])
+                }
+            }
+        }
+        else {
+            if ($Event.SourceEventArgs.Data) {
+                $Event.MessageData["err"] += $Event.SourceEventArgs.Data
+                
+                if ($Event.MessageData["ignoreOutput"] -eq $false) {
+                    Write-Host $Event.SourceEventArgs.Data
+                }
+            }
+        }
+    }
+
+    # start process
+    $process.Start() | Out-Null
+
+    # begin streaming of standard and error output to console
+    if (!$newProcessWindow) {
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+    }
+
+    # create Stopwatch object to track timeout for process escaping
+    # start stopwatch and assign initial elapsed time
+    $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+    $elapsed = 0
+
+    # execute process until exit occurs or timeout is reached
+    if ($ignoreOutput -eq $false) {
+        Write-Info "Executing process with args: '$processPath $args'"
+    }
+
+    do {
+        # capture time elapsed
+        $elapsed = $elapsed + $stopwatch.Elapsed.Milliseconds
+
+        # exit process if timeout has been reached
+        if (-Not ($newProcessWindow) -and $timeout -and ($elapsed -gt $timeout)) {
+
+            # kill process and return failed exit code
+            $process.Kill()
+            Write-Warning "Exiting process '$processPath' as timeout has been reached"
+            return -1
+        }
+    }
+    while (!$process.WaitForExit($processExitTimeout))
+
+    # stop stopwatch
+    $stopwatch.Stop()
+
+    # unregister events for standard and error output streaming to console
+    $stdOutEvent.Name, $stdErrOutEvent.Name | ForEach-Object {
+        Unregister-Event -SourceIdentifier $_
+    }
+    
+    # capture exit code
+    if (![string]::IsNullOrWhiteSpace($process.ExitCode)) {
+        $exitCode = $process.ExitCode
+    }
+    else {
+        # assume no exit code means success
+        $exitCode = 0
+    }
+
+    # close and dispose of process and its used resources
+    $process.Dispose()
+
+    # output process information
+    if ($ignoreOutput -eq $false) {
+        Write-Info "Completed process..."
+        Write-Info "Process exit code: '$exitCode'"
+    }
+
+    # output error information, if available
+    if (($ignoreErrorOutput -eq $false) -and
+        (![string]::IsNullOrWhiteSpace($messageData.Get_Item("err")))) {
+        
+        Write-Exception -Message "Process error(s): '$($messageData.Get_Item("err"))'" -ErrorAction Continue
+    }
+
+    # set standard and error output reference parameters
+    $processStandardOutput.value = $messageData.Get_Item("out")
+    $processStandardErrorOutput.value = $messageData.Get_Item("err")
+
+    return $exitCode
+}

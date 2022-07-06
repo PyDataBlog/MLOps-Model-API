@@ -1,0 +1,125 @@
+var q = require('q');
+var _ = require('lodash');
+var moment = require('moment');
+
+var trello = require('../libs/trello_client');
+
+var ORGANIZATIONS = [
+  { id: '4ffb85c372c8548a030144e5', name: 'HuaJiao' },
+  { id: '4ffb861572c8548a03015a66', name: 'Asimov' },
+  { id: '544765a39570e08b7e6aeccb', name: 'NextTao' },
+];
+
+var NEXTTAO = { id: '544765a39570e08b7e6aeccb', name: 'NextTao' };
+
+var SCRUM_NAMES = [ 'Features', 'Bugs', 'Upcoming', 'Today', 'Re-Open', 'Close', ];
+
+function _mapListIds(lists) {
+  return _.reduce(lists, function (memo, next) {
+    memo[next.name] = next.id;
+    return memo;
+  }, {});
+}
+
+function _summarizeBoard(brd) {
+  var d = q.defer();
+
+  q
+    .all([trello.getCardsOfBoard(brd.id), trello.getListsOfBoard(brd.id)])
+    .spread(function (cards, lists) {
+      var aggregated = _.groupBy(cards, 'idList');
+      var mapping = _mapListIds(lists);
+
+      var result = _.map(SCRUM_NAMES, function (name) {
+        var listId = mapping[name];
+        var cards = aggregated[listId];
+
+        if (cards) {
+          return name + ": " + cards.length;
+        } else {
+          return name + ": 0";
+        }
+      });
+
+      d.resolve('# ' + brd.name + '\n' + result.join(', '))
+    })
+    .fail(function (error) {
+      d.reject(error);
+    })
+    .done();
+
+  return d.promise;
+}
+
+function _summarizeOrg(org, msg) {
+  trello.getOpenBoardsOfOrg(org.id)
+    .then(function (boards) {
+      var results = _.map(boards, function (brd) {
+        return _summarizeBoard(brd);
+      })
+
+      return q.all(results);
+    })
+    .then(function (results) {
+      msg.send([
+        org.name,
+        '----------------',
+        results.join('\n'),
+      ].join('\n'));
+    })
+    .fail(function (error) {
+      console.log(error);
+    })
+    .done();
+}
+
+function _weeklyBoard(board) {
+  var d = q.defer();
+
+  trello.activeCards(board.id, -7)
+    .then(function (cards) {
+      var text = [
+        board.name,
+        '----------------',
+        _.map(cards, function (c) {
+          return [ c.list.name, c.name, c.updated ].join(' ');
+        }).join('\n')
+      ].join('\n');
+
+      d.resolve(text);
+    })
+    .fail()
+    .done();
+
+  return d.promise;
+}
+
+function _weeklyOrg(org, msg) {
+  trello.getOpenBoardsOfOrg(org.id)
+    .then(function (boards) {
+      var results = _.map(boards, function (brd) {
+        return _weeklyBoard(brd);
+      })
+
+      return q.all(results);
+    })
+    .then(function (results) {
+      _.each(results, function (r) {
+        msg.send(r);
+      })
+    })
+    .fail()
+    .done();
+}
+
+module.exports = {
+  summary: function (msg) {
+    _.each(ORGANIZATIONS, function (org) {
+      _summarizeOrg(org, msg);
+    });
+  },
+  weekly: function (msg) {
+    msg.send('// working on the weekly report of ' + NEXTTAO.name);
+    _weeklyOrg(NEXTTAO, msg);
+  }
+};

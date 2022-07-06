@@ -1,0 +1,89 @@
+@echo off
+:: ###########################################
+:: ## Kodi mysql and file backup script     ##
+:: ## for Windows OS                        ##
+:: ##                                       ##
+:: ## https://www.harsunen.fi/              ##
+:: ##                                       ##
+:: ###########################################
+:: Backup-script for MySQL-shared Kodi installation. Backups the database and userdata\addon_data and \userdata\*.xml files
+:: Script requires 7-Zip for compressing, get it from http://7-zip.org/
+::
+:: Backup specific variables
+set backupname=kodi
+set backup_source_dir="%appdata%\Kodi\userdata"
+set backup_destination_dir="<eg. Z:\backup\kodi>"
+set dbuser=<database_uid>
+set dbpass=<database_pwd>
+set retaindays=60
+::second backup destination, I use Dropbox
+set dropboxdir="%USERPROFILE%\Dropbox\server_backup"
+
+:: Set program paths
+set sevenZip_path="%PROGRAMFILES%\7-Zip"
+set mySqlBinFolder=C:\Program Files\MySQL\MySQL Server 5.6\bin
+set mysqlexe="%mySqlBinFolder%\mysql.exe"
+set mysqldumpexe="%mySqlBinFolder%\mysqldump.exe"
+
+:: Additional variables
+set yyyy=%date:~-4%
+set mm=%date:~-7,2%
+set dd=%date:~-10,2%
+set filename_prefix="%backupname%_backup_"
+set filename_suffix="%yyyy%-%mm%-%dd%"
+set backup_tmp_dir="%TMP%\%backupname%_%filename_suffix%"
+set backup_filename="%filename_prefix%%filename_suffix%.7z"
+set errorLogPath="%backup_destination_dir%\dumperrors.txt"
+set mysqldumpvars=--user=%dbuser% --password=%dbpass% --add-drop-database --add-drop-table --add-drop-trigger --hex-blob --routines --triggers --log-error=%errorLogPath%
+:: cannot get the --defaults-file=C:\software\MySQL_data\my.ini working
+
+:: Simple check if correct variables are set
+IF %sevenZip_path%=="" GOTO variables_not_set
+IF %backupname%=="" GOTO variables_not_set
+IF %backup_source_dir%=="" GOTO variables_not_set
+IF %backup_tmp_dir%=="" GOTO variables_not_set
+IF %backup_destination_dir%=="" GOTO variables_not_set
+IF %filename_suffix%=="" GOTO variables_not_set
+IF %filename_prefix%=="" GOTO variables_not_set
+IF %backup_filename%=="" GOTO variables_not_set
+
+:: Backing up..
+:: ################################################################
+if exist %backup_tmp_dir% (rmdir /s /q %backup_tmp_dir%)
+mkdir %backup_tmp_dir%
+pushd %backup_tmp_dir%
+
+:: Delete the file %backup_filename% if it exists
+if exist %backup_filename% (del %backup_filename%)
+
+:: Backup the kodi files and directories
+XCOPY %backup_source_dir%\addon_data %backup_tmp_dir%\addon_data /Y /Q /C /I /S
+COPY %backup_source_dir%\*.xml %backup_tmp_dir%\* /Y
+
+:: Backup the kodi database(s)
+if exist %backup_filename% (del /q %temp%\%backupname%_temp.txt)
+%mysqlexe% --user=%dbuser% --password=%dbpass% -A --skip-column-names -e"SELECT DISTINCT table_schema FROM information_schema.tables WHERE table_schema LIKE 'myvideos%%'" > "%TEMP%\%backupname%_temp.txt"
+%mysqlexe% --user=%dbuser% --password=%dbpass% -A --skip-column-names -e"SELECT DISTINCT table_schema FROM information_schema.tables WHERE table_schema LIKE 'mymusic%%'" >> "%TEMP%\%backupname%_temp.txt"
+for /F "tokens=*" %%C in (%TEMP%\%backupname%_temp.txt) do (%mysqldumpexe% %mysqldumpvars% %%C > "%backup_tmp_dir%\%filename_prefix%_%%C_%filename_suffix%.sql")
+del /q %temp%\%backupname%_temp.txt
+:: Zipping the directory...
+pushd ..
+%sevenZip_path%\7z.exe a %backup_filename% %backup_tmp_dir%
+COPY %backup_filename% %backup_destination_dir% /Y
+COPY %backup_filename% %dropboxdir% /y
+RMDIR /S /Q %backup_tmp_dir%
+DEL /S /Q %backup_filename%
+
+:: Deleting backup files older than %retaindays% days
+forfiles /p %backup_destination_dir% /M *.7z /D -%retaindays% /C "cmd /c del @Path /Q" 2>&1 | find /v /i "ERROR: No files found"
+forfiles /p %dropboxdir% /M *.7z /D -%retaindays% /C "cmd /c del @Path /Q" 2>&1 | find /v /i "ERROR: No files found"
+
+popd
+popd
+EXIT
+:variables_not_set
+:: if you ended up here, some variable is not set
+CLS
+ECHO Not all variables were set
+PAUSE
+EXIT

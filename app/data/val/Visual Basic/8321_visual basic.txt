@@ -1,0 +1,117 @@
+﻿Namespace IORoutines
+
+    Public Module _Shared
+
+        Public Function GetDirectoryName(fileName As String, removeTrailingSlash As Boolean) As String
+            Dim Result As String = IO.Path.GetDirectoryName(fileName)
+            If removeTrailingSlash AndAlso Result.EndsWith("\") Then
+                Result = Result.Substring(0, Result.Length - 1)
+            End If
+            Return Result
+        End Function
+
+        Public Function GetExtension(fileName As String, removePeriod As Boolean) As String
+            Dim Result As String = IO.Path.GetExtension(fileName)
+            If removePeriod AndAlso Result.StartsWith(".") Then
+                Result = Result.Substring(1)
+            End If
+            Return Result
+        End Function
+
+        Public Function GetFileName(fileName As String, removeExtension As Boolean) As String
+            If removeExtension Then
+                Return IO.Path.GetFileNameWithoutExtension(fileName)
+            Else
+                Return IO.Path.GetFileName(fileName)
+            End If
+        End Function
+
+        Public Function GetFiles(path As String, searchPattern As String, searchOption As IO.SearchOption) As List(Of String)
+            If String.IsNullOrEmpty(path) OrElse Not IO.Directory.Exists(path) Then
+                Return New List(Of String)
+            End If
+            Return IO.Directory.GetFiles(path, searchPattern, searchOption).ToList()
+        End Function
+
+        Public Async Function HasSCSDocuments(fileName As String, checkMainFileSettings As Boolean) As Task(Of Boolean)
+            If String.IsNullOrEmpty(fileName) Then
+                Return False
+            End If
+            If Not IO.File.Exists(fileName) Then
+                Return False
+            End If
+
+            Dim WildCardName As String = "{0}.*".FormatWith(GetFileName(fileName, True))
+            Dim Extension As String = GetExtension(fileName, True)
+            Dim Directory As String = GetDirectoryName(fileName, False)
+
+            Dim SystemSetting As Models.DMSCON.SystemSetting = Nothing
+            If checkMainFileSettings Then
+                SystemSetting = DBCache.SystemSettings.GetSingle("-1_SCS_MainAsSCS_{0}".FormatWith(Extension.ToUpper).ToLower)
+                If SystemSetting IsNot Nothing AndAlso SystemSetting.Value.Equals("True", StringComparison.OrdinalIgnoreCase) Then
+                    Return True
+                End If
+            End If
+
+            SystemSetting = DBCache.SystemSettings.GetSingle("-1_ExcludeShadowFiles".ToLower)
+            Dim ExcludeShadowFiles As String = ""
+            If SystemSetting Is Nothing OrElse String.IsNullOrEmpty(SystemSetting.Value) Then
+            Else
+                For Each Current As String In Split(SystemSetting.Value, ";")
+                    ExcludeShadowFiles = "{0};{1};".FormatWith(Current.ToLower)
+                Next
+            End If
+
+            For Each SCSFileName As String In GetFiles(Directory, WildCardName, IO.SearchOption.TopDirectoryOnly)
+                Dim SCSExtension As String = GetExtension(SCSFileName, True)
+                If SCSExtension.Equals(Extension, StringComparison.OrdinalIgnoreCase) Then
+                    Continue For
+                End If
+                If ExcludeShadowFiles.Contains(";{0};".FormatWith(SCSExtension.ToLower)) Then
+                    Continue For
+                End If
+                If Await Models.DMSDOC.Document.IsValidDocumentPath(SCSFileName) Then
+                    Continue For
+                End If
+
+                Return True
+            Next
+
+            Return False
+        End Function
+
+        Public Sub CopyDirectory(sourcePath As String, destPath As String)
+            If Not IO.Directory.Exists(destPath) Then
+                IO.Directory.CreateDirectory(destPath)
+            End If
+
+            For Each CurrentFile As String In IO.Directory.GetFiles(sourcePath)
+                Dim dest As String = IO.Path.Combine(destPath, IO.Path.GetFileName(CurrentFile))
+                IO.File.Copy(CurrentFile, dest)
+            Next
+
+            For Each CurrentFolder As String In IO.Directory.GetDirectories(sourcePath)
+                Dim NewDestination As String = IO.Path.Combine(destPath, IO.Path.GetFileName(CurrentFolder))
+                CopyDirectory(CurrentFolder, NewDestination)
+            Next
+        End Sub
+
+        Public Sub WriteToFile(addBlankLine As Boolean, append As Boolean, filename As String, logErrors As Boolean, message As String)
+            Try
+                Using oWriter As New IO.StreamWriter(filename, append)
+                    oWriter.WriteLine(message)
+                    If addBlankLine Then
+                        oWriter.WriteLine("")
+                    End If
+                    oWriter.Flush()
+                End Using
+            Catch ex As Exception
+                If logErrors Then
+                    ex.ToLog(True)
+                End If
+            End Try
+        End Sub
+
+    End Module
+
+End Namespace

@@ -1,0 +1,112 @@
+use core;
+
+use x86::io::outb;
+
+use ::console::{Color, ConsoleCore};
+
+const VGA_TEXT_BASE: *mut u16 = 0xB8000 as *mut u16;
+// TODO: Read this from BIOS instead
+const VGA_BASE_PORT: u16 = 0x3d4;
+
+pub struct ConsoleCoreImpl {
+    x: usize,
+    y: usize,
+    fg: Color,
+    bg: Color,
+    show_cursor: bool,
+}
+
+impl ConsoleCoreImpl {
+    fn update_hw_cursor(&mut self) {
+        const CMD_CURSOR_LOW: u8 = 0x0f;
+        const CMD_CURSOR_HIGH: u8 = 0x0e;
+
+        if self.show_cursor {
+            let pos = self.y * self.width() + self.x;
+            unsafe {
+                outb(VGA_BASE_PORT, CMD_CURSOR_LOW);
+                outb(VGA_BASE_PORT + 1, pos as u8);
+                outb(VGA_BASE_PORT, CMD_CURSOR_HIGH);
+                outb(VGA_BASE_PORT + 1, (pos >> 8) as u8);
+            }
+        }
+    }
+}
+
+impl ConsoleCore for ConsoleCoreImpl {
+    fn new() -> Self {
+        ConsoleCoreImpl {
+            x: 0,
+            y: 0,
+            fg: Color::White,
+            bg: Color::Black,
+            show_cursor: true,
+        }
+    }
+
+    fn set_cursor(&mut self, x: usize, y: usize) -> bool {
+        if self.x >= self.width() || self.y >= self.height() {
+            return false;
+        }
+        self.x = x;
+        self.y = y;
+        self.update_hw_cursor();
+        true
+    }
+    fn set_color(&mut self, fg: Option<Color>, bg: Option<Color>) {
+        if let Some(c) = fg { self.fg = c }
+        if let Some(c) = bg { self.bg = c }
+    }
+    fn set_char(&mut self, ch: u8) {
+        let color = self.fg as u16 | ((self.bg as u16) << 4);
+        unsafe {
+            let addr = VGA_TEXT_BASE.offset((self.y * self.width() + self.x) as isize);
+            core::intrinsics::volatile_store(addr, ch as u16 | (color << 8));
+        }
+    }
+    fn show_cursor(&mut self, v: bool) {
+        self.show_cursor = v;
+    }
+    fn advance_cursor(&mut self) {
+        if self.x == self.width() - 1 {
+            self.advance_line();
+        } else {
+            self.x += 1;
+            self.update_hw_cursor();
+        }
+    }
+    fn advance_line(&mut self) {
+        let width = self.width();
+        let height = self.height();
+        assert!(height > 0);
+
+        if self.y == self.height() - 1 {
+            unsafe {
+                core::intrinsics::volatile_copy_memory(VGA_TEXT_BASE, VGA_TEXT_BASE.offset(width as isize), width * (height - 1));
+            }
+
+            let color = (self.bg as u16) << 4;
+            for x in 0..width {
+                unsafe {
+                    let addr = VGA_TEXT_BASE.offset((width * (height - 1) + x) as isize);
+                    core::intrinsics::volatile_store(addr, b' ' as u16 | (color << 8));
+                }
+            }
+        } else {
+            self.y += 1;
+        }
+
+        self.x = 0;
+        self.update_hw_cursor();
+    }
+
+    fn width(&self) -> usize {
+        80
+    }
+    fn height(&self) -> usize {
+        25
+    }
+    fn cursor(&self) -> (usize, usize) {
+        (self.x, self.y)
+    }
+}

@@ -1,0 +1,206 @@
+using System;
+using System.Collections.ObjectModel;
+using System.Linq;
+using System.Windows.Input;
+using Afnor.Silverlight.Toolkit.ViewServices;
+using EspaceClient.BackOffice.Silverlight.Business.Depots;
+using EspaceClient.BackOffice.Silverlight.Business.Interfaces;
+using EspaceClient.BackOffice.Silverlight.Business.Loader;
+using EspaceClient.BackOffice.Silverlight.Infrastructure.ServiceOrganisationBloc;
+using EspaceClient.BackOffice.Silverlight.ViewModels.Common.Modularity;
+using EspaceClient.BackOffice.Silverlight.ViewModels.GestionContenu.Contenu;
+using EspaceClient.BackOffice.Silverlight.ViewModels.GestionContenu.Contenu.Tabs;
+using EspaceClient.BackOffice.Silverlight.ViewModels.Interfaces.Bloc;
+using EspaceClient.BackOffice.Silverlight.ViewModels.Interfaces.Modularity;
+using EspaceClient.BackOffice.Silverlight.ViewModels.Messages;
+using EspaceClient.BackOffice.Silverlight.ViewModels.ModelBuilders.Common;
+using EspaceClient.BackOffice.Silverlight.ViewModels.ModelBuilders.Common.Modularity;
+using EspaceClient.BackOffice.Silverlight.ViewModels.ModelBuilders.GestionContenu.Contenu.Details;
+using EspaceClient.FrontOffice.Infrastructure.Constant;
+using nRoute.Components;
+using nRoute.Components.Composition;
+using OGDC.Silverlight.Toolkit.Debuging;
+using OGDC.Silverlight.Toolkit.Services.Services;
+
+namespace EspaceClient.BackOffice.Silverlight.ViewModels.ModelBuilders.GestionContenu.Contenu.Implementation
+{
+    [MapResource(typeof(IModelBuilderDetails), InstanceLifetime.Singleton)]
+    public class ModelBuilderDetails : ModelBuilderBase, IModelBuilderDetails
+    {
+        private readonly IResourceWrapper _resourceWrapper;
+        private readonly IMessenging _messengingService;
+        private readonly IApplicationContext _applicationContext;
+        private readonly ILoaderReferentiel _referentiel;
+        private readonly INotificationViewService _notificationViewService;
+        private readonly IDepotConfigurationPage _configurationPageDepot;
+
+        [ResolveConstructor]
+        public ModelBuilderDetails(
+            IResourceWrapper resourceWrapper,
+            IMessenging messengingService,
+            IApplicationContext applicationContext,
+            ILoaderReferentiel referentiel,
+            INotificationViewService notificationViewService,
+            IDepotConfigurationPage configurationPageDepot)
+        {
+            _resourceWrapper = resourceWrapper;
+            _messengingService = messengingService;
+            _applicationContext = applicationContext;
+            _referentiel = referentiel;
+            _notificationViewService = notificationViewService;
+            _configurationPageDepot = configurationPageDepot;
+
+            CodeActionsGenerales.Add("DeleteContenu");
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        public DetailsViewModel Build(ContenuEntityViewModel contenuEntityViewModel, TabViewModel tabViewModel)
+        {
+            var viewModel = new DetailsViewModel(_applicationContext, _messengingService, _configurationPageDepot)
+            {
+                ToolbarButtonCommands = new ObservableCollection<ToolbarButtonViewModel>(),
+                AccordionItems = new ObservableCollection<AccordionItemViewModel>(),
+                Entity = contenuEntityViewModel,
+                Parent = tabViewModel,
+            };
+
+            var typeActionGeneraleToolbar = _applicationContext.TypeActionsGenerales.Where(x => x.Code.Equals(Constants.GetStringValue(ActionsGeneralesType.Toolbar))).FirstOrDefault();
+            var typeActionGeneraleVues = _applicationContext.TypeActionsGenerales.Where(x => x.Code.Equals(Constants.GetStringValue(ActionsGeneralesType.Vue))).FirstOrDefault();
+
+            if (typeActionGeneraleToolbar == null || typeActionGeneraleVues == null)
+                throw new Exception("Type d'action manquants.");
+
+            foreach (var codeActionsGenerale in CodeActionsGenerales)
+            {
+                // On récupère les actions correspondants à ce droit.
+                var Actions = _applicationContext.ActionsGenerales.Where(x => x.CodeAction.Equals(codeActionsGenerale)).Where(x => x.TypeActionGeneraleID.Equals(typeActionGeneraleToolbar.ID));
+
+                foreach (var Action in Actions)
+                {
+                    ICommand Command = null;
+
+                    // On associe le traitement grace au CodeAction
+                    switch (Action.CodeAction)
+                    {
+                        case "DeleteContenu":
+                            Command = new ActionCommand<TabViewModel>(OnDelete);
+                            break;
+
+                        default:
+                            DebugHelper.WriteLine(DebugType.Contact, "[!!!] L'action générale '{0}' n'est pas gérée.", new object[] { Action.CodeAction });
+                            break;
+                    }
+
+                    // For Testing Ability :
+                    // var Translator = new ModelBuilderTranslator(referentiel, _applicationContext);
+                    var Translator = ResourceLocator.GetResource<IModelBuilderTranslator>();
+
+                    var ToolbarButton = Translator.Translate(Action, Command);
+
+                    if (ToolbarButton == null)
+                        continue;
+
+                    viewModel.ToolbarButtonCommands.Add(ToolbarButton);
+                }
+            }
+
+            var codeVueInformation = Constants.GetStringValue(VueCode.ContenuInformation);
+            var vueInformation = _applicationContext.Vues.Where(x => x.Code.Equals(codeVueInformation)).FirstOrDefault();
+
+            if (vueInformation != null)
+            {
+                var isConfigurationPageEnabled = _applicationContext.ActionsGenerales.Where(x => x.CodeAction.Equals("Save" + codeVueInformation)).Where(x => x.TypeActionGeneraleID.Equals(typeActionGeneraleVues.ID)).FirstOrDefault() != null;
+
+                // For Testing Ability :
+                // var ModelBuilderInformation = new ModelBuilderInformation(_resourceWrapper, _applicationContext, _referentiel);
+                var modelBuilder = ResourceLocator.GetResource<IModelBuilderInformation>();
+
+                // For Testing Ability :
+                // var Translator = new ModelBuilderTranslator(referentiel, _applicationContext);
+                var translator = ResourceLocator.GetResource<IModelBuilderTranslator>();
+
+                var vue = translator.Translate(vueInformation, tabViewModel, "GestionContenu/Contenu/Details/Informations/", modelBuilder.Build(contenuEntityViewModel), true, isConfigurationPageEnabled, isConfigurationPageEnabled);
+
+                if (vue != null)
+                {
+                    vue.Parent = tabViewModel;
+
+                    viewModel.AccordionItems.Add(vue);
+                }
+            }
+
+            var codeVueBloc = Constants.GetStringValue(VueCode.Bloc);
+            var vueBloc = _applicationContext.Vues.Where(x => x.Code.Equals(codeVueBloc)).FirstOrDefault();
+
+            if (vueBloc != null)
+            {
+                var isConfigurationPageEnabled = _applicationContext.ActionsGenerales.Where(x => x.CodeAction.Equals("Save" + codeVueBloc)).Where(x => x.TypeActionGeneraleID.Equals(typeActionGeneraleVues.ID)).FirstOrDefault() != null;
+
+                var modelBuilder = ResourceLocator.GetResource<IModelBuilderBloc>();
+
+                var translator = ResourceLocator.GetResource<IModelBuilderTranslator>();
+
+                var vue = translator.Translate(vueBloc, tabViewModel, "Common/Bloc/", modelBuilder.Build(OrganisationBlocType.ConfigurationPage, contenuEntityViewModel), true, isConfigurationPageEnabled, isConfigurationPageEnabled);
+
+                if (vue != null)
+                {
+                    vue.Parent = tabViewModel;
+
+                    viewModel.AccordionItems.Add(vue);
+                }
+            }
+
+            return viewModel;
+        }
+
+        private void OnDelete(TabViewModel tabViewModel)
+        {
+            var accordionViewModel = tabViewModel.ViewModel as IAccordionComposition;
+
+            ContenuEntityViewModel entityContenu = null;
+
+            if (accordionViewModel.SelectedAccordionItem.ViewModel is IAccordionItemComposition<IOrganisationBlocComposition>)
+            {
+                var accordionItemViewModel = accordionViewModel.SelectedAccordionItem.ViewModel as IAccordionItemComposition<IOrganisationBlocComposition>;
+                var entity = accordionItemViewModel.Entity;
+                entityContenu = entity as ContenuEntityViewModel;
+            }
+            else if (accordionViewModel.SelectedAccordionItem.ViewModel is IAccordionItemComposition<ContenuEntityViewModel>)
+            {
+                var accordionItemViewModel = accordionViewModel.SelectedAccordionItem.ViewModel as IAccordionItemComposition<ContenuEntityViewModel>;
+                entityContenu = accordionItemViewModel.Entity;
+            }
+
+            BeginLoading(tabViewModel);
+
+            _configurationPageDepot.DeleteConfigurationPage(
+                entityContenu.ConfigurationPage.ID,
+                success =>
+                {
+                    if (success)
+                    {
+                        _notificationViewService.ShowNotification(_resourceWrapper.StringsResourceManager.GetString("DeleteCompleted"));
+
+                        _messengingService.Publish<CloseCurrentTabMessage>(new CloseCurrentTabMessage(tabViewModel));
+                    }
+                    else
+                    {
+                        _notificationViewService.ShowNotification(_resourceWrapper.StringsResourceManager.GetString("DeleteFailed"));
+                    }
+
+                    EndLoading(tabViewModel);
+                },
+                error =>
+                {
+                    _messengingService.Publish(new ErrorMessage(error));
+
+                    _notificationViewService.ShowNotification(_resourceWrapper.StringsResourceManager.GetString("DeleteFailed"));
+
+                    EndLoading(tabViewModel);
+                }
+            );
+        }
+    }
+}

@@ -1,0 +1,2 @@
+# pythonskel
+Python Project Skeleton

@@ -1,0 +1,111 @@
+var gulp = require('gulp');
+var setup = require('web3-common-build-setup');
+var DEPS_FOLDER = setup.depsFolder;
+
+
+// Build tools
+var _        = require(DEPS_FOLDER + 'lodash');
+var insert   = require(DEPS_FOLDER + 'gulp-insert');
+var del      = require(DEPS_FOLDER + 'del');
+
+var plugins       = {};
+plugins.sass      = require(DEPS_FOLDER + 'gulp-sass');
+plugins.tsc       = require(DEPS_FOLDER + 'gulp-tsc');
+plugins.ngHtml2js = require(DEPS_FOLDER + 'gulp-ng-html2js');
+plugins.concat    = require(DEPS_FOLDER + 'gulp-concat');
+
+
+// Customize build configuration
+var CONFIG = setup.buildConfig;
+CONFIG.FOLDER.APP = _.constant("./src/app/web3-demo/");
+
+CONFIG.PARTIALS.MAIN = function() {
+    return [
+        "./src/app/web3-demo/view/content.html"
+    ];
+};
+
+var tmpLibs = CONFIG.SRC.JS.LIBS();
+tmpLibs.push('./bower_components/angular-mocks/angular-mocks.js');
+tmpLibs.push('./bower_components/jquery/dist/jquery.js');
+tmpLibs.push('./bower_components/bootstrap/dist/js/bootstrap.min.js');
+
+
+CONFIG.SRC.JS.LIBS = function() { return tmpLibs; };
+
+CONFIG.DEV.NG_MODULE_DEPS = function() { return ['httpBackendMock']; };
+
+var deployDir = "./dist";
+
+// Initialize gulp
+var gulpInstance = setup.initGulp(gulp, CONFIG);
+
+
+gulpInstance.task('dist', ['tscompile:templates', 'tscompile:app', 'resources']);
+
+gulpInstance.task('deploy', ['dist'], function() {
+   gulp.src([
+                CONFIG.DIST.FOLDER() + "app.js",
+                CONFIG.DIST.FOLDER() + "templates.js",
+                CONFIG.DIST.FOLDER() + "app.js.map",
+            ])
+       .pipe(gulp.dest(deployDir));
+});
+
+
+gulp.task("tscompile:templates", function (cb) {
+    var camelCaseModuleName = CONFIG.DYNAMIC_META.MODULE_NAME().replace(/-([a-z])/g, function(g) {
+        return g[1].toUpperCase();
+    });
+
+    gulp.src(CONFIG.SRC.ANGULAR_HTMLS())
+        .pipe(plugins.ngHtml2js({
+            moduleName: camelCaseModuleName + "Templatecache",
+            prefix: "/"
+        }))
+        .pipe(plugins.concat(CONFIG.DIST.JS.FILES.TEMPLATES()))
+        .pipe(insert.wrap(requireJSTemplatesPrefix, requireJSSuffix))
+        .pipe(gulp.dest(CONFIG.DIST.FOLDER()))
+        .on('error', cb);
+    cb();
+});
+
+
+gulpInstance.task('tscompile:app', ['prod:init-app'], function(cb) {
+    // Exclude bootstrap.ts when compiling distributables since
+    // Camunda's tasklist app takes care of bootrapping angular
+    var srcFiles = [CONFIG.FOLDER.SRC() + "**/*.ts",
+              //"!" + CONFIG.FOLDER.SRC() + "**/*Interceptor.ts",
+              //"!" + CONFIG.FOLDER.SRC() + "**/bootstrap.ts", 
+              "!" + CONFIG.SRC.TS.GLOBAL_TS_UNIT_TEST_FILES()];
+    gulp.src(srcFiles.concat(CONFIG.SRC.TS.TS_DEFINITIONS()))
+        .pipe(plugins.tsc(
+            {
+                allowBool: true,
+                out: CONFIG.DIST.JS.FILES.APP(), 
+                sourcemap: true,
+                sourceRoot: "/",
+                target: "ES5"
+            }))
+        .pipe(insert.wrap(requireJSAppPrefix, requireJSSuffix))
+        .pipe(gulp.dest(CONFIG.DIST.FOLDER()))
+        .on('error', cb);
+    cb();
+});
+
+
+gulpInstance.task('sass', function (cb) {
+	gulp.src("./sass/main.scss")
+		.pipe(plugins.sass({
+			precision: 8,
+			errLogToConsole: true
+		}))
+		.pipe(gulp.dest("./target/css"))
+        .on('error', cb);
+    cb();
+});
+
+
+gulpInstance.task('watchSass', function (cb) {
+    gulp.watch(['sass/**/*.scss'], ['sass']);
+});

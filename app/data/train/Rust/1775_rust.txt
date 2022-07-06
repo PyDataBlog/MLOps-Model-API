@@ -1,0 +1,424 @@
+/*
+This file is part of Mulp.
+
+Mulp is free software: you can redistribute it and/or modify
+it under the terms of the GNU General Public License as published by
+the Free Software Foundation, either version 3 of the License, or
+(at your option) any later version.
+
+Mulp is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU General Public License for more details.
+
+You should have received a copy of the GNU General Public License
+along with Mulp.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+
+//use std::num::Float;
+use std::fmt;
+use std::rand::{task_rng, Rng, TaskRng};
+
+use logistic_functions;
+
+// .abs(), .exp()
+
+// Neuron 
+// McCulloch & Pitts's Neuron
+// 
+// TODO:
+// 
+// Create the ability to use
+// - radial basis neuron
+// - sigma-pi neuron
+// 
+// delta_weights are used for the retropropagation algorithm
+//
+// uniquement pour fonctions logisitques
+// (plus logique)
+//
+// TODO : 
+// - permettre cependant l'utilisation d'autres fonctions ...
+
+/// An artificial neuron is represented here
+pub struct Neuron {
+    /// general
+    /// The number of weights of the neuron (input dimension)
+    nb_input: uint, // ACTUAL DIM = NB INPUT + 1 (BIAIS)
+   
+    /// The weights of the neuron
+    w: Vec<f64>, // weights of f64
+    /// The net value (ponderated sum)
+    net: f64, //ponderated sum
+    
+    // propagation
+    a: f64, // activation
+    
+    // backpropagation
+    ap: f64, // diff-activation. /!\ Do not use in the output layer
+    momentum: Vec<f64>, // add inertia
+    
+    error: f64,
+    ponderated_error: Vec<f64>,
+    // computed error is passed cross each weights, one for each neuron dimension
+    // to not confound with ponderated_errors from the following neurons layer.
+    
+    //delta_w: Vec<f64> // compute with activation an
+    // CHECK IF WE ACTUALLY HAVE
+    // delta_w <=> ponderated error
+}
+
+impl Neuron {
+    // static method
+    
+    /// Returns a neuron with the number of dimension given
+    ///
+    /// # Arguments
+    ///
+    /// * `nb_input` - An unsigned int which represent the number of dimension of the input vector
+    ///
+    pub fn new(nb_input: uint) -> Neuron {
+        // Propagation
+        let mut w: Vec<f64> = Vec::with_capacity(nb_input);
+        for _ in range(0u, nb_input) {
+            w.push(0.0);
+        }
+        // all 0f64.
+               
+        let net: f64 = 0f64;
+        let a: f64 = 0f64;
+        
+        // Back propagation
+        let ap: f64 = 0f64;
+        let mut momentum: Vec<f64> = Vec::with_capacity(nb_input);
+        for _ in range(0u, nb_input) {
+            momentum.push(0.0);
+        }
+        
+        let error: f64 = 0f64;
+        // do not initialize because, needs a propagation de toda manera.
+        let mut ponderated_error: Vec<f64> = Vec::with_capacity(nb_input);
+        for _ in range(0u, nb_input) {
+            ponderated_error.push(0.0);
+        }
+        
+        return Neuron {
+            nb_input: nb_input,
+            w: w,
+            net: net,
+            a: a,
+            ap: ap,
+            momentum: momentum,
+            error: error,
+            ponderated_error: ponderated_error,
+        };
+    }
+    
+    // Get parameters
+    pub fn get_dim(&mut self) -> uint {
+        return self.nb_input;
+    }
+    pub fn get_weights(&mut self) -> Vec<f64>{
+        return self.w.clone();
+    }
+    pub fn get_net(&mut self) -> f64 {
+        return self.net;
+    }
+    pub fn get_activation(&mut self) -> f64 {
+        return self.a;
+    }
+    pub fn get_ponderated_error(&mut self) -> Vec<f64> {
+        return self.ponderated_error.clone();
+    }
+    
+
+    
+    //
+    // INITIALISATION
+    //
+    
+    /// Load existing weights and erase the current ones,
+    /// into the neuron
+    /// 
+    /// # Arguments
+    ///
+    /// * `w` - New weights
+    ///
+    pub fn load_weights(&mut self, w: &[f64]){
+        for j in range (0i, self.nb_input as int)
+        {
+            let i = j as uint;
+            self.w[i] = w[i];
+        }
+    }
+    
+    /// Initialize weights
+    pub fn initialize_weights(&mut self, task_rng: &mut TaskRng, born: f64)
+    {
+        let mut it = self.w.iter_mut();
+        loop {
+            match it.next() {
+                Some(w) => {
+                    *w = task_rng.gen_range(-born, born);
+                }
+                None => { break }
+            }
+        }
+    }
+    
+    // PROPAGATION
+    //
+    // Should be differentiable
+    // class C2
+    // input vector is the output of the precedent layer
+   
+    pub fn compute_net(&mut self, input: &[f64]) {
+        self.net = dot_product(input, self.w.as_slice());
+    }
+    
+    fn phi(&self, x: f64) -> f64 {
+        return logistic_functions::sigmoid(x);
+    }
+    
+    fn phip(&self, x:f64) -> f64 {
+        return logistic_functions::sigmoidp(x);
+    }
+    
+    fn compute_a(&mut self)
+    {
+        self.a = self.phi(self.net);
+    }
+    
+    /// Propagates the input value in the neuron :
+    /// it computes the net value summing the weighted inputs, and then computing the activation.
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The input vector
+    ///
+    pub fn propagate(&mut self, input: &[f64]) {
+        // checked before if input of the neuron size.
+        self.compute_net(input);
+        self.compute_a();
+    }
+    
+    //
+    // BACKPROPAGATION
+    //
+    
+    /// Differentiated activation is necessary for retro backpropagation
+    ///
+    /// WARNING : works only with logistic functions
+    fn compute_ap(&mut self) {
+        // because the activation function is a logistic function
+        self.ap = self.phip(self.net);
+    }
+    
+    
+    /// Computes error with the summed ponderated vector error of the following layer.
+    /// A neuron corresponds to a specifical dimension of each neurons of the following layer.
+    /// Thus, there are as many ponderated errors () as those present in the following layer
+    ///
+    /// # Arguments
+    ///
+    /// * `ponderated_error` - The summed ponderated errors
+    ///
+    fn compute_error(&mut self, ponderated_error: f64){
+        //        DONE BY MLP
+        //        let sum: f64 = ponderated_errors.iter().fold(0f64, |a, &b| a + b);
+        // 
+        self.error = (self.ap)*ponderated_error;
+        
+        // ponderate error for each dim / weight
+        // different from ponderated_errors !!
+        for i in range (0u, self.nb_input)
+        {
+            self.ponderated_error[i] = self.w[i]*self.error;
+        }
+    }
+    
+   
+    
+    /// Back propagation using the gradient descent algorithm.
+    /// Only for hidden layers.
+    ///
+    /// # Arguments
+    ///
+    /// * `ponderated_errors` - It is the ponderated error from the next neurons layer.
+    /// It is the ponderated error of each neurons of the following layer corresponding of the current neuron-dimension.
+    ///
+    /// Do not use with the output layer.
+    /// In the output layer we do not care the activation function derivability
+    /// output_error = target - output.
+    /// Use load_error() and load_activiation ()
+    ///
+    pub fn back_propagate(&mut self, ponderated_error: f64){
+        self.compute_ap();
+        self.compute_error(ponderated_error);
+    }
+    
+    
+    /// Actualize neuron weights with the computed error and the corresponding input.
+    /// (check if delta_w corresponds to ponderated_error). 
+    ///
+    /// # Arguments
+    ///
+    /// * `input` - The input data corresponding of the back propagation.
+    /// * `nu` - The learning rate [0,1], typical 0.3.
+    /// * `mu` - The momentum [0,1], typical 0.9.
+    pub fn actualize_weights(&mut self, input: &[f64], nu: f64, mu: f64) {
+        for i in range (0u, self.nb_input) {
+            self.w[i] += nu*self.error*input[i] + mu*self.momentum[i];
+            self.momentum[i] = nu*self.error*input[i] + mu*self.momentum[i];
+            
+            
+            // or 
+            // self.w[i] += nu*self.error*input[i] + mu*self.momentum[i];
+            // self.momentum[i] = nu*self.error*input[i];
+        }
+    }
+    
+    /// Substitue activation with another.
+    /// It must be only use for softmax computation !
+    ///
+    /// It gives rights to the neurons layer to modify its neurons activation.
+    /// P.S: it is possible to modify and to make a kind of interface (?) or virtual neuron
+    /// specifical of the output features.
+    pub fn load_activation(&mut self, a: f64) {
+        self.a = a;
+    }
+
+    /// Load (output - target) precedly computed
+    /// only for the output layer.
+    /// Load error and compute ponderated errors. 
+    ///
+    pub fn load_error(&mut self, error: f64) {
+        self.error = error;
+        
+        // and then back propagate accross weights
+        // ponderate error for each dim / weight
+        // different from ponderated_errors !!
+        //
+        // P.S: implant zip functionality ?
+        for i in range (0u, self.nb_input) {
+            self.ponderated_error[i] = self.w[i]*self.error;
+        }
+    }
+}
+
+impl fmt::Show for Neuron {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        return write!(f,"{}",self.w);
+    }
+}
+
+fn dot_product(v0: &[f64], v1: &[f64]) -> f64 {
+    let mut sum  = 0f64;
+    let mut it = v0.iter().zip(v1.iter());
+    loop {
+        match it.next() {
+            Some(z) => {
+                sum += (*z.val0()) * (*z.val1());
+            }
+            None => { break }
+        }
+    }
+    return sum;
+}
+
+#[test]
+fn dot_product_test()
+{
+    let v0 = vec![1.55, 0.0, 42.0, -5.8744, 7.0];
+    let v1 = vec![-3.9996, 5556.0, -2.0, -5.902, 98.0];
+    
+    
+    let p = dot_product(v0.as_slice(),v1.as_slice());
+    let actual_p = 630.47133;
+    
+    let epsilon = 0.00001;
+    assert!(float_extension::is_equal(p,actual_p,epsilon));
+}
+
+
+#[test]
+fn neuron_test ()
+{
+    let mut n: Neuron = Neuron::new(4u);
+    // check if all is well initialized
+    
+    let mut v1: Vec<f64> = Vec::new();
+    let mut w: Vec<f64> = Vec::new();
+    
+    // input
+    v1.push(1.0); // biais (v1_0)
+    v1.push(1.6); // v1_1
+    v1.push(2560.9); // v1_2
+    v1.push(-0.001); // v1_3
+    
+    // weights
+    w.push(0.6); // w0 (biais)
+    w.push(-1.2); // w1
+    w.push(0.035); // w2
+    w.push(65.64); // w3
+    n.load_weights(w.as_slice());
+    
+    // ready to propagate ?
+    assert!(n.get_dim() == 4u);
+    
+    //println!{"weights:\n{}",w};
+    n.propagate(v1.as_slice());
+    //assert!();
+    
+    // ponderated error from the correspondants weigts from the neurons of layer.
+    // summed by mlp class
+    let ponderated_error = 0.6;
+    n.back_propagate(ponderated_error);
+    // compute ap: phip(net) = 
+    // computer error
+    
+    
+    // println!("{}", n.ap);
+    // println!("{}", n.error);
+    
+   // println!{"n:\n{}",n};
+    
+    // because actualisation depends of input
+    let nu = 0.7;
+    let mu = 0.9;
+    n.actualize_weights(v1.as_slice(),nu,mu);
+    
+    
+    let new_w = n.get_weights();
+    //println!("weights:\n{}", new_w);
+    // println!("{} {}");
+
+}
+
+/*
+fn neuron_test_backpropagation ()
+{
+    let mut n: Neuron = Neuron::new(2u);
+    // check if all is well initialized
+    
+    let mut v1: Vec<f64> = Vec::new();
+    let mut w: Vec<f64> = Vec::new();
+    
+    // input
+    v1.push(1.0); // biais (v1_0)
+    v1.push(-5.0); // v1_3
+    // target = 24.0
+    
+    // weights
+    w.push(0.6); // w0 (biais)
+    w.push(1.0); // w1
+    n.load_weights(w.as_slice());
+    
+    n.propagate(v1.as_slice());
+    
+    n.back_propagate(2.0);
+    // compute ap
+    // compute ponderated errors
+}
+*/

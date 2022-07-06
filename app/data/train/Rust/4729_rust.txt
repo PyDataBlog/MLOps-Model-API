@@ -1,0 +1,121 @@
+//! This module provides the music struct, which allows to play and control a music from a file.
+
+use libc;
+use mpv;
+
+use std::rc::Rc;
+use std::cell::RefCell;
+
+/// The music struct.
+pub struct Music {
+
+    /// Indicates wether the music is playing, paused or stopped.
+    status: MusicStatus,
+
+    /// The mpv handler to control the music.
+    mpv: Option<Rc<RefCell<mpv::MpvHandler>>>
+}
+
+impl Music {
+
+    /// Creates a new music from a path to a music file.
+    pub fn new(path: &str) -> Result<Music, ()> {
+        // Set locale, because apparently, mpv needs it
+        unsafe {
+            libc::setlocale(libc::LC_NUMERIC, &('C' as i8));
+        }
+
+        let mpv_builder = mpv::MpvHandlerBuilder::new().expect("Failed to init MPV builder");
+        let mut mpv = mpv_builder.build().expect("Failed to build MPV handler");
+        let _ = mpv.set_property("pause", true);
+        if mpv.command(&["loadfile", path]).is_err() {
+            return Err(())
+        }
+
+        let arc = Rc::new(RefCell::new(mpv));
+
+        Ok(Music {
+            status: MusicStatus::Stopped,
+            mpv: Some(arc),
+        })
+    }
+
+    /// Plays the current music.
+    ///
+    /// Tells MPV to set the pause property to false.
+    pub fn play(&mut self) {
+        self.status = MusicStatus::Playing;
+        let _ = self.mpv.as_ref().unwrap().borrow_mut().set_property("pause", false);
+    }
+
+
+    /// Stops the current music.
+    ///
+    /// Tells MPV to set the pause property to true, and to reset the playback-time.
+    pub fn stop(&mut self) {
+        self.status = MusicStatus::Stopped;
+        let _ = self.mpv.as_ref().unwrap().borrow_mut().set_property("playback-time", 0);
+        let _ = self.mpv.as_ref().unwrap().borrow_mut().set_property("pause", true);
+    }
+
+    /// Pauses the current music.
+    ///
+    /// Tells MPV to set the pause property to true.
+    pub fn pause(&mut self) {
+        self.status = MusicStatus::Paused;
+        let _ = self.mpv.as_ref().unwrap().borrow_mut().set_property("pause", true);
+    }
+
+    /// Returns the status of the music.
+    pub fn status(&self) -> MusicStatus {
+        self.status
+    }
+
+    /// Mangages the events from MPV. Returns true if the music is finished.
+    pub fn event_loop(&mut self) -> bool {
+
+        let mut ended = false;
+
+        if ! self.mpv.is_none() {
+            let mpv = self.mpv.as_mut().unwrap();
+            loop {
+                match mpv.borrow_mut().wait_event(0.0) {
+                    Some(mpv::Event::EndFile(_)) => {
+                        ended = true;
+                    },
+                    Some(_) => {
+
+                    },
+                    None => {
+                        break;
+                    }
+                }
+            }
+        }
+
+        if ended {
+            self.stop();
+        }
+
+        ended
+    }
+}
+
+#[derive(Copy, Clone)]
+/// The different possible music statuses.
+pub enum MusicStatus {
+    Stopped,
+    Playing,
+    Paused
+}
+
+impl MusicStatus {
+    /// Returns a UTF-8 icon representing the music status.
+    pub fn get_icon(&self) -> String {
+        match *self {
+            MusicStatus::Stopped => "⏹",
+            MusicStatus::Playing => "▶",
+            MusicStatus::Paused  => "⏸",
+        }.to_owned()
+    }
+}

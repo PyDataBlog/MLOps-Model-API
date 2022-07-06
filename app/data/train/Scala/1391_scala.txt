@@ -1,0 +1,55 @@
+package one.lockstep.util.crypto
+import javax.crypto.KeyAgreement
+
+import one.lockstep.util._
+
+class Ecdhe(ecCurve: EcCurve, hash: Hash) extends Kem {
+
+  lazy val secretKeyLength = bitStrength
+
+  private def kdf(raw: Bytes): SecretKey = SecretKey(hash(raw) take (secretKeyLength+7)/8) <| validateLength
+
+  private def validateLength(secretKey: SecretKey): Unit =
+    require(secretKey.bitLength == secretKeyLength,
+      s"$secretKeyLength-bit secret key required, encountered: ${secretKey.bitLength}-bit")
+
+  private def keyAgreement(): KeyAgreement = KeyAgreement.getInstance("ECDH", ecCurve.provider)
+
+  override def validate(publicKey: PublicKey): Boolean = ecCurve.validate(publicKey)
+  override def validate(privateKey: PrivateKey): Boolean = ecCurve.validate(privateKey)
+
+  override def encap(publicKey: PublicKey): (SecretKey, EncapsulatedSecretKey) = {
+    require(validate(publicKey), "invalid public key")
+    val ecPublicKey = ecCurve.decode(publicKey)
+    val ephemeral: KeyPair = keygen()
+    val agreement = keyAgreement()
+    agreement.init(ecCurve.decode(ephemeral.privateKey))
+    agreement.doPhase(ecPublicKey, true)
+    val premaster = Bytes(agreement.generateSecret())
+    val secretKey = kdf(premaster)
+    val encapsulatedKey = EncapsulatedSecretKey(ephemeral.publicKey.raw)
+    (secretKey, encapsulatedKey)
+  }
+
+//  val catcher = nonFatalCatch[Bytes].withApply {
+//    case e: IllegalStateException ⇒ throw new CryptoException("key agreement failed", e)
+//    case NonFatal(t) ⇒ throw t
+//  }
+
+  override def decap(privateKey: PrivateKey): EncapsulatedSecretKey => SecretKey = {
+    require(validate(privateKey), "invalid key")
+    encapsulatedSecretKey ⇒ {
+      val agreement = keyAgreement()
+      val premaster = /*catcher*/ {
+        agreement.init(ecCurve.decode(privateKey))
+        agreement.doPhase(ecCurve.decode(PublicKey(encapsulatedSecretKey.raw)), true)
+        Bytes(agreement.generateSecret())
+      }
+      kdf(premaster)
+    }
+  }
+
+  def keygen(): KeyPair = ecCurve.keygen()
+
+  override def bitStrength: Int = ecCurve.bitStrength
+}

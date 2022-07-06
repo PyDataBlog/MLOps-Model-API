@@ -1,0 +1,153 @@
+// ⚪ Initialization
+let canvas = document.getElementById('game') as HTMLCanvasElement;
+
+var gl = canvas.getContext('webgl');
+if (!gl) {
+	throw new Error('Could not create WebGL Context!');
+}
+
+// 🔲 Create NDC Space Quad (attribute vec2 position)
+let ndcQuad = [ 1.0, -1.0, -1.0, -1.0, 1.0, 1.0, -1.0, 1.0 ];
+let indices = [ 0, 1, 2, 1, 2, 3 ];
+
+// Create Buffers
+let dataBuffer = gl.createBuffer();
+let indexBuffer = gl.createBuffer();
+
+// Bind Data/Indices to Buffers
+gl.bindBuffer(gl.ARRAY_BUFFER, dataBuffer);
+gl.bufferData(gl.ARRAY_BUFFER, new Float32Array(ndcQuad), gl.STATIC_DRAW);
+gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, indexBuffer);
+gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, new Uint16Array(indices), gl.STATIC_DRAW);
+
+function createProgram(vsSource: string, fsSource: string) {
+	let vs = gl.createShader(gl.VERTEX_SHADER);
+	gl.shaderSource(vs, vsSource);
+	gl.compileShader(vs);
+	if (!gl.getShaderParameter(vs, gl.COMPILE_STATUS)) {
+		console.error('An error occurred compiling the shader: ' + gl.getShaderInfoLog(vs));
+	}
+
+	let fs = gl.createShader(gl.FRAGMENT_SHADER);
+	gl.shaderSource(fs, fsSource);
+	gl.compileShader(fs);
+	if (!gl.getShaderParameter(fs, gl.COMPILE_STATUS)) {
+		console.error('An error occurred compiling the shader: ' + gl.getShaderInfoLog(fs));
+	}
+
+	let program = gl.createProgram();
+	gl.attachShader(program, vs);
+	gl.attachShader(program, fs);
+	gl.linkProgram(program);
+	if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+		console.error(gl.getProgramInfoLog(program));
+	}
+	return { vs, fs, program };
+}
+
+let vs = `
+attribute vec2 aPosition;
+varying vec2 vFragCoord;
+
+void main()
+{
+  vFragCoord = (0.5 * aPosition) + vec2(0.5, 0.5);
+  vFragCoord.y  = 1.0 - vFragCoord.y;
+  gl_Position = vec4(aPosition, 0.0, 1.0);
+}
+`;
+
+let fs = `
+precision mediump float;
+
+varying vec2 vFragCoord;
+
+uniform sampler2D tBottomLayer;
+uniform sampler2D tTopLayer;
+
+// 🌅 Color Dodge
+vec4 colorDodge(vec4 col, vec4 blend)
+{
+  return vec4(mix(col.rgb / clamp(1.0 - blend.rgb, 0.00001, 1.0), col.rgb, blend.a), col.a);
+}
+
+void main()
+{
+  vec2 uv = vFragCoord;
+  vec4 outColor = vec4(0.0, 0.0, 0.0, 0.0);
+
+  vec4 bottomColor = texture2D(tBottomLayer, uv);
+  vec4 topColor = texture2D(tTopLayer, uv);
+
+  outColor = colorDodge(bottomColor, topColor);
+
+  gl_FragColor = outColor;
+}
+`;
+
+let { program } = createProgram(vs, fs);
+
+// 🖼️ Load Textures
+function loadTexture(url: string) {
+	let tex = gl.createTexture();
+	gl.bindTexture(gl.TEXTURE_2D, tex);
+	const pixel = new Uint8Array([ 0, 0, 0, 255 ]);
+	gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, pixel);
+	let img = new Image();
+	img.src = url;
+	img.onload = () => {
+		gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, img);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+		gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+		gl.generateMipmap(gl.TEXTURE_2D);
+	};
+	return tex;
+}
+
+let bottomLayer = loadTexture('https://alain.xyz/blog/image-editor-effects/assets/cover.jpg');
+let topLayer = loadTexture('https://alain.xyz/blog/unreal-engine-architecture/assets/cover.png');
+
+// 📐 Draw
+function draw() {
+	// Bind Shaders
+	gl.useProgram(program);
+
+	// Bind Vertex Layout
+	let loc = gl.getAttribLocation(program, 'aPosition');
+	gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 4 * 2, 0);
+	gl.enableVertexAttribArray(loc);
+	gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+
+	// Bind Uniforms
+	var shaderTexNumber = 0;
+	let bottomLayerLoc = gl.getUniformLocation(program, 'tBottomLayer');
+	gl.uniform1i(bottomLayerLoc, shaderTexNumber);
+	gl.activeTexture(gl.TEXTURE0 + shaderTexNumber);
+	gl.bindTexture(gl.TEXTURE_2D, bottomLayer);
+	shaderTexNumber++;
+	let topLayerLoc = gl.getUniformLocation(program, 'tTopLayer');
+	gl.uniform1i(topLayerLoc, shaderTexNumber);
+	gl.activeTexture(gl.TEXTURE0 + shaderTexNumber);
+	gl.bindTexture(gl.TEXTURE_2D, topLayer);
+
+	gl.drawElements(gl.TRIANGLES, 6, gl.UNSIGNED_SHORT, 0);
+}
+let resizeHandler = () => {
+	canvas.width = innerWidth;
+	canvas.height = innerHeight;
+	gl.viewport(0, 0, innerWidth, innerHeight);
+	draw();
+};
+
+window.addEventListener('resize', resizeHandler);
+resizeHandler();
+
+function update()
+{
+  draw();
+  requestAnimationFrame(update)
+}
+
+requestAnimationFrame(update);

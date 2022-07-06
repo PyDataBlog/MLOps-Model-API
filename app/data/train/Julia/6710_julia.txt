@@ -1,0 +1,1942 @@
+# coupled ABPD and LP neurons
+# May 26th, 2017
+# Alec Hoyland (ahoyland 'at' brandeis 'dot' edu)
+# github: alec-hoyland/bursting-HCO
+
+# preamble
+workspace()
+gc()
+
+# Packages and Directories
+using Juno
+using Plots
+pyplot()
+
+# change directory
+cd("/home/marder/repos/bursting-HCO")
+include("typefile-coupled.jl")
+include("funfile-coupled.jl")
+
+# Time Parameters
+dt      = 0.01         # ms
+tmax    = 10000        # ms
+tspan   = convert(Int64,tmax/dt)
+t       = linspace(dt,tmax,tspan)
+
+# Initialize Constants
+begin # canonical parameters & Goldman
+  Temp          = 11.0      # °C
+  ExtraCal      = 3000.0    # μM
+  Cal0          = 0.05      # μM
+  VMI           = 60.0      # mV
+  # AB neuron
+  AB.Cm         = 1.0       # μF/cm^2
+  # maximal conductances (Goldman)
+  AB.Na.g       = 700.0     # μS/cm^2
+  AB.CaT.g      = 2.0
+  AB.CaS.g      = 4.0
+  AB.A.g        = 50.0
+  AB.KCa.g      = 40.0
+  AB.Kd.g       = 70.0
+  AB.H.g        = 0.0
+  AB.leak.g     = 0.01
+  AB.MI.g       = 0.0
+  # reversal potentials
+  AB.Na.E       = 50.0      # mV
+  AB.CaT.E      = 80.0
+  AB.CaS.E      = 80.0
+  AB.A.E        = -80.0
+  AB.KCa.E      = -80.0
+  AB.Kd.E       = -80.0
+  AB.H.E        = -20.0
+  AB.leak.E     = -50.0
+  AB.MI.E       = 0.0
+  # cooperative binding Constants
+  AB.Na.p       = 3
+  AB.CaT.p      = 3
+  AB.CaS.p      = 3
+  AB.A.p        = 3
+  AB.KCa.p      = 4
+  AB.Kd.p       = 4
+  AB.H.p        = 1
+  AB.leak.p     = 1
+  AB.MI.p       = 1
+  # LP neuron
+  LP.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  LP.Na.g       = 100.0     # μS/cm^2
+  LP.CaT.g      = 0.0
+  LP.CaS.g      = 4.0
+  LP.A.g        = 10.0
+  LP.KCa.g      = 0.0
+  LP.Kd.g       = 75.0
+  LP.H.g        = 0.02
+  LP.leak.g     = 0.03
+  LP.MI.g       = 0.0
+  # reversal potentials
+  LP.Na.E       = 50.0      # mV
+  LP.CaT.E      = 80.0
+  LP.CaS.E      = 80.0
+  LP.A.E        = -80.0
+  LP.KCa.E      = -80.0
+  LP.Kd.E       = -80.0
+  LP.H.E        = -20.0
+  LP.leak.E     = -50.0
+  LP.MI.E       = 0.0
+  # cooperative binding constants
+  LP.Na.p       = 3
+  LP.CaT.p      = 3
+  LP.CaS.p      = 3
+  LP.A.p        = 3
+  LP.KCa.p      = 4
+  LP.Kd.p       = 4
+  LP.H.p        = 1
+  LP.leak.p     = 1
+  LP.MI.p       = 1
+  # synaptic maximal conductances
+  AB.glut.g     = 0.0
+  AB.chol.g     = 0.0
+  LP.glut.g     = 0.0
+  LP.chol.g     = 0.0
+  # synaptic reversal potentials
+  AB.glut.E     = -70.0
+  AB.chol.E     = -80.0
+  LP.glut.E     = -70.0
+  LP.chol.E     = -80.0
+end
+begin # AB #2 and LP #4
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#4)
+  LP.Na.g     = 100.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 4.0
+  LP.A.g      = 20.0
+  LP.KCa.g    = 0.0
+  LP.Kd.g     = 25.0
+  LP.H.g      = 0.05
+  LP.leak.g   = 0.03
+end
+
+
+## Produce an Interburst Interval vs Synaptic Coupling Plot
+# compute and save LP traces
+using JLD
+Juno.progress(name="IBI vs gsyn") do blergablarg
+  param_span    = 0.1:0.05:1.0
+  output        = zeros(length(t),length(param_span))
+  for ii in 1:length(param_span)
+    Juno.progress(blergablarg,ii/length(param_span))
+    LP.chol.g         = param_span[ii]
+    (ABvolt, LPvolt)  = simulateSTG(0.0,0.0)
+    output[:,ii]      = LPvolt
+  end
+  save("trace-LP-chol.jld", "LPchol", param_span, "LPvolt", output)
+end
+# load LP traces
+LPvolt    = load("trace-LP-chol.jld", "LPvolt")
+LPchol    = collect(0.1:0.05:1.0)
+# plot the traces with the bursting
+burst     = zeros(size(LPvolt))
+for ii in 1:length(LPvolt[1,:])
+  burst[:,ii] = getIntraBurst(LPvolt[:,ii],100)
+  println("$(ii/length(LPvolt[1,:]))")
+end
+save("burst-LP-chol.jld", "LPchol", collect(param_span), "LPburst", burst)
+burst = load("burst-LP-chol.jld","LPburst")
+for ii in 1:length(LPvolt[1,:])
+  println("percent = $(100*ii/length(LPvolt[1,:]))")
+  plot(t,[LPvolt[:,ii] burst[:,ii]],layout=(2,1),grid=false,legend=false,
+    title = ["LP (0.0, $(LPchol[ii]))" ""],
+    xaxis = (["" "time (ms"]),
+    yaxis = (["membrane potential (mV)" "bursting?"],[(-60.0,50.0) (0.0,1.0)]))
+    savefig("LP (0.0, $(LPchol[ii])).png")
+end
+# plot the interburst frequency
+IBI       = getIBI(LPvolt,100)
+IBF       = (1000)./IBI
+plot(LPchol,IBF,grid=false,legend=false,
+  xaxis   = ("LP cholinergic synaptic strength (\$mS/cm^2)",0.1:0.05:1.0),
+  yaxis   = ("interburst frequency (Hz)"),
+  title   = "Interburst Frequency over LP Cholinergic Synaptic Strength")
+savefig("LP interburst frequency.png")
+
+bcount    = Array{Array{Float64,1},1}(length(burst[1,:]))
+IBI       = zeros(length(burst[1,:]))
+for ii in 1:length(burst[1,:])
+  bcount[ii]  = find(diff(burst[:,ii]))
+  IBI[ii]     = bcount[ii][end] - bcount[ii][end-2]
+end
+
+plot(param_span,(100000)./IBI,grid=false,legend=false,
+  title   = "Interburst Frequency vs. LP cholinergic synaptic strength",
+  xlabel  = "LP cholinergic synaptic strength (mS/cm^2)",
+  ylabel  = "interburst frequency")
+
+begin
+  AB.glut.g     = 0.001
+  output1, output2 = simulateSTG(0.0,0.0)
+  plot(t,[output1 output2],layout=(2,1),grid=false)
+end
+
+## Produce an Interburst Frequency vs Synaptic Coupling Plot
+# compute and save AB traces
+# compute and save LP traces
+using JLD
+Juno.progress(name="IBI vs gsyn") do YogSothoth
+  Juno.progress(name="IBI vs gsyn2") do ShubNiggurath
+    # parameter sweeps for synaptic conductances
+    param_span_AB = linspace(0.0001,0.001,11)
+    param_span_LP = linspace(0.1,0.5,11)
+    # data storage
+    ABvolt        = zeros(length(t),length(param_span_AB)*length(param_span_LP))
+    LPvolt        = zeros(length(t),length(param_span_LP)*length(param_span_LP))
+    for ii in 1:length(param_span_AB)
+      for qq in 1:length(param_span_LP)
+        Juno.progress(YogSothoth,ii/length(param_span_AB))
+        Juno.progress(ShubNiggurath,qq/length(param_span_LP))
+        # update synaptic conductances
+        AB.glut.g           = param_span_AB[ii]
+        LP.chol.g           = param_span_LP[qq]
+        # do simulation
+        output1, output2    = simulateSTG(0.0,0.0)
+        plot(t,[output1,output2],layout=(2,1),grid=false,legend=false,
+          title   = ["AB ($(AB.glut.g), $(AB.chol.g), 0.0)" "LP ($(LP.glut.g), $(LP.chol.g), 0.0)"],
+          xaxis   = ("time (ms)"),
+          yaxis   = ("membrane potential (mV)", (-80,50)))
+        savefig("AB ($(AB.glut.g), $(AB.chol.g), 0.0) LP ($(LP.glut.g), $(LP.chol.g), 0.0).png")
+        index               = convert(Int64,11*ii+qq-11)
+        # save at index ii*qq
+        ABvolt[:,index]     = output1
+        LPvolt[:,index]     = output2
+      end
+    end
+    save("trace-AB-LP.jld", "ABvolt", ABvolt, "LPvolt", LPvolt, "ABglut", param_span_AB, "LPchol", param_span_LP)
+  end
+end
+# load traces
+ABvolt          = load("trace-AB-LP.jld", "ABvolt")
+LPvolt          = load("trace-AB-LP.jld", "LPvolt")
+ABglut          = load("trace-AB-LP.jld", "ABglut")
+LPchol          = load("trace-AB-LP.jld", "LPchol")
+
+##
+
+# load LP traces
+LPvolt    = load("trace-LP-chol.jld", "LPvolt")
+LPchol    = collect(0.1:0.05:1.0)
+# plot the traces with the bursting
+burst     = zeros(size(LPvolt))
+for ii in 1:length(LPvolt[1,:])
+  burst[:,ii] = getIntraBurst(LPvolt[:,ii],100)
+  println("$(ii/length(LPvolt[1,:]))")
+end
+save("burst-AB-LP-chol.jld", "LPchol", collect(param_span), "LPburst", burst)
+burst = load("burst-LP-chol.jld","LPburst")
+for ii in 1:length(LPvolt[1,:])
+  println("percent = $(100*ii/length(LPvolt[1,:]))")
+  plot(t,[LPvolt[:,ii] burst[:,ii]],layout=(2,1),grid=false,legend=false,
+    title = ["LP (0.0, $(LPchol[ii]))" ""],
+    xaxis = (["" "time (ms"]),
+    yaxis = (["membrane potential (mV)" "bursting?"],[(-60.0,50.0) (0.0,1.0)]))
+    savefig("LP (0.0, $(LPchol[ii])).png")
+end
+# plot the interburst frequency
+IBI       = getIBI(LPvolt,100)
+IBF       = (1000)./IBI
+plot(LPchol,IBF,grid=false,legend=false,
+  xaxis   = ("LP cholinergic synaptic strength (\$mS/cm^2)",0.1:0.05:1.0),
+  yaxis   = ("interburst frequency (Hz)"),
+  title   = "Interburst Frequency over LP Cholinergic Synaptic Strength")
+savefig("LP interburst frequency.png")
+
+bcount    = Array{Array{Float64,1},1}(length(burst[1,:]))
+IBI       = zeros(length(burst[1,:]))
+for ii in 1:length(burst[1,:])
+  bcount[ii]  = find(diff(burst[:,ii]))
+  IBI[ii]     = bcount[ii][end] - bcount[ii][end-2]
+end
+
+plot(param_span,(100000)./IBI,grid=false,legend=false,
+  title   = "Interburst Frequency vs. LP cholinergic synaptic strength",
+  xlabel  = "LP cholinergic synaptic strength (mS/cm^2)",
+  ylabel  = "interburst frequency")
+
+begin
+  AB.glut.g     = 0.001
+  output1, output2 = simulateSTG(0.0,0.0)
+  plot(t,[output1 output2],layout=(2,1),grid=false)
+end
+
+## AB #2 LP #4 traces
+using JLD
+Juno.progress(name="IBI vs gsyn") do YogSothoth
+  Juno.progress(name="IBI vs gsyn2") do ShubNiggurath
+    LP.CaS.g  = 10.0
+    LP.A.g    = 50.0
+    LP.KCa.g  = 5.0
+    LP.Kd.g   = 100.0
+    LP.H.g    = 0.00
+    # parameter sweeps for synaptic conductances
+    param_span_AB = linspace(0.0001,0.001,11)
+    param_span_LP = linspace(0.1,1.0,21)
+    # data storage
+    ABvolt        = zeros(length(t),length(param_span_AB)*length(param_span_LP))
+    LPvolt        = zeros(length(t),length(param_span_LP)*length(param_span_LP))
+    for ii in 1:length(param_span_AB)
+      for qq in 1:length(param_span_LP)
+        Juno.progress(YogSothoth,ii/length(param_span_AB))
+        Juno.progress(ShubNiggurath,qq/length(param_span_LP))
+        # update synaptic conductances
+        AB.glut.g           = param_span_AB[ii]
+        LP.chol.g           = param_span_LP[qq]
+        # do simulation
+        output1, output2    = simulateSTG(0.0,0.0)
+        plot(t,[output1,output2],layout=(2,1),grid=false,legend=false,
+          title   = ["AB ($(AB.glut.g), $(AB.chol.g), 0.0)" "LP ($(LP.glut.g), $(LP.chol.g), 0.0)"],
+          xaxis   = ("time (ms)"),
+          yaxis   = ("membrane potential (mV)", (-80,50)))
+        savefig("AB ($(AB.glut.g), $(AB.chol.g), 0.0) LP ($(LP.glut.g), $(LP.chol.g), 0.0).png")
+        index               = convert(Int64,11*ii+qq-11)
+        # save at index ii*qq
+        ABvolt[:,index]     = output1
+        LPvolt[:,index]     = output2
+      end
+    end
+    save("trace-AB-LP3.jld", "ABvolt", ABvolt, "LPvolt", LPvolt, "ABglut", param_span_AB, "LPchol", param_span_LP)
+  end
+end
+
+## Interburst Intervals over Synaptic Strength
+using JLD
+using LaTeXStrings
+# import AB #2 and LP #3 with parametrized AB.glut.g and LP.chol.g
+ABvolt          = load("trace-AB-LP.jld", "ABvolt")
+LPvolt          = load("trace-AB-LP.jld", "LPvolt")
+ABglut          = load("trace-AB-LP.jld", "ABglut")
+LPchol          = load("trace-AB-LP.jld", "LPchol")
+ABvolt2         = reshape(ABvolt,(1000000,11,11))
+# plot AB
+begin
+  myx     = ["" for qq in 1:1, ii in 1:length(ABvolt2[1,:,1])]; myx[end] = "time (s)"
+  myy     = ["" for qq in 1:1, ii in 1:length(ABvolt2[1,:,1])]; myy[6] = "membrane potential (mV)"
+  myleg   = ["\$ g^{AB}_{glut} = $(collect(ABglut)[ii]), g^{LP}_{chol} = $(LPchol[1])\$"
+   for qq in 1:1, ii in 1:length(ABvolt2[1,:,1])]
+  mytitle = ["" for qq in 1:1, ii in 1:length(ABvolt2[1,:,1])]; mytitle[1] = "Effect of Increasing Synaptic Inhibition on ABPD"
+  plot(t/1000,ABvolt2[:,1,:],layout=(11,1),grid=false,legend=false,size = (400,800),top_margin=20px)
+  plot!(yticks = linspace(-60,20,2),ylabel = myy)
+  plot!(xlabel = myx)
+  plot!(title = mytitle,titlefont=Plots.Font("sans-serif",10,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)))
+  gui()
+end
+savefig("Effect of Increasing Synaptic Inhibition on ABPD.png")
+# plot LP
+begin
+  myx     = ["" for qq in 1:1, ii in 1:length(ABvolt2[1,1,:])]; myx[end] = "time (s)"
+  myy     = ["" for qq in 1:1, ii in 1:length(ABvolt2[1,1,:])]; myy[6] = "membrane potential (mV)"
+  myleg   = ["\$ g^{AB}_{glut} = $(collect(ABglut)[ii]), g^{LP}_{chol} = $(LPchol[1])\$" for qq in 1:1, ii in 1:length(ABvolt2[1,1,:])]
+  mytitle = ["" for qq in 1:1, ii in 1:length(ABvolt2[1,:,1])]; mytitle[1] = "Effect of Increasing Synaptic Inhibition on LP"
+  plot(t/1000,ABvolt2[:,:,1],layout=(11,1),grid=false,legend=false,size = (400,800),top_margin=20px)
+  plot!(yticks = linspace(-60,20,2),ylabel = myy)
+  plot!(xlabel = myx)
+  plot!(title = mytitle,titlefont=Plots.Font("sans-serif",10,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)))
+  gui()
+end
+savefig("Effect of Increasing Synaptic Inhibition on LP.png")
+# get AB frequency curve
+IBI_AB  = getIBI(ABvolt2[:,1,:],100)  # in ms
+IBF_AB  = (1000)./IBI_AB              # in sec
+plot(ABglut[1:9],IBF_AB[1:9],legend=false,grid=false,
+  title="ABPD Interburst Frequency over Increasing Inhibition",
+  titlefont=Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  xaxis=("\$g^{AB}_{glut} (mS/cm^2)\$",ABglut[1:9]),
+  ylabel="interburst frequency (Hz)")
+savefig("ABPD Interburst Frequency over Increasing Inhibition.png")
+# get LP frequency curve
+IBI_LP  = getIBI(ABvolt2[:,:,1],100)  # in ms
+IBF_LP  = (1000)./IBI_LP              # in sec
+plot(LPchol[1:9],IBF_LP[1:9],legend=false,grid=false,
+  title="LP Interburst Frequency over Increasing Inhibition",
+  titlefont=Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  xaxis=("\$g^{LP}_{chol} (mS/cm^2)\$",LPchol[1:9]),
+  ylabel="interburst frequency (Hz)")
+savefig("LP Interburst Frequency over Increasing Inhibition.png")
+# get LP frequency curve for fixed AB parameter
+AB.glut.g     = 0.001
+LP.chol.g     = 0.1
+output1, output2 = simulateSTG(0.0,0.0)
+plot(t,[output1 output2],grid=false,legend=false,layout=(2,1))
+Juno.progress(name = "LP chol sweep with AB feedback") do Azathoth
+  # fix value of synaptic inhibition to ABPD
+  AB.glut.g     = 0.001
+  # iterate through synaptic inhibition to LP
+  LPchol  = linspace(0.1,1.0,101)
+  volt    = zeros(length(t),length(LPchol),2)   # 1 -> ABPD, 2 -> LP
+  for ii in 1:length(LPchol)
+    Juno.progress(Azathoth, ii/length(LPchol))
+    LP.chol.g         = LPchol[ii]
+    # simulate the traces
+    output1, output2  = simulateSTG(0.0,0.0)
+    # copy the outputs to a 3-matrix
+    volt[:,ii,1]      = output1
+    volt[:,ii,2]      = output2
+  end
+  # save to a .jld file
+  JLD.save("LP chol sweep with AB feedback.jld",
+    "ABvolt", volt[:,:,1],
+    "LPvolt", volt[:,:,2],
+    "ABglut", AB.glut.g,
+    "LPchol", LPchol)
+  # get the interburst intervals and compute the interburst frequencies
+  IBI_AB  = getIBI(volt[:,:,1],100)
+  IBI_LP  = getIBI(volt[:,:,2],100)
+  # interburst frequencies in Hz
+  IBF_AB  = (1000)./(IBI_AB)
+  IBF_LP  = (1000)./(IBI_LP)
+  # plot AB interburst frequency
+  plot(LPchol,IBF_AB,legend=false,grid=false,
+    title="ABPD Interburst Frequency over Increasing LP Inhibition",
+    titlefont=Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+    xaxis=("\$g^{LP}_{chol} (mS/cm^2)\$",linspace(LPchol[1],LPchol[end],11)),
+    ylabel="interburst frequency (Hz)")
+  savefig("ABPD Interburst Frequency over Increasing LP Inhibition.png")
+  # plot LP interburst frequency
+  plot(LPchol,IBF_LP,legend=false,grid=false,
+    title="LP Interburst Frequency over Increasing LP Inhibition",
+    titlefont=Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+    xaxis=("\$g^{LP}_{chol} (mS/cm^2)\$",linspace(LPchol[1],LPchol[end],11)),
+    ylabel="interburst frequency (Hz)")
+  savefig("LP Interburst Frequency over Increasing LP Inhibition.png")
+end
+
+## Run Specific Traces
+# LP #3
+LP.CaS.g  = 10.0
+LP.A.g    = 50.0
+LP.KCa.g  = 5.0
+LP.Kd.g   = 100.0
+LP.H.g    = 0.00
+# synaptic conductances
+AB.glut.g     = 0.0001
+LP.chol.g     = 3.0
+output1, output2 = simulateSTG(0.0,0.0)
+plot(t,[output1 output2],grid=false,legend=false,layout=(2,1),margin=20px,
+  xlabel = "time (ms)",
+  ylabel = ["membrane potential (mV)" "membrane potential (mV)"],
+  title  = ["AB ($(AB.glut.g), 0.0, 0.0)" "LP #3 ($(LP.chol.g), 0.0, 0.0)"])
+savefig("AB ($(AB.glut.g), 0.0, 0.0) LP #4 ($(LP.chol.g), 0.0, 0.0).png")
+
+## Interburst Intervals over Synaptic Strength II
+using JLD
+# AB #2 and LP #4
+ABvolt    = JLD.load("LP chol sweep with AB feedback.jld","ABvolt")
+LPvolt    = JLD.load("LP chol sweep with AB feedback.jld","LPvolt")
+AB.glut.g = JLD.load("LP chol sweep with AB feedback.jld","ABglut")
+LPchol    = JLD.load("LP chol sweep with AB feedback.jld","LPchol")
+IBI_AB    = getIBI(ABvolt,100)
+IBI_LP    = getIBI(LPvolt,100)
+IBF_AB    = (1000)./IBI_AB
+IBF_LP    = (1000)./IBI_LP
+plot(LPchol,[IBF_AB IBF_LP],grid=false,legend=false,bottom_margin=10mm,
+  label   = ["AB #2" "LP #4"],
+  xlabel  = ["" "\$g^{LP}_{chol} (mS/cm^2)\$"],
+  xticks  = linspace(LPchol[1],LPchol[end],11),
+  ylabel  = "interburst frequency (Hz)",
+  title   = "Interburst Frequency over Increasing LP Inhibition")
+savefig("Interburst Frequency over Increasing LP Inhibition.png")
+# AB #2 and LP #3
+ABvolt    = load("trace-AB-LP3.jld","ABvolt")
+LPvolt    = load("trace-AB-LP3.jld","LPvolt")
+ABglut    = load("trace-AB-LP3.jld","ABglut")
+LPchol    = load("trace-AB-LP3.jld","LPchol")
+
+## Adding IMI into the neurons
+using Juno
+using Plots
+pyplot()
+# change directory
+VMI   = 60.0
+cd("/home/marder/Documents/Summer Project/Coupled Eve/")
+include("typefile-coupled.jl")
+include("funfile-coupled.jl")
+# Time Parameters
+dt      = 0.01         # ms
+tmax    = 10000        # ms
+tspan   = convert(Int64,tmax/dt)
+t       = linspace(dt,tmax,tspan)
+# save data
+using JLD
+using LaTeXStrings
+## initialize constants
+begin
+  Temp          = 11.0      # °C
+  ExtraCal      = 3000.0    # μM
+  Cal0          = 0.05      # μM
+  # AB neuron
+  AB.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  AB.Na.g       = 700.0     # μS/cm^2
+  AB.CaT.g      = 2.0
+  AB.CaS.g      = 4.0
+  AB.A.g        = 50.0
+  AB.KCa.g      = 40.0
+  AB.Kd.g       = 70.0
+  AB.H.g        = 0.0
+  AB.leak.g     = 0.01
+  AB.MI.g       = 0.0
+  # reversal potentials
+  AB.Na.E       = 50.0      # mV
+  AB.CaT.E      = 80.0
+  AB.CaS.E      = 80.0
+  AB.A.E        = -80.0
+  AB.KCa.E      = -80.0
+  AB.Kd.E       = -80.0
+  AB.H.E        = -20.0
+  AB.leak.E     = -50.0
+  AB.MI.E       = 0.0
+  # cooperative binding Constants
+  AB.Na.p       = 3
+  AB.CaT.p      = 3
+  AB.CaS.p      = 3
+  AB.A.p        = 3
+  AB.KCa.p      = 4
+  AB.Kd.p       = 4
+  AB.H.p        = 1
+  AB.leak.p     = 1
+  AB.MI.p       = 1
+  # LP neuron
+  LP.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  LP.Na.g       = 100.0     # μS/cm^2
+  LP.CaT.g      = 0.0
+  LP.CaS.g      = 4.0
+  LP.A.g        = 10.0
+  LP.KCa.g      = 0.0
+  LP.Kd.g       = 75.0
+  LP.H.g        = 0.02
+  LP.leak.g     = 0.03
+  LP.MI.g       = 0.0
+  # reversal potentials
+  LP.Na.E       = 50.0      # mV
+  LP.CaT.E      = 80.0
+  LP.CaS.E      = 80.0
+  LP.A.E        = -80.0
+  LP.KCa.E      = -80.0
+  LP.Kd.E       = -80.0
+  LP.H.E        = -20.0
+  LP.leak.E     = -50.0
+  LP.MI.E       = 0.0
+  # cooperative binding constants
+  LP.Na.p       = 3
+  LP.CaT.p      = 3
+  LP.CaS.p      = 3
+  LP.A.p        = 3
+  LP.KCa.p      = 4
+  LP.Kd.p       = 4
+  LP.H.p        = 1
+  LP.leak.p     = 1
+  LP.MI.p       = 1
+  # synaptic maximal conductances
+  AB.glut.g     = 0.0
+  AB.chol.g     = 0.0
+  LP.glut.g     = 0.0
+  LP.chol.g     = 0.0
+  # synaptic reversal potentials
+  AB.glut.E     = -70.0
+  AB.chol.E     = -80.0
+  LP.glut.E     = -70.0
+  LP.chol.E     = -80.0
+end
+# AB #2 and LP #4
+cd("/home/marder/Documents/Summer Project/Coupled Eve/IMI/LP #4/")
+begin
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#4)
+  LP.Na.g     = 100.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 4.0
+  LP.A.g      = 20.0
+  LP.KCa.g    = 0.0
+  LP.Kd.g     = 25.0
+  LP.H.g      = 0.05
+  LP.leak.g   = 0.03
+end
+Juno.progress(name="LP #4 IMI sweep") do DunwichHorror
+  Juno.progress(name="LP #4 synaptic sweep") do WilburWhateley
+    gMI     = push!([0.001*2.0^xx for xx in 1:6],0.0)
+    syndex  = readdlm("AB-LP synaptic test values.txt")
+    ABvolt  = zeros(length(t),length(syndex),length(gMI))
+    LPvolt  = zeros(length(t),length(syndex),length(gMI))
+    for qq in 1:length(syndex[:,1])
+      Juno.progress(DunwichHorror,qq/length(syndex))
+      AB.glut.g     = syndex[qq,1]
+      LP.chol.g     = syndex[qq,2]
+      for ii in 1:length(gMI)
+        Juno.progress(WilburWhateley,ii/length(gMI))
+        AB.MI.g     = gMI[ii]
+        LP.MI.g     = gMI[ii]
+        output1, output2  = simulateSTG(0.0,0.0)
+        ABvolt[:,qq,ii]   = output1
+        LPvolt[:,qq,ii]   = output2
+        plot(t,[output1, output2],grid=false,legend=true,layout=(2,1),
+          xlabel  = ["" "time (ms)"],
+          ylabel  = "mV",
+          ylims   = (-80,30),
+          label   = ["\$ g_{glut} = $(AB.glut.g)\$" "\$ g_{chol} = $(LP.chol.g) \$"],
+          title   = ["AB #2 \$ g_{MI} = $(gMI[ii])`mS/cm^2 \$" "LP #4"])
+        savefig("AB #2 ($(AB.glut.g)) LP #4 ($(LP.chol.g)) with gMI ($(AB.MI.g)).png")
+      end
+    end
+    JLD.save("AB #2 LP #4 IMI.jld",
+      "ABvolt", ABvolt,
+      "LPvolt", LPvolt,
+      "syndex", syndex,
+      "gMI",    gMI)
+  end
+end
+# AB #2 and LP #3
+cd("/home/marder/Documents/Summer Project/Coupled Eve/IMI/LP #3/")
+begin
+  LP.CaS.g  = 10.0
+  LP.A.g    = 50.0
+  LP.KCa.g  = 5.0
+  LP.Kd.g   = 100.0
+  LP.H.g    = 0.00
+end
+Juno.progress(name="LP #3 IMI sweep") do DunwichHorror
+  Juno.progress(name="LP #3 synaptic sweep") do WilburWhateley
+    gMI     = push!([0.001*2.0^xx for xx in 1:6],0.0)
+    syndex  = readdlm("AB-LP synaptic test values.txt")
+    ABvolt  = zeros(length(t),length(syndex),length(gMI))
+    LPvolt  = zeros(length(t),length(syndex),length(gMI))
+    for qq in 1:length(syndex[:,1])
+      Juno.progress(DunwichHorror,qq/length(syndex))
+      AB.glut.g     = syndex[qq,1]
+      LP.chol.g     = syndex[qq,2]
+      for ii in 1:length(gMI)
+        Juno.progress(WilburWhateley,ii/length(gMI))
+        AB.MI.g     = gMI[ii]
+        LP.MI.g     = gMI[ii]
+        output1, output2 = simulateSTG(0.0,0.0)
+        ABvolt[:,qq,ii]   = output1
+        LPvolt[:,qq,ii]   = output2
+        plot(t,[output1, output2],grid=false,legend=true,layout=(2,1),
+          xlabel  = ["" "time (ms)"],
+          ylabel  = "mV",
+          ylims   = (-80,30),
+          label   = ["\$ g_{glut} = $(AB.glut.g)\$" "\$ g_{chol} = $(LP.chol.g) \$"],
+          title   = ["AB #2 \$ g_{MI} = $(gMI[ii])`mS/cm^2 \$" "LP #4"])
+        savefig("AB #2 ($(AB.glut.g)) LP #3 ($(LP.chol.g)) with gMI ($(AB.MI.g)).png")
+      end
+    end
+    JLD.save("AB #2 LP #4 IMI.jld",
+      "ABvolt", ABvolt,
+      "LPvolt", LPvolt,
+      "syndex", syndex,
+      "gMI",    gMI)
+  end
+end
+# AB #2 and LP #4 with TTX
+cd("/home/marder/Documents/Summer Project/Coupled Eve/IMI/TTX/LP #4/")
+begin
+  # AB neuron (#2)
+  AB.Na.g     = 0.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#4)
+  LP.Na.g     = 0.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 4.0
+  LP.A.g      = 20.0
+  LP.KCa.g    = 0.0
+  LP.Kd.g     = 25.0
+  LP.H.g      = 0.05
+  LP.leak.g   = 0.03
+end
+Juno.progress(name="LP #4 IMI sweep TTX") do DunwichHorror
+  Juno.progress(name="LP #4 synaptic sweep") do WilburWhateley
+    gMI     = push!([0.001*2.0^xx for xx in 1:6],0.0)
+    syndex  = readdlm("AB-LP synaptic test values.txt")
+    ABvolt  = zeros(length(t),length(syndex),length(gMI))
+    LPvolt  = zeros(length(t),length(syndex),length(gMI))
+    for qq in 1:length(syndex[:,1])
+      Juno.progress(DunwichHorror,qq/length(syndex))
+      AB.glut.g     = syndex[qq,1]
+      LP.chol.g     = syndex[qq,2]
+      for ii in 1:length(gMI)
+        Juno.progress(WilburWhateley,ii/length(gMI))
+        AB.MI.g     = gMI[ii]
+        LP.MI.g     = gMI[ii]
+        output1, output2 = simulateSTG(0.0,0.0)
+        ABvolt[:,qq,ii]   = output1
+        LPvolt[:,qq,ii]   = output2
+        plot(t,[output1, output2],grid=false,legend=true,layout=(2,1),
+          xlabel  = ["" "time (ms)"],
+          ylabel  = "mV",
+          ylims   = (-80,30),
+          label   = ["\$ g_{glut} = $(AB.glut.g)\$" "\$ g_{chol} = $(LP.chol.g) \$"],
+          title   = ["AB #2 \$ g_{MI} = $(gMI[ii])`mS/cm^2 \$" "LP #4"])
+        savefig("AB #2 ($(AB.glut.g)) LP #4 ($(LP.chol.g)) with gMI ($(AB.MI.g)).png")
+      end
+    end
+    JLD.save("AB #2 LP #4 IMI.jld",
+      "ABvolt", ABvolt,
+      "LPvolt", LPvolt,
+      "syndex", syndex,
+      "gMI",    gMI)
+  end
+end
+# AB #2 and LP #3 with TTX
+cd("/home/marder/Documents/Summer Project/Coupled Eve/IMI/TTX/LP #3/")
+begin
+  AB.Na.g   = 0.0
+  LP.Na.g   = 0.0
+  LP.CaS.g  = 10.0
+  LP.A.g    = 50.0
+  LP.KCa.g  = 5.0
+  LP.Kd.g   = 100.0
+  LP.H.g    = 0.00
+end
+Juno.progress(name="LP #3 IMI sweep TTX") do DunwichHorror
+  Juno.progress(name="LP #3 synaptic sweep") do WilburWhateley
+    gMI     = push!([0.001*2.0^xx for xx in 1:6],0.0)
+    syndex  = readdlm("AB-LP synaptic test values.txt")
+    ABvolt  = zeros(length(t),length(syndex),length(gMI))
+    LPvolt  = zeros(length(t),length(syndex),length(gMI))
+    for qq in 1:length(syndex[:,1])
+      Juno.progress(DunwichHorror,qq/length(syndex))
+      AB.glut.g     = syndex[qq,1]
+      LP.chol.g     = syndex[qq,2]
+      for ii in 1:length(gMI)
+        Juno.progress(WilburWhateley,ii/length(gMI))
+        AB.MI.g     = gMI[ii]
+        LP.MI.g     = gMI[ii]
+        output1, output2 = simulateSTG(0.0,0.0)
+        ABvolt[:,qq,ii]   = output1
+        LPvolt[:,qq,ii]   = output2
+        plot(t,[output1, output2],grid=false,legend=true,layout=(2,1),
+          xlabel  = ["" "time (ms)"],
+          ylabel  = "mV",
+          ylims   = (-80,30),
+          label   = ["\$ g_{glut} = $(AB.glut.g)\$" "\$ g_{chol} = $(LP.chol.g) \$"],
+          title   = ["AB #2 \$ g_{MI} = $(gMI[ii])`mS/cm^2 \$" "LP #4"])
+        savefig("AB #2 ($(AB.glut.g)) LP #3 ($(LP.chol.g)) with gMI ($(AB.MI.g)).png")
+      end
+    end
+    JLD.save("AB #2 LP #4 IMI.jld",
+      "ABvolt", ABvolt,
+      "LPvolt", LPvolt,
+      "syndex", syndex,
+      "gMI",    gMI)
+  end
+end
+
+## Test IMI under Various Regimes
+workspace()
+gc()
+# Packages and Directories
+using Juno
+using Plots
+using LaTeXStrings
+using JLD
+pyplot()
+# change directory
+cd("/home/marder/Documents/Summer Project/Coupled Eve/")
+include("typefile-coupled.jl")
+include("funfile-coupled.jl")
+cd("/home/marder/Documents/Summer Project/Coupled Eve/IMI")
+# time parameters
+dt      = 0.01         # ms
+tmax    = 10000        # ms
+tspan   = convert(Int64,tmax/dt)
+t       = linspace(dt,tmax,tspan)
+# initialize constants
+begin
+  Temp          = 11.0      # °C
+  ExtraCal      = 3000.0    # μM
+  Cal0          = 0.05      # μM
+  # AB neuron
+  AB.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  AB.Na.g       = 700.0     # μS/cm^2
+  AB.CaT.g      = 2.0
+  AB.CaS.g      = 4.0
+  AB.A.g        = 50.0
+  AB.KCa.g      = 40.0
+  AB.Kd.g       = 70.0
+  AB.H.g        = 0.0
+  AB.leak.g     = 0.01
+  AB.MI.g       = 0.0
+  # reversal potentials
+  AB.Na.E       = 50.0      # mV
+  AB.CaT.E      = 80.0
+  AB.CaS.E      = 80.0
+  AB.A.E        = -80.0
+  AB.KCa.E      = -80.0
+  AB.Kd.E       = -80.0
+  AB.H.E        = -20.0
+  AB.leak.E     = -50.0
+  AB.MI.E       = 0.0
+  # cooperative binding Constants
+  AB.Na.p       = 3
+  AB.CaT.p      = 3
+  AB.CaS.p      = 3
+  AB.A.p        = 3
+  AB.KCa.p      = 4
+  AB.Kd.p       = 4
+  AB.H.p        = 1
+  AB.leak.p     = 1
+  AB.MI.p       = 1
+  # LP neuron
+  LP.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  LP.Na.g       = 100.0     # μS/cm^2
+  LP.CaT.g      = 0.0
+  LP.CaS.g      = 4.0
+  LP.A.g        = 10.0
+  LP.KCa.g      = 0.0
+  LP.Kd.g       = 75.0
+  LP.H.g        = 0.02
+  LP.leak.g     = 0.03
+  LP.MI.g       = 0.0
+  # reversal potentials
+  LP.Na.E       = 50.0      # mV
+  LP.CaT.E      = 80.0
+  LP.CaS.E      = 80.0
+  LP.A.E        = -80.0
+  LP.KCa.E      = -80.0
+  LP.Kd.E       = -80.0
+  LP.H.E        = -20.0
+  LP.leak.E     = -50.0
+  LP.MI.E       = 0.0
+  # cooperative binding constants
+  LP.Na.p       = 3
+  LP.CaT.p      = 3
+  LP.CaS.p      = 3
+  LP.A.p        = 3
+  LP.KCa.p      = 4
+  LP.Kd.p       = 4
+  LP.H.p        = 1
+  LP.leak.p     = 1
+  LP.MI.p       = 1
+  # synaptic maximal conductances
+  AB.glut.g     = 0.0
+  AB.chol.g     = 0.0
+  LP.glut.g     = 0.0
+  LP.chol.g     = 0.0
+  # synaptic reversal potentials
+  AB.glut.E     = -70.0
+  AB.chol.E     = -80.0
+  LP.glut.E     = -70.0
+  LP.chol.E     = -80.0
+end
+## IMI in Isolated Neurons
+VMI           = 60.0
+AB.glut.g     = 0.0
+LP.chol.g     = 0.0
+Juno.progress(name="IMI in isolated neurons") do IncreasingIMI
+  begin # AB #2 and LP #3
+    # AB neuron (#2)
+    AB.Na.g     = 100.0
+    AB.CaT.g    = 2.5
+    AB.CaS.g    = 6.0
+    AB.A.g      = 50.0
+    AB.KCa.g    = 5.0
+    AB.Kd.g     = 100.0
+    AB.H.g      = 0.01
+    AB.leak.g   = 0.00
+    # LP neuron (#3)
+    LP.Na.g   = 100.0
+    LP.CaS.g  = 10.0
+    LP.A.g    = 50.0
+    LP.KCa.g  = 5.0
+    LP.Kd.g   = 100.0
+    LP.H.g    = 0.00
+  end
+  myplot1     = zeros(length(t),5)
+  myplot2     = zeros(length(t),5)
+  myplot3     = zeros(length(t),5)
+  # simulate with increasing IMI
+  for ii in 1:5
+    Juno.progress(IncreasingIMI,ii/10)
+    AB.MI.g   = 10^(ii-4.0)
+    LP.MI.g   = 10^(ii-4.0)
+    output1, output2  = simulateSTG(0.0,0.0)
+    myplot1[:,ii]     = output1
+    myplot2[:,ii]     = output2
+  end
+  begin # LP #4
+    LP.Na.g     = 0.0
+    LP.CaT.g    = 0.0
+    LP.CaS.g    = 4.0
+    LP.A.g      = 20.0
+    LP.KCa.g    = 0.0
+    LP.Kd.g     = 25.0
+    LP.H.g      = 0.05
+    LP.leak.g   = 0.03
+  end
+  for qq in 1:5
+    Juno.progress(IncreasingIMI,(5+qq)/10)
+    AB.MI.g   = 10^(qq-4.0)
+    LP.MI.g   = 10^(qq-4.0)
+    output1, output3   = simulateSTG(0.0,0.0)
+    myplot3[:,qq]      = output3
+  end
+  save("IncreasingIMI.jld","ABvolt",myplot1,"LP3volt",myplot2,"LP4volt",myplot3)
+  # plot in three figures
+  Juno.msg(IncreasingIMI,"MESSAGE: beginning to plot!")
+  plot(t,myplot1,grid=false,layout=(5,1),legend=:left,
+    label     = ["\$ g_{MI} = $(10^(ii-4.0))~mS/cm^2\$" for qq in 1:1, ii in 1:5],
+    xlabel    = ["" "" "" "" "time (ms)"],
+    ylabel    = ["" "" "membrane potential (mV)" "" ""],
+    title     = ["AB #2 with IMI" "" "" "" ""])
+  savefig("AB #2 with IMI.png")
+  plot(t,myplot2,grid=false,layout=(5,1),legend=:left,
+    label     = ["\$ g_{MI} = $(10^(ii-4.0))~mS/cm^2\$" for qq in 1:1, ii in 1:5],
+    xlabel    = ["" "" "" "" "time (ms)"],
+    ylabel    = ["" "" "membrane potential (mV)" "" ""],
+    title     = ["LP #3 with IMI" "" "" "" ""])
+  savefig("LP #3 with IMI.png")
+  plot(t,myplot3,grid=false,layout=(5,1),legend=:left,
+    label     = ["\$ g_{MI} = $(10^(ii-4.0))~mS/cm^2\$" for qq in 1:1, ii in 1:5],
+    xlabel    = ["" "" "" "" "time (ms)"],
+    ylabel    = ["" "" "membrane potential (mV)" "" ""],
+    title     = ["LP #4 with IMI" "" "" "" ""])
+  savefig("LP #4 with IMI.png")
+end
+
+## IMI with Increasing Inhbition
+Juno.progress(name="IMI in coupled neurons") do IncreasingSyn
+  begin # synaptic and IMI parameters
+    VMI           = 60.0
+    AB.glut.g     = 0.0
+    LP.chol.g     = 0.0
+    AB.MI.g       = 0.0
+    LP.MI.g       = 0.0
+  end
+  begin # AB #2 and LP #3
+    # AB neuron (#2)
+    AB.Na.g     = 100.0
+    AB.CaT.g    = 2.5
+    AB.CaS.g    = 6.0
+    AB.A.g      = 50.0
+    AB.KCa.g    = 5.0
+    AB.Kd.g     = 100.0
+    AB.H.g      = 0.01
+    AB.leak.g   = 0.00
+    # LP neuron (#3)
+    LP.Na.g   = 100.0
+    LP.CaS.g  = 10.0
+    LP.A.g    = 50.0
+    LP.KCa.g  = 5.0
+    LP.Kd.g   = 100.0
+    LP.H.g    = 0.00
+  end
+  # simulate with increasing synaptic strength
+  ABglut      = linspace(0.0001,0.001,5)
+  LPchol      = linspace(0.1,1.0,5)
+  AB.MI.g     = 0.01
+  LP.MI.g     = 1.0
+  for ii in 1:5
+    Juno.progress(IncreasingSyn,ii/5)
+    AB.glut.g = ABglut[ii]
+    LP.chol.g = LPchol[ii]
+    output1, output2  = simulateSTG(0.0,0.0)
+    Juno.msg(IncreasingSyn,"MESSAGE: beginning to plot!")
+    plot(t,[output1 output2],grid=false,layout=(2,1),legend=:left,
+      title   = ["AB #2 with \$g{MI} = $(AB.MI.g) mS/cm^2 \$" "LP #3"],
+      xlabel  = ["" "time (ms)"],
+      ylabel  = "mV",
+      label   = ["\$ g^{AB}_{glut} = $(AB.glut.g)~mS/cm^2 \$" "\$ g^{LP}_{chol} = $(LP.chol.g)~mS/cm^2 \$"])
+      savefig("AB #2 ($(AB.glut.g)) LP #3 ($(LP.chol.g)) IMI ($(AB.MI.g), $(LP.MI.g),60).png")
+  end
+end
+Juno.progress(name="IMI in coupled neurons 2") do IncreasingSyn2
+  begin # LP #4
+    LP.Na.g     = 0.0
+    LP.CaT.g    = 0.0
+    LP.CaS.g    = 4.0
+    LP.A.g      = 20.0
+    LP.KCa.g    = 0.0
+    LP.Kd.g     = 25.0
+    LP.H.g      = 0.05
+    LP.leak.g   = 0.03
+  end
+  # simulate with increasing synaptic strength
+  ABglut      = linspace(0.0001,0.001,5)
+  LPchol      = linspace(0.1,1.0,5)
+  AB.MI.g     = 0.001
+  LP.MI.g     = 0.01
+  for ii in 1:5
+    Juno.progress(IncreasingSyn2,ii/5)
+    AB.glut.g = ABglut[ii]
+    LP.chol.g = LPchol[ii]
+    output1, output2  = simulateSTG(0.0,0.0)
+    Juno.msg(IncreasingSyn2,"MESSAGE: beginning to plot!")
+    plot(t,[output1 output2],grid=false,layout=(2,1),legend=:left,
+      title   = ["AB #2 with \$g{MI} = $(AB.MI.g) mS/cm^2 \$" "LP #4 with \$g{MI} = $(LP.MI.g) mS/cm^2\$"],
+      xlabel  = ["" "time (ms)"],
+      ylabel  = "mV",
+      label   = ["\$ g^{AB}_{glut} = $(AB.glut.g)~mS/cm^2 \$" "\$ g^{LP}_{chol} = $(LP.chol.g)~mS/cm^2 \$"])
+    savefig("AB #2 ($(AB.glut.g)) LP #4 ($(LP.chol.g)) IMI ($(AB.MI.g), $(LP.MI.g), 60).png")
+  end
+end
+
+## IMI decomposed curent spectra
+begin # AB #2 and LP #3
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#3)
+  LP.Na.g   = 100.0
+  LP.CaS.g  = 10.0
+  LP.A.g    = 50.0
+  LP.KCa.g  = 5.0
+  LP.Kd.g   = 100.0
+  LP.H.g    = 0.00
+end
+begin # synaptic and modulatory input conductances
+  AB.glut.g   =
+  LP.chol.g   =
+  AB.MI.g     = 0.0001
+  LP.MI.g     = 1.0
+end
+# simulate AB #2 and LP #3 with current spectra
+ABvolt, LPvolt, ABamps, LPamps = decomposeSTG(0.0,0.0)
+myData        =
+
+## Synapse and IMI Sweep (LP #3)
+using Juno
+using Plots
+using LaTeXStrings
+using JLD
+pyplot()
+# change directory
+cd("/home/marder/Documents/Summer Project/Coupled Eve/")
+include("typefile-coupled.jl")
+include("funfile-coupled.jl")
+cd("/home/marder/Documents/Summer Project/Coupled Eve/IMI/TTX/LP #3/")
+# time parameters
+dt      = 0.01         # ms
+tmax    = 10000        # ms
+tspan   = convert(Int64,tmax/dt)
+t       = linspace(dt,tmax,tspan)
+# initialize constants
+begin
+  Temp          = 11.0      # °C
+  ExtraCal      = 3000.0    # μM
+  Cal0          = 0.05      # μM
+  # AB neuron
+  AB.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  AB.Na.g       = 700.0     # μS/cm^2
+  AB.CaT.g      = 2.0
+  AB.CaS.g      = 4.0
+  AB.A.g        = 50.0
+  AB.KCa.g      = 40.0
+  AB.Kd.g       = 70.0
+  AB.H.g        = 0.0
+  AB.leak.g     = 0.01
+  AB.MI.g       = 0.0
+  # reversal potentials
+  AB.Na.E       = 50.0      # mV
+  AB.CaT.E      = 80.0
+  AB.CaS.E      = 80.0
+  AB.A.E        = -80.0
+  AB.KCa.E      = -80.0
+  AB.Kd.E       = -80.0
+  AB.H.E        = -20.0
+  AB.leak.E     = -50.0
+  AB.MI.E       = 0.0
+  # cooperative binding Constants
+  AB.Na.p       = 3
+  AB.CaT.p      = 3
+  AB.CaS.p      = 3
+  AB.A.p        = 3
+  AB.KCa.p      = 4
+  AB.Kd.p       = 4
+  AB.H.p        = 1
+  AB.leak.p     = 1
+  AB.MI.p       = 1
+  # LP neuron
+  LP.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  LP.Na.g       = 100.0     # μS/cm^2
+  LP.CaT.g      = 0.0
+  LP.CaS.g      = 4.0
+  LP.A.g        = 10.0
+  LP.KCa.g      = 0.0
+  LP.Kd.g       = 75.0
+  LP.H.g        = 0.02
+  LP.leak.g     = 0.03
+  LP.MI.g       = 0.0
+  # reversal potentials
+  LP.Na.E       = 50.0      # mV
+  LP.CaT.E      = 80.0
+  LP.CaS.E      = 80.0
+  LP.A.E        = -80.0
+  LP.KCa.E      = -80.0
+  LP.Kd.E       = -80.0
+  LP.H.E        = -20.0
+  LP.leak.E     = -50.0
+  LP.MI.E       = 0.0
+  # cooperative binding constants
+  LP.Na.p       = 3
+  LP.CaT.p      = 3
+  LP.CaS.p      = 3
+  LP.A.p        = 3
+  LP.KCa.p      = 4
+  LP.Kd.p       = 4
+  LP.H.p        = 1
+  LP.leak.p     = 1
+  LP.MI.p       = 1
+  # synaptic maximal conductances
+  AB.glut.g     = 0.0
+  AB.chol.g     = 0.0
+  LP.glut.g     = 0.0
+  LP.chol.g     = 0.0
+  # synaptic reversal potentials
+  AB.glut.E     = -70.0
+  AB.chol.E     = -80.0
+  LP.glut.E     = -70.0
+  LP.chol.E     = -80.0
+end
+begin # AB #2 and LP #3
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#3)
+  LP.Na.g     = 100.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 10.0
+  LP.A.g      = 50.0
+  LP.KCa.g    = 5.0
+  LP.Kd.g     = 100.0
+  LP.H.g      = 0.00
+  LP.leak.g   = 0.03
+end
+# TTX
+AB.Na.g   = 0.0
+LP.Na.g   = 0.0
+VMI           = 60.0
+ABvolt        = zeros(length(t),3,3,4,4)
+LPvolt        = zeros(length(t),3,3,4,4)
+Juno.progress(name="synapse and IMI sweep") do Dagon
+  index   = 0
+  ABglut  = [0.0001, 0.001, 0.01]
+  LPchol  = [0.001, 0.01, 0.1]
+  gMI     = [0.0001, 0.001, 0.01, 0.1]
+  for c1 in 1:length(ABglut)
+    for c2 in 1:length(LPchol)
+      for c3 in 1:length(gMI)
+        for c4 in 1:length(gMI)
+          index   = index + 1
+          Juno.progress(Dagon,index/(3*3*4*4))
+          AB.glut.g     = ABglut[c1]
+          LP.chol.g     = LPchol[c2]
+          AB.MI.g       = gMI[c3]
+          LP.MI.g       = gMI[c4]
+          output1, output2 = simulateSTG(0.0,0.0)
+          plot(t,[output1 output2],legend=:left,layout=(2,1),grid=false,
+            ylims       = (-80.0,30.0),
+            xlabel      = ["" "time (ms)"],
+            ylabel      = "mV",
+            title       = ["AB #2 \$ g_{MI} = $(AB.MI.g)~mS/cm^2\$" "LP #3 \$ g_{MI} = $(LP.MI.g)~mS/cm^2\$"],
+            label       = ["\$ g_{glut} = $(AB.glut.g)~mS/cm^2\$" "\$ g_{chol} = $(LP.chol.g)~mS/cm^2\$"])
+          savefig("AB #2 LP #3 TTX ($index).png")
+          ABvolt[:,c1,c2,c3,c4] = output1
+          LPvolt[:,c1,c2,c3,c4] = output2
+        end
+      end
+    end
+  end
+  save("synapse and IMI sweep (TTX).jld",
+    "ABvolt",ABvolt,
+    "LPvolt",LPvolt,
+    "ABglut",ABglut,
+    "LPchol",LPchol,
+    "gMI",gMI)
+end
+
+## Synapse and IMI Sweep (LP #4)
+using Juno
+using Plots
+using LaTeXStrings
+using JLD
+pyplot()
+# change directory
+cd("/home/marder/Documents/Summer Project/Coupled Eve/")
+include("typefile-coupled.jl")
+include("funfile-coupled.jl")
+cd("/home/marder/Documents/Summer Project/Coupled Eve/IMI/")
+# time parameters
+dt      = 0.01         # ms
+tmax    = 10000        # ms
+tspan   = convert(Int64,tmax/dt)
+t       = linspace(dt,tmax,tspan)
+# initialize constants
+begin
+  Temp          = 11.0      # °C
+  ExtraCal      = 3000.0    # μM
+  Cal0          = 0.05      # μM
+  # AB neuron
+  AB.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  AB.Na.g       = 700.0     # μS/cm^2
+  AB.CaT.g      = 2.0
+  AB.CaS.g      = 4.0
+  AB.A.g        = 50.0
+  AB.KCa.g      = 40.0
+  AB.Kd.g       = 70.0
+  AB.H.g        = 0.0
+  AB.leak.g     = 0.01
+  AB.MI.g       = 0.0
+  # reversal potentials
+  AB.Na.E       = 50.0      # mV
+  AB.CaT.E      = 80.0
+  AB.CaS.E      = 80.0
+  AB.A.E        = -80.0
+  AB.KCa.E      = -80.0
+  AB.Kd.E       = -80.0
+  AB.H.E        = -20.0
+  AB.leak.E     = -50.0
+  AB.MI.E       = 0.0
+  # cooperative binding Constants
+  AB.Na.p       = 3
+  AB.CaT.p      = 3
+  AB.CaS.p      = 3
+  AB.A.p        = 3
+  AB.KCa.p      = 4
+  AB.Kd.p       = 4
+  AB.H.p        = 1
+  AB.leak.p     = 1
+  AB.MI.p       = 1
+  # LP neuron
+  LP.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  LP.Na.g       = 100.0     # μS/cm^2
+  LP.CaT.g      = 0.0
+  LP.CaS.g      = 4.0
+  LP.A.g        = 10.0
+  LP.KCa.g      = 0.0
+  LP.Kd.g       = 75.0
+  LP.H.g        = 0.02
+  LP.leak.g     = 0.03
+  LP.MI.g       = 0.0
+  # reversal potentials
+  LP.Na.E       = 50.0      # mV
+  LP.CaT.E      = 80.0
+  LP.CaS.E      = 80.0
+  LP.A.E        = -80.0
+  LP.KCa.E      = -80.0
+  LP.Kd.E       = -80.0
+  LP.H.E        = -20.0
+  LP.leak.E     = -50.0
+  LP.MI.E       = 0.0
+  # cooperative binding constants
+  LP.Na.p       = 3
+  LP.CaT.p      = 3
+  LP.CaS.p      = 3
+  LP.A.p        = 3
+  LP.KCa.p      = 4
+  LP.Kd.p       = 4
+  LP.H.p        = 1
+  LP.leak.p     = 1
+  LP.MI.p       = 1
+  # synaptic maximal conductances
+  AB.glut.g     = 0.0
+  AB.chol.g     = 0.0
+  LP.glut.g     = 0.0
+  LP.chol.g     = 0.0
+  # synaptic reversal potentials
+  AB.glut.E     = -70.0
+  AB.chol.E     = -80.0
+  LP.glut.E     = -70.0
+  LP.chol.E     = -80.0
+end
+begin # LP #4
+  LP.Na.g     = 0.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 4.0
+  LP.A.g      = 20.0
+  LP.KCa.g    = 0.0
+  LP.Kd.g     = 25.0
+  LP.H.g      = 0.05
+  LP.leak.g   = 0.03
+end
+VMI           = 60.0
+ABvolt        = zeros(length(t),6,6,6,6)
+LPvolt        = zeros(length(t),6,6,6,6)
+Juno.progress(name="synapse and IMI sweep") do Dagon
+  index   = 0
+  ABglut  = linspace(0.0001,0.01,6)
+  LPchol  = linspace(0.1,1.0,6)
+  gMI     = linspace(0.001,0.01,6)
+  for c1 in 1:length(ABglut)
+    for c2 in 1:length(LPchol)
+      for c3 in 1:length(gMI)
+        for c4 in 1:length(gMI)
+          index   = index + 1
+          Juno.progress(Dagon,index/(6^4))
+          AB.glut.g     = ABglut[c1]
+          LP.chol.g     = LPchol[c2]
+          AB.MI.g       = gMI[c3]
+          LP.MI.g       = gMI[c4]
+          output1, output2 = simulateSTG(0.0,0.0)
+          plot(t,[output1 output2],legend=:left,layout=(2,1),grid=false,
+            xlabel      = ["" "time (ms)"],
+            ylabel      = "mV",
+            title       = ["AB #2 \$ g_{MI} = $(AB.MI.g)~mS/cm^2\$" "LP #4 \$ g_{MI} = $(LP.MI.g)~mS/cm^2\$"],
+            label       = ["\$ g_{glut} = $(AB.glut.g)~mS/cm^2\$" "\$ g_{chol} = $(LP.chol.g)~mS/cm^2\$"])
+          savefig("AB #2 LP #4 ($index).png")
+          ABvolt[:,c1,c2,c3,c4] = output1
+          LPvolt[:,c1,c2,c3,c4] = output2
+        end
+      end
+    end
+  end
+  save("synapse and IMI sweep.jld",
+    "ABvolt",ABvolt,
+    "LPvolt",LPvolt,
+    "ABglut",ABglut,
+    "LPchol",LPchol,
+    "gMI",gMI)
+end
+
+##
+AB.glut.g   = 0.0001
+LP.chol.g   = 0.1
+AB.MI.g     = 0.00
+LP.MI.g     = 0.00
+output1,output2 = simulateSTG(0.0,0.0)
+plot([output1 output2],layout=(2,1))
+
+begin # synaptic and IMI parameters
+  VMI           = 60.0
+  AB.glut.g     = 0.0
+  LP.chol.g     = 0.0
+  AB.MI.g       = 0.0
+  LP.MI.g       = 0.0
+end
+begin # AB #2 and LP #3
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#3)
+  LP.Na.g   = 100.0
+  LP.CaS.g  = 10.0
+  LP.A.g    = 50.0
+  LP.KCa.g  = 5.0
+  LP.Kd.g   = 100.0
+  LP.H.g    = 0.00
+end
+# simulate with increasing synaptic strength
+ABglut      = linspace(0.0001,0.001,5)
+LPchol      = linspace(0.1,1.0,5)
+AB.MI.g     = 0.01
+LP.MI.g     = 1.0
+for ii in 1:5
+  Juno.progress(IncreasingSyn,ii/5)
+  AB.glut.g = ABglut[ii]
+  LP.chol.g = LPchol[ii]
+  output1, output2  = simulateSTG(0.0,0.0)
+  Juno.msg(IncreasingSyn,"MESSAGE: beginning to plot!")
+  plot(t,[output1 output2],grid=false,layout=(2,1),legend=:left,
+    title   = ["AB #2 with \$g{MI} = $(AB.MI.g) mS/cm^2 \$" "LP #3"],
+    xlabel  = ["" "time (ms)"],
+    ylabel  = "mV",
+    label   = ["\$ g^{AB}_{glut} = $(AB.glut.g)~mS/cm^2 \$" "\$ g^{LP}_{chol} = $(LP.chol.g)~mS/cm^2 \$"])
+    savefig("AB #2 ($(AB.glut.g)) LP #3 ($(LP.chol.g)) IMI ($(AB.MI.g), $(LP.MI.g),60).png")
+end
+end
+ii = 1
+AB.glut.g = ABglut[ii]
+LP.chol.g = LPchol[ii]
+AB.MI.g   = 0.001
+LP.MI.g   = 0.001
+output1, output2  = simulateSTG(0.0,0.0)
+Juno.msg(IncreasingSyn,"MESSAGE: beginning to plot!")
+plot(t,[output1 output2],grid=false,layout=(2,1),legend=:left,
+  title   = ["AB #2 with \$g_{MI} = $(AB.MI.g) mS/cm^2 \$" "LP #3 with \$ g_{MI} = $(LP.MI.g) mS/cm^2\$"],
+  xlabel  = ["" "time (ms)"],
+  ylabel  = "mV",
+  label   = ["\$ g^{AB}_{glut} = $(AB.glut.g)~mS/cm^2 \$" "\$ g^{LP}_{chol} = $(LP.chol.g)~mS/cm^2 \$"])
+savefig("AB #2 ($(AB.glut.g)) LP #3 ($(LP.chol.g)) IMI ($(AB.MI.g), $(LP.MI.g), 60).png")
+
+## Data Analysis of AB #2 and LP #3 with Modulatory Input
+begin
+  Temp          = 11.0      # °C
+  ExtraCal      = 3000.0    # μM
+  Cal0          = 0.05      # μM
+  VMI           = 60.0      # mV
+  # AB neuron
+  AB.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  AB.Na.g       = 700.0     # μS/cm^2
+  AB.CaT.g      = 2.0
+  AB.CaS.g      = 4.0
+  AB.A.g        = 50.0
+  AB.KCa.g      = 40.0
+  AB.Kd.g       = 70.0
+  AB.H.g        = 0.0
+  AB.leak.g     = 0.01
+  AB.MI.g       = 0.0
+  # reversal potentials
+  AB.Na.E       = 50.0      # mV
+  AB.CaT.E      = 80.0
+  AB.CaS.E      = 80.0
+  AB.A.E        = -80.0
+  AB.KCa.E      = -80.0
+  AB.Kd.E       = -80.0
+  AB.H.E        = -20.0
+  AB.leak.E     = -50.0
+  AB.MI.E       = 0.0
+  # cooperative binding Constants
+  AB.Na.p       = 3
+  AB.CaT.p      = 3
+  AB.CaS.p      = 3
+  AB.A.p        = 3
+  AB.KCa.p      = 4
+  AB.Kd.p       = 4
+  AB.H.p        = 1
+  AB.leak.p     = 1
+  AB.MI.p       = 1
+  # LP neuron
+  LP.Cm         = 1.0       # μF/cm^2
+  # maximal conductances
+  LP.Na.g       = 100.0     # μS/cm^2
+  LP.CaT.g      = 0.0
+  LP.CaS.g      = 4.0
+  LP.A.g        = 10.0
+  LP.KCa.g      = 0.0
+  LP.Kd.g       = 75.0
+  LP.H.g        = 0.02
+  LP.leak.g     = 0.03
+  LP.MI.g       = 0.0
+  # reversal potentials
+  LP.Na.E       = 50.0      # mV
+  LP.CaT.E      = 80.0
+  LP.CaS.E      = 80.0
+  LP.A.E        = -80.0
+  LP.KCa.E      = -80.0
+  LP.Kd.E       = -80.0
+  LP.H.E        = -20.0
+  LP.leak.E     = -50.0
+  LP.MI.E       = 0.0
+  # cooperative binding constants
+  LP.Na.p       = 3
+  LP.CaT.p      = 3
+  LP.CaS.p      = 3
+  LP.A.p        = 3
+  LP.KCa.p      = 4
+  LP.Kd.p       = 4
+  LP.H.p        = 1
+  LP.leak.p     = 1
+  LP.MI.p       = 1
+  # synaptic maximal conductances
+  AB.glut.g     = 0.0
+  AB.chol.g     = 0.0
+  LP.glut.g     = 0.0
+  LP.chol.g     = 0.0
+  # synaptic reversal potentials
+  AB.glut.E     = -70.0
+  AB.chol.E     = -80.0
+  LP.glut.E     = -70.0
+  LP.chol.E     = -80.0 # intrinsic conductances # intrinsic conductances
+end
+begin # AB #2 and LP #3
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#3)
+  LP.Na.g     = 100.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 10.0
+  LP.A.g      = 50.0
+  LP.KCa.g    = 5.0
+  LP.Kd.g     = 100.0
+  LP.H.g      = 0.00
+  LP.leak.g   = 0.03
+end
+# load the synaptic and MI conductances
+myInput     = readdlm("bursting.txt")
+# produce output matrix
+Juno.progress(name="bursting plots") do BurstingData
+  ABout     = zeros(length(t),length(myInput[:,1]))
+  LPout     = zeros(length(t),length(myInput[:,1]))
+  println("MESSAGE: beginning computation")
+  for ii in 1:length(myInput[:,1])
+    Juno.progress(BurstingData,ii/length(myInput[:,1]))
+    # set conductances for trial # ii
+    AB.glut.g     = myInput[ii,1]
+    AB.MI.g       = myInput[ii,2]
+    LP.chol.g     = myInput[ii,3]
+    LP.MI.g       = myInput[ii,4]
+    # do simulation
+    ABout[:,ii], LPout[:,ii]  = simulateSTG(0.0,0.0)
+  end
+  # do analysis
+  println("MESSAGE: beginning analysis")
+  AB_IBI        = getIBI(ABout,100)
+  LP_IBI        = getIBI(LPout,100)
+  # save the voltage traces and the conductances
+  println("MESSAGE: saving data ... ... ...")
+  JLD.save("bursting-data.jld",
+    "ABvolt", ABout,
+    "LPvolt", LPout,
+    "ABglut", myInput[:,1],
+    "LPchol", myInput[:,3],
+    "AB_MI",  myInput[:,2],
+    "LP_MI",  myInput[:,4],
+    "AB_IBI", AB_IBI,
+    "LP_IBI", LP_IBI)
+end
+# load the IBIs
+IBI     = readdlm("bursting-IBI.txt")
+IBF     = (1000)./IBI
+plot(IBF)
+
+## Plots for Brandeis SciFest VII
+using LaTeXStrings
+using JLD
+# burst frequency over increasing synaptic strength
+begin # AB #2 & LP #3
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#3)
+  LP.Na.g     = 100.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 10.0
+  LP.A.g      = 50.0
+  LP.KCa.g    = 5.0
+  LP.Kd.g     = 100.0
+  LP.H.g      = 0.00
+  LP.leak.g   = 0.03
+end
+# time parameters (longer simulation time)
+dt      = 0.01         # ms
+tmax    = 10000        # ms
+tspan   = convert(Int64,tmax/dt)
+t       = linspace(dt,tmax,tspan)
+Juno.progress(name="burst frequency vs. ABglut") do YogSothoth
+  # parameters & output
+  param   = collect(linspace(0.0001,0.001,20))
+  LP.chol.g   = 1.0
+  ABvolt  = zeros(length(t),length(param))
+  LPvolt  = zeros(length(t),length(param))
+  # do simulation
+  for index in 1:length(param)
+    Juno.progress(YogSothoth,index/length(param))
+    AB.glut.g   = param[index]
+    output1, output2    = simulateSTG(0.0,0.0)
+    ABvolt[:,index]     = output1
+    LPvolt[:,index]     = output2
+  end
+  JLD.save("burst frequency vs ABglut.jld",
+    "ABvolt",ABvolt,
+    "LPvolt",LPvolt,
+    "param",param)
+end
+# do the analysis for vs AB
+myData = load("burst frequency vs ABglut.jld")
+plot(t,myData["ABvolt"][:,1],grid=false,legend=false)
+# interburst intervals (ms)
+AB_IBI = getIBI(myData["ABvolt"][:,2:end],100,5)
+LP_IBI = getIBI(myData["LPvolt"][:,2:end],100,5)
+# burst frequencies (Hz)
+AB_IBF = (1000)./(AB_IBI)
+LP_IBF = (1000)./(LP_IBI)
+plot(myData["param"][1:end-1],[AB_IBF LP_IBF],
+  grid=false,legend=:right,
+  label   = ["AB #2" "LP #3"],
+  xlabel  = "glutamatergic synaptic strength onto ABPD \$ (mS/cm^2)\$",
+  ylabel  = "burst frequency (Hz)",
+  title   = "Burst Frequency with Increasing AB Inhibition",
+  # ylims   = (0.5,1.5),
+  # yticks  = 0.5:0.1:1.5,
+  #xscale  = :log,
+  tickfont    = font(12,"sans-serif"),
+  legendfont  = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  titlefont   = Plots.Font("sans-serif",16,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  guidefont   = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  linewidth   = 6)
+Juno.progress(name="burst frequency vs. LPchol") do YogSothoth
+  # parameters & output
+  param   = collect(linspace(0.001,0.1,10))
+  AB.glut.g     = 0.1
+  ABvolt  = zeros(length(t),length(param))
+  LPvolt  = zeros(length(t),length(param))
+  # do simulation
+  for index in 1:length(param)
+    Juno.progress(YogSothoth,index/length(param))
+    LP.chol.g           = param[index]
+    output1, output2    = simulateSTG(0.0,0.0)
+    ABvolt[:,index]     = output1
+    LPvolt[:,index]     = output2
+  end
+  JLD.save("burst frequency vs LPchol.jld",
+    "ABvolt",ABvolt,
+    "LPvolt",LPvolt,
+    "param",param)
+end
+# do the analysis for vs LP
+myData = load("burst frequency vs LPchol.jld")
+plot(t,myData["ABvolt"][:,1],grid=false,legend=false)
+# interburst intervals (ms)
+AB_IBI = getIBI(myData["ABvolt"][:,2:end],100,20)
+LP_IBI = getIBI(myData["LPvolt"][:,2:end],100,20)
+# burst frequencies (Hz)
+AB_IBF = (1000)./(AB_IBI)
+LP_IBF = (1000)./(LP_IBI)
+plot(myData["param"][2:end],[AB_IBF LP_IBF],
+  grid=false,legend=:right,
+  label   = ["AB #2" "LP #3"],
+  xlabel  = "cholinergic synaptic strength onto LP \$ (mS/cm^2)\$",
+  ylabel  = "burst frequency (Hz)",
+  title   = "Burst Frequency of ABPD and LP with Increasing LP Inhibition",
+  ylims   = (0.5,1.5),
+  yticks  = 0.5:0.1:1.5,
+  xscale  = :log,
+  tickfont    = font(12,"sans-serif"),
+  legendfont  = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  titlefont   = Plots.Font("sans-serif",16,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  guidefont   = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  linewidth   = 6)
+
+## Correlation Coefficient Analysis
+using LaTeXStrings
+using JLD
+# burst frequency over increasing synaptic strength
+begin # AB #2 & LP #3
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#3)
+  LP.Na.g     = 100.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 10.0
+  LP.A.g      = 50.0
+  LP.KCa.g    = 5.0
+  LP.Kd.g     = 100.0
+  LP.H.g      = 0.00
+  LP.leak.g   = 0.03
+  # synaptic & modulatory inputs
+  AB.glut.g   = 0.0
+  AB.chol.g   = 0.0
+  LP.glut.g   = 0.0
+  LP.chol.g   = 0.0
+  AB.MI.g     = 0.0
+  LP.MI.g     = 0.0
+end
+# time parameters (longer simulation time)
+dt      = 0.01         # ms
+tmax    = 10000        # ms
+tspan   = convert(Int64,tmax/dt)
+t       = linspace(dt,tmax,tspan)
+# do the simulations
+Juno.progress(name="correlation coefficient I") do YogSothoth
+  Juno.progress(name="correlation coefficient II") do ShubNiggurath
+    param   = [exp10(xx) for xx in linspace(-4,0,5)]
+    myData1 = zeros(length(t),length(param),length(param))
+    myData2 = zeros(length(t),length(param),length(param))
+    for ii in 1:length(param)
+      for qq in 1:length(param)
+        Juno.progress(YogSothoth,ii/length(param))
+        Juno.progress(ShubNiggurath,qq/length(param))
+        AB.glut.g     = param[ii]
+        LP.chol.g     = param[qq]
+        output1, output2 = simulateSTG(0.0,0.0)
+        myData1[:,ii,qq] = output1    # (time, AB.glut.g, LP.chol.g)
+        myData2[:,ii,qq] = output2    # (time, AB.glut.g, LP.chol.g)
+      end
+    end
+    JLD.save("correlation coefficient.jld","ABvolt",myData1,"LPvolt",myData2,"param",param)
+  end
+end
+
+
+## Pearson Correlation Coefficient
+myData    = load("correlation coefficient.jld")
+# compute the interburst interval
+AB_IBI    = getIBI(myData["ABvolt"],100,100,8)
+LP_IBI    = getIBI(myData["LPvolt"],100,100,8)
+# compute the burst frequency
+AB_IBF    = (1000)./AB_IBI
+LP_IBF    = (1000)./LP_IBI
+# shift LP by the period of AB
+θ         = zeros(5,5)
+LPshft    = Array{Array{Float64,1},2}(5,5)
+for ii in 1:5
+  for qq in 1:5
+    θ[ii,qq] = 0.5/dt*getIBI(myData["ABvolt"][:,ii,qq],100,100,8)
+    if isnan(θ[ii,qq])
+      θ[ii,qq] = convert(Int64,0)
+    end
+    index = round(Int64,(1+θ[ii,qq])):round(Int64,(length(t)-θ[ii,qq]))
+    LPshft[ii,qq] = myData["LPvolt"][index,ii,qq]
+  end
+end
+
+# create output for the R-value heatmap
+Rmat    = zeros(size(myData["ABvolt"][1,:,:]))
+for ii in 1:length(myData["ABvolt"][1,:,1])     # along AB.glut.g dimension
+  for qq in 1:length(myData["ABvolt"][1,1,:])   # along LP.chol.g dimension
+    Rmat[ii,qq] = cor(myData["ABvolt"][1:length(LPshft[ii,qq]),ii,qq],LPshft[ii,qq])
+  end
+end
+# plot it
+xs = [string("$(myData["param"][ii])") for ii in 1:length(myData["param"])]
+heatmap(xs,xs,abs(Rmat),
+  title     = "Cross-Correlation with Varied Synaptic Strengths",
+  xlabel    = "cholinergic synaptic strength onto LP \$ (mS/cm^2)\$",
+  ylabel    = "glutamatergic synaptic strength onto ABPD \$ (mS/cm^2)\$",
+  tickfont  = font(12,"sans-serif"),
+  colorbar_title = "Pearson Correlation Coefficient",
+  aspect_ratio = 1,
+  size      = (800,800),
+  legendfont  = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  titlefont   = Plots.Font("sans-serif",16,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  guidefont   = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)))
+# inset plots
+output1     = zeros(length(t),3)
+output2     = zeros(length(t),3)
+begin # inset plot 2
+  begin # simulation parameters
+    AB.glut.g   = 0.001
+    LP.chol.g   = 0.1
+    output1[:,1], output2[:,1] = simulateSTG(0.0,0.0)
+    AB.glut.g   = 0.01
+    output1[:,2],output2[:,2] = simulateSTG(0.0,0.0)
+    AB.glut.g   = 0.1
+    output1[:,3],output2[:,3] = simulateSTG(0.0,0.0)
+  end
+  begin # plot parameters
+    mytitle = ["" for qq in 1:1, ii in 1:6]; mytitle[2] = "Inset 2: Increasing \$ g_{glut} \$"
+    myxaxis = ["" for qq in 1:1, ii in 1:6]; myxaxis[5] = "time (s)"
+    myyaxis = ["" for qq in 1:1, ii in 1:6]; myyaxis[1] = "\$ V_m \$ (mV)"; myyaxis[4] = "\$ V_m \$ (mV)"
+    mylabel = ["\$ g_{glut} = 0.001 \$" "\$ g_{glut} = 0.01 \$" "\$ g_{glut} = 0.1 \$" "\$ g_{chol} = 0.1 \$" "\$ g_{chol} = 0.1 \$" "\$ g_{chol} = 0.1 \$"]
+  end
+  plot(t/1000,[output1 output2],layout=(2,3),legend=:left,grid=false,
+    label     = mylabel,
+    title     = mytitle,
+    xlabel    = myxaxis,
+    ylabel    = myyaxis,
+    tickfont  = font(12,"sans-serif"),
+    size      = (1200,400),
+    legendfont  = Plots.Font("sans-serif",10,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+    titlefont   = Plots.Font("sans-serif",20,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+    guidefont   = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)))
+  gui()
+end
+begin # inset plot 1
+  begin # simulation parameters
+    AB.glut.g   = 0.0001
+    LP.chol.g   = 0.01
+    output1[:,1], output2[:,1] = simulateSTG(0.0,0.0)
+    LP.chol.g   = 0.01
+    output1[:,2],output2[:,2] = simulateSTG(0.0,0.0)
+    LP.chol.g   = 0.1
+    output1[:,3],output2[:,3] = simulateSTG(0.0,0.0)
+  end
+  begin # plot parameters
+    mytitle = ["" for qq in 1:1, ii in 1:6]; mytitle[2] = "Inset 1: Increasing \$ g_{chol} \$"
+    myxaxis = ["" for qq in 1:1, ii in 1:6]; myxaxis[5] = "time (s)"
+    myyaxis = ["" for qq in 1:1, ii in 1:6]; myyaxis[1] = "\$ V_m \$ (mV)"; myyaxis[4] = " \$ V_m \$ (mV)"
+    mylabel = ["\$ g_{glut} = 0.0001 \$" "\$ g_{glut} = 0.0001 \$" "\$ g_{glut} = 0.0001 \$" "\$ g_{chol} = 0.001 \$" "\$ g_{chol} = 0.01 \$" "\$ g_{chol} = 0.1 \$"]
+  end
+  plot(t/1000,[output1 output2],layout=(2,3),legend=:left,grid=false,
+    label     = mylabel,
+    title     = mytitle,
+    xlabel    = myxaxis,
+    ylabel    = myyaxis,
+    tickfont  = font(12,"sans-serif"),
+    size      = (1200,400),
+    legendfont  = Plots.Font("sans-serif",10,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+    titlefont   = Plots.Font("sans-serif",20,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+    guidefont   = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)))
+  gui()
+end
+
+## Phase Shift
+myData    = load("correlation coefficient.jld")
+# compute the interburst intervals of AB and LP
+bursts    = Array{Array{Float64,1},3}(2,5,5)
+θ         = zeros(2,5,5)
+for ii in 1:5
+  for qq in 1:5
+    bursts[1,ii,qq] = dt*find(getBursts(myData["ABvolt"][:,ii,qq],100,100,8))
+    bursts[2,ii,qq] = dt*find(getBursts(myData["LPvolt"][:,ii,qq],100,100,8))
+  end
+end
+
+ABvolt    = myData["ABvolt"][:,1:4,5]
+LPvolt    = myData["LPvolt"][:,1:4,5]
+ABbursts  = bursts[1,1:4,5]
+LPbursts  = bursts[2,1:4,5]
+
+bst_diff  = zeros(3,3)
+for ii in 1:3
+  for qq in 1:3
+    bst_diff[ii,qq] = (LPbursts[ii][end-qq+1] - ABbursts[ii][end-qq+1])/mean(ABbursts[ii][end-2:end])
+  end
+end
+
+## Frequency & Phase Shift Plots
+using LaTeXStrings
+using JLD
+# burst frequency over increasing synaptic strength
+begin # AB #2 & LP #3
+  # AB neuron (#2)
+  AB.Na.g     = 100.0
+  AB.CaT.g    = 2.5
+  AB.CaS.g    = 6.0
+  AB.A.g      = 50.0
+  AB.KCa.g    = 5.0
+  AB.Kd.g     = 100.0
+  AB.H.g      = 0.01
+  AB.leak.g   = 0.00
+  # LP neuron (#3)
+  LP.Na.g     = 100.0
+  LP.CaT.g    = 0.0
+  LP.CaS.g    = 10.0
+  LP.A.g      = 50.0
+  LP.KCa.g    = 5.0
+  LP.Kd.g     = 100.0
+  LP.H.g      = 0.00
+  LP.leak.g   = 0.03
+  # synaptic & modulatory inputs
+  AB.glut.g   = 0.0
+  AB.chol.g   = 0.0
+  LP.glut.g   = 0.0
+  LP.chol.g   = 0.0
+  AB.MI.g     = 0.0
+  LP.MI.g     = 0.0
+end
+# time parameters (longer simulation time)
+dt        = 0.01         # ms
+tmax      = 20000        # ms
+tspan     = convert(Int64,tmax/dt)
+t         = linspace(dt,tmax,tspan)
+# simulation parameters
+ABglut    = linspace(0.0001,0.1,21)
+LP.chol.g = 0.1
+glutData  = zeros(length(t),2,length(ABglut))
+# do simulation
+Juno.progress(name="AB freq") do ABfreq
+  for ii in 1:length(ABglut)
+    Juno.progress(ABfreq,ii/length(ABglut))
+    AB.glut.g   = ABglut[ii]
+    output1, output2 = simulateSTG(0.0,0.0)
+    glutData[:,1,ii] = output1; glutData[:,2,ii] = output2
+  end
+  save("AB freq.jld","ABvolt",glutData[:,1,:],"LPvolt",glutData[:,2,:],
+    "ABglut",collect(ABglut),"LPchol",LP.chol.g)
+end
+# do data analysis
+myData      = load("AB freq.jld")
+AB_IBI      = getIBI(myData["ABvolt"],100,100,8)
+LP_IBI      = getIBI(myData["LPvolt"],100,100,8)
+AB_IBF      = (1000)./AB_IBI
+LP_IBF      = (1000)./LP_IBI
+# plot
+plot(myData["ABglut"],[AB_IBF LP_IBF],legend=:left,
+  label     = ["AB" "LP (\$ g_{chol} = 0.1 \$)"]
+  title     = "Burst Frequency over Increasing AB Inhibition",
+  xlabel    = "glutamatergic synaptic strength onto AB (\$ mS/cm^2\$)"
+  ylabel    = "burst frequency (Hz)",
+  tickfont  = font(12,"sans-serif"),
+  size      = (600,400),
+  legendfont  = Plots.Font("sans-serif",10,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  titlefont   = Plots.Font("sans-serif",20,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  guidefont   = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)))
+gui()
+# simulation parameters
+LPchol    = linspace(0.01,1.0,21)
+AB.glut.g = 0.0001
+cholData  = zeros(length(t),2,length(ABglut))
+# do simulation
+Juno.progress(name="LP freq") do LPfreq
+  for ii in 1:length(LPchol)
+    Juno.progress(LPfreq,ii/length(LPchol))
+    LP.chol.g   = LPchol[ii]
+    output1, output2 = simulateSTG(0.0,0.0)
+    cholData[:,1,ii] = output1; cholData[:,2,ii] = output2
+  end
+  save("LP freq.jld","ABvolt",cholData[:,1,:],"LPvolt",cholData[:,2,:],
+    "ABglut",collect(ABglut),"LPchol",LP.chol.g)
+end
+# do data analysis
+myData      = load("LP freq.jld")
+AB_IBI      = getIBI(myData["ABvolt"],100,100,8)
+LP_IBI      = getIBI(myData["LPvolt"],100,100,8)
+AB_IBF      = (1000)./AB_IBI
+LP_IBF      = (1000)./LP_IBI
+# plot
+plot(myData["ABglut"],[AB_IBF LP_IBF],legend=:left,
+  label     = ["AB" "LP (\$ g_{chol} = 0.1 \$)"]
+  title     = "Burst Frequency over Increasing LP Inhibition",
+  xlabel    = "cholinegic synaptic strength onto LP (\$ mS/cm^2\$)"
+  ylabel    = "burst frequency (Hz)",
+  tickfont  = font(12,"sans-serif"),
+  size      = (600,400),
+  legendfont  = Plots.Font("sans-serif",10,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  titlefont   = Plots.Font("sans-serif",20,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)),
+  guidefont   = Plots.Font("sans-serif",14,:hcenter,:vcenter,0.0,RGB{U8}(0.0,0.0,0.0)))
+gui()

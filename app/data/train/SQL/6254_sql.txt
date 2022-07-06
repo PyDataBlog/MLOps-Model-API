@@ -1,0 +1,1 @@
+ALTER TABLE fiona_pet_business.t_finance_settle_accounts_detail MODIFY busi_type_id VARCHAR(36);

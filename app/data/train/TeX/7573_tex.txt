@@ -1,0 +1,117 @@
+%% @texfile{
+%%   author = "Cesar Crusius",
+%%   filename = "ccshowbox.tex",
+%%   docstring = "LuaTeX-based \showbox",
+%% }
+\input ccbase
+\pragmaonce{ccshowbox}
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%
+% CCSHOWBOX LUA MODULE
+%
+% Some adapted from Patrick Gundlach's viznodelist.lua.
+%
+\luacode
+local function nzformat(fmt,value)
+  if value == 0 then return "" end
+  return string.format(fmt,value)
+end
+
+local function showglue(n,depth,prefix)
+  local s=n.spec
+  local t=prefix..string.format("glue %gpt",s.width/2^16)
+  if s.stretch ~= 0 then
+    t = t..string.format(" plus %g",s.stretch/2^16)
+    if s.stretch_order == 0 then t = t.."pt"
+    else t = t..string.format("fi%s",string.rep("l",s.stretch_order-1))
+    end
+  end
+  if s.shrink ~= 0 then
+    t = t..string.format(" minus %g",s.shrink/2^16)
+    if s.shrink_order == 0 then t = t.."pt"
+    else t = t..string.format("fi%s",string.rep("l",s.shrink_order-1))
+    end
+  end
+  if not s.writable then t = t.." ro" end
+  texio.write_nl(t)
+end
+
+local function showglyph(n,depth,prefix)
+  texio.write_nl(prefix..string.format(
+    "glyph %q lang=%d font=%d width=%gpt",
+    unicode.utf8.char(n.char),
+    n.lang, n.font, n.width/2^16))
+end
+
+local function showkern(n,depth,prefix)
+  texio.write_nl(prefix..string.format("kern %gpt",n.kern/2^16))
+end
+
+local shownode -- forward declaration
+local function showheadlist(n,depth,prefix)
+  while n do
+    shownode(n,depth,prefix)
+    n = n.next
+  end
+end
+
+local function showlist(n,depth,prefix,name)
+  local t = prefix..name..string.format(
+    " %gpt x (%gpt+%gpt)",
+    n.width/2^16, n.height/2^16, n.depth/2^16)
+  t = t..nzformat(" glue_set=%d",n.glue_set)
+  t = t..nzformat(" glue_sign=%d",n.glue_sign)
+  t = t..nzformat(" glue_order=%d",n.glue_order)
+  t = t..nzformat(" shift=%gpt",n.shift/2^16)
+  texio.write_nl(t)
+  showheadlist(n.head,depth-1,prefix..".")
+end
+local function showhlist(n,depth,prefix) showlist(n,depth,prefix,"hlist") end
+local function showvlist(n,depth,prefix) showlist(n,depth,prefix,"vlist") end
+
+local function showrule(n,depth,prefix)
+  local function p(t,v)
+    if v == -1073741824 then return ""
+    else return t..string.format("%gpt",v/2^16)
+    end
+  end
+  texio.write_nl(prefix
+    .."rule"
+    ..p(" width=",n.width)
+    ..p(" height=",n.height)
+    ..p(" depth=",n.depth))
+end
+
+local showfn = {
+  [ccbase.GLUE_TYPE]  = showglue,
+  [ccbase.GLYPH_TYPE] = showglyph,
+  [ccbase.HLIST_TYPE] = showhlist,
+  [ccbase.KERN_TYPE]  = showkern,
+  [ccbase.RULE_TYPE]  = showrule,
+  [ccbase.VLIST_TYPE] = showvlist,
+}
+
+function shownode(n,depth,prefix)
+  if depth < 0 then return end
+  f = showfn[n.id]
+  if f then
+    f(n,depth,prefix)
+  else
+    texio.write_nl(prefix.."Unknown node "..node.type(n.id))
+  end
+end
+
+local function showbox(box,depth)
+  if type(box) == "number" then box = tex.box[box] end
+  shownode(box,depth,"")
+end
+
+ccshowbox = {
+  showbox  = showbox,
+  shownode = shownode,
+  showheadlist = showheadlist,
+}
+\endluacode
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+\def\ccshowbox#1#2{\directlua{ccshowbox.showbox(#1,#2)}}
+\endinput

@@ -1,0 +1,363 @@
+﻿Imports System.ComponentModel
+Imports DevComponents.AdvTree
+
+Public Class frmMain
+
+    Private _Archive As Boolean = False
+    Private _ErrorLog As String = ""
+    Private _SecurityMasks As New List(Of Models.SecurityMask)
+    Private _TopLevel As String = ""
+
+    Private _ToRemove As List(Of String) = {
+        "Thumbs.DB",
+        ".DWL",
+        ".DWL2",
+        ".ERR",
+        ".LDB",
+        ".LNK",
+        ".LOG",
+        ".TMP"
+    }.Select(Function(o) o.ToLower()).ToList()
+
+    Private ReadOnly Property ErrorLog As String
+        Get
+            If _ErrorLog.IsNotSet() Then
+                _ErrorLog = "{0}Errors - {1} - {2}.txt".FormatWith(APRBase.Settings.Directory(APRBase.BaseDirectory.Desktop), My.Application.Info.ProductName, APRBase.Settings.WindowsUserName)
+            End If
+            Return _ErrorLog
+        End Get
+    End Property
+
+#Region " Form Events "
+
+    Public Sub New()
+        ' This call is required by the designer.
+        InitializeComponent()
+        ' Add any initialization after the InitializeComponent() call.
+        Me.Opacity = 0.5
+    End Sub
+
+    Private Sub Me_Load(sender As Object, e As System.EventArgs) Handles Me.Load
+        APRBase.Initialise(Me)
+        APRBase.Settings.DebugLogging = APRBase.Settings.Get(Of Boolean)("DebugEnabled")
+
+        APRBase.Errors.Handlers.AddRange({
+                                         New APRBase.AddErrorLogEventHandler(AddressOf LogError_File),
+                                         New APRBase.AddErrorLogEventHandler(AddressOf LogError_Screen)
+                                     })
+
+        Me.StartUp("")
+    End Sub
+
+    Private Sub Me_Shown(sender As Object, e As System.EventArgs) Handles Me.Shown
+        Try
+            _SecurityMasks.Clear()
+            _SecurityMasks.AddRange(DBAccess.ExecuteReader(Of Models.SecurityMask)("SELECT * FROM [SecurityMasks]"))
+
+            cbStorage.PopulateComboItems(_SecurityMasks.OrderBy(Function(o) o.MaskName).ToDictionary(Function(o) o.SecurityMaskID.ToString(), Function(o) o.MaskName))
+        Catch ex As Exception
+            ex.ToLog()
+        End Try
+
+        Me.Opacity = 1
+    End Sub
+
+    Private Sub Me_FormClosing(sender As Object, e As System.Windows.Forms.FormClosingEventArgs) Handles Me.FormClosing
+        Me.ShutDown("")
+
+        APRBase.CloseAndSave(Me)
+    End Sub
+
+    Private Sub LogError_File(silent As Boolean, [error] As APRBase.Models.Error)
+        APRBase.IORoutines.WriteToFile(True, True, ErrorLog, False, [error].ErrorDetails)
+    End Sub
+
+    Private Sub LogError_Screen(silent As Boolean, [error] As APRBase.Models.Error)
+        If silent Then
+            Return
+        End If
+
+        MessageBox.Show([error].Message, "Error...", MessageBoxButtons.OK, MessageBoxIcon.Error)
+    End Sub
+
+#End Region
+
+    Private Sub btnClose_Click(sender As Object, e As EventArgs) Handles btnClose.Click
+        Me.Close()
+    End Sub
+
+    Private Sub btnProcess_Click(sender As Object, e As EventArgs) Handles btnProcess.Click
+        Me.Opacity = 0.75
+        tlpButtons.Enabled = False
+
+        _TopLevel = txtTopLevel.Text
+        If Not _TopLevel.EndsWith("\") Then
+            _TopLevel = "{0}\".FormatWith(_TopLevel)
+        End If
+
+        bwMain.RunWorkerAsync(_SecurityMasks.Where(Function(o) o.SecurityMaskID.IsEqualTo(APRBase.Type.ToIntegerDB(cbStorage.GetSelectedComboItemValue()))).FirstOrDefault())
+    End Sub
+
+    Private Sub cbStorage_SelectedIndexChanged(sender As Object, e As EventArgs) Handles cbStorage.SelectedIndexChanged
+        Try
+            Dim SecurityMask As Models.SecurityMask = _SecurityMasks.Where(Function(o) o.SecurityMaskID.IsEqualTo(APRBase.Type.ToIntegerDB(cbStorage.GetSelectedComboItemValue()))).FirstOrDefault()
+
+            Select Case SecurityMask.SecurityMaskID
+                Case 7 ' 1 Design Definition Documents
+                    txtTopLevel.Text = "\\SOX3014\DefinitionDocuments$\LegacyImport"
+                Case 8 ' 2 Design Complience Documents
+                    txtTopLevel.Text = "\\SOX3014\ComplienceDocuments$\LegacyImport"
+                Case 9 ' 3 Design General
+                    txtTopLevel.Text = "\\SOX3014\General$\LegacyImport"
+                Case 10 ' 6 Design ITAR
+                    txtTopLevel.Text = "\\SOX3014\ITAR$\LegacyImport"
+                Case 11 ' 4 Design Admin
+                    txtTopLevel.Text = "\\SOX3014\DesignAdmin$\LegacyImport"
+                Case 12 ' 5 Design Confidential
+                    txtTopLevel.Text = "\\SOX3014\Confidential$\LegacyImport"
+                Case 13 ' 7 Design Military
+                    txtTopLevel.Text = "\\SOX3014\Military$\LegacyImport"
+                Case 14 ' Templates
+                    txtTopLevel.Text = "\\SOX3014\Templates$"
+
+                Case Else
+                    txtTopLevel.Text = SecurityMask.StorageLocationDirectory
+            End Select
+
+            Dim Parameters As New Dictionary(Of String, Object)
+            Parameters.Add("FileStoredPath", "{0}%".FormatWith(txtTopLevel.Text))
+            Parameters.Add("SecurityMaskID", SecurityMask.SecurityMaskID)
+
+            lrMain.AddMessage("")
+            lrMain.AddMessage("Security Mask: {0}".FormatWith(SecurityMask.MaskName))
+            If _Archive Then
+                lrMain.AddMessage("Documents to Process: {0}".FormatWith(DBAccess.ExecuteScalar(Of Integer)("SELECT COUNT([DocID]) FROM DMSARC.dbo.qryDocuments WHERE (([SecurityMaskID]=@SecurityMaskID) AND (NOT ([FileStoredPath] LIKE @FileStoredPath)))", Parameters)))
+            Else
+                lrMain.AddMessage("Documents to Process: {0}".FormatWith(DBAccess.ExecuteScalar(Of Integer)("SELECT COUNT([DocID]) FROM DMSDOC.dbo.qryDocuments WHERE (([SecurityMaskID]=@SecurityMaskID) AND (NOT ([FileStoredPath] LIKE @FileStoredPath)))", Parameters)))
+            End If
+            lrMain.AddMessage("")
+        Catch ex As Exception
+            ex.ToLog()
+        End Try
+    End Sub
+
+    Private Sub bwMain_DoWork(sender As Object, e As System.ComponentModel.DoWorkEventArgs) Handles bwMain.DoWork
+        lrMain.ClearResults()
+
+        lrMain.AddMessage("Starting Clean...")
+        CleanDirectory(_TopLevel)
+        lrMain.AddMessage("Clean Complete.")
+        lrMain.AddMessage("")
+
+        ProcessStorage(DirectCast(e.Argument, Models.SecurityMask))
+    End Sub
+
+    Private Sub bwMain_RunWorkerCompleted(sender As Object, e As RunWorkerCompletedEventArgs) Handles bwMain.RunWorkerCompleted
+        Me.Opacity = 1
+        tlpButtons.Enabled = True
+    End Sub
+
+    Private Sub CheckFolder(ByRef fileCount As Integer, ByRef folderCount As Integer, ByRef newFolderName As String)
+        Do
+            newFolderName = "{0}{1}\".FormatWith(_TopLevel, folderCount.ToString("000"))
+            If Not IO.Directory.Exists(newFolderName) Then
+                IO.Directory.CreateDirectory(newFolderName)
+            End If
+            fileCount = IO.Directory.GetFiles(newFolderName).Count()
+            If fileCount <= 750 Then
+                Exit Do
+            End If
+            folderCount += 1
+        Loop
+    End Sub
+
+    Private Sub chkArchive_CheckedChanged(sender As Object, e As EventArgs) Handles chkArchive.CheckedChanged
+        _Archive = chkArchive.Checked
+    End Sub
+
+    Private Sub CleanDirectory(directoryPath As String)
+        Try
+            lrMain.AddMessage("   Checking Directory: {0}...".FormatWith(directoryPath))
+            For Each Current As String In IO.Directory.GetFiles(directoryPath, "*.*", IO.SearchOption.AllDirectories)
+                If Not Current.FileExists() Then
+                    Continue For
+                End If
+
+                Dim CurrentFileName As String = Current.ToLower()
+
+                For Each FileCheck As String In _ToRemove
+                    If CurrentFileName.EndsWith(FileCheck) Then
+                        Try
+                            IO.File.SetAttributes(CurrentFileName, IO.FileAttributes.Normal)
+                            IO.File.Delete(CurrentFileName)
+
+                            lrMain.AddMessage("      Deleted: {0}".FormatWith(CurrentFileName))
+                        Catch exInner As Exception
+                            exInner.ToLog(True, "FileName: {0}".FormatWith(CurrentFileName))
+
+                            lrMain.AddMessage("      ERROR: {0}".FormatWith(exInner.Message))
+                            lrMain.AddMessage("         FileName: {0}".FormatWith(CurrentFileName))
+                        End Try
+                    End If
+                Next
+
+                If IO.Path.GetFileName(CurrentFileName).StartsWith("~$") Then
+                    Try
+                        IO.File.SetAttributes(CurrentFileName, IO.FileAttributes.Normal)
+                        IO.File.Delete(CurrentFileName)
+
+                        lrMain.AddMessage("      Deleted: {0}".FormatWith(CurrentFileName))
+                    Catch exInner As Exception
+                        exInner.ToLog(True, "FileName: {0}".FormatWith(CurrentFileName))
+
+                        lrMain.AddMessage("      ERROR: {0}".FormatWith(exInner.Message))
+                        lrMain.AddMessage("         FileName: {0}".FormatWith(CurrentFileName))
+                    End Try
+                End If
+
+                Dim NewFileName As String = Current.Replace(",", "")
+                If NewFileName.IsNotEqualTo(Current) Then
+                    Try
+                        IO.File.Move(Current, NewFileName)
+
+                        lrMain.AddMessage("      Moved: {0}".FormatWith(Current))
+                        lrMain.AddMessage("         -> {0}".FormatWith(NewFileName))
+                    Catch exInner As Exception
+                        exInner.ToLog(True, "FileName: {0}".FormatWith(Current))
+
+                        lrMain.AddMessage("      ERROR: {0}".FormatWith(exInner.Message))
+                        lrMain.AddMessage("         FileName: {0}".FormatWith(Current))
+                    End Try
+                End If
+            Next
+
+            lrMain.AddMessage("   Completed...")
+        Catch ex As Exception
+            ex.ToLog()
+
+            lrMain.AddMessage("   Failed.")
+        End Try
+    End Sub
+
+    Private Sub ProcessStorage(securityMask As Models.SecurityMask)
+        Try
+            If Not IO.Directory.Exists(_TopLevel) Then
+                IO.Directory.CreateDirectory(_TopLevel)
+            End If
+
+            Dim SQLSelect As String = ""
+            Dim SQLUpdate As String = ""
+
+            If _Archive Then
+                SQLSelect = "SELECT [DocID],[FileStoredPath] FROM DMSARC.dbo.qryDocuments WHERE (([SecurityMaskID]=@SecurityMaskID) AND (NOT ([FileStoredPath] LIKE @FileStoredPath)))"
+                SQLUpdate = "UPDATE DMSARC.dbo.Documents SET [FileStoredPath]=@FileStoredPath WHERE ([DocID]=@DocID)"
+
+                _TopLevel = "{0}Archive\".FormatWith(_TopLevel)
+                If Not IO.Directory.Exists(_TopLevel) Then
+                    IO.Directory.CreateDirectory(_TopLevel)
+                End If
+            Else
+                SQLSelect = "SELECT [DocID],[FileStoredPath] FROM DMSDOC.dbo.qryDocuments WHERE (([SecurityMaskID]=@SecurityMaskID) AND (NOT ([FileStoredPath] LIKE @FileStoredPath)))"
+                SQLUpdate = "UPDATE DMSDOC.dbo.Documents SET [FileStoredPath]=@FileStoredPath WHERE ([DocID]=@DocID)"
+            End If
+
+            Dim Parameters As New Dictionary(Of String, Object)
+            Parameters.Add("DocID", DBNull.Value)
+            Parameters.Add("FileStoredPath", "{0}%".FormatWith(_TopLevel))
+            Parameters.Add("SecurityMaskID", securityMask.SecurityMaskID)
+
+            Dim Documents As New List(Of Models.Document)
+            Documents.AddRange(DBAccess.ExecuteReader(Of Models.Document)(SQLSelect, Parameters))
+
+            lrMain.AddMessage("Security Mask: {0}".FormatWith(securityMask.MaskName))
+            lrMain.AddMessage("Documents to Process: {0}".FormatWith(Documents.Count))
+            lrMain.AddMessage("")
+            lrMain.AddMessage("Starting Clean...")
+
+            Dim FileCount As Integer = 0
+            Dim FolderCount As Integer = 1
+            Dim NewFolderName As String = ""
+
+            CheckFolder(FileCount, FolderCount, NewFolderName)
+
+            For Each Current As Models.Document In Documents
+                Dim DirectoryName As String = IO.Path.GetDirectoryName(Current.FileStoredPath)
+                Dim FileName As String = IO.Path.GetFileName(Current.FileStoredPath)
+                Dim WildCardName As String = "{0}.*".FormatWith(FileName.Substring(0, FileName.LastIndexOf(".")))
+
+                For Each SourceFileName As String In IO.Directory.GetFiles(DirectoryName, WildCardName, IO.SearchOption.TopDirectoryOnly)
+                    Dim DestinationFileName As String = "{0}{1}".FormatWith(NewFolderName, IO.Path.GetFileName(SourceFileName))
+
+                    Try
+                        IO.File.Move(SourceFileName, DestinationFileName)
+
+                        If SourceFileName.IsEqualTo(Current.FileStoredPath) Then
+                            Parameters("DocID") = Current.DocID
+                            Parameters("FileStoredPath") = DestinationFileName
+                            DBAccess.ExecuteNonQuery(SQLUpdate, Parameters)
+
+                            lrMain.AddMessage("   {0}".FormatWith(SourceFileName))
+                            lrMain.AddMessage("      -> {0}".FormatWith(DestinationFileName))
+                        End If
+
+                        FileCount += 1
+                    Catch exInner As Exception
+                        exInner.ToLog(True, "Source: {0}, Destination: {1}".FormatWith(SourceFileName, DestinationFileName))
+
+                        lrMain.AddMessage("   ERROR: {0}".FormatWith(exInner.Message))
+                        lrMain.AddMessage("      Source: {0}".FormatWith(SourceFileName))
+                    End Try
+                Next
+
+                If FileCount >= 750 Then
+                    CheckFolder(FileCount, FolderCount, NewFolderName)
+                End If
+            Next
+
+            lrMain.AddMessage("Clean Complete.")
+        Catch ex As Exception
+            ex.ToLog()
+
+            lrMain.AddMessage("Clean Failed.")
+        End Try
+    End Sub
+
+    Private Sub ButtonX1_Click(sender As Object, e As EventArgs) Handles ButtonX1.Click
+        lrMain.ClearResults()
+
+        Dim Base As String = "000"
+
+        Dim Level60 As List(Of String) = {
+            "SF",
+            "DB",
+            "TotH"
+        }.ToList()
+        Dim Level75 As List(Of String) = {
+            "AMoC",
+            "BS",
+            "S"
+        }.ToList()
+        Dim Level90 As List(Of String) = {
+            "GT",
+            "P",
+            "B"
+        }.ToList()
+        Dim Level100 As List(Of String) = {
+            "EM",
+            "FS",
+            "LW"
+        }.ToList()
+
+
+        For l60 As Integer = 0 To 2
+            For l75 As Integer = 0 To 2
+                For l90 As Integer = 0 To 2
+                    For l100 As Integer = 0 To 2
+                        lrMain.AddMessage("{0}{1}{2}{3}{4} name={5}_{6}_{7}_{8}".FormatWith(Base, l60, l75, l90, l100, Level60(l60), Level75(l75), Level90(l90), Level100(l100)))
+                    Next
+                Next
+            Next
+        Next
+    End Sub
+
+End Class

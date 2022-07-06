@@ -1,0 +1,413 @@
+#!/usr/bin/env python3
+
+import logging
+from src import util
+from src import etherscan
+from src import messages
+from crypto.prices import *
+
+logger = logging.getLogger("node")
+
+######
+# Telegram command handler for adding nodes for the user who fired the command.
+#
+# Command: /node :address0;name0 ... :addressN;nameN
+#
+# Command parameter: :address0 - Address of the first node to add
+#                    :name0 - Name of the first node
+#                    :addressN - Address of the last node to add
+#                    :nameN - Name of the last node
+#
+# Gets only called by the telegram bot api
+######
+def nodeAdd(bot, update, args):
+
+    response = "*Add*\n\n"
+
+    chatId = update.message.chat_id
+
+    logger.warning("add - args " + " ".join(args))
+    logger.warning("add - user: {}".format(update.message.from_user.id))
+
+    pool = bot.database.getPoolById(chatId)
+
+    if pool == None:
+
+        bot.create(bot,update,[])
+
+    if len(args) == 0:
+
+        response += ("Arguments required: address_0;name_0 ... address_n;name_n\n\n"
+                     "Example: /add 0xFf2ED74286a5686Bc4F4896761718DE031680000;Node1 0xFf2ED74286a5686Bc4F4896761718DE031681111;Node2\n")
+        valid = False
+
+    else:
+
+        for arg in args:
+
+            valid = True
+
+            newNode = arg.split(";")
+
+            if len(newNode) != 2:
+
+                response += messages.invalidParameterError.format(arg)
+                valid = False
+
+            else:
+
+                if not util.validateTntAddress( newNode[0] ):
+
+                    response += messages.invalidTntAddressError.format(newNode[0])
+                    valid = False
+
+                if not util.validateName( newNode[1] ):
+
+                    response += messages.invalidNameError.format(newNode[1])
+                    valid = False
+
+                if valid:
+
+                    address = newNode[0]
+                    name = newNode[1]
+
+                    if bot.database.addNode(update.message.chat_id, address, name, update.message.from_user.id,update.message.from_user.username):
+
+                        response += "Added node {}!\n".format(address)
+
+                    else:
+
+                        response += messages.nodeExistsError.format(address)
+
+    bot.sendMessage(update.message.chat_id, response )
+
+######
+# Telegram command handler for updating nodes for the user who fired the command.
+#
+# Command: /add :address :newname
+#
+# Command parameter: :address - Address of the node to update
+#                    :newname - New name for the node
+#
+# Gets only called by the telegram bot api
+######
+def nodeUpdate(bot, update, args):
+
+    response = "*Update*\n\n"
+
+    chatId = update.message.chat_id
+
+    logger.warning("update - args " + " ".join(args))
+    logger.warning("update - user: {}".format(update.message.from_user.id))
+
+    pool = bot.database.getPoolById(chatId)
+    user = bot.database.getUser(chatId, update.message.from_user.id)
+
+    if pool == None:
+
+        response+= messages.noPoolError
+
+    elif user == None:
+
+        response += messages.notActiveInPoolError
+
+    elif len(args) != 2:
+
+        response += ("Exactly 2 arguments required: :address :newname\n"
+                     "Where :address is the address of the node to update and :newname the"
+                     "new name of the node.\n\n"
+                     "Example: /update 0xFf2ED74286a5686Bc4F4896761718DE031680000 MyNewNodeName\n")
+
+    else:
+
+        valid = True
+
+        if not util.validateTntAddress( args[0] ):
+
+            response += messages.invalidTntAddressError.format(args[0])
+            valid = False
+
+        elif not util.validateName( args[1] ):
+
+            response += messages.invalidNameError.format(args[1])
+            valid = False
+
+        if valid:
+
+            address = args[0]
+            name = args[1]
+
+            logger.info("update - {} {}".format(address, user['id']))
+
+            if bot.database.getNode(address, user['id']) == None:
+
+                response += messages.nodeNotExistsError.format(address)
+
+            else:
+
+                bot.database.updateNode(address,user['id'], name)
+
+                response += "Node successfully updated. {}\n".format(address)
+
+    bot.sendMessage(chatId, response )
+
+######
+# Telegram command handler for removing nodes for the user who fired the command.
+#
+# Command: /remove :address
+#
+# Command parameter: :address - Address of the node to remove
+#
+#
+# Gets only called by the telegram bot api
+######
+def nodeRemove(bot, update, args):
+
+    response = "*Remove*\n\n"
+
+    chatId = update.message.chat_id
+
+    logger.warning("remove - " + " ".join(args))
+    logger.warning("remove - user: {}".format(update.message.from_user.id))
+
+    pool = bot.database.getPoolById(chatId)
+    user = bot.database.getUser(chatId, update.message.from_user.id)
+
+    if pool == None:
+
+        response+= messages.noPoolError
+
+    elif user == None:
+
+        response += messages.notActiveInPoolError
+
+    elif len(args) != 1:
+
+        response += ("Argument required: :address\n\n"
+                     "Example: /remove 0xFf2ED74286a5686Bc4F4896761718DE031680000\n")
+
+    else:
+
+        address = args[0]
+
+        if not util.validateTntAddress( address ):
+
+            response += "ERROR: Invalid TNT-Address: {}\n".format(address)
+
+        else:
+
+            logger.info("remove - valid {}".format(address, ))
+
+            if bot.database.getNode(address, user['id']) == None:
+
+                response += "ERROR: Node {} does not exist!\n".format(address)
+
+            else:
+
+                bot.database.deleteNode(address,user['id'])
+                response += "Node {} successfully deleted.\n".format(address)
+
+    bot.sendMessage(chatId, response )
+
+######
+# Telegram command handler for reading the amounts of each node of the users
+# in the pool
+#
+# Command: /nodes
+#
+# Gets only called by the telegram bot api
+######
+def nodes(bot, update):
+
+    response = ""
+
+    chatId = update.message.chat_id
+
+    nodesFound = False
+
+    pool = bot.database.getPoolById(chatId)
+
+    logger.warning("nodes - {}".format(chatId))
+
+    if pool == None:
+
+       response = "*Nodes*\n\n"
+       response +=  ("You need to create a pool with nodes first. "
+                    "Type /help to show the list of commands.")
+
+    else:
+
+       tntPrice = liqui(Cryptos.TNT)
+
+       addresses = []
+
+       for user in bot.database.getUsers(pool['id']):
+
+           nodes = bot.database.getNodes(user['id'])
+
+           if len(nodes) == 0:
+               continue
+
+           for node in nodes:
+               addresses.append(node["address"])
+
+       amounts = etherscan.getTNTAmount(addresses, pool['api_key'])
+
+       for user in bot.database.getUsers(pool['id']):
+
+           nodes = bot.database.getNodes(user['id'])
+
+           if len(nodes) == 0:
+               continue
+
+           nodesFound = True
+
+           response += "*" + user['name'] + "*\n"
+
+           total = 0
+
+           for node in nodes:
+
+                tnt = amounts[node["address"]]
+                
+                if tnt == -1:
+                    response += node['name'] + " -> Sorry, there was an error.\n".format(tnt)
+                                        
+                else:
+                    total += int(tnt)
+                    response += node['name'] + " -> {} TNT\n".format(tnt)
+
+           if tntPrice != None:
+               response += '\n*Total:\n  TNT: {}\n  USD: {}*\n\n'.format(total,int(total*tntPrice.usd))
+           else:
+               response += '\n*Total TNT: {}*\n\n'.format(total)
+
+       response += "\n\n"
+
+    if not nodesFound and pool:
+        response = "*Nodes*\n\n"
+        response += ("There are currently no nodes in this pool. You can create "
+                     "nodes with /add.")
+
+    bot.sendMessage(chatId, response )
+
+######
+# Telegram command handler for reading the total amounts of all nodes of the users
+# in the pool
+#
+# Command: /total
+#
+# Gets only called by the telegram bot api
+######
+def total(bot, update):
+
+    response = ""
+
+    chatId = update.message.chat_id
+
+    nodesFound = False
+
+    pool = bot.database.getPoolById(chatId)
+
+    logger.warning("total - {}".format(chatId))
+
+    if pool == None:
+        response = "*Total*\n\n"
+        response +=  ("You need to create a pool with nodes first. "
+                     "Type /help to show the list of commands.")
+
+    else:
+
+        tntPrice = liqui(Cryptos.TNT)
+
+        addresses = []
+
+        for user in bot.database.getUsers(pool['id']):
+
+           nodes = bot.database.getNodes(user['id'])
+
+           if len(nodes) == 0:
+               continue
+
+           for node in nodes:
+               addresses.append(node["address"])
+
+        amounts = etherscan.getTNTAmount(addresses, pool['api_key'])
+
+        for user in bot.database.getUsers(chatId):
+
+            nodes = bot.database.getNodes(user['id'])
+            total = 0
+
+            if len(nodes) == 0:
+                continue
+
+            nodesFound = True
+
+            for node in bot.database.getNodes(user['id']):
+
+                total += amounts[node['address']]
+
+            if tntPrice != None:
+                response += '{} -> {} TNT | {} USD\n'.format(user['name'],total,int(total * tntPrice.usd))
+            else:
+                response += '{} -> {} TNT\n'.format(user['name'],total,int(total))
+
+    if not nodesFound:
+        response = "*Total*\n\n"
+        response += ("There are currently no nodes in this pool. You can create "
+                     "nodes with /add.")
+
+    bot.sendMessage(chatId, response )
+
+######
+# Telegram command handler for reading the addresses of all nodes of the users
+# in the pool
+#
+# Command: /addresses
+#
+# Gets only called by the telegram bot api
+######
+def addresses(bot, update):
+
+   response = ""
+
+   chatId = update.message.chat_id
+
+   nodesFound = False
+
+   pool = bot.database.getPoolById(chatId)
+
+   logger.warning("addresses - {}".format(chatId))
+
+   if pool == None:
+
+       response = "*Addresses*\n\n"
+       response +=  ("You need to create a pool with nodes first. "
+                     "Type /help to show the list of commands.")
+
+   else:
+
+       for user in bot.database.getUsers(pool['id']):
+
+           nodes = bot.database.getNodes(user['id'])
+
+           if len(nodes) == 0:
+               continue
+
+           response += "*" + user['name'] + "*\n"
+
+           nodesFound = True
+
+           for node in nodes:
+
+               response += node['name'] + " -> " + node['address']  + "\n"
+
+           response += "\n\n"
+
+   if not nodesFound:
+      response = "*Addresses*\n\n"
+      response += ("There are currently no nodes in this pool. You can create "
+                     "nodes with /add.")
+
+   bot.sendMessage(update.message.chat_id, response )

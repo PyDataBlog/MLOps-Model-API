@@ -1,0 +1,141 @@
+<?php
+/** History class */
+
+namespace smtech\GradingAnalytics\Snapshots;
+
+use smtech\GradingAnalytics\Snapshots\Exception\SnapshotException;
+
+/**
+ * A class to query and cache the history of a course's statistics
+ *
+ * @author Seth Battis <SethBattis@stmarksschool.org>
+ */
+class History extends CacheableDatabase
+{
+    /**
+     * The Canvas ID of the course
+     * @var string|integer
+     */
+    protected $courseId;
+
+    /**
+     * The course history
+     * @var array
+     */
+    protected static $data;
+
+    /**
+     * Construct a history object
+     *
+     * Note that the actual history will be queried and/or cached just in time
+     * when needed, not during instantiation.
+     *
+     * @param \mysqli|\smtech\ReflexiveCanvasLTI\Toolbox|CacheableDatabase $databaseProvider
+     *        An object containing a reusable mysqli access object
+     * @param string|integer $courseId Canvas ID of the course
+     *
+     * @throws SnapshotException `SnapshotException::COURSE_ID` If `$courseId`
+     *         does not appear to be a valid (numeric) Canvas course ID.
+     */
+    public function __construct($databaseProvider, $courseId)
+    {
+        parent::__construct($databaseProvider);
+
+        if (is_numeric($courseId)) {
+            $this->courseId = $courseId;
+        } else {
+            throw new SnapshotException(
+                'Numeric Course ID required',
+                SnapshotException::COURSE_ID
+            );
+        }
+    }
+
+    /**
+     * Get the numeric Canvas course ID
+     *
+     * @return string|integer
+     */
+    public function getCourseId()
+    {
+        return $this->courseId;
+    }
+
+    /**
+     * Get the numeric Canvas account ID of the course's parent department
+     *
+     * @return string|integer|false Returns `FALSE` if no parent department is
+     *         included in the most recent collected course statistics
+     */
+    public function getDepartmentId()
+    {
+        if ($this->cacheHistory()) {
+            return (integer) static::$data[$this->getCourseID()][0]['course[account_id]'];
+        }
+        return false;
+    }
+
+    /**
+     * Get the date of the most recently collected course statistics
+     *
+     * @return string|false The date in `YYYY-MM-DD` format or `FALSE` if no
+     *                          timestamp is available.
+     */
+    public function getCurrentTimestamp()
+    {
+        if ($this->cacheHistory()) {
+            return substr(static::$data[$this->getCourseId()][0]['timestamp'], 0, 10);
+        }
+        return false;
+    }
+
+    /**
+     * Trigger a caching of the course history, if not already cached
+     *
+     * @return boolean `TRUE` if there is a non-empty cache of course
+     *                        statistics to work with, `FALSE` otherwise
+     */
+    public function cacheHistory()
+    {
+        $courseId = $this->getCourseId();
+        if (empty(static::$data[$courseId])) {
+            static::$data = $this->getCache()->getCache($courseId);
+            if (empty($this->data)) {
+                if ($response = $this->sql->query("
+                    SELECT * FROM `course_statistics`
+                        WHERE
+                            `course[id]` = '$courseId'
+                        ORDER BY
+                            `timestamp` DESC
+                ")) {
+                    while ($row = $response->fetch_assoc()) {
+                        static::$data[$courseId][] = $row;
+                    }
+                    $this->getCache()->setCache($courseId, static::$data[$courseId]);
+                }
+            }
+        }
+        return (is_array(static::$data) &&
+            is_array(static::$data[$courseId]) &&
+            count(static::$data[$courseId]) > 0
+        );
+    }
+
+    /**
+     * Get the course's history of statistics
+     *
+     * @link https://smtech.github.io/grading-analytics/definitions.html Online
+     *       documentation of course statistic fields
+     *
+     * @return array|false One row per course statistic collected daily, as
+     *                         described in the documentation, or `FALSE` if no
+     *                         statistics are available
+     */
+    public function getHistory()
+    {
+        if ($this->cacheHistory()) {
+            return static::$data[$this->getCourseId()];
+        }
+        return false;
+    }
+}

@@ -1,0 +1,41 @@
+package sms.core.actor
+
+import akka.actor._
+import scala.concurrent.Future
+import sms.core.actor.MasterWorkerProtocol.{TaskExecutionException, TaskToBeDone, TaskDone}
+import sms.core.actor.Tasks.TaskEnvelope
+
+abstract class SMSWorkerActorCompanion extends SMSActorCompanion {
+  protected final def actorName: Option[String] = None
+}
+
+trait SMSWorkerActor extends SMSActor with ActorLogging {
+  type Result = PartialFunction[Any, Future[_]]
+
+  import context.dispatcher
+
+  protected val handle: Result
+
+  final def receive: Actor.Receive = {
+    case TaskToBeDone(todo @ _ *) =>
+      val ref = sender
+      log.debug("Executing tasks: {}", todo)
+      Future.traverse(todo.map(env => env -> handle(env.work)))(_.lift).map { results =>
+          val (succeeded, failed) = {
+            val s = Seq.newBuilder[Any]
+            val f = Seq.newBuilder[(Throwable, TaskEnvelope)]
+            results.foreach {
+              case (task, result) if result.isSuccess => (s += result, f)
+              case (task, result) if result.isFailure => (s, f += result.failed.get -> task)
+            }
+            (s.result(), f.result())
+          }
+        if (failed.nonEmpty) ref ! TaskExecutionException(failed: _*)
+        if (succeeded.nonEmpty) ref ! TaskDone(succeeded: _*)
+      }
+  }
+
+  override def preStart(): Unit = {
+    log.debug("Starting worker actor {}", self)
+  }
+}

@@ -1,0 +1,174 @@
+using Images
+using ImageMagick
+using PyPlot
+
+include("../../Common/common.jl")
+include("../../Common/utils.jl")
+include("../../Common/imgcreater.jl")
+
+# Load the rgb image from a2p3.png and convert it to a normalized floating point image.
+# Then convert it to a grayscale image.
+function loadimage()
+  img = PyPlot.imread("asgn3_data_v1/data-julia/a2p3.png")
+  im = Common.rgb2gray(img)
+  rgb = img
+  return im::Array{Float32,2},rgb::Array{Float32,3}
+end
+
+# Calculate the structure tensor for the Harris detector.
+# Replicate boundaries for filtering.
+function computetensor(im::Array{Float32,2}, σ::Float64, fsize::Int)
+  # derivative filter
+  x = (1/2)*[1 0 -1]
+  y = x'
+
+  # g = Utils.gaussian(σ, fsize)
+  # G = g*g'
+  G = Kernel.gaussian((σ, σ), (fsize, fsize))
+
+  # (d/dx(im)*G) e.g. (d/dy(im)*G)
+  filt_img = imfilter(im, G)
+  dx = imfilter(filt_img, centered(x))
+  dy = imfilter(filt_img, centered(y))
+
+  dx2 = dot.(dx, dx)
+  dy2 = dot.(dy, dy)
+  dxdy = dot.(dx, dy)
+
+  σm = 1.6*σ
+  G = Kernel.gaussian((σm, σm), (fsize, fsize))
+
+  dx2 = imfilter(dx2, G)
+  dy2 = imfilter(dy2, G)
+  dxdy = imfilter(dxdy, G)
+  return dx2::Array{Float64,2},dy2::Array{Float64,2},dxdy::Array{Float64,2}
+end
+
+function computetensor2(im::Array{Float32,2}, σ::Float64, fsize::Int)
+  (dx, dy) = imgradients(im, KernelFactors.sobel, "replicate")
+  dx2 = dot.(dx, dx)
+  dy2 = dot.(dy, dy)
+  dxdy = dot.(dx, dy)
+
+  box_filter_kernel = centered((1 / (3 * 3)) * ones(3, 3))
+
+  dx2 = imfilter(dx2, box_filter_kernel)
+  dxdy = imfilter(dxdy, box_filter_kernel)
+  dy2 = imfilter(dy2, box_filter_kernel)
+  return dx2::Array{Float64,2},dy2::Array{Float64,2},dxdy::Array{Float64,2}
+end
+
+# Compute Harris function values from the structure tensor
+function computeharris(dx2::Array{Float64,2}, dy2::Array{Float64,2},
+  dxdy::Array{Float64,2}, σ::Float64)
+  harris = map((xx, yy, xy) -> (σ^4 * ((xx * yy) - xy^2)) - 0.06 * (σ^2	* (xx + yy))^2, dx2, dy2, dxdy)
+  # harris = map((xx, yy, xy) -> xx * yy - xy ^ 2 - 0.06 * (xx + yy) ^ 2, dx2, dy2, dxdy)
+
+  #corners = falses(size(im))
+  #maxima = map(CartesianIndex{2}, findlocalmaxima(harris))
+  #for m in maxima corners[m] = true end
+  return harris::Array{Float64,2}
+end
+
+# Apply non-maximum suppression on the harris function result to extract local maxima
+# with a 5x5 window. Allow multiple points with equal values within the same window
+# and apply thresholding with the given threshold value.
+function nonmaxsupp(harris::Array{Float64,2}, thresh::Float64)
+  mask = harris .> thresh
+  img = harris .* mask
+  res = Common.imfilter_max(harris, 5)
+  imshoe(res)
+  px = []
+  py = []
+  return px::Array{Int,1},py::Array{Int,1}
+end
+
+function findlocalextrema2{T<:Union{Gray,Number},N}(img::AbstractArray{T,N}, region::Union{Tuple{Int,Vararg{Int}},Vector{Int},UnitRange{Int},Int}, edges::NTuple{N,Bool}, order::Base.Order.Ordering)
+    issubset(region,1:ndims(img)) || throw(ArgumentError("invalid region"))
+    extrema = Array{CartesianIndex{N}}(0)
+    edgeoffset = CartesianIndex(map(!, edges))
+    R0 = CartesianRange(indices(img))
+    R = CartesianRange(R0.start+edgeoffset, R0.stop-edgeoffset)
+    Rinterior = CartesianRange(R0.start+1, R0.stop-1)
+    iregion = CartesianIndex(ntuple(d->d ∈ region, Val{N}))
+    Rregion = CartesianRange(-iregion, iregion)
+    z = zero(iregion)
+    for i in R
+        isextrema = true
+        img_i = img[i]
+        if i ∈ Rinterior
+            # If i is in the interior, we don't have to worry about i+j being out-of-bounds
+            for j in Rregion
+                j == z && continue
+                if !Base.Order.lt(order, img[i+j], img_i)
+                    isextrema = false
+                    break
+                end
+            end
+        else
+            for j in Rregion
+                (j == z || i+j ∉ R0) && continue
+                if !Base.Order.lt(order, img[i+j], img_i)
+                    isextrema = false
+                    break
+                end
+            end
+        end
+        isextrema && push!(extrema, i)
+    end
+    extrema
+end
+
+findlocalextrema3{T,N}(img::AbstractArray{T,N}, region, edges::Bool, order) = findlocalextrema(img, region, ntuple(d->edges,Val{N}), order)
+
+
+# Problem 1: Harris Detector
+
+function problem1()
+  # parameters
+  σ = 2.4
+  threshold = 1e-6
+  fsize = 25
+
+  # load image as color and grayscale images
+  im,rgb = loadimage()
+
+  ### chessboard test ###
+  # im = ImgCreater.chessboardimg(500, 500, 100, 100)
+  # rgb = im
+  # calculate structure tensor
+  dx2,dy2,dxdy = computetensor(im, σ, fsize)
+
+  # compute harris function
+  harris = computeharris(dx2,dy2,dxdy, σ)
+
+  # display harris images
+  figure()
+  imshow(harris,"jet",interpolation="none")
+  axis("off")
+  title("Harris function values")
+  gcf()
+
+  # threshold harris function values
+  mask = harris .> threshold
+  y,x = findn(mask)
+  figure()
+  imshow(rgb)
+  plot(x,y,"xy")
+  axis("off")
+  title("Harris Interest Points without Non-maximum Suppression")
+  gcf()
+
+  # apply non-maxumum suppression
+  x,y = nonmaxsupp(harris,threshold)
+
+  # display points ontop of rgb image
+  figure()
+  imshow(rgb)
+  plot(x,y,"xy")
+  axis("off")
+  title("Harris Interest Points after non-maximum suppression")
+  gcf()
+
+  return
+end

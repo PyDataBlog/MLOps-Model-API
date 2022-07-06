@@ -1,0 +1,389 @@
+﻿/*
+ * Copyright Jaroslaw Wilczynski 2015
+ */
+
+//using Oracle.DataAccess.Client;
+using Oracle.ManagedDataAccess.Client;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Text.RegularExpressions;
+
+namespace SimpleDBSchemaExporter.Oracle
+{
+    /// <summary>
+    /// Information about DB objects identity
+    /// </summary>
+    public class OraObjectId
+    {
+        public String Schema { get; set; }
+        public String Type { get; set; }
+        public String Name { get; set; }
+        public override bool Equals(object obj)
+        {
+            OraObjectId other = obj as OraObjectId;
+            if (other == null)
+                return false;
+            return (this.Schema == other.Schema && this.Type == other.Type && this.Name == other.Name);
+        }
+        public override int GetHashCode()
+        {
+            unchecked
+            {
+                return (39 * this.Schema.GetHashCode() + 39 * this.Type.GetHashCode() + 39 * this.Name.GetHashCode());
+            }
+        }
+        public override string ToString()
+        {
+            return "{" + Type + "," + Schema + "." + Name + "}";
+        }
+    }
+
+    /// <summary>
+    /// Base class for definition classes
+    /// </summary>
+    public class OraObjectDefinition
+    {
+        public OraObjectId Id { get; set; }
+        public override string ToString()
+        {
+            return Id.ToString();
+        }
+    }
+
+    /// <summary>
+    /// In-memory representation of standalone PL SQL unit. (Not trigger)
+    /// </summary>
+    public class OraPLSQLUnitDefinition : OraObjectDefinition
+    {
+        public bool IsWrapped { get; set; }
+        public String Source { get; set; }
+        public String BodySource { get; set; }
+        public override string ToString()
+        {
+            return Id.ToString();
+        }
+    }
+
+    /// <summary>
+    /// In-memory representation of database trigger
+    /// </summary>
+    public class OraTriggerDefinition : OraObjectDefinition
+    {
+        public OraObjectId BaseObject { get; set; }
+        public String Source { get; set; }
+        public override string ToString()           
+        {
+            return Id.ToString();
+        }
+    }
+
+    /// <summary>
+    /// Contains implementation of export process
+    /// </summary>
+    public static class StandalonePLSQLUnits
+    {
+        private static OraPLSQLUnitDefinition GetDefinitionFromSource(OraObjectId id, StringBuilder dbSource)
+        {
+            OraPLSQLUnitDefinition def = new OraPLSQLUnitDefinition();
+            def.Id = id;
+
+            string source;
+
+            source = dbSource.ToString();            
+
+            // Check if header text matches expected format
+            Match matchHeader;
+            Group groupWrapped;
+            {
+                Regex reHeader = new Regex("^" + id.Type + " +" +
+                         @"(""?" + id.Schema + @"""?)?" +
+                         @"""?" + id.Name + @"""?" +
+                         "( wrapped)?",
+                         RegexOptions.IgnoreCase);
+
+                var matches = reHeader.Matches(source);
+                if (matches.Count != 1)
+                    throw new Exception("Unnown source format - " + id.ToString());
+
+                matchHeader = matches[0];
+                groupWrapped = matches[0].Groups[2];
+            }
+
+            // Rules that "fixes" header
+            {
+                string sourceHeader = source.Substring(0, matchHeader.Length);
+                string sourceBody = source.Substring(0 + matchHeader.Length);
+
+                // remove unneded whitespaces in header
+                sourceHeader = Regex.Replace(sourceHeader, " +", " ");
+
+                // write "create or replace" - for conformance with PL/SQL DEV
+                char firstChar = sourceHeader.ToCharArray(0, 1)[0];
+                if (Char.IsUpper(firstChar))
+                {
+                    sourceHeader = "CREATE OR REPLACE " + sourceHeader;
+                }
+                else
+                {
+                    sourceHeader = "create or replace " + sourceHeader;
+                }
+
+                // join header back with body
+                source = sourceHeader + sourceBody;
+            }
+
+            def.IsWrapped = groupWrapped.Success;
+
+            // End Of Line markers in Win style - for conformance with PL/SQL Dev
+            {
+                source = source.TrimEnd();
+
+                StringBuilder sbSource = new StringBuilder(source.Length + 100);
+                sbSource.Append(source);
+                source = null;
+
+                sbSource.Append("\n" + "/\n" + "\n");
+                sbSource.Replace("\n", "\r\n");
+
+                source = sbSource.ToString();
+                sbSource = null;
+            }
+
+            def.Source = source;
+            return def;
+        }
+
+        /// <summary>
+        /// Load definitions from database
+        /// </summary>
+        public static Dictionary<OraObjectId, OraPLSQLUnitDefinition> GetAll(OracleConnection conn, String schemaName)
+        {
+            Dictionary<OraObjectId, OraPLSQLUnitDefinition> dbDefinitions = new Dictionary<OraObjectId, OraPLSQLUnitDefinition>();
+            Dictionary<OraObjectId, StringBuilder> dbSources = new Dictionary<OraObjectId, StringBuilder>(1000);
+            // get text
+            using (OracleCommand cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "select type, name, text from dba_source where owner=:a and type!='TRIGGER' order by type, name, line";
+                cmd.Parameters.Add("a", schemaName);
+                cmd.FetchSize = 1024 * 1024;
+                using (var dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        var dbId = new OraObjectId() { Type = dr.GetString(0), Schema = schemaName, Name = dr.GetString(1) };
+                        if (!dbSources.ContainsKey(dbId))
+                        {
+                            dbSources.Add(dbId, new StringBuilder());
+                        }
+                        StringBuilder source = dbSources[dbId];
+                        source.Append(dr.GetString(2));
+                    }
+                }
+            }
+                        
+            foreach (var id in dbSources.Keys.ToList())
+            {
+                if (id.Type == "PACKAGE BODY" || id.Type == "TYPE BODY")
+                    continue;
+
+                var def = GetDefinitionFromSource(id, dbSources[id]);
+                dbSources[id] = null;
+
+                if (id.Type == "PACKAGE" || id.Type == "TYPE")
+                {
+                    var bodyId = new OraObjectId() { Type = id.Type + " BODY", Name = id.Name, Schema = id.Schema };
+                    if (dbSources.ContainsKey(bodyId))
+                    {
+                        var bodyDef = GetDefinitionFromSource(bodyId, dbSources[bodyId]);
+                        dbSources[bodyId] = null;
+                        
+                        def.BodySource = bodyDef.Source;
+                        def.IsWrapped = (def.IsWrapped || bodyDef.IsWrapped);
+                    }
+                }
+
+                dbDefinitions.Add(def.Id, def);
+            }
+
+            return dbDefinitions;
+        }
+
+        /// <summary>
+        /// Unload definitions to text files
+        /// </summary>        
+        public static void WriteAll(Dictionary<OraObjectId, OraPLSQLUnitDefinition> dbDefinitions, string baseDirPath)
+        {
+            WriteAll(dbDefinitions, baseDirPath, /*plSQLConform*/ false);
+        }
+        
+        /// <summary>
+        /// Unload definitions to text files
+        /// </summary>
+        public static void WriteAll(Dictionary<OraObjectId, OraPLSQLUnitDefinition> dbDefinitions, string baseDirPath, bool plSQLConform)
+        {
+            String workingCopyPath = baseDirPath;
+            foreach (var unit in dbDefinitions.Values)
+            {
+                string fileName = GetFileName(unit, plSQLConform);
+                string filePath = workingCopyPath;
+
+                if (!Directory.Exists(filePath))
+                    Directory.CreateDirectory(filePath);
+
+                filePath = Path.Combine(filePath, fileName);
+
+                string source = unit.Source;
+                if (unit.BodySource != null)
+                    source += unit.BodySource;
+                File.WriteAllText(filePath, source, Encoding.GetEncoding("windows-1250"));
+            }
+        }
+
+        private static string ChooseExtensionForType(String type, bool plSQLConform)
+        {
+            switch (type)
+            {
+                case "FUNCTION": return "fnc";
+                case "PACKAGE": return "pck";
+                case "PACKAGE BODY": return "pckb";
+                case "PROCEDURE": return "prc";
+                case "TYPE": return "tps";
+                case "TYPE BODY": return "tpb";
+                default: return type.Replace(' ', '_').ToLower();
+            }            
+        }
+
+        public static string GetFileName(OraPLSQLUnitDefinition unit, bool plSQLConform)
+        {
+            string fileName = unit.Id.Name.ToLower() + "." + ChooseExtensionForType(unit.Id.Type, plSQLConform);
+            if (!plSQLConform)
+                fileName += (unit.IsWrapped ? "_wrp" : "");
+            return fileName;
+        }                
+    }
+
+    /// <summary>
+    /// Contains implementation of export process
+    /// </summary>
+    public static class Triggers
+    {
+        /// <summary>
+        /// Load definitions from database
+        /// </summary>
+        /// <remarks>
+        /// Uses DBMS_MATADATA. Does not work on some of my databases
+        /// </remarks>
+        public static Dictionary<OraObjectId, OraTriggerDefinition> GetAll(OracleConnection conn, String schemaName)
+        {
+            Dictionary<OraObjectId, OraTriggerDefinition> dbDefinitions = new Dictionary<OraObjectId,OraTriggerDefinition>();
+            using (OracleCommand cmd = conn.CreateCommand())
+            {
+                cmd.CommandText = "select base_object_type, table_owner, table_name, owner, trigger_name, dbms_metadata.get_ddl('TRIGGER', trigger_name, owner) " +
+                                  "from dba_triggers " +
+                                  "where owner = :a or table_owner = :b ";
+                cmd.Parameters.Add("a", schemaName);
+                cmd.Parameters.Add("b", schemaName);
+                cmd.FetchSize = 1024 * 1024;
+
+                using (OracleDataReader dr = cmd.ExecuteReader())
+                {
+                    while (dr.Read())
+                    {
+                        String v_base_object_type = dr.GetString(0);
+                        String v_table_owner = dr.GetString(1);
+                        String v_table_name = dr.IsDBNull(2) ? "" : dr.GetString(2);
+                        String v_owner = dr.GetString(3);
+                        String v_trigger_name = dr.GetString(4);
+                        String v_ddl = dr.GetString(5);
+
+                        var definition = new OraTriggerDefinition();
+                        definition.Id = new OraObjectId() { Type = "TRIGGER", Schema = v_owner, Name = v_trigger_name };
+                        definition.BaseObject = new OraObjectId() { Type = v_base_object_type, Schema = v_table_owner, Name = v_table_name };
+                        definition.Source = v_ddl.Trim();
+
+                        dbDefinitions.Add(definition.Id, definition);
+                    }
+                }
+            }
+
+            // fixing
+            {
+                foreach (OraTriggerDefinition trigger in dbDefinitions.Values)
+                {
+                    var id = trigger.Id;
+                    string source = trigger.Source;                    
+
+                    //normalazing first line
+                    //{
+                    //    string before = "CREATE OR REPLACE TRIGGER \"" + id.Schema + "\".\"" + id.Name + "\"( )*";
+                    //    string after = "CREATE OR REPLACE TRIGGER " + id.Name.ToUpper();
+                    //    source = Regex.Replace(source, "^" + before, after);
+                    //}
+
+                    Match rmJunkAtEnd = Regex.Match(source, "ALTER TRIGGER \"" + trigger.Id.Schema + "\".\"" + trigger.Id.Name + "\" ENABLE$");
+                    if (rmJunkAtEnd.Success)
+                    {
+                        source = source.Substring(0, source.Length - rmJunkAtEnd.Length);
+                    }
+                    source = source.TrimEnd();
+                    source = source + ("\n" + "/\n" + "\n");
+                    source = source.Replace("\n", "\r\n");
+
+                    trigger.Source = source;
+                }
+            }
+            return dbDefinitions;
+        }
+
+        /// <summary>
+        /// Check if there are triggers which I would call "crossschema"
+        /// </summary>
+        public static IEnumerable<OraTriggerDefinition> GetCrossSchemaTriggers(Dictionary<OraObjectId, OraTriggerDefinition> dbDefinitions, String schemaName)
+        {
+            foreach (var trigger in dbDefinitions.Values)
+            {
+                if (trigger.Id.Schema != schemaName ||
+                   (trigger.BaseObject.Schema != schemaName && trigger.BaseObject.Name != "")
+                   )
+                {
+                    yield return trigger;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Unload definitions to text files
+        /// </summary>
+        public static void WriteAll(Dictionary<OraObjectId, OraTriggerDefinition> dbDefinitions, string baseDirPath)
+        {
+            String workingCopyPath = baseDirPath;
+            foreach (var trigger in dbDefinitions.Values)
+            {
+                string fileName = GetFileName(trigger, false);
+
+                string filePath = workingCopyPath;
+
+                if (!Directory.Exists(filePath))
+                    Directory.CreateDirectory(filePath);
+
+                filePath = Path.Combine(filePath, fileName);
+
+                String text = trigger.Source;                
+
+                File.WriteAllText(filePath, text, Encoding.GetEncoding("windows-1250"));
+            }
+        }
+
+        public static string GetFileName(OraTriggerDefinition trigger, bool plSQLConform)
+        {
+            if(plSQLConform)
+                return trigger.Id.Name.ToLower() + ".trg";
+            else
+                return trigger.BaseObject.Name.ToLower() + "__" + trigger.Id.Name.ToLower() + ".trg";
+        }
+    }
+}

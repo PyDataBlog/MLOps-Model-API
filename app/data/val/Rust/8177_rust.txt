@@ -1,0 +1,383 @@
+#[macro_use]
+extern crate log;
+extern crate bevy;
+
+use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, Sender, channel};
+use std::net::TcpStream;
+use std::thread;
+
+use bevy::net::worker::Worker;
+use bevy::net::client::{ClientID};
+use bevy::net::work::{Work,WorkIdentifier,WorkEvent,ClientEvent,WorkerEvent,WorkEventLoop,InputStorage};
+use bevy::entity::{Entity, EntityTimeline, EntityResult, EntityReference};
+use bevy::logging::simple_logger;
+use bevy::asset::AssetManager;
+use bevy::util::time::{Ticker, Duration};
+use bevy::util::time;
+use bevy::util::binary_io::{BinaryWrite, BinaryReadDep, BinaryWriteDep, BinaryError};
+use bevy::math::{Vector3, Quaternion, Decomposed, Transform};
+
+// A zone is a portion of a game world.  It contains a map of tiles and cube entities.  A new cube
+// entity is created for each player. ZoneWork will take its Clients' inputs, use them to move their
+// corresponding cubes, and send the updates to all of the Clients.  ZoneWork
+struct ZoneWork {
+    clients: HashMap<ClientID, TcpStream>, // map unique ClientIDs to their connections
+    client_entities: HashMap<ClientID, EntityReference>, // map unique ClientIDs to their character
+                                                         // in the form of a reference
+    update_duration: Duration,
+    worker_event_rx: Option<Receiver<WorkerEvent>>,
+    client_event_rx: Option<Receiver<ClientEvent>>,
+    client_event_tx: Sender<ClientEvent>,
+    entity_timeline: EntityTimeline,
+    id_message: Entity,
+    time_message: Entity,
+    asset_manager: AssetManager,
+    next_id: u32
+}
+
+impl ZoneWork {
+    pub fn new(updates_per_second: u32, mut asset_manager: AssetManager) -> ZoneWork {
+        let (client_message_tx, client_message_rx) = channel();
+        let id_message = Entity::new(asset_manager.get_entity_template("entity_templates/messages/id_assignment.json").unwrap(), 0u32);
+        let time_message = Entity::new(asset_manager.get_entity_template("entity_templates/messages/time.json").unwrap(), 0u32);
+        ZoneWork {
+            clients: HashMap::new(),
+            client_entities: HashMap::new(),
+            update_duration: Duration::milliseconds((1000.0f64 / updates_per_second as f64) as i64),
+            worker_event_rx: None,
+            entity_timeline: EntityTimeline::new(3),
+            asset_manager: asset_manager,
+            client_event_rx: Some(client_message_rx),
+            client_event_tx: client_message_tx,
+            id_message: id_message,
+            time_message: time_message,
+            next_id: 0
+        }
+    }
+    // Add map tiles to the current state
+    pub fn initialize_map(&mut self) {
+        let tile_template = self.asset_manager.get_entity_template("entity_templates/tile.json").unwrap();
+        let mut state = self.entity_timeline.get_current_state_mut().unwrap();
+        for x in 0..10 {
+            for y in 0..10 {
+                let mut new_tile = Entity::new(tile_template.clone(), (x+y*10) as u32);
+                new_tile.set("position", Vector3::<f32>::new((x*2) as f32, (y*2) as f32, -1.0)).unwrap();
+                state.add_entity(new_tile).unwrap();
+            }
+        }
+    }
+
+    // Consume the ZoneWork's ClientEvent Receiver and return it, if it exists
+    pub fn client_events(&mut self) -> Option<Receiver<ClientEvent>> {
+        self.client_event_rx.take()
+    }
+
+    // Consume the ZoneWork's WorkerEvent Receiver and return it, if it exists
+    pub fn worker_events(&mut self) -> Option<Receiver<WorkerEvent>> {
+        self.worker_event_rx.take()
+    }
+
+    pub fn get_unique_client_id(&mut self) -> u32 {
+        let id = self.next_id;
+        self.next_id += 1;
+        id
+    }
+
+    // Adds a new client from a TcpStream
+    pub fn add_client(&mut self, mut stream: TcpStream) {
+        // Load the cube template and create a new Cube entity
+        let cube_template = self.asset_manager.get_entity_template("entity_templates/cube.json").unwrap();
+        let id = self.get_unique_client_id();
+        let new_shape = Entity::new(cube_template, id);
+        self.client_entities.insert(id, new_shape.get_reference());
+        // Add the client's character the the current state
+        self.entity_timeline.get_current_state_mut().unwrap().add_entity(new_shape).unwrap();
+        self.clients.insert(id, stream.try_clone().unwrap());
+        self.send_id_assignment(id);
+        self.send_full_update(id);
+        // Get an asset manager for this client's message thread
+        let mut asset_manager = self.asset_manager.clone();
+        // Get a copy of the ClientEventessage sender for this client's message thread
+        let client_event_tx = self.client_event_tx.clone();
+        // Listen for client messages on a new thread
+        thread::spawn(move || {
+            loop {
+                match EntityResult::binary_read_dep(&mut stream, &mut asset_manager) {
+                    Ok(entity_result) => {
+                        client_event_tx.send(ClientEvent::Message(id, entity_result)).unwrap();
+                    },
+                    Err(err) => {
+                        match err {
+                            BinaryError::UnexpectedEOF => {},
+                            BinaryError::Io(err) => {error!("{:?}", err);},
+                        }
+                        break;
+                    }
+                }
+            }
+            client_event_tx.send(ClientEvent::Disconnected(id)).unwrap();
+        });
+    }
+
+    // Process a single WorkerEvent
+    pub fn handle_worker_event(&mut self, worker_event: WorkerEvent) {
+        match worker_event {
+            WorkerEvent::AddClient(stream) => {
+                self.add_client(stream);
+            }
+        }
+    }
+
+    pub fn handle_client_event(&mut self, client_event: ClientEvent, client_input: &mut HashMap<ClientID, InputStorage>) {
+        match client_event {
+            ClientEvent::Disconnected(id) => {
+                // If a client disconnects, remove it from the game state
+                let reference = self.client_entities.remove(&id).unwrap();
+                self.clients.remove(&id);
+                client_input.remove(&id);
+                self.entity_timeline.get_current_state_mut().unwrap().remove_entity(reference).unwrap();
+            },
+            ClientEvent::Message(id, entity_result) => {
+                match entity_result {
+                    EntityResult::Dynamic(input_entity) => {
+                        // The only dynamic entity a client sends is PlayerInput
+                        let input_duration = input_entity.get_duration("duration").unwrap();
+                        let input_type = input_entity.get_string("type").unwrap();
+                        // Add the input to the client's InputStorage
+                        let mut input_storage = client_input.entry(id).or_insert_with(|| {InputStorage::new()});
+                        input_storage.add_input(input_type, input_duration);
+                    },
+                    EntityResult::Static(_) => {
+                        // the only static entity a player sends is GetTime
+                        let mut stream = self.clients.get_mut(&id).unwrap();
+                        self.time_message.set("time", time::get_time()).unwrap();
+                        self.time_message.set("update_duration", self.update_duration.clone()).unwrap();
+                        true.binary_write(stream).unwrap();
+                        self.time_message.binary_write(stream).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn handle_player_input(&mut self, client_input: &mut HashMap<ClientID, InputStorage>) {
+        // input only modifies the current state
+        let mut current_state = self.entity_timeline.get_current_state_mut().unwrap();
+        // Iterate over every client InputStorage.  If it has input, process that input
+        for (id, storage) in client_input.iter_mut() {
+            if storage.has_input() {
+                // Get the current player's position, rotation, and speed
+                let client_entity_reference = self.client_entities.get(&id).unwrap();
+                let (position, mut rotation, speed) = { // This is done for borrowing reasons
+                    let client_entity = current_state.get_entity(&client_entity_reference).unwrap();
+                    let position = client_entity.get_vector3f("position").unwrap().clone();
+                    let rotation = client_entity.get_f32("rotation").unwrap().clone();
+                    let speed = client_entity.get_f32("speed").unwrap().clone();
+                    (position, rotation, speed)
+                };
+                // For each of the input types, remove up to update_duration from the input storage
+                // run that input type for the returned duration
+                match storage.remove_input("forward", &self.update_duration) {
+                    Some(duration) => {
+                        let input_milliseconds = duration.num_milliseconds();
+                        let new_position = position +
+                            move_vector(rotation, speed, input_milliseconds);
+                        current_state.set(client_entity_reference, "position", new_position).unwrap();
+                    },
+                    None => {}
+                }
+                match storage.remove_input("back", &self.update_duration) {
+                    Some(duration) => {
+                        let input_milliseconds = duration.num_milliseconds();
+                        let new_position = position -
+                            move_vector(rotation, speed, input_milliseconds);
+                        current_state.set(client_entity_reference, "position", new_position).unwrap();
+                    },
+                    None => {}
+                }
+                match storage.remove_input("rotate_counterclockwise", &self.update_duration) {
+                    Some(duration) => {
+                        let input_milliseconds = duration.num_milliseconds();
+                        rotation += 0.001 * (input_milliseconds as f32);
+                        current_state.set(client_entity_reference, "rotation", rotation).unwrap();
+                    },
+                    None => {}
+                }
+                match storage.remove_input("rotate_clockwise", &self.update_duration) {
+                    Some(duration) => {
+                        let input_milliseconds = duration.num_milliseconds();
+                        rotation -= 0.001 * (input_milliseconds as f32);
+                        current_state.set(client_entity_reference, "rotation", rotation).unwrap();
+                    },
+                    None => {}
+                }
+            }
+        }
+    }
+
+
+    pub fn send_full_update(&mut self, id: ClientID) {
+        let mut stream = self.clients.get_mut(&id).unwrap();
+        let mut states = self.entity_timeline.states.iter();
+        // Write the first state in full
+        match states.next() {
+            Some((time, state)) => {
+                false.binary_write(stream).unwrap();
+                state.binary_write_dep(stream, true).unwrap();
+                time.binary_write(stream).unwrap();
+            },
+            None => {}
+        }
+        // Only write changes for the other states
+        for (time, state) in states {
+            if state.has_changes() {
+                false.binary_write(stream).unwrap();
+                state.binary_write_dep(stream, false).unwrap();
+                time.binary_write(stream).unwrap();
+            }
+        }
+    }
+
+    // Send a client its entity id
+    pub fn send_id_assignment(&mut self, id: ClientID) {
+        let mut stream = self.clients.get_mut(&id).unwrap();
+        self.id_message.set("id", id).unwrap();
+        true.binary_write(stream).unwrap();
+        self.id_message.binary_write(stream).unwrap();
+    }
+
+    // Start the worker's event loop
+    pub fn start(&mut self) {
+        // Create a new map for client InputStorages
+        let mut client_input = HashMap::new();
+        // Create a new eventloop and listen for WorkerEvents, ClientEvents, and update ticks
+        let mut event_loop = WorkEventLoop::new();
+        // update the game state every update_duration
+        let mut ticker = Ticker::new(&self.update_duration);
+        event_loop.listen(ticker.event().unwrap());
+        event_loop.listen(self.worker_events().unwrap());
+        event_loop.listen(self.client_events().unwrap());
+        self.entity_timeline.new_state();
+        self.initialize_map();
+        loop {
+            let (event, _) = event_loop.get();
+            match event {
+                WorkEvent::Worker(event) => {
+                    trace!("WorkerEvent: {:?}", event);
+                    self.handle_worker_event(event);
+                },
+                WorkEvent::Client(event) => {
+                    trace!("ClientEvent: {:?}", event);
+                    self.handle_client_event(event, &mut client_input)
+                }
+                WorkEvent::Tick => {
+                    // take up to update_duration from all stored player inputs and handle that amount of input
+                    self.handle_player_input(&mut client_input);
+                    // Send the changes since the last state to all current clients, if there are any changes
+                    // This is simpler, but it would be more efficent to write the state to a buffer and then write the buffer to streams
+                    if self.entity_timeline.get_current_state().unwrap().has_changes() {
+                        for (_, client_stream) in self.clients.iter_mut() {
+                            false.binary_write(client_stream).unwrap();
+                            self.entity_timeline.get_current_state().unwrap()
+                                                .binary_write_dep(client_stream, false).unwrap();
+                            self.entity_timeline.current_time.binary_write(client_stream).unwrap();
+                        }
+                    }
+
+                    self.entity_timeline.new_state();
+                }
+            }
+        }
+    }
+}
+
+impl Work for ZoneWork {
+    /// Sets up communication between the Work and a Worker
+    fn set_worker_message_receiver(&mut self, receiver: Receiver<WorkerEvent>) {
+        self.worker_event_rx = Some(receiver);
+    }
+    /// Start the worker.  Note: This should normally update the game state and send updates to clients
+    fn start(&mut self) {
+        self.start();
+    }
+}
+
+// Get an entity's displacement vector, given its speed, the amount of time it moves, and its rotation
+fn move_vector(rotation: f32, speed: f32, milliseconds: i64) -> Vector3<f32> {
+    let distance = speed * (milliseconds as f32);
+    let transform = Decomposed {
+                scale: 1.0,
+                rot: Quaternion::new((rotation/2.0).cos(),0.0,0.0,(rotation/2.0).sin()),
+                disp: Vector3::<f32>::new(0.0,0.0,0.0)
+            };
+    transform.transform_vector(&Vector3::<f32>::new(0.0,distance,0.0))
+}
+
+// Returns ZoneWork with a given work entity's updates_per_second.
+struct SimpleWorkIdentifier {
+    asset_manager: AssetManager
+}
+
+impl SimpleWorkIdentifier {
+    pub fn new(asset_manager: AssetManager) ->  SimpleWorkIdentifier {
+        SimpleWorkIdentifier {
+            asset_manager: asset_manager
+        }
+    }
+}
+
+impl WorkIdentifier for SimpleWorkIdentifier {
+    fn work_from_entity(&self, entity: &Entity) -> Option<Box<Work+Send+'static>> {
+        if entity.name.as_ref().unwrap() == "Zone Work" {
+            let updates_per_second = entity.get_u32("updates_per_second").unwrap();
+            Some(Box::new(ZoneWork::new(updates_per_second, self.asset_manager.clone())))
+        } else {
+            None
+        }
+    }
+}
+
+fn main() {
+    // Print logs at all levels but trace (debug through error) to the console
+    simple_logger::init_debug().unwrap();
+    // simple_logger::init_trace().unwrap();
+
+    // create a new AssetManager with "examples/assets" as the root folder
+    let mut asset_manager = AssetManager::new("examples/assets");
+
+    // World state assets
+    asset_manager.load("component_templates/renderable_mesh.json");
+    asset_manager.load("entity_templates/cube.json");
+    asset_manager.load("entity_templates/tile.json");
+
+    // Work assignent assets
+    asset_manager.load("entity_templates/work.json");
+    asset_manager.load("static_entities/zone_work.json");
+
+    // Work and Client messages
+    asset_manager.load("entity_templates/messages/player_input.json");
+    asset_manager.load("entity_templates/messages/id_assignment.json");
+    asset_manager.load("entity_templates/messages/get_time.json");
+    asset_manager.load("entity_templates/messages/time.json");
+    asset_manager.load("static_entities/messages/forward_input.json");
+    asset_manager.load("static_entities/messages/back_input.json");
+    asset_manager.load("static_entities/messages/rotate_counterclockwise_input.json");
+    asset_manager.load("static_entities/messages/rotate_clockwise_input.json");
+
+    // wait for assets to finish loading
+    asset_manager.wait_for_loading_assets();
+
+    // create a new worker with a SimpleWorkIdentifier, connect to the arbiter, and listen for clients
+    let simple_work_identifier = Box::new(SimpleWorkIdentifier::new(asset_manager.clone()));
+    let mut worker = Worker::new(asset_manager, simple_work_identifier,
+                                 "127.0.0.1:8091", "127.0.0.1:8080");
+    worker.start();
+    // intercept all events and print them
+    for event in worker.events() {
+        match event {
+            _ => {info!("{:?}", event)}
+        }
+    }
+
+}

@@ -1,0 +1,150 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE TemplateHaskell #-}
+
+module Eleco.Slave.Backend.Repa where
+
+import Data.Vector.Unboxed
+  ( Vector
+  , imap
+  , fromList
+  )
+import qualified Data.Vector.Unboxed as V
+import Data.Vector.Binary
+
+import Data.Array.Repa
+  ( Array
+  , DIM1
+  , U
+  , Z(..)
+  , (:.)(..)
+  , fromUnboxed
+  , fromListUnboxed
+  , toUnboxed
+  , computeP
+  )
+import qualified Data.Array.Repa as R
+import Data.Array.Repa.Algorithms.Matrix
+
+import Control.Distributed.Process (Process)
+import Control.Distributed.Process.Node (initRemoteTable)
+import Control.Distributed.Process.Closure (remotable)
+import Control.Distributed.Process.Backend.SimpleLocalnet
+  ( initializeBackend
+  , startSlave
+  )
+
+import Eleco.Core.Entity
+import Eleco.Slave
+import Eleco.Slave.State
+import Eleco.Slave.Backend
+
+type Vec2D = (Double, Double)
+
+{-# INLINE vecAdd #-}
+vecAdd :: Vec2D -> Vec2D -> Vec2D
+vecAdd (!x1, !y1) (!x2, !y2) = (x1 + x2, y1 + y2)
+
+{-# INLINE vecSub #-}
+vecSub :: Vec2D -> Vec2D -> Vec2D
+vecSub (!x1, !y1) (!x2, !y2) = (x1 - x2, y1 - y2)
+
+{-# INLINE vecDis #-}
+vecDis :: Vec2D -> Vec2D -> Double
+vecDis (!x1, !y1) (!x2, !y2) =
+  let dx = x1 - x2
+      dy = y1 - y2 in
+  dx * dx + dy * dy
+
+{-# INLINE vecMul #-}
+vecMul :: Vec2D -> Double -> Vec2D
+vecMul (!vx, !vy) !x = (vx * x, vy * x)
+
+{-# INLINE vecDiv #-}
+vecDiv :: Vec2D -> Double -> Vec2D
+vecDiv (!vx, !vy) !x = (vx / x, vy / x)
+
+{-# INLINE vecLen2 #-}
+vecLen2 :: Vec2D -> Double
+vecLen2 (!vx, !vy) = vx * vx + vy * vy
+
+{-# INLINE vecLen #-}
+vecLen :: Vec2D -> Double
+vecLen = sqrt . vecLen2
+
+{-# INLINE vecNorm #-}
+vecNorm :: Vec2D -> Vec2D
+vecNorm vec =
+  let len = vecLen vec in
+  if len /= 0
+    then vecDiv vec len
+    else vec
+
+data RepaBackend = RepaBackend
+  { positions  :: !(Array U DIM1 RawEntity)
+  , velocities :: !(Array U DIM1 Vec2D)
+  , masses     :: !(Vector Double)
+  , gravity    :: {-# UNPACK #-} !Double }
+
+instance Backend (Vector RawEntity) RepaBackend where
+  type CrossNodeData RepaBackend = (Vector RawEntity, Vector Double)
+
+  updateBackend simState@SimulationState{..} = do
+    datas <- expectCrossNodeDatas simState
+    newvs <- computeP $ R.zipWith (calNewVel datas) positions velocities
+    newps <- computeP $ R.zipWith calNewPos positions newvs
+    return b
+      { positions  = newps
+      , velocities = newvs }
+    where
+      b@RepaBackend{..} = simBackend
+      vecPositions = toUnboxed positions
+      interactions = [gravityInteraction]
+      indeces      = [0..entityCount-1]
+
+      gravityInteraction !ent1 !m1 !ent2 !m2 !dir_vec !dis =
+        let !co = gravity * m1 * m2 / (dis * dis) in
+        dir_vec `vecMul` co
+
+      calNewVel !datas !ent1 (!vx, !vy) =
+        let ents = map (V.unsafeIndex vecPositions) $ filter (/=eid) indeces
+            tvel = foldl (go masses) (0, 0) ents in
+        foldl (\acc (cnEnts, cnMasses) -> V.foldl' (go cnMasses) acc cnEnts) tvel datas
+        where
+          !e1pos = position ent1
+          !eid   = localId ent1
+          !e1m   = V.unsafeIndex masses eid
+          go e2masses acc ent2 =
+            let !e2pos   = position ent2
+                !e2m     = V.unsafeIndex e2masses $ localId ent2
+                !vec     = e1pos `vecSub` e2pos
+                !dir_vec = vecNorm vec
+                !dis     = vecLen  vec in
+            foldl (\v f -> f ent1 e1m ent2 e2m dir_vec dis `vecAdd` v) acc interactions
+
+      calNewPos (!px, !py, !i) (!vx, !vy) = (px + vx, py + vy, i)
+
+  backendInfo = const BackendInfo
+    { backendName = "Repa"
+    , backendVersion = (0, 0, 0, 1)
+    , backendBehaviours = ["Gravity"] }
+
+  entitySeq = toUnboxed . positions
+
+  fullCrossNodeData RepaBackend{..} =
+    (toUnboxed positions, masses)
+
+  regionalCrossNodeData RepaBackend{..} indeces =
+    ( fromList $ fmap (V.unsafeIndex poss) indeces
+    , fromList $ fmap (V.unsafeIndex masses) indeces )
+    where poss = toUnboxed positions
+
+repaSlaveSimulator :: Process ()
+repaSlaveSimulator = slaveSimulatorProcess emptyBackend
+  where
+    emptyBackend = RepaBackend
+      { positions  = fromListUnboxed (Z :. 0 :: DIM1) []
+      , velocities = fromListUnboxed (Z :. 0 :: DIM1) []
+      , masses     = fromList []
+      , gravity    = 1.0
+      }
+remotable ['repaSlaveSimulator]

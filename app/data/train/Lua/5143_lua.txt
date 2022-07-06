@@ -1,0 +1,745 @@
+--------------------------------------------------------
+-- This file is part of the JX3 LM Plugin.
+-- @link     : https://leafvmaple.com/
+-- @desc     :
+-- @author   : Áã¶È·ãÓ°
+-- @modifier : Emile Zhai (root@derzh.com)
+-- @copyright: Copyright (c) 2016 Leafvmaple Kingsoft Co., Ltd.
+--------------------------------------------------------
+local DELETE_IMAGE_PATH      = "ui/Image/UICommon/CommonPanel2.UITex"
+local DELETE_NORMAL_FRAME    = 49
+local DELETE_MOUSEOVER_FRAME = 51
+
+local AUCTION_MODE = {
+	["PRICE_MIN"]  = 1,
+	["PRICE_SAVE"] = 2,
+}
+local USER_DB
+
+local _L = LoadLangPack(LM.GetAddonInfo().szRoot .. "LM_Auction/lang/")
+
+LM_Auction = {
+	PRICE_VERSION 	= 1,
+
+	nPricePercentage = 0.95,
+	nDefaultPrices   = 1,
+
+	-- Ñ¡Ïî
+	nMode           = AUCTION_MODE.PRICE_MIN,
+	nMaxHistory 	= 10,
+	szDefaultTime   = _L["24 hours"],
+}
+
+LM_AuctionSettings = {}
+
+local tSearchInfoDefault = {
+	["Name"]	 = _L["item name"],
+	["Level"]	 = {"", ""},
+	["Quality"]	 = _L["item quality"],
+	["Status"]	 = _L["item status"],
+	["MaxPrice"] = {"", "" ,""},
+}
+
+local tItemDataInfo = {
+	["Search"] 	= {nStart = 1, nCurCount = 0, nTotCount = 0, nSortType = AUCTION_ORDER_TYPE.BUY_IT_NOW_PRICE, 	bDesc = 0, bUnitPrice=false, nRequestID = 0, szCheckName = "CheckBox_Price"},
+	["Sell"] 	= {nStart = 1, nCurCount = 0, nTotCount = 0, nSortType = AUCTION_ORDER_TYPE.QUALITY, 			bDesc = 1, bUnitPrice=false, nRequestID = 1, szCheckName = "CheckBox_AName"},
+	["Bid"] 	= {nStart = 1, nCurCount = 0, nTotCount = 0, nSortType = AUCTION_ORDER_TYPE.LEFT_TIME, 			bDesc = 1, bUnitPrice=false, nRequestID = 2, szCheckName = "CheckBox_BRemainTime"},
+}
+
+local tItemWidgetInfo = {
+	["Search"] =
+	{
+		Scroll="Scroll_Result", BtnUp="Btn_RUp", BtnDown="Btn_RDown", Box="Box_Box", Text="Text_BoxName", Level="Text_BoxLevel", Saler="Text_BoxSaler", Time="Text_BoxRemainTime",
+		aBidText={"Handle_BidMoney",  "Text_MyBid"},
+		aBuyText={"Handle_BidMoneyU", "Text_UnitPrice"},
+		tCheck =
+		{
+			["CheckBox_RName"]      = {imgUp = "Image_RNameUp",     imgDown = "Image_RNameDown",     nSortType = AUCTION_ORDER_TYPE.QUALITY},
+			["CheckBox_RLevel"]     = {imgUp = "Image_RLevelUp",    imgDown = "Image_RLevelDown",    nSortType = AUCTION_ORDER_TYPE.LEVEL},
+			["CheckBox_RemainTime"] = {imgUp = "Image_ReNameUp",    imgDown = "Image_ReNameDown",    nSortType = AUCTION_ORDER_TYPE.LEFT_TIME},
+			["CheckBox_Bid"]        = {imgUp = "Image_BidNameUp",   imgDown = "Image_BidNameDown",   nSortType = AUCTION_ORDER_TYPE.PRICE},
+			["CheckBox_Price"]      = {imgUp = "Image_PriceNameUp", imgDown = "Image_PriceNameDown", nSortType = AUCTION_ORDER_TYPE.BUY_IT_NOW_PRICE},
+		}
+	},
+	["Bid"] =
+	{
+		Scroll="Scroll_Bid", BtnUp="Btn_BUp", BtnDown="Btn_BDown", Box="Box_BidBox", Text="Text_BidBoxName", Level="Text_BidBoxLevel", Saler="Text_BidBoxSaler", Time="Text_BidBoxRemainTime",
+		aBidText={"Handle_BidBidMoney", "Text_BidMyBid"},
+		aBuyText={"Handle_BBidMoneyU",  "Text_BUnitPrice"},
+		tCheck =
+		{
+			["CheckBox_BName"]       = {imgUp = "Image_BNameUp",      imgDown = "Image_BNameDown",      nSortType = AUCTION_ORDER_TYPE.QUALITY},
+			["CheckBox_BLevel"]      = {imgUp = "Image_BLevelUp",     imgDown = "Image_BLevelDown",     nSortType = AUCTION_ORDER_TYPE.LEVEL},
+			["CheckBox_BRemainTime"] = {imgUp = "Image_BReNameUp",    imgDown = "Image_BReNameDown",    nSortType = AUCTION_ORDER_TYPE.LEFT_TIME},
+			["CheckBox_BBid"]        = {imgUp = "Image_BBidNameUp",   imgDown = "Image_BBidNameDown",   nSortType = AUCTION_ORDER_TYPE.PRICE},
+			["CheckBox_BPrice"]      = {imgUp = "Image_BPriceNameUp", imgDown = "Image_BPriceNameDown", nSortType = AUCTION_ORDER_TYPE.BUY_IT_NOW_PRICE},
+		}
+	},
+	["Sell"] =
+	{
+		Scroll="Scroll_Auction", BtnUp="Btn_AUp", BtnDown="Btn_ADown", Box="Box_ABox", Text="Text_ABoxName", Level="Text_ABoxLevel", Saler="Text_ABoxSaler", Time="Text_ABoxRemainTime",
+		aBidText={"Handle_ABidMoney", "Text_AMyBid",},
+		aBuyText={"Handle_ABidMoneyU", "Text_AUnitPrice",},
+		tCheck =
+		{
+			["CheckBox_AName"]       = {imgUp = "Image_ANameUp",      imgDown = "Image_ANameDown",      nSortType = AUCTION_ORDER_TYPE.QUALITY},
+			["CheckBox_ALevel"]      = {imgUp = "Image_ALevelUp",     imgDown = "Image_ALevelDown",     nSortType = AUCTION_ORDER_TYPE.LEVEL},
+			["CheckBox_ARemainTime"] = {imgUp = "Image_AReNameUp",    imgDown = "Image_AReNameDown",    nSortType = AUCTION_ORDER_TYPE.LEFT_TIME},
+			["CheckBox_ABid"]        = {imgUp = "Image_ABidNameUp",   imgDown = "Image_ABidNameDown",   nSortType = AUCTION_ORDER_TYPE.PRICE},
+			["CheckBox_APrice"]      = {imgUp = "Image_APriceNameUp", imgDown = "Image_APriceNameDown", nSortType = AUCTION_ORDER_TYPE.BUY_IT_NOW_PRICE},
+		}
+	}
+}
+
+local NO_BID_PRICE    = PackMoney(9000000, 0, 0)
+local REAL_TIME_COLOR = {255, 0, 0}
+local INI_FILE_PATH   = "UI/Config/Default/AuctionItem.ini"
+
+local tBidTime        = {}
+local tBaseSellPrice  = {}
+
+do
+local function OnReadData()
+	LM_AuctionSettings = USER_DB:Get("AuctionSettings") or {
+		bFilterRecipe 	= false,
+		bFilterBook 	= false,
+		bBidRealTime 	= true,
+		bFastBid        = true,
+		bFastBuy        = true,
+		bFastCancel     = true,
+		bLowestPrices   = true,
+		tSearchHistory     = {},
+		tBlackList         = {},
+		tItemPrice         = {},
+		tSellerList        = {},
+		tColorDiamondPrice = {},
+		tItemFavorite      = {},
+		tRealTimeColor     = REAL_TIME_COLOR,
+	}
+end
+local function OnWriteData()
+	USER_DB:Set("AuctionSettings", LM_AuctionSettings)
+end
+local function OnLoadDataBase()
+	if not LM_Auction.CACHE_DB then
+		LM_Auction.CACHE_DB = UnQLite_Open(LM.FormatPath({'temporary/auction.udb', LM_DATA_PATH.ROLE}))
+	end
+	if not USER_DB then
+		USER_DB = UnQLite_Open(LM.FormatPath({'userdata/auction.udb', LM_DATA_PATH.ROLE}))
+	end
+	OnReadData()
+end
+RegisterEvent("LOADING_END", OnLoadDataBase)
+RegisterEvent("FIRST_LOADING_END", OnLoadDataBase)
+
+local function OnReleaseDataBase()
+	OnWriteData()
+	if LM_Auction.CACHE_DB then
+		LM_Auction.CACHE_DB:Release()
+	end
+	if USER_DB then
+		USER_DB:Release()
+		USER_DB = nil
+	end
+end
+RegisterEvent("GAME_EXIT", OnReleaseDataBase)
+RegisterEvent("PLAYER_EXIT_GAME", OnReleaseDataBase)
+RegisterEvent("RELOAD_UI_ADDON_BEGIN", OnReleaseDataBase)
+end
+
+function LM_Auction.OnFrameCreate()
+end
+
+function LM_Auction.GetFrame()
+	return Station.Lookup("Normal/LM_Auction")
+end
+
+function LM_Auction.GetSearchEdit(hFrame)
+	hFrame = hFrame or Station.Lookup("Normal/AuctionPanel")
+	local hWndSch = hFrame:Lookup("PageSet_Totle/Page_Business/Wnd_Search")
+	return hWndSch and hWndSch:Lookup("Edit_ItemName")
+end
+
+function LM_Auction.AddWidget(hFrame)
+	if not hFrame then return end
+	local page = hFrame:Lookup("PageSet_Totle/Page_Business")
+	local hWndSrch = page:Lookup("Wnd_Search")
+	local hLMAuction = Wnd.OpenWindow(LM.GetAddonInfo().szRoot .. "LM_Auction/ui/LM_Auction.ini")
+	if not hWndSrch:Lookup("Btn_SearchDown") then
+		local hBtnSearchDown = hLMAuction:Lookup("Btn_SearchDown")
+		if hBtnSearchDown then
+			local hSearchEdit = LM_Auction.GetSearchEdit()
+			hSearchEdit:SetSize(125, 20)
+			hBtnSearchDown:ChangeRelation(hWndSrch, true, true)
+			hBtnSearchDown:SetRelPos(148, 32)
+			hBtnSearchDown.OnLButtonClick = function()
+				LM_Auction.OpenSearchDroplist(hSearchEdit)
+			end
+			hBtnSearchDown.OnRButtonClick = function()
+				local tMenu = {}
+				for k, v in pairs(LM_AuctionSettings.tItemFavorite) do
+					table.insert(tMenu,
+						{
+							szOption = k,
+							fnAction = function()
+								LM_Auction.UpdateList(k, _L["added to favorites"])
+							end,
+						})
+				end
+				PopupMenu(tMenu)
+			end
+		end
+	end
+	if not hFrame:Lookup("Btn_Check") then
+		local btnCheck = hLMAuction:Lookup("Btn_Check")
+		if btnCheck then
+			btnCheck:ChangeRelation(hFrame, true, true)
+			btnCheck:SetRelPos(854, 56)
+			btnCheck:Lookup("", ""):Lookup("Text_Check"):SetText(_L["check option"])
+			btnCheck.OnLButtonClick = function()
+				LM_Retrieval.OpenPanel()
+			end
+		end
+	end
+	Wnd.CloseWindow(hLMAuction)
+end
+
+function LM_Auction.GetPrediction(hItem)
+	local item = GetItem(hItem.nItemID)
+	local tItemInfo = GetItemInfo(item.dwTabType, item.dwIndex)
+	local tDesc = Table_GetItemDesc(item.nUiId)
+	if string.find(tDesc, _L["additional drop"]) then
+		local tDrop = {szOption = _L["view drop"]}
+		local drops = string.gsub(tDesc,  "this\.dwTabType\=(%d+) this.dwIndex=(%d+) ", function(k, v)
+			local itemInfo = GetItemInfo(k, v)
+			table.insert(tDrop, {
+				szOption = itemInfo.szName,
+				fnMouseEnter = function()
+					local x, y = this:GetAbsPos()
+					local w, h = this:GetSize()
+					OutputItemTip(UI_OBJECT_ITEM_INFO, 0, k, v, {x, y, w, h}, false)
+				end,
+			})
+		end)
+		return tDrop
+	end
+end
+
+function LM_Auction.GetSearchHistory()
+	local tMenu = {}
+	local nCount = table.getn(LM_AuctionSettings.tSearchHistory)
+	for i = nCount, 1, -1 do
+		local tItem = {
+			szOption 		= LM_AuctionSettings.tSearchHistory[i].szName,
+			UserData 		= LM_AuctionSettings.tSearchHistory[i].szName,
+			szIcon			= DELETE_IMAGE_PATH,
+			nIconWidth 		= 17,
+			nIconHeight 	= 17,
+			nFrame 			= DELETE_NORMAL_FRAME,
+			nMouseOverFrame = DELETE_MOUSEOVER_FRAME,
+			szLayer 		= "ICON_RIGHTMOST",
+			fnClickIcon 	= LM_Auction.RemoveSearchItem,
+			fnAction 		= function()
+				LM_Auction.UpdateList(LM_AuctionSettings.tSearchHistory[i].szName)
+			end,
+		}
+		table.insert(tMenu, tItem)
+	end
+	table.insert(tMenu, {bDevide = true})
+	local tClearItem = {
+		szOption = _L["clear search history"],
+		fnAction = function()
+			LM_AuctionSettings.tSearchHistory = {}
+		end,
+	}
+	table.insert(tMenu, tClearItem)
+	return tMenu
+end
+
+function LM_Auction.IsInBlackList(szName)
+	return LM_AuctionSettings.tBlackList[szName] ~= nil
+end
+
+function LM_Auction.AddBlackList(szName)
+	LM_AuctionSettings.tBlackList[szName] = true
+	LM.Sysmsg(_L("%s added to black list", szName), _L['LM_Auction'])
+end
+
+function LM_Auction.AddSeller(szName)
+	LM_AuctionSettings.tSellerList[szName] = true
+	LM.Sysmsg(_L("%s added to seller list", szName), _L['LM_Auction'])
+end
+
+function LM_Auction.AddFavorite(szName)
+    LM_AuctionSettings.tItemFavorite[szName] = true
+    LM.Sysmsg(_L("%s added to favorites", szName), _L['LM_Auction'])
+end
+
+function LM_Auction.AddSearchItem(szKeyName)
+	local index = nil
+	for k, v in pairs(LM_AuctionSettings.tSearchHistory) do
+		if v.szName == szKeyName then
+			index = k
+			break
+		end
+	end
+	if index then
+		table.remove(LM_AuctionSettings.tSearchHistory, index)
+	end
+	table.insert(LM_AuctionSettings.tSearchHistory, {szName = szKeyName})
+	local nCount = table.getn(LM_AuctionSettings.tSearchHistory)
+	if nCount > LM_Auction.nMaxHistory then
+		table.remove(LM_AuctionSettings.tSearchHistory, 1)
+	end
+end
+
+function LM_Auction.SetBaseSellPrice(hItem)
+	local szItemName = hItem.szItemName
+	local szKey = hItem.szKey
+	if MoneyOptCmp(hItem.tBuyPrice, NO_BID_PRICE) == 0 then
+		LM.Sysmsg(_L["can not save this price"], _L['LM_Auction'])
+		return
+	end
+
+	local tBuyPrice = MoneyOptDiv(hItem.tBuyPrice, hItem.nCount)
+	tBaseSellPrice[szKey] = tBuyPrice
+	local szMoney = GetMoneyText(tBuyPrice, "font=10")
+	local szColor = GetItemFontColorByQuality(hItem.nQuality, true)
+	local szItem  = MakeItemInfoLink(string.format("[%s]", szItemName), string.format("font=10 %s", szColor), hItem.nVersion, hItem.dwTabType, hItem.dwIndex)
+	LM.Sysmsg({ szItem, {_L["successfully set base sell price"], rich = false}, szMoney, rich = true }, _L['LM_Auction'])
+end
+
+function LM_Auction.RemoveSearchItem(szItemName, bSlient)
+	for i = #LM_AuctionSettings.tSearchHistory, 1, -1 do
+		if szItemName == LM_AuctionSettings.tSearchHistory[i].szName then
+			table.remove(LM_AuctionSettings.tSearchHistory, i)
+		end
+	end
+	ClosePopupMenu()
+end
+
+function LM_Auction.OpenSearchDroplist(hSearchEdit)
+	if not hSearchEdit then
+		return
+	end
+	local xT, yT = hSearchEdit:GetAbsPos()
+	local wT, hT = hSearchEdit:GetSize()
+	local tMenu = LM_Auction.GetSearchHistory()
+	tMenu.nMiniWidth = wT + 32
+	tMenu.x = xT - 5
+	tMenu.y = yT + hT
+
+	PopupMenu(tMenu)
+end
+
+function LM_Auction.UpdateBidItemTime(hFrame)
+	local tInfo = tItemWidgetInfo["Search"]
+	local hList = hFrame:Lookup("PageSet_Totle/Page_Business/Wnd_Result2", "Handle_List")
+	local nCount = hList:GetItemCount()
+	for i = 0, nCount - 1, 1 do
+		local hItem = hList:Lookup(i)
+		local hTextTime = hItem:Lookup(tInfo.Time)
+		if tBidTime[hItem.nSaleID] then
+			local nLeftTime = math.max(0, math.ceil((tBidTime[hItem.nSaleID].nTime - GetTickCount()) / 1000))
+			local szTime = AuctionPanel.FormatAuctionTime(nLeftTime)
+			if nLeftTime <= 120 then
+				if nLeftTime > 0 then
+					hTextTime:SetText(_L("%s bid second", nLeftTime))
+				else
+					hTextTime:SetText(_L["settlement"])
+				end
+				hTextTime:SetFontColor(unpack(LM_AuctionSettings.tRealTimeColor))
+			else
+				hTextTime:SetText(szTime)
+			end
+		end
+	end
+end
+
+function LM_Auction.UpdateList(szItemName, szType, bNotInit, szSellerName)
+	if not szItemName then
+		szItemName = ""
+	end
+	szSellerSearch = szSellerName or ""
+	local t = tItemDataInfo["Search"]
+	local hFrame = Station.Lookup("Normal/AuctionPanel")
+	AuctionPanel.tSearch = tSearchInfoDefault
+	AuctionPanel.tSearch["Name"] = szItemName
+	if szSellerName and szSellerName ~= "" then
+		AuctionPanel.tSearch["Name"] = _L["item name"]
+	end
+	if not bNotInit then
+		AuctionPanel.InitSearchInfo(hFrame, AuctionPanel.tSearch)
+	end
+	AuctionPanel.SaveSearchInfo(hFrame)
+
+	if szType and szType ~= "" then
+		LM.Sysmsg(_L("search %s: %s", szType, szItemName), _L['LM_Auction'])
+	end
+
+	return AuctionPanel.ApplyLookup(hFrame, "Search", t.nSortType, "", 1, t.bDesc, szSellerName)
+end
+
+---------------------------------------------
+---- Hook
+---------------------------------------------
+
+function LM_Auction.Init(hFrame)
+	local hWndRes = hFrame:Lookup("PageSet_Totle/Page_Business/Wnd_Result2")
+	local hCheckPervalue = hWndRes:Lookup("CheckBox_PerValue")
+	local hCheckPrice = hWndRes:Lookup("CheckBox_Price")
+	hCheckPervalue:Check(true)
+	AuctionPanel.OnSortStateUpdate(hCheckPrice)
+	if hCheckPrice:Lookup("", "Image_PriceNameDown"):IsVisible() then
+		AuctionPanel.OnSortStateUpdate(hCheckPrice)
+	end
+	LM_Auction.AddWidget(hFrame)
+end
+
+function LM_Auction.SetSaleInfo(hItem, szDataType, tItemData)
+	hItem.szSellerName = tItemData["SellerName"]
+	local item = tItemData["Item"]
+	hItem.nQuality  = item.nQuality
+	hItem.nVersion  = item.nVersion
+	hItem.dwTabType = item.dwTabType
+	hItem.dwIndex   = item.dwIndex
+	if szDataType == "Search" then
+		local szKey = (item.nGenre == ITEM_GENRE.BOOK) and hItem.szItemName or item.nUiId
+		hItem.szKey = szKey
+
+		if LM_AuctionSettings.tItemPrice[szKey] == nil or LM_AuctionSettings.tItemPrice[szKey][2] ~= LM_Auction.PRICE_VERSION then
+			LM_AuctionSettings.tItemPrice[szKey] = {NO_BID_PRICE, LM_Auction.PRICE_VERSION}
+		end
+		if MoneyOptCmp(hItem.tBuyPrice, NO_BID_PRICE) ~= 0 then
+			local tBuyPrice = MoneyOptDiv(hItem.tBuyPrice, hItem.nCount)
+
+			if MoneyOptCmp(LM_AuctionSettings.tItemPrice[szKey][1], tBuyPrice) == 1 then
+				LM_AuctionSettings.tItemPrice[szKey][1] = tBuyPrice
+			end
+
+			if item.nGenre == ITEM_GENRE.COLOR_DIAMOND then
+				local nLevel = item.nDetail
+				if LM_AuctionSettings.tColorDiamondPrice[nLevel] == nil or LM_AuctionSettings.tColorDiamondPrice[nLevel][2] ~= LM_Auction.PRICE_VERSION then
+					LM_AuctionSettings.tColorDiamondPrice[nLevel] = {NO_BID_PRICE, LM_Auction.PRICE_VERSION}
+				end
+			 	if MoneyOptCmp(LM_AuctionSettings.tColorDiamondPrice[nLevel][1], tBuyPrice) == 1 then
+					LM_AuctionSettings.tColorDiamondPrice[nLevel][1] = tBuyPrice
+				end
+			end
+		end
+	end
+
+	local tInfo = tItemWidgetInfo[szDataType]
+	local nLeftTime = tItemData["LeftTime"]
+	local hTextTime = hItem:Lookup(tInfo.Time)
+	local szTime = AuctionPanel.FormatAuctionTime(nLeftTime)
+	if nLeftTime <= 120 and LM_AuctionSettings.bBidRealTime then
+		hTextTime:SetText(_L("%s bid second", nLeftTime))
+		hTextTime:SetFontColor(unpack(LM_AuctionSettings.tRealTimeColor))
+	else
+		hTextTime:SetText(szTime)
+	end
+
+	local nLeftTime = tItemData["LeftTime"]
+	if not tBidTime[hItem.nSaleID] or tBidTime[hItem.nSaleID].nVersion ~= LM_Auction.PRICE_VERSION then
+		tBidTime[hItem.nSaleID] = {nTime = nLeftTime * 1000 + GetTickCount(), nVersion = LM_Auction.PRICE_VERSIONn}
+	end
+	hItem:Show()
+end
+
+function LM_Auction.PostUpdateItemList(hFrame, szDataType, tItemInfo)
+	for k, v in pairs(tItemInfo or {}) do
+		if v["Item"] then
+			local bFilterd = false
+			if szDataType == "Search" then
+				if not LM_Auction.IsInBlackList(v["SellerName"]) then
+					if LM_AuctionSettings.bFilterRecipe and v["Item"].nGenre == ITEM_GENRE.MATERIAL and v["Item"].nSub == 5 and IsMystiqueRecipeRead(v["Item"]) then
+						bFilterd = true
+					elseif LM_AuctionSettings.bFilterBook and v["Item"].nGenre == ITEM_GENRE.BOOK then
+						local nBookID, nSegmentID = GlobelRecipeID2BookID(v["Item"].nBookID)
+						if GetClientPlayer().IsBookMemorized(nBookID, nSegmentID) then
+							bFilterd = true
+						end
+					end
+				end
+			end
+			if bFilterd then
+				tItemInfo[k] = nil
+			end
+		end
+	end
+end
+
+function LM_Auction.AfterUpdateItemList(hFrame, szDataType, tItemInfo)
+	local hList = hFrame:Lookup("PageSet_Totle/Page_Business/Wnd_Result2", "Handle_List")
+	local nItemCount = hList:GetItemCount() - 1
+	for i = 0, nItemCount do
+		local hItem = hList:Lookup(i)
+		hItem:RegisterEvent(ITEM_EVENT.RBUTTONCLICK)
+		hItem.OnItemLButtonClick = function()
+			AuctionPanel.Selected(this)
+			AuctionPanel.UpdateSelectedInfo(this:GetRoot(), "Search", true)
+			if LM_AuctionSettings.bFastBid and IsShiftKeyDown() and IsCtrlKeyDown() then
+				AuctionPanel.AuctionBid(this)
+			elseif LM_AuctionSettings.bFastBuy and IsAltKeyDown() and IsCtrlKeyDown() then
+				if MoneyOptCmp(this.tBuyPrice, NO_BID_PRICE) ~= 0 then
+					AuctionPanel.AuctionBuy(this, "Search")
+				end
+			--else
+			--	return FORMAT_WMSG_RET(true, true)
+			end
+		end
+	end
+
+	hList = hFrame:Lookup("PageSet_Totle/Page_Auction/Wnd_Auction", "Handle_AList")
+	nItemCount = hList:GetItemCount() - 1
+	for i = 0, nItemCount do
+		local hItem = hList:Lookup(i)
+		hItem:RegisterEvent(ITEM_EVENT.RBUTTONCLICK)
+		hItem.OnItemLButtonClick = function()
+			AuctionPanel.Selected(this)
+			AuctionPanel.UpdateSelectedInfo(this:GetRoot(), "Sell", true)
+			if LM_AuctionSettings.bFastCancel and IsAltKeyDown() and IsCtrlKeyDown() then
+				AuctionPanel.AuctionCancel(this)
+			--else
+			--	return FORMAT_WMSG_RET(true, true)
+			end
+		end
+	end
+
+	if szDataType == "Search" then
+		local hEdit = LM_Auction.GetSearchEdit()
+		local szKeyName = hEdit:GetText()
+		szKeyName = StringReplaceW(szKeyName, " ", "")
+		if szKeyName ~= _L["item name"] and szKeyName ~= "" then
+			LM_Auction.AddSearchItem(szKeyName)
+		end
+	end
+end
+
+function LM_Auction.FormatAuctionTime(nTime)
+	if not LM_AuctionSettings.bBidRealTime and nTime < 600 then
+		return g_tAuctionString.STR_AUCTION_NEAR_DUE
+	end
+
+	local szText = ""
+	local nH, nM, nS = GetTimeToHourMinuteSecond(nTime, false)
+	if nH and nH > 0 then
+		if (nM and nM > 0) or (nS and nS > 0) then
+			nH = nH + 1
+		end
+		szText = szText..nH..g_tStrings.STR_BUFF_H_TIME_H
+	else
+		nM = nM or 0
+		nS = nS or 0
+		if nM == 0 and nS == 0 then
+			return szText
+		end
+
+		if nS > 0 then
+			nM = nM + 1
+		end
+
+		if nM >= 60 then
+			szText = szText .. math.ceil(nM / 60) .. g_tStrings.STR_BUFF_H_TIME_H
+		else
+			szText = szText .. nM .. g_tStrings.STR_BUFF_H_TIME_M
+		end
+	end
+
+	return szText
+end
+
+function LM_Auction.UpdateSaleInfo(hFrame, bDefault)
+	if bDefault then
+		local hWndSale = hFrame:Lookup("PageSet_Totle/Page_Auction/Wnd_Sale")
+		local handle = hWndSale:Lookup("", "")
+		local box = handle:Lookup("Box_Item")
+		local textTime = handle:Lookup("Text_Time")
+		local textItemName = handle:Lookup("Text_ItemName")
+		if not box:IsEmpty() then
+			local szItemName = textItemName:GetText()
+			if not LM_AuctionSettings.tItemPrice[szItemName] then
+				local szText = textTime:GetText()
+				if szText ~= LM_Auction.szDefaultTime then
+					textTime:SetText(LM_Auction.szDefaultTime)
+				end
+			end
+		end
+	end
+end
+
+function LM_Auction.GetItemSellInfo(szItemName)
+	local hFrame  = Station.Lookup("Normal/AuctionPanel")
+	local szText = hFrame:Lookup("PageSet_Totle/Page_Auction/Wnd_Sale", "Text_ItemName"):GetText()
+	local box    = hFrame:Lookup("PageSet_Totle/Page_Auction/Wnd_Sale", "Box_Item")
+	local item   = GetPlayerItem(GetClientPlayer(), box.dwBox, box.dwX)
+	local szKey  = (szItemName == _L['book']) and szText or item.nUiId	--Êé¼®Ãû×Ö×ª»¯
+    if LM.nMode == AUCTION_MODE.PRICE_MIN then
+		local function GetSellInfo(szName, tPrice)
+			local u = {szName = szName, tBidPrice = tPrice[1], tBuyPrice = tPrice[1], szTime = LM_Auction.szDefaultTime}
+			if LM_AuctionSettings.bLowestPrices then
+				if LM_Auction.bPricePercentage then
+					u.tBidPrice = MoneyOptMult(u.tBidPrice, LM_Auction.nPricePercentage)
+					u.tBuyPrice = MoneyOptMult(u.tBuyPrice, LM_Auction.nPricePercentage)
+				else
+					--µ¥¼ÛÅÐ¶Ï£¬·ÀÖ¹²î¼ÛÒç³ö
+					if MoneyOptCmp(u.tBidPrice, LM_Auction.nDefaultPrices) == 1 then
+						u.tBidPrice = MoneyOptSub(u.tBidPrice, LM_Auction.nDefaultPrices)
+					end
+					if MoneyOptCmp(u.tBuyPrice, LM_Auction.nDefaultPrices) == 1 then
+						u.tBuyPrice = MoneyOptSub(u.tBuyPrice, LM_Auction.nDefaultPrices)
+					end
+				end
+			end
+			return u
+		end
+		if tBaseSellPrice[szKey] then
+			LM.Sysmsg(_L["lower price type"], _L['LM_Auction'])
+			local tPrice = {tBaseSellPrice[szKey]}
+			return GetSellInfo(szKey, tPrice)
+		else
+			for k, v in pairs(LM_AuctionSettings.tItemPrice) do
+				if szKey == k and MoneyOptCmp(v[1], NO_BID_PRICE) ~= 0 then
+					LM.Sysmsg(_L["lower price type"], _L['LM_Auction'])
+					if type(szKey) == "string" then
+						return GetSellInfo(szKey, v)
+					else
+						return GetSellInfo(szItemName, v)
+					end
+				end
+			end
+		end
+		if item.nGenre == ITEM_GENRE.COLOR_DIAMOND then
+			local tPrice = LM.tColorDiamondPrice[item.nDetail]
+			if tPrice and MoneyOptCmp(tPrice[1], NO_BID_PRICE) ~= 0 then
+				LM.Sysmsg(_L["lower color diamond price type"], _L['LM_Auction'])
+				if type(szKey) == "string" then
+					return GetSellInfo(szKey, tPrice)
+				else
+					return GetSellInfo(szItemName, tPrice)
+				end
+			end
+		end
+	else
+		for k, v in pairs(AuctionPanel.tItemSellInfoCache) do
+			if v.szName == szItemName then
+				LM.Sysmsg(_L["system price type"], _L['LM_Auction'])
+				return v
+			end
+		end
+    end
+	LM.Sysmsg(_L["no item price"], _L['LM_Auction'])
+	return nil
+end
+
+function LM_Auction.OnItemMouseEnter()
+	if this:GetName() == "Box_Box" and not this:IsEmpty() then
+		-- szItemTip = LM_Auction.GetItemTip(this)
+	end
+end
+
+function LM_Auction.OnItemMouseLeave()
+	if this:GetName() == "Box_Box" then
+		HideTip()
+		--szItemTip = nil
+	end
+end
+
+function LM_Auction.OnFrameBreathe()
+	local hFrame = Station.Lookup("Normal/AuctionPanel")
+	if not hFrame then
+		return
+	end
+	LM_Auction.UpdateBidItemTime(hFrame)
+end
+
+do
+local function HookAuctionFunc()
+	HookTableFunc(AuctionPanel, "SetSaleInfo",       LM_Auction.SetSaleInfo,         true)
+	HookTableFunc(AuctionPanel, "UpdateItemList",    LM_Auction.PostUpdateItemList)
+	HookTableFunc(AuctionPanel, "UpdateItemList",    LM_Auction.AfterUpdateItemList, true)
+	HookTableFunc(AuctionPanel, "FormatAuctionTime", LM_Auction.FormatAuctionTime,   true, true, true)
+	HookTableFunc(AuctionPanel, "UpdateSaleInfo",    LM_Auction.UpdateSaleInfo,      true)
+	HookTableFunc(AuctionPanel, "GetItemSellInfo",   LM_Auction.GetItemSellInfo,     true)
+	HookTableFunc(AuctionPanel, "OnFrameBreathe",    LM_Auction.OnFrameBreathe)
+	HookTableFunc(AuctionPanel, "OnItemMouseEnter",  LM_Auction.OnItemMouseEnter)
+	HookTableFunc(AuctionPanel, "OnItemMouseLeave",  LM_Auction.OnItemMouseLeave)
+end
+RegisterEvent("ON_FRAME_CREATE", function()
+	if arg0 and arg0:GetName() == "AuctionPanel" then
+		HookAuctionFunc()
+		LM_Auction.Init(arg0)
+	end
+end)
+end
+
+do
+local function UnhookAuctionFunc()
+	UnhookTableFunc(AuctionPanel, "Init",              LM_Auction.Init)
+	UnhookTableFunc(AuctionPanel, "SetSaleInfo",       LM_Auction.SetSaleInfo)
+	UnhookTableFunc(AuctionPanel, "UpdateItemList",    LM_Auction.PostUpdateItemList)
+	UnhookTableFunc(AuctionPanel, "UpdateItemList",    LM_Auction.AfterUpdateItemList)
+	UnhookTableFunc(AuctionPanel, "FormatAuctionTime", LM_Auction.FormatAuctionTime)
+	UnhookTableFunc(AuctionPanel, "UpdateSaleInfo",    LM_Auction.UpdateSaleInfo)
+	UnhookTableFunc(AuctionPanel, "GetItemSellInfo",   LM_Auction.GetItemSellInfo)
+	UnhookTableFunc(AuctionPanel, "OnItemMouseEnter",  LM_Auction.OnItemMouseEnter)
+	UnhookTableFunc(AuctionPanel, "OnItemMouseLeave",  LM_Auction.OnItemMouseLeave)
+end
+RegisterEvent("GAME_EXIT", UnhookAuctionFunc)
+RegisterEvent("PLAYER_EXIT_GAME", UnhookAuctionFunc)
+RegisterEvent("RELOAD_UI_ADDON_BEGIN", UnhookAuctionFunc)
+end
+--------------------------------------------
+function AuctionPanel.OnItemRButtonClick()
+	local szName = this:GetName()
+	if szName == "Box_Item" then
+		if not this:IsEmpty() then
+			RemoveUILockItem("LM_Auction")
+			AuctionPanel.ClearBox(this)
+			AuctionPanel.UpdateSaleInfo(this:GetRoot(), true)
+		end
+	elseif szName == "Handle_ItemList" then
+		AuctionPanel.Selected(this)
+		local hItem = this
+		local tMenu = {
+			{szOption = _L["set base price"],                                   fnAction = function() LM_Auction.SetBaseSellPrice(hItem)         end},
+			{bDevide  = true},
+			{szOption = _L["search all this item"],                             fnAction = function() LM_Auction.UpdateList(hItem.szItemName)    end},
+			{bDevide  = true},
+			{szOption = _L("search [%s]",                  hItem.szSellerName), fnAction = function() LM_Auction.UpdateList(nil, nil, false, hItem.szSellerName) end},
+			{szOption = _L("whisper to [%s]",              hItem.szSellerName), fnAction = function() EditBox_TalkToSomebody(hItem.szSellerName) end},
+			{szOption = _L("add seller [%s] to favorites", hItem.szSellerName), fnAction = function() LM_Auction.AddSeller(hItem.szSellerName)   end},
+			{szOption = _L("add [%s] to black list",       hItem.szSellerName), fnAction = function() LM_Auction.AddBlackList(hItem.szSellerName) LM_Auction.UpdateList() end},
+			{bDevide  = true},
+			{szOption = _L["add to favorites"],                                 fnAction = function() LM_Auction.AddFavorite(hItem.szItemName)   end},
+		}
+		local tDrop = LM_Auction.GetPrediction(this)
+		if tDrop then
+			table.insert(tMenu, tDrop)
+		end
+		PopupMenu(tMenu)
+	end
+end
+
+function AuctionPanel.OnMouseEnter()
+	local szName = this:GetName()
+	if szName == "Btn_Sale" then
+		local x, y = this:GetAbsPos()
+		local w, h = this:GetSize()
+		OutputTip(GetFormatText(_L["sell tip"], nFont or 18), 800, {x, y, w, h})
+	elseif szName == "Btn_SearchDown" then
+		local x, y = this:GetAbsPos()
+		local w, h = this:GetSize()
+		OutputTip(GetFormatText(_L["drop list tip"], nFont or 18), 800, {x, y, w, h})
+	end
+end
+
+function AuctionPanel.OnMouseLeave()
+	local szName = this:GetName()
+	if szName == "Btn_Sale" then
+		HideTip()
+	elseif szName == "Btn_SearchDown" then
+		HideTip()
+	end
+end

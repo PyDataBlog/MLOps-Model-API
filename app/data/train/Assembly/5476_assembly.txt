@@ -1,0 +1,674 @@
+ list       F=inhx8m, P=16F1937, R=hex, N=0
+#include  P16F1937.inc; PIC definitions
+ __config _config1,_FCMEN_OFF  & _IESO_ON & _CLKOUTEN_OFF & _BOREN_OFF  & _CPD_OFF & _CP_OFF & _MCLRE_ON  & _PWRTE_OFF & _WDTE_OFF & _FOSC_INTOSC
+ __config _config2,_LVP_ON  & _BORV_27 & _STVREN_OFF & _PLLEN_OFF & _VCAPEN_OFF & _WRT_OFF
+ Errorlevel -302      ; switches off Message [302]: Register in operand not in bank 0.
+; Definitions -------------------------------------------------------------
+
+
+
+;#define LCDRW portb,5
+#define LCDE portb,4
+#define LCD_P7 portb,3
+#define LCD_P6 portb,2
+#define LCD_P5 portb,1
+#define LCD_P4 portb,0
+
+#define LED_Pin portd,7
+#define LCDRS portb,5
+
+
+; RAM preserved -----------------------------------------------------------
+	cblock 0x20
+		WaitCounter,WaitCounter2,LCD_ByteSendBuffer
+		PassArg1,PassArg2,PassArg3,PassArg4,PassArg5,PassArg6,PassArg7,PassArg8,PassArg9,PassArg10,PassArg11,PassArg12,PassArg13
+	endc
+; Conastants --------------------------------------------------------------
+
+; Program Memory ----------------------------------------------------------
+                org     0
+                goto    Init
+; Interrupt Service Routine -----------------------------------------------
+                org     4               ; ISR beginning
+
+; -------------------------------------------------------------------------
+; Microcontroller initialization
+Init            
+				movlb 0x01
+				movlw b'01111000'
+				movwf OSCCON
+				movlb 0x03
+				clrf ANSELA
+				clrf ANSELB
+				clrf ANSELD
+				clrf ANSELE
+				movlb 0x00
+;##########################################################################
+; Main Program ------------------------------------------------------------
+
+Start
+				;TRIS setup
+				movlb 0x01
+				movlw b'11111111'		;
+				movwf TRISA				;Set the port pin types of the RA
+				movlw b'11000000'		;
+				movwf TRISB				;Set the port pin types of the RB
+				movlw b'11111111'		;
+				movwf TRISC				;Set the port pin types of the RC
+				movlw b'01111111'		;
+				movwf TRISD				;Set the port pin types of the RD
+				movlb 0x00
+
+				clrf PORTA
+				clrf PORTB
+				clrf PORTC
+				clrf PORTD
+
+				bsf LED_Pin
+
+				call wait250msec
+				call wait250msec
+
+				call LCD_Initialize
+				call wait250msec
+				call wait250msec
+				call LCD_DisplayTurnOn
+				call LCD_CursorTurnOff
+				call LCD_Clear
+				;Entry mode set 
+				movlw b'00000000'
+				call LCD_SendByte
+				movlw b'01100000'
+				call LCD_SendByte
+				call wait10msec
+				call wait250msec
+				call wait250msec
+
+				CALL ShowMainScreen
+
+				movlb 0x01
+				bsf PORTA,0
+				movlb 0x03
+				bsf ANSELA,0
+
+				BANKSEL ADCON1 
+				MOVLW b'01110000'
+				MOVWF ADCON1
+
+				BANKSEL ADCON0
+				MOVLW b'10000001'
+				MOVWF ADCON0
+
+				movlb 0x00
+
+				bcf LED_Pin
+				call wait1sec
+
+Mainloop
+
+				bsf LED_Pin
+				movlw b'11001101'
+				CALL LCD_SetCursorPosition
+
+				call GetADC_Value
+				
+				movlw d'62'
+				subwf passarg1,f
+				clrf passarg2
+				clrf passarg4
+				movlw d'100'
+				movwf passarg3
+				call Multiply16x16
+
+				movf passarg7,w
+				movwf passarg1
+				movf passarg6,w
+				movwf passarg2
+				movf passarg5,w
+				movwf passarg3
+
+				clrf passarg4
+				clrf passarg5
+				clrf passarg6
+				incf passarg5,f
+				incf passarg6,f
+				call Divide24By24
+
+				movlw b'00000001'
+				andwf PassArg9,f			;Clear 0.5 
+
+				movf passarg3,w
+				call Show1ByteNumberInPosition
+
+				movlw ',';
+				call LCD_ShowCharacter
+
+				movlw 0x35
+				btfss PassArg9,0
+				movlw 0x30
+				call LCD_ShowCharacter
+
+				movlw b'11011111'
+				call LCD_ShowCharacter
+				movlw 'C';
+				call LCD_ShowCharacter
+			
+				call wait250msec
+				bcf LED_Pin
+				call wait250msec
+				goto Mainloop
+
+
+
+GetADC_Value
+				CALL wait250msec				
+				CALL wait250msec			
+
+				BANKSEL ADCON0
+				BSF ADCON0,ADGO
+				BTFSC ADCON0,ADGO
+				GOTO $-1
+
+				BANKSEL ADRESH
+				MOVF ADRESH,W
+				movlb 0x00
+				MOVWF PassArg1
+				BANKSEL ADRESL
+				MOVF ADRESL,W
+				movlb 0x00
+				MOVWF PassArg2
+
+				return
+
+Show1ByteNumberInPosition
+				movwf PassArg1
+				call Bin8ToDecimal
+
+				movf PassArg4,w
+				btfsc zero
+				goto SBNIP_FirstIs0
+				
+				movlw 0x30
+				addwf PassArg4,w
+				call LCD_ShowCharacter
+SBNIP_ContinueNormal				
+				movlw 0x30
+				addwf PassArg5,w
+				call LCD_ShowCharacter
+SBNIP_ShowLastDigit
+				movlw 0x30
+				addwf PassArg6,w
+				call LCD_ShowCharacter
+				return
+
+SBNIP_FirstIs0
+				movf PassArg5,w
+				btfss zero
+				goto SBNIP_ContinueNormal
+				goto SBNIP_ShowLastDigit
+
+
+ShowMainScreen
+
+				movlw b'00000000'
+				CALL LCD_SetCursorPosition
+				movlw 'P';
+				call LCD_ShowCharacter
+				movlw 'I';
+				call LCD_ShowCharacter
+				movlw 'C';
+				call LCD_ShowCharacter
+				movlw ' ';
+				call LCD_ShowCharacter
+				movlw 'T';
+				call LCD_ShowCharacter
+				movlw 'H';
+				call LCD_ShowCharacter
+				movlw 'E';
+				call LCD_ShowCharacter
+				movlw 'R';
+				call LCD_ShowCharacter
+				movlw 'M';
+				call LCD_ShowCharacter
+				movlw 'O';
+				call LCD_ShowCharacter
+				movlw 'M';
+				call LCD_ShowCharacter
+				movlw 'E';
+				call LCD_ShowCharacter
+				movlw 'T';
+				call LCD_ShowCharacter
+				movlw 'E';
+				call LCD_ShowCharacter
+				movlw 'R';
+				call LCD_ShowCharacter
+				movlw ' ';
+				call LCD_ShowCharacter
+				movlw 'W';
+				call LCD_ShowCharacter
+				movlw 'I';
+				call LCD_ShowCharacter
+				movlw 'T';
+				call LCD_ShowCharacter
+				movlw 'H';
+				call LCD_ShowCharacter
+				movlw b'01000000'
+				CALL LCD_SetCursorPosition
+				movlw 'T';
+				call LCD_ShowCharacter
+				movlw 'H';
+				call LCD_ShowCharacter
+				movlw 'E';
+				call LCD_ShowCharacter
+				movlw 'R';
+				call LCD_ShowCharacter
+				movlw 'M';
+				call LCD_ShowCharacter
+				movlw 'I';
+				call LCD_ShowCharacter
+				movlw 'S';
+				call LCD_ShowCharacter
+				movlw 'T';
+				call LCD_ShowCharacter
+				movlw 'O';
+				call LCD_ShowCharacter
+				movlw 'R';
+				call LCD_ShowCharacter
+				movlw ' ';
+				call LCD_ShowCharacter
+
+
+				movlw b'10000011'
+				CALL LCD_SetCursorPosition
+				movlw 'w';
+				call LCD_ShowCharacter
+				movlw 'w';
+				call LCD_ShowCharacter
+				movlw 'w';
+				call LCD_ShowCharacter
+				movlw '.';
+				call LCD_ShowCharacter
+				movlw 'p';
+				call LCD_ShowCharacter
+				movlw 'c';
+				call LCD_ShowCharacter
+				movlw 'b';
+				call LCD_ShowCharacter
+				movlw 'h';
+				call LCD_ShowCharacter
+				movlw 'e';
+				call LCD_ShowCharacter
+				movlw 'a';
+				call LCD_ShowCharacter
+				movlw 'v';
+				call LCD_ShowCharacter
+				movlw 'e';
+				call LCD_ShowCharacter
+				movlw 'n';
+				call LCD_ShowCharacter
+				movlw '.';
+				call LCD_ShowCharacter
+				movlw 'c';
+				call LCD_ShowCharacter
+				movlw 'o';
+				call LCD_ShowCharacter
+				movlw 'm';
+				call LCD_ShowCharacter
+
+
+				movlw b'11000000'
+				CALL LCD_SetCursorPosition
+				movlw 'T';
+				call LCD_ShowCharacter
+				movlw 'E';
+				call LCD_ShowCharacter
+				movlw 'M';
+				call LCD_ShowCharacter
+				movlw 'P';
+				call LCD_ShowCharacter
+				movlw 'E';
+				call LCD_ShowCharacter
+				movlw 'R';
+				call LCD_ShowCharacter
+				movlw 'A';
+				call LCD_ShowCharacter
+				movlw 'T';
+				call LCD_ShowCharacter
+				movlw 'U';
+				call LCD_ShowCharacter
+				movlw 'R';
+				call LCD_ShowCharacter
+				movlw 'E';
+				call LCD_ShowCharacter
+				movlw ':';
+				call LCD_ShowCharacter
+
+				return
+
+Bin8ToDecimal
+                movf PassArg1,w
+                movwf PassArg2
+                movlw 8
+                movwf PassArg3
+                clrf PassArg4
+                clrf PassArg5
+                clrf PassArg6
+
+Bin8ToDecimal_BCDADD3       
+				movlw 5
+                subwf PassArg4, 0
+                btfsc STATUS, C
+                CALL Bin8ToDecimal_ADD3HUNS
+
+                movlw 5
+                subwf PassArg5, 0
+                btfsc STATUS, C
+                CALL Bin8ToDecimal_ADD3TENS
+
+                movlw 5
+                subwf PassArg6, 0
+                btfsc STATUS, C
+                CALL Bin8ToDecimal_ADD3ONES
+
+                decf PassArg3, 1
+                bcf STATUS, C
+                rlf PassArg1, 1
+                rlf PassArg6, 1
+                btfsc PassArg6,4 ; 
+                CALL Bin8ToDecimal_CARRYONES
+                rlf PassArg5, 1
+
+                btfsc PassArg5,4 ; 
+                CALL Bin8ToDecimal_CARRYTENS
+                rlf PassArg4,1
+                bcf STATUS, C
+
+                movf PassArg3, 0
+                btfss STATUS, Z
+                GOTO Bin8ToDecimal_BCDADD3
+                movf PassArg2,w
+                movwf PassArg1
+                RETURN
+
+Bin8ToDecimal_ADD3HUNS        
+				movlw 3
+                addwf PassArg4,1
+                RETURN
+Bin8ToDecimal_ADD3TENS
+				movlw 3
+                addwf PassArg5,1
+                RETURN
+Bin8ToDecimal_ADD3ONES
+				movlw 3
+                addwf PassArg6,1
+                RETURN
+Bin8ToDecimal_CARRYONES
+				bcf PassArg6, 4
+                bsf STATUS, C
+                RETURN
+Bin8ToDecimal_CARRYTENS
+				bcf PassArg5, 4
+                bsf STATUS, C
+                RETURN
+
+
+StartDelayCount movwf WaitCounter2		;1    
+
+BackWaitLoop2   movlw d'249'			;1
+                call WaitWx4Cycles		;2+996
+                movlw d'249'			;1
+                call WaitWx4Cycles		;2+996
+                movlw d'249'			;1
+                call WaitWx4Cycles		;2+996
+                movlw d'249'			;1
+                call WaitWx4Cycles		;2+996
+                movlw d'200'			;1
+                call WaitWx4Cycles		;2+992
+                movlw d'120'			;1
+                call WaitWx4Cycles		;2+992
+				nop
+				nop
+                decf WaitCounter2,f		;1
+                btfss zero				;1
+                goto BackWaitLoop2		;2
+                return					;2
+
+WaitWx4Cycles   movwf WaitCounter
+BackWaitLoop    decfsz WaitCounter,f
+                goto BackWaitLoop
+                return
+
+Wait1mSec       movlw d'1'
+                goto StartDelayCount
+Wait4mSec       movlw d'4'
+                goto StartDelayCount
+Wait10mSec      movlw d'10'
+                goto StartDelayCount
+Wait100mSec      movlw d'100'
+                goto StartDelayCount
+Wait250mSec     movlw d'250'
+                goto StartDelayCount
+
+
+Wait1Sec		call Wait250mSec
+				call Wait250mSec
+				call Wait250mSec
+				goto Wait250mSec
+LCD_SetCursorPosition
+				movwf passarg1
+				andlw b'00011111'
+				movwf passarg2		;Col
+				movlw b'11000000'
+				andwf passarg1,f	;Row
+				bcf carry
+				rlf passarg1,f
+				rlf passarg1,f
+				rlf passarg1,f
+
+
+				movlw 0x00
+				movf passarg1,f
+				btfsc zero
+				goto LCD_SetCursorPosition_Next
+
+				movlw 0x40
+				decf passarg1,f
+				btfsc zero
+				goto LCD_SetCursorPosition_Next
+
+				movlw 0x94
+				decf passarg1,f
+				btfsc zero
+				goto LCD_SetCursorPosition_Next
+
+				movlw 0xd4
+
+LCD_SetCursorPosition_Next	
+				addwf passarg2,f
+				bsf passarg2,7
+				movlw b'11110000'
+				andwf passarg2,w
+				call LCD_SendByte
+
+				swapf passarg2,f
+				movlw b'11110000'
+				andwf passarg2,w
+
+				call LCD_SendByte
+				call wait10msec
+				RETURN
+				
+
+LCD_ShowCharacter
+				movwf PassArg1
+				bsf LCDRS
+				call LCD_SendByte
+				swapf PassArg1,w
+				call LCD_SendByte
+				bcf LCDRS
+				return
+
+LCD_Initialize
+				movlw b'00110000'
+				call LCD_SendByte
+				movlw b'00110000'
+				call LCD_SendByte
+				movlw b'00110000'
+				call LCD_SendByte
+
+				movlw b'00100000'
+				call LCD_SendByte
+				call wait10msec
+
+				movlw b'00100000'
+				call LCD_SendByte
+				movlw b'11100000'
+				call LCD_SendByte
+				return
+
+LCD_Clear
+				movlw b'00000000'
+				call LCD_SendByte
+				movlw b'00010000'
+				call LCD_SendByte
+				return
+
+LCD_DisplayTurnOff
+				movlw b'00000000'
+				call LCD_SendByte
+				movlw b'10100000'
+				call LCD_SendByte
+				return
+
+LCD_DisplayTurnOn
+				movlw b'00000000'
+				call LCD_SendByte
+				movlw b'11100000'
+				call LCD_SendByte
+				return
+
+LCD_CursorTurnOn
+				movlw b'00000000'
+				call LCD_SendByte
+				movlw b'11100000'
+				call LCD_SendByte
+				return
+LCD_CursorTurnOff
+				movlw b'00000000'
+				call LCD_SendByte
+				movlw b'11000000'
+				call LCD_SendByte
+				return
+
+LCD_SendByte
+				movwf LCD_ByteSendBuffer
+				bsf LCD_P4
+				btfss LCD_ByteSendBuffer,4
+				bcf LCD_P4
+				bsf LCD_P5
+				btfss LCD_ByteSendBuffer,5
+				bcf LCD_P5
+				bsf LCD_P6
+				btfss LCD_ByteSendBuffer,6
+				bcf LCD_P6
+				bsf LCD_P7
+				btfss LCD_ByteSendBuffer,7
+				bcf LCD_P7
+				bsf LCDE
+				call wait1msec
+				bcf LCDE
+				call wait1msec
+				return
+Multiply16x16
+				local m1, m2
+				clrf PassArg8
+				clrf PassArg7
+				clrf PassArg6
+				clrf PassArg5
+				bsf PassArg6, 7
+m1:
+				rrf PassArg2, f
+				rrf PassArg1, f
+				skpc
+				goto m2
+				movf PassArg3, w
+				addwf PassArg7, f
+				movf PassArg4, w
+				skpnc
+				incfsz PassArg4, w
+				addwf PassArg8, f
+m2:
+				rrf PassArg8, f
+				rrf PassArg7, f
+				rrf PassArg6, f
+				rrf PassArg5, f
+				skpc
+				goto m1
+				return
+
+Divide24By24
+				movlw .24
+				movwf PassArg13
+				movf PassArg1,w
+				movwf PassArg12
+				movf PassArg2,w
+				movwf PassArg11
+				movf PassArg3,w
+				movwf PassArg10
+				clrf PassArg1
+				clrf PassArg2
+				clrf PassArg3
+
+				clrf PassArg7
+				clrf PassArg8
+				clrf PassArg9
+Divide24By24_dloop
+				bcf status,c
+				rlf PassArg10,f
+				rlf PassArg11,f
+				rlf PassArg12,f
+				rlf PassArg9,f
+				rlf PassArg8,f
+				rlf PassArg7,f
+				movf PassArg4,w
+				subwf PassArg7,w
+				btfss status,z
+				goto Divide24By24_nochk
+
+				movf PassArg5,w
+				subwf PassArg8,w
+				btfss status,z
+				goto Divide24By24_nochk
+
+				movf PassArg6,w
+				subwf PassArg9,w
+Divide24By24_nochk
+				btfss status,c
+				goto Divide24By24_nogo
+
+				movf PassArg6,w
+				subwf PassArg9,f
+				btfss status,c
+				decf PassArg8,f
+				movf PassArg8,w
+				xorlw 0xff
+				btfsc status,z
+				decf PassArg7,f
+				movf PassArg5,w
+				subwf PassArg8,f
+				btfss status,c
+				decf PassArg7,f
+				movf PassArg4,w
+				subwf PassArg7,f
+				bsf status,c
+Divide24By24_nogo
+				rlf PassArg3,f
+				rlf PassArg2,f
+				rlf PassArg1,f
+				decfsz PassArg13,f
+				goto Divide24By24_dloop
+				return
+
+Fins	
+
+                end

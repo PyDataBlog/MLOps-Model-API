@@ -1,0 +1,183 @@
+const GREEK_FROM_BETA: [char; 26] = [
+    '\u{03b1}', // A => alpha
+    '\u{03b2}', // B => beta
+    '\u{03be}', // C => xi
+    '\u{03b4}', // D => delta
+    '\u{03b5}', // E => epsilon
+    '\u{03c6}', // F => phi
+    '\u{03b3}', // G => gamma
+    '\u{03b7}', // H => eta
+    '\u{03b9}', // I => iota
+    '\u{03c2}', // J => final sigma
+    '\u{03ba}', // K => kappa
+    '\u{03bb}', // L => lambda
+    '\u{03bc}', // M => mu
+    '\u{03bd}', // N => nu
+    '\u{03bf}', // O => omicron
+    '\u{03c0}', // P => pi
+    '\u{03b8}', // Q => theta
+    '\u{03c1}', // R => rho
+    '\u{03c3}', // S => sigma (medial by default)
+    '\u{03c4}', // T => tau
+    '\u{03c5}', // U => upsilon
+    '\u{03dd}', // V => digamma (wau)
+    '\u{03c9}', // W => omega
+    '\u{03c7}', // X => chi
+    '\u{03c8}', // Y => psi
+    '\u{03b6}', // Z => zeta
+];
+
+const MEDIAL_SIGMA: char = '\u{03c3}';
+const FINAL_SIGMA: char = '\u{03c2}';
+
+const QUESTION_MARK: char = ';'; // normal semicolon is prefered
+const APOSTROPHE: char = '\u{2019}'; // right single quotation mark
+const HYPHEN: char = '\u{2010}'; // TLG says to use this instead of '-'
+const DASH: char = '\u{2014}'; // em dash
+const MIDDLE_DOT: char = '\u{00B7}';
+const NUMERAL_SIGN: char = '\u{0374}';
+
+const SMOOTH_BREATHING: char = '\u{0313}';
+const ROUGH_BREATHING: char = '\u{0314}';
+
+const ACUTE_ACCENT: char = '\u{0301}';
+const CIRCUMFLEX_ACCENT: char = '\u{0342}';
+const GRAVE_ACCENT: char = '\u{0300}';
+
+const DIAERESIS: char = '\u{0308}';
+
+const IOTA_SUBSCRIPT: char = '\u{0345}';
+
+pub fn beta_decode(c: char) -> char {
+    match c {
+        'a' ... 'z' => {
+            const LITTLE_A: usize = 'a' as usize;
+            let index = (c as usize) - LITTLE_A;
+            GREEK_FROM_BETA[index]
+        },
+        'A' ... 'Z' => {
+            const BIG_A: usize = 'A' as usize;
+            let index = (c as usize) - BIG_A;
+            GREEK_FROM_BETA[index]
+        }
+        ')' => SMOOTH_BREATHING,
+        '(' => ROUGH_BREATHING,
+        '/' => ACUTE_ACCENT,
+        '=' => CIRCUMFLEX_ACCENT,
+        '\\'=> GRAVE_ACCENT,
+        '+' => DIAERESIS,
+        '|' => IOTA_SUBSCRIPT,
+        ';' => QUESTION_MARK,
+        '\''=> APOSTROPHE,
+        '-' => HYPHEN,
+        '_' => DASH,
+        ':' => MIDDLE_DOT,
+        '#' => NUMERAL_SIGN,
+        _ => c,
+    }
+}
+
+pub struct BetaDecoding<I: Iterator<Item=char>> {
+    betacode: I,
+    lookahead: Option<char>,
+    breathing: Option<char>,
+    accent: Option<char>,
+    awaiting_uppercase: bool,
+}
+
+impl<I: Iterator<Item=char>> BetaDecoding<I> {
+    pub fn new(betacode: I) -> BetaDecoding<I> {
+        BetaDecoding {
+            betacode: betacode,
+            lookahead: None,
+            breathing: None,
+            accent: None,
+            awaiting_uppercase: false,
+        }
+    }
+
+    fn next_helper(&mut self) -> Option<char> {
+        // get_greek_char does most of the work, just have to determine correct sigma
+        let greek_char = if let Some(_) = self.lookahead {
+            self.lookahead
+        } else {
+            self.get_greek_char()
+        };
+        self.lookahead = None;
+        match greek_char {
+            Some(MEDIAL_SIGMA) => {
+                self.lookahead = self.get_greek_char();
+                match self.lookahead {
+                    Some(c) if c.is_alphabetic() => Some(MEDIAL_SIGMA),
+                    _ => Some(FINAL_SIGMA),
+                }
+            },
+            _ => greek_char,
+        }
+    }
+
+    fn get_greek_char(&mut self) -> Option<char> {
+        if let Some(breathing) = self.breathing {
+            self.breathing = None;
+            Some(breathing)
+        } else if let Some(accent) = self.accent {
+            self.accent = None;
+            Some(accent)
+        } else {
+            match self.betacode.next() {
+                Some('`') => {
+                    // escape character
+                    self.betacode.next()
+                },
+                Some('*') => {
+                    self.awaiting_uppercase = true;
+                    self.next()
+                },
+                Some(')') if self.awaiting_uppercase => {
+                    let next = self.next();
+                    self.breathing = Some(SMOOTH_BREATHING);
+                    next
+                },
+                Some('(') if self.awaiting_uppercase => {
+                    let next = self.next();
+                    self.breathing = Some(ROUGH_BREATHING);
+                    next
+                },
+                Some('/') if self.awaiting_uppercase => {
+                    let next = self.next();
+                    self.accent = Some(ACUTE_ACCENT);
+                    next
+                },
+                Some('=') if self.awaiting_uppercase => {
+                    let next = self.next();
+                    self.accent = Some(CIRCUMFLEX_ACCENT);
+                    next
+                },
+                Some('\\') if self.awaiting_uppercase => {
+                    let next = self.next();
+                    self.accent = Some(GRAVE_ACCENT);
+                    next
+                },
+                Some(c) => {
+                    let greek = beta_decode(c);
+                    if self.awaiting_uppercase {
+                        self.awaiting_uppercase = false;
+                        greek.to_uppercase().next()
+                    } else {
+                        Some(greek)
+                    }
+                },
+                None => None,
+            }
+        }
+    }
+}
+
+impl<I: Iterator<Item=char>> Iterator for BetaDecoding<I> {
+    type Item = char;
+    #[inline]
+    fn next (&mut self) -> Option<char> {
+        self.next_helper()
+    }
+}
+

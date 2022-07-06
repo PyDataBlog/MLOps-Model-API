@@ -1,0 +1,64 @@
+package demo.wordcnt
+
+import demo.SparkBatchApplication
+import org.apache.commons.lang3.RandomStringUtils
+import org.apache.spark.{SparkConf, SparkContext}
+
+/**
+ * ランダム文字列生成バッチ
+ */
+object RandomWordsWriter extends SparkBatchApplication {
+  /**
+   * 指定された文字列数×文字数のランダム文字列を生成してファイルに出力します
+   * <p/>
+   *
+   * @param sc SparkContext
+   * @param args 起動引数
+   */
+  override def process(sc: SparkContext, args: Array[String]): Unit = {
+    val dir = if (args.length > 0) args(0) else throw new IllegalArgumentException("FilePath is required.")
+    val lines = if (args.length > 1) args(1).toLong else 1000 * 1000 * 100
+    val chars = if (args.length > 2) args(2).toInt else 9
+    val partitions = sc.defaultMinPartitions
+    val recordPartition = lines / partitions.toLong
+    val executors = sc.getConf.get("spark.executor.instances", partitions.toString).toInt
+    println(s"""==========
+        | Batch Random-word Writer
+        | ----
+        | directory path  : ${dir}
+        | line size       : ${lines}
+        | word size       : ${chars}
+        | executors       : ${executors}
+        | partitions      : ${partitions}
+        |==========
+      """.stripMargin)
+
+    // ==== main script ====
+
+    val startTime = System.currentTimeMillis();
+    println("wordgen : start")
+    sc.parallelize(1 to partitions, partitions).mapPartitionsWithIndex { case (idx, _) =>
+      Iterator.tabulate(recordPartition.toInt) { offset =>
+        RandomStringUtils.randomAlphabetic(chars)
+      }
+    }.saveAsTextFile(dir)
+    println("wordcount : complete [" + convertTime((System.currentTimeMillis() - startTime).toInt) + "]")
+  }
+
+  def convertTime(time: Int): String = {
+    if (time > 3600000) return (time / 3600000) + " hour " + ((time % 3600000) / 60000) + " min (" + time + ")"
+    if (time > 60000) return (time / 60000) + " min " + ((time % 60000) / 1000) + " sec (" + time + ")"
+    ((time % 60000) / 1000) + " sec (" + time + ")"
+  }
+
+  /** Sparkジョブ設定内容を変更 */
+  override def configure(conf: SparkConf, args: Array[String]) = {
+    conf.set("spark.ui.killEnabled", "true")
+    // パーティション分割数をExecutorと同じに変更
+    val executors = conf.get("spark.executor.instances", "2").toInt
+    val parallelismParExecutors = conf.get("spark.executor.cores", "1").toInt
+    val parallelism = executors * parallelismParExecutors
+    conf.set("spark.default.parallelism", parallelism.toString)
+    super.configure(conf, args)
+  }
+}

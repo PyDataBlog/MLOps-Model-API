@@ -1,0 +1,267 @@
+\chapter{High Availability (Kommt nicht an MEP)}
+Im Zentrum steht die Hochverfügbarkeit von Java EE Applikationen. Um solche Applikationen hochverfügbar zu machen, müssen diese auf mehreren Server zur Verfügung gestellt werden. So schützt man sich zum einem vor Server-Ausfällen und zum anderen, dass der Server durch Erhöhung der Last in die Knie geht. Damit eine Applikation verteilt werden kann, muss sie horizontal skalierbar sein. Applikationen welche auf Basis des Java EE Framework entwickelt werden, bringen diese Fähigkeit bereits mit. All diese Low-Level Aufgaben übernimmt der Container.
+
+Beispielsweise installieren wir unsere Java EE Applikation auf drei Applikationsservern \emph{(nachfolgend App-Server)} und setzen die App-Server alle in einen einzigen Cluster. Befinden sich Statefull-Session-Beans im Einsatz müssen diese auf allen drei App-Server repliziert werden. Dadurch kann jeder einzelne Request von einem x-beliebigen App-Server verarbeitet werden. Natürlich gibt es auch andere Modelle, dass beispielsweise eine Session immer über den gleichen App-Server laufen. Dies würde eigentlich keine Replizierung mehr benötigt, aber was passiert wenn dieser Server crasht? Genau - die nicht persistenten Session-Daten gehen verloren. Wie replizieren wir nun aber die Daten der Beans? Gar nicht, dass erledigt für uns die App-Server gleich selber. Der Wildfly App-Server (ex JBoss) verwendet dabei die Library \emph{JGroups}, welche nachfolgend behandelt wird.
+
+\section{JGroups}
+JGroups ist eine leichtgewichtige (2MB) Clustering Library. Sie kann für folgendes verwendet werden: 
+\begin{itemize}
+	\item Kommunikation im Cluster
+	\item Chat
+	\item Task Distribution
+	\item Publisher/Subscriber
+\end{itemize}
+Sie bietet zuverlässige \emph{one-to-one} und \emph{one-to-many} Kommunikation. Die Bibliothek selber benötigt keine Java EE Komponenten und kann in einer Java SE Umgebung betrieben werden. Zudem ist sie sehr mächtig und kann problemlos mit Server-Ausfällen umgehen.
+
+\subsection{Komponenten}
+
+JGroups besteht auf folgenden Komponenten:
+
+\subsubsection{JChannel}
+
+Dies ist ein Cluster-Node Endpoint. Schlussendlich nicht mehr oder weniger als ein Socket, wie wir es aus der Netzwerkkommunikation kennen. Der Entwickler arbeitet grundsätzlich mit diesem Objekt.
+
+\newpage
+
+\subsubsection{Protocol stack} 
+
+Der Protokoll-Stack kann beliebig zusammengestellt werden. Zudem gibt es built-in Protokolle wie: 
+\begin{multicols}{2}
+	\begin{itemize}
+		\item network communication
+		\item membership discovery
+		\item failure detection
+		\item lossless and ordered transmission
+		\item network split handling and subsequent merging
+		\item notification when nodes join or leave the cluster
+		\item flow control
+		\item compression
+		\item encryption
+		\item authentication
+	\end{itemize}
+\end{multicols}
+Der gesamte Stack wird typischerweise über XML-Dateien konfiguriert. Kann aber auch programmatisch erfolgen. Listing \ref{lst:xml-protokol-stack} zeigt ein Beispiel für eine XML-Konfiguration eines Stacks.
+	
+\begin{lstlisting}[language=XML, caption=XML für Protokoll Stack, label=lst:xml-protokol-stack]
+<config xmlns="urn:org:jgroups" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:schemaLocation="urn:org:jgroups	http://www.jgroups.org/schema/jgroups.xsd">
+<UDP mcast_port="${jgroups.udp.mcast_port:45588}" />
+	<PING />
+	<MERGE3 max_interval="30000" min_interval="10000"/>
+	<FD_SOCK/>
+	<FD_ALL/>
+	<VERIFY_SUSPECT timeout="1500" />
+	<pbcast.NAKACK2 xmit_interval="500" use_mcast_xmit="false"/>
+	<UNICAST3 xmit_interval="500" conn_expiry_timeout="0" />
+	<pbcast.STABLE desired_avg_gossip="50000" max_bytes="4M"/>
+	<pbcast.GMS print_local_addr="true" join_timeout="2000" view_bundling="true"/>
+	<UFC max_credits="2M" min_threshold="0.4"/>
+	<MFC max_credits="2M" min_threshold="0.4"/>
+	<FRAG2 frag_size="60K" />
+</config>
+\end{lstlisting}
+
+\subsubsection{Building blocks} 
+
+Diese werden über Channels benutzt für Methodenaufrufe innerhalb des Clusters, verteiltes Caching, verteilte Zähler, verteilte Locks und Verteilung von Task über die Cluster Nodes.
+
+\subsection{Häufig verwendete Klassen}
+
+Nachfolgend werden häufig verwendete Klassen von JGroups erläutert.
+
+\subsubsection{Address} 
+
+Identifiziert bzw. repräsentiert einen Member (Node) in einem Cluster. Kreiert man einen Channel \verb|new JChannel()|, wird implizit eine Adresse vergeben. Mittels \verb|JChannel.getAddress()| kann die Adresse abgefragt werden. Die Adresse kann mit einem logischen Namen versehen werden, welche dann in der \verb|View| erscheint. Der logische Name kann vor dem Öffnen des Channels gesetzt werden \verb|channel.name("A")|. Die anderen Nodes sehen diesen logischen Namen auch. Haben mehrere Nodes denselben Namen, dies spielt keine Rolle, da intern mit der UUID gearbeitet wird. Listing \ref{lst:verwendung-jchannel} zeigt wie eine Nachricht an den Cluster geschickt wird.
+	
+\begin{lstlisting}[caption=Verwendung von JChannel, label=lst:verwendung-jchannel]
+// Create a channel, name it "A":
+JChannel ch = new JChannel("/home/bela/udp.xml").name("A");
+	
+// Join the cluster "demo-cluster":
+ch.connect("demo-cluster");
+	
+// Send a messaeg to all nodes (including myself):
+Message msg=new Message(null, "hello world");
+ch.send(msg);
+	
+// Disconnect and close the channel:
+ch.close();
+\end{lstlisting}
+	
+\subsubsection{View}
+
+Liste aller Adressen in einem Cluster. Die Sortierung der View ist in allen Nodes dieselbe. Eine View definiert immer folgendes:	
+\newline
+\verb/[Coordinator-Knoten|View-Sequenz] (Anzahl Knoten) [Knoten-Name 1, ..., Knoten-Name n]/
+\newline
+Der Koordinator-Knoten ist zuständig für die View. View-Changes laufen über diesen Knoten. Bei jedem Wechsel der View, wird die Sequenz um eins erhöht.
+\begin{lstlisting}[caption=View]
+// Knoten A ist in einen leeren Cluster eingetreten. A wird Coordinator
+[A|0] (1) [A]
+[A|1] (2) [A, B] 	// B ist dazugestossen.\newline
+[A|2] (3) [A, B, C] // C ist dazugestossen.\newline
+[A|3] (2) [A, C] 	// B ist ausgetreten.\newline
+[C|4] (1) [C] 		// A ist ausgetreten. C wird nun automatisch Coordinator.
+\end{lstlisting}
+Auf dem Channel kann \verb|disconnect()| aufgerufen werden. Dies veranlasst ein \emph{leave request} auf dem Coordinator, welcher die View aktualisiert und diese den verbleibenden Teilnehmer übermittelt. Nachdem \verb|disconnect()| kann der Channel wieder benutzt werden um zu \verb|connect()|. Der Channel kann mit \verb|close()| geschlossen werden. Geschlossene Channel können nicht wieder verwendet werden.
+		
+\subsubsection{Message}
+
+Werden von Nodes über Channels empfangen und gesendet. Falls die Destination \verb|null| ist, geht die Message an alle Nodes im Cluster. Die Message hat einen Payload (\verb|byte[] buffer|) und Flags. Ausserdem einen Header, welcher aber nur von den Protokollen benutzt werden sollte.
+	
+\begin{lstlisting}[caption=Nachricht senden]
+Message msg = new Message(null, "hello");
+// set flag OOB
+msg.setFlag(Message.Flag.OOB);
+channel.send(msg);
+\end{lstlisting}
+
+\newpage
+	
+\subsubsection{ReceiverAdapter}
+
+Um Messages zu empfangen, können Listeners registriert werden (push-modell).
+
+\begin{lstlisting}[caption=Message Listener]
+channel.setReceiver(new ReceiverAdapter() {
+	public void receive(Message msg) {
+		System.out.println("received msg from " + msg.getSrc() + ": " + msg.getObject());
+	}
+
+	public void viewAccepted(View view) {
+		System.out.println("received view " + view);
+	}
+});
+\end{lstlisting}
+	
+\subsection{Zustand}
+
+In Clustern gibt es oft \emph{shared State}. Jeder Node hat einen lokalen State. Wird dieser verändert wird das im gesamten Cluster propagiert. State kann alles sein. Es wird zwischen dem State Provider (typischerweise der Coordinator) und dem State Requester unterschieden. Dafür muss auf dem \verb|ReceiverAdapter| folgendes überschrieben werden. 
+
+\begin{lstlisting}[caption=\texttt{ReceiverAdapter} überschreiben]
+// Der Protkoll Stack muss für State-Transfer erweitert werden: 
+// STATE_TRANSFER, STATE, or STATE_SOCK
+public void setState(InputStream input) throws Exception {
+    List<String> list = (List<String>)
+							    Util.objectFromStream(new DataInputStream(input));
+	synchronized(state) {
+		state.clear();
+		state.addAll(list);
+	}
+	
+	System.out.println(list.size() + " messages in chat history):");
+	for(String str: list) System.out.println(str);
+}
+
+public void getState(OutputStream output) throws Exception {
+	synchronized(state) {
+		Util.objectToStream(state, new DataOutputStream(output));
+	}
+}
+
+\end{lstlisting}
+
+\subsection{Building Blocks}
+
+\subsubsection{Method invocation}
+
+Mittels der Klasse \verb|RpcDispatcher| können Methoden-Aufrufe in Clustern getätigt werden. Diese können \emph{synchron}, wie auch \emph{asynchron} sein. Jede Java-Methode kann aufgerufen werden. Eine Antwort ist vom Typ \verb|Rsp<T>|, welche Methoden wie \verb|getValue()|, \verb|hasException()| oder \verb|wasSuspected()| beinhaltet. Mittels \verb|RequestOptions| kann jeder Aufruf parametrisiert werden:
+	
+\begin{itemize}
+	\item GET\_ALL: Wartet bis alle Nodes geantwortet haben. Ausser die, die suspected (nicht mehr da) sind.
+	\item GET\_NONE: Wartet nicht. Das ist ein non-blockling call.
+	\item GET\_FIRST: Wartet bis der erste Node geantwortet hat.
+	\item GET\_MAJORITY: Wartet bis die Mehrheit der Nodes geantwortet hat.
+\end{itemize}
+	
+\begin{lstlisting}[caption=Methoden-Aufruf im Cluster]
+public int print(int number) throws Exception {
+	return number * 2;
+} 
+// 5000 = Timeout in Millis
+RequestOptions opts = new RequestOptions(ResponseMode.GET_ALL, 5000);
+JChannel channel = new JChannel();
+RpcDispatcher disp = new RpcDispatcher(channel, this);
+channel.connect("RpcDispatcherTestGroup");
+for (int i = 0; i < 10; i++) {
+	RspList rsp_list = disp.callRemoteMethods(null, "print", new Object[]{i}, new Class[]{int.class}, opts);
+	System.out.println("Responses: " + rsp_list);
+}
+\end{lstlisting}
+\noindent
+Zudem gibt es \verb|ResponseFilter| dabei können Antworten von Nodes einfach und sauber gefiltert werden.
+	
+\begin{lstlisting}[caption=Antwort filtern]
+RspFilter filter = new RspFilter() {
+	int num = 0;
+	public boolean isAcceptable(Object response, Address sender) {
+		boolean retval = (Integer) response > 1;
+		if (retval) { num++; }
+		return retval;
+	}
+	public boolean needMoreResponses() {
+		return num < 2;
+	}
+};
+RequestOptions opts = RequestOptions.SYNC().setRspFilter(filter);
+RspList rsps = disp.callRemoteMethods(null, "foo", null, null, opts);
+\end{lstlisting}
+	
+\subsubsection{Distributed Caching}
+
+Dabei geht es um Replizieren (replicating) und Verteilen (distributing) von Daten. Beim Replizieren haben alle Nodes alle Daten und beim Verteilen haben  einzelne Nodes nur einen Teil der Daten.
+	
+Bei der \verb|ReplicatedHashMap| ist es die Variante \emph{full replicating}. Es ist relativ simple. Es ist nichts anders als eine Map, welcher aber im Cluster zu jedem Zeitpunkt repliziert ist. Arbeitet intern mit dem \emph{State Transfer}-Konzept.
+	
+\begin{lstlisting}[caption=Beispiel einer \texttt{ReplicatedHashMap}]
+JChannel channel = new JChannel(props);
+channel.connect("rhm-cluster");
+ReplicatedHashMap<String,Integer> map=new ReplicatedHashMap<String,Integer>(channel)
+map.start();
+\end{lstlisting}
+
+Als Alternative gibt es \verb|ReplCache|, welches eine \emph{partial replication} darstellt. Mittels dem Parameter \emph{replication count} kann definiert werden auf wie vielen Nodes die Daten präsent sein müssen. Wenn die \emph{View} ändert, werden die Daten \emph{rebalanced}. Damit jeder Node immer möglichst gleiche viele Daten hat.
+	
+\begin{lstlisting}[caption=Partial Replication]
+ReplCache<String,String> cache = new ReplCache<String,String>(props, cluster_name);
+cache.setCallTimeout(rpc_timeout);
+cache.start();
+\end{lstlisting}
+
+\subsubsection{Locks} 
+
+Locks können einfach und elegant über mehrere Nodes realisiert werden.
+	
+\begin{lstlisting}[caption=Beispiel eines Locks]
+JChannel ch = new JChannel(props);
+LockService lock_service = new LockService(ch);
+ch.connect("lock-cluster");
+Lock lock = lock_service.getLock("mylock");
+lock.lock();
+try {
+	// access a resource protected by the lock
+} finally {
+	lock.unlock();
+}
+\end{lstlisting}
+
+\subsubsection{Counters}
+
+Counters können einfach und elegant über mehrere Nodes realisiert werden. Die Aktionen sind alle atomar!
+	
+\begin{lstlisting}[caption=Interface eines Counters]
+public interface Counter {
+	public long get();
+	public void set(long new_value);
+	public boolean compareAndSet(long expect, long update);
+	public long incrementAndGet();
+	public long decrementAndGet();
+	public long addAndGet(long delta);
+}
+\end{lstlisting}
+	
+\subsubsection{Distributed task execution} 
+
+Task können auf mehreren Nodes verteilt werden. Damit ein einzelner Node nicht überlastet wird. Dabei wird beispielsweise auch folgendes Szenario unterstützt: Wenn ein Task crashed, muss dieser von einem anderen Node übernommen werden. Es darf keinen \emph{single point of failure} geben.
+
+\subsection{Infinispan}
+Infinispan is a distributed in-memory key/value data store with optional schema, available under the Apache License 2.0. It can be used both as an embedded Java library and as a language-independent service accessed remotely over a variety of protocols (HotRod, REST, Memcached and WebSockets). It offers advanced functionality such as transactions, events, querying and distributed processing. Gemäss Maven-Abhängigkeiten benutzt Infinispan intern JGroups. 

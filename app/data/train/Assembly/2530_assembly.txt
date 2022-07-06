@@ -1,0 +1,94 @@
+; name			: ServerEnvironmentVariables.asm
+; description	: Get the webserver environment variables and displays them in a table on a web page .
+
+option casemap : none
+
+include main.inc
+
+.code
+
+main proc
+
+	; first get a handle
+	push	rbp									; push rbp to align the stack
+
+	mov		rcx, STD_OUTPUT
+	call	GetStdHandle
+	mov		qword ptr [stdHandle], rax
+	; print the page start
+	lea		r9, bytesWritten
+	mov		r8, headerlength
+	lea		rdx, header
+	mov		rcx, qword ptr [stdHandle]
+	call	WriteFile
+	; start processing the environment
+	call	GetEnvironmentStringsA
+	; rax has the memory address where the environment strings are stored
+	mov		qword ptr [stringStart], rax
+_nextenvstring:
+	; each string ends with a zero, the entire block also ends with zero which means
+	; that when the first byte we read equals zero, we are at the end of the environment
+	; strings memory block.
+	mov		rcx, qword ptr [stringStart]
+	call	lstrlen	
+	; rax has the string length or zero if no string available anymore
+	and		rax, rax
+	jz		_envstringsend
+	; store the string length temporarely
+	mov		qword ptr [stringLength], rax
+
+	; we now have to look in that string for the '=' character
+	mov		rcx, qword ptr [stringStart]
+	lea		rdx, delimiter			; the = character
+	mov		r8, 1					; characters to compare
+	call	lstrcmp					; compare
+
+	; we can now print the string
+	lea		r9, bytesWritten
+	mov		r8, qword ptr [stringLength]
+	mov		rdx, qword ptr [stringStart]
+	mov		rcx, qword ptr [stdHandle]
+	call	WriteFile
+
+	; write an end cr lf to start at a new line
+	; we can now print the string
+	lea		r9, bytesWritten
+	mov		r8, 4
+	lea		rdx, endofline
+	mov		rcx, qword ptr [stdHandle]
+	call	WriteFile
+	; get the string length and adjust the pointer to the next string
+	mov		rax, qword ptr [stringLength]
+	; because the string length doesn't include the trailing zero add one to get the next string address
+	inc		rax
+	; add the length to stringStart
+	add		qword ptr [stringStart], rax
+	jmp		_nextenvstring
+_envstringsend:
+
+	; print the page end
+	lea		r9, bytesWritten
+	mov		r8, footerlength
+	lea		rdx, footer
+	mov		rcx, qword ptr [stdHandle]
+	call	WriteFile
+	pop		rbp								; pop rbp to adjust stack
+	xor		rcx, rcx			; exit code = 0
+	call	ExitProcess
+
+main endp
+
+.data
+	bytesWritten	dq		0
+	stringLength	dq		0
+	stringStart		dq		0
+	stdHandle		dq		0
+	endofline		db		"<br>",0
+	delimiter		db		"=", 0
+	firstString		dq		1
+	header			db		"Content-type: text/html",10,13,10,13
+					db		"<html><head><title>IIS web variables</title></head><body><pre>", 0
+	headerlength	equ		$-header
+	footer			db		"</pre></body></html>", 0
+	footerlength	equ		$-footer    
+end

@@ -1,0 +1,498 @@
+BITS   16   ; Éú³É16Î»´úÂë¶ø²»ÊÇ32Î»´úÂë
+SECTION  .TEXT   ; ´úÂë¶Î
+;ORG   7C00H  ; Ö¸¶¨³ÌÐò±»×°ÈëÄÚ´æµÄÆðÊ¼Î»ÖÃ
+ORG 0000H
+
+;====================================================================
+; 
+; ºêºÍ³£Á¿¶¨Òå
+; 
+;====================================================================
+?     EQU  0  ; NASM²»Ö§³ÖDW ?ÕâÑùµÄÓï·¨£¬¿ÉÒÔÊ¹ÓÃÕâÑùµÄ¶¨Òå
+        ; Ä£Äâ£¬ÒÔÊ¹´úÂëµÄ¿É¶ÁÐÔ¸üÇ¿
+;DATA_BUF_SEG EQU  0200H ; ÓÃÓÚ¶ÁÈ¡¸ùÄ¿Â¼»òÎÄ¼þÄÚÈÝµÄ»º³åÇø(8K) ¶ÎµØÖ·
+;DATA_BUF_OFF EQU  2000H
+DATA_BUF_OFF EQU  3000H  ; Modified by Garry.
+;STACK_ADDR  EQU  7BD0H ; ¶ÑÕ»Õ»¶¥(×¢Òâ£º¶ÑÕ»´óÐ¡Ô¼Îª20K) 
+OSLOADER_ADDR EQU  8000H ; FDOSLDR.BIN·ÅÈëÄÚ´æÖÐµÄÆðÊ¼Î»ÖÃ£¬Õâ¾ÍÒâÎ¶×Å
+        ; ×°ÔØ³ÌÐò¼°Ïà¹Ø×ÊÔ´µÄ³ß´ç²»ÄÜ³¬¹ý608K
+        ; 8000H - A000H (32K - 640K )
+;OSLOADER_SEG EQU  0800H ; ÆðÊ¼¶ÎµØÖ·     
+OSLOADER_SEG EQU 0100H  ; Start address of OS IMAGE,modified by Garry.
+SECOND_SECTOR EQU  03H  ; µÚ¶þ¸öÒýµ¼ÉÈÇøµÄÉÈÇøºÅ(µÚËÄ¸öÉÈÇø)
+SECOND_ADDR  EQU  7E00H ; µÚ¶þ¸öÒýµ¼ÉÈÇøµÄ×°ÔØÎ»ÖÃ
+
+;====================================================================
+; ÓÃ¶ÑÕ»±£´æÈô¸ÉÖÐ¼ä±äÁ¿( SS = 0 BP = 7C00H )
+;====================================================================
+FAT_START_SECTOR EQU  4  ; FAT±íµÄÆðÊ¼ÉÈÇøºÅ  DWORD
+ROOT_START_SECTOR EQU  8  ; ¸ùÄ¿Â¼µÄÆðÊ¼ÉÈÇøºÅ DWORD
+DATA_START_SECTOR EQU  12  ; Êý¾ÝÇøÆðÊ¼ÉÈÇøºÅ  DWORD
+FAT_ENTRY_SECTORS EQU  14  ; FAT±íËùÕ¼µÄÉÈÇøÊý  WORD
+ROOT_ENTRY_SECTORS EQU  16  ; ¸ùÄ¿Â¼ËùÕ¼µÄÉÈÇøÊý WORD
+DIR_PER_SECTOR  EQU  17  ; Ã¿¸öÉÈÇøËùÈÝÄÉµÄÄ¿Â¼ BYTE
+DISK_EXT_SUPPORT EQU  18     ; ´ÅÅÌÊÇ·ñÖ§³ÖÀ©Õ¹BIOS BYTE
+CURRENT_CLUSTER  EQU  40  ; µ±Ç°ÕýÔÚ´¦ÀíµÄ´ØºÅ DWORD
+
+
+;====================================================================  
+; À©Õ¹´ÅÅÌ·þÎñËùÊ¹ÓÃµÄµØÖ·°ü
+;====================================================================
+DAP_SECTOR_HIGH  EQU  24  ; ÆðÊ¼ÉÈÇøºÅµÄ¸ß32Î» ( Ã¿´Îµ÷ÓÃÐèÒªÖØÖÃ ) DWORD
+DAP_SECTOR_LOW  EQU  28  ; ÆðÊ¼ÉÈÇøºÅµÄµÍ32Î» ( Ã¿´Îµ÷ÓÃÐèÒªÖØÖÃ ) DWORD
+DAP_BUFFER_SEG  EQU  30  ; »º³åÇø¶ÎµØÖ·   ( Ã¿´Îµ÷ÓÃÐèÒªÖØÖÃ ) WORD
+DAP_BUFFER_OFF  EQU  32  ; »º³åÇøÆ«ÒÆ   ( Ã¿´Îµ÷ÓÃÐèÒªÖØÖÃ ) WORD  
+DAP_RESERVED2  EQU  33  ; ±£Áô×Ö½Ú
+DAP_READ_SECTORS EQU  34  ; Òª´¦ÀíµÄÉÈÇøÊý(1 - 127 )
+DAP_RESERVED1  EQU  35  ; ±£Áô×Ö½Ú
+DAP_PACKET_SIZE  EQU  36  ; °üµÄ´óÐ¡Îª16×Ö½Ú
+
+;====================================================================
+; 
+; Ä¿Â¼Ïî½á¹¹(Ã¿¸ö½á¹¹Îª32×Ö½Ú)
+; 
+;====================================================================
+OFF_DIR_NAME    EQU  0  ; Ä¿Â¼ÏîµÄÆ«ÒÆ  BYTE[11]
+OFF_DIR_ATTRIBUTE   EQU  11  ; Ä¿Â¼ÊôÐÔ   BYTE
+OFF_NT_RESERVED    EQU  12  ; ±£ÁôÊôÐÔ   BYTE
+OFF_CREATE_TIME_HUNDREDTH EQU  13  ; ´´½¨Ê±¼ä   BYTE
+OFF_CREATE_TIME    EQU  14  ; ´´½¨Ê±¼ä   WORD
+OFF_CREATE_DATE    EQU  16  ; ´´½¨Ê±¼ä   WORD
+OFF_LAST_ACCESS_DATE  EQU  18  ; ÉÏ´Î·ÃÎÊÊ±¼ä  WORD
+OFF_START_CLUSTER_HIGH  EQU  20  ; ÆðÊ¼´ØºÅ¸ßÎ»  WORD
+OFF_LAST_UPDATE_TIME  EQU  22  ; ÉÏ´Î¸üÐÂÊ±¼ä  WORD
+OFF_LAST_UPDATE_DATE  EQU  24  ; ÉÏ´Î¸üÐÂÊ±¼ä  WORD
+OFF_START_CLUSTER_LOW  EQU  26  ; ÆðÊ¼´ØºÅµÍÎ»  WORD
+OFF_FILE_SIZE    EQU  28  ; ÎÄ¼þ³ß´ç   DWORD
+
+; Ïà¹Ø³£Á¿
+DIR_NAME_DELETED   EQU  0E5H ; ¸ÃÏîÒÑ¾­±»É¾³ý
+DIR_NAME_FREE    EQU  00H  ; ¸ÃÏîÊÇ¿ÕÏÐµÄ(ÆäºóÒ²ÊÇ¿ÕÏÐµÄ)
+DIR_NAME_DOT    EQU  2EH  ; ÌØÊâÄ¿Â¼ . »ò ..
+DIR_NAME_SPACE    EQU  20H  ; ²»ÔÊÐíµÄ×Ö·û
+DIR_ENTRY_SIZE    EQU  32  ; Ã¿¸öÄ¿Â¼ÏîµÄ³ß´ç£¬Æä½á¹¹ÈçÉÏËùÊ¾ 
+
+;ÎÄ¼þÊôÐÔ
+DIR_ATTR_READONLY   EQU  01H  ; Ö»¶ÁÎÄ¼þ
+DIR_ATTR_HIDDEN    EQU  02H  ; Òþ²ØÎÄ¼þ
+DIR_ATTR_SYSTEM    EQU  04H  ; ÏµÍ³ÎÄ¼þ
+DIR_ATTR_VOLUME    EQU  08H  ; ¾í±êºÅ(Ö»¿ÉÄÜ³öÏÖÔÚ¸ùÄ¿Â¼ÖÐ)
+DIR_ATTR_SUBDIR    EQU  10H  ; ×ÓÄ¿Â¼
+DIR_ATTR_ARCHIVE   EQU  20H  ; ¹éµµÊôÐÔ
+DIR_ATTR_LONGNAME   EQU  0FH  ; ³¤ÎÄ¼þÃû
+DIR_ATTR_LONGNAME_MASK  EQU  3FH  ; ³¤ÎÄ¼þÃûÑÚÂë
+
+; ´ØÊôÐÔ
+CLUSTER_MASK    EQU  0FFFFFFFH ; ´ØºÅÑÚÂë(FAT32=>FAT28)
+CLUSTER_FREE    EQU  00000000H ; ´ØÊÇ¿ÕÏÐµÄ
+CLUSTER_RESERVED   EQU  00000001H ; ´ØÊÇ±£ÁôµÄ
+CLUSTER_MIN_VALID   EQU  00000002H ; ×îÐ¡ÓÐÐ§´ØºÅ
+CLUSTER_MAX_VALID   EQU  0FFFFFF6H ; ×î´óÓÐÐ§´ØºÅ
+CLUSTER_BAD     EQU  0FFFFFF7H ; »µ´Ø
+CLUSTER_LAST    EQU  0FFFFFF8H   ;0xFFFFFFF8-0xFFFFFFFF±íÊ¾ÎÄ¼þµÄ×îºóÒ»¸ö´Ø
+
+;Start segment address of bootsect after loaded into memory.
+DEF_ORG_START EQU 7C0H
+
+;Base segment address of the bootsect after relocation
+;DEF_BOOT_START EQU 9F00H
+;DEF_BOOT_START EQU 9B00H  --Modified by Garry in 28.May
+DEF_BOOT_START EQU 9000H
+
+;Start address of OS image.
+DEF_RINIT_START EQU 1000H
+
+;====================================================================
+;
+; Æô¶¯ÉÈÇø(512×Ö½Ú)
+;
+;====================================================================
+_ENTRY_POINT:
+
+; 3×Ö½ÚµÄÌø×ªÖ¸Áî
+ JMP SHORT _BOOT_CODE ; Ìø×ªµ½ÕæÕýµÄÒýµ¼´úÂë
+ NOP       ; ¿ÕÖ¸ÁîÒÔ±£Ö¤×Ö½ÚÊýÎª3
+
+;====================================================================
+; 
+; BPB( BIOS Parameter Block ) 
+; 
+;====================================================================
+SectorsPerCluster  DB 32 ; Ã¿¸ö´ØµÄÉÈÇøÊý ( 1 2 4 8 16 32 64 128 )
+        ; Á½ÕßÏà³Ë²»ÄÜ³¬¹ý32K(´Ø×î´ó´óÐ¡)
+ReservedSectors   DW 36 ; ´Ó¾íµÄµÚÒ»¸öÉÈÇø¿ªÊ¼µÄ±£ÁôÉÈÇøÊýÄ¿£»
+        ; ¸ÃÖµ²»ÄÜÎª0£¬¶ÔÓÚFAT12/FAT16£¬¸ÃÖµÍ¨³£Îª1£»
+        ; ¶ÔÓÚFAT32£¬µäÐÍÖµÎª32£»
+NumberOfFATs   DB 2 ; ¾íÉÏFATÊý¾Ý½á¹¹µÄÊýÄ¿£¬¸ÃÖµÍ¨³£Ó¦Îª2
+HiddenSectors   DD 38 ; °üº¬¸ÃFAT¾íµÄ·ÖÇøÖ®Ç°µÄÒþ²ØÉÈÇøÊý
+
+;====================================================================
+; 
+; EBPB ( Extended BIOS Parameter Block )
+; 
+;====================================================================
+SectorsPerFAT32   DD 14994   ; ¶ÔÓÚFAT32£¬¸Ã×Ö¶Î°üº¬Ò»¸öFATµÄ´óÐ¡£¬¶øSectorsPerFAT16
+          ; ×Ö¶Î±ØÐëÎª0;
+RootDirectoryStart  DD 2   ; ¸ùÄ¿Â¼µÄÆðÊ¼´ØºÅ£¬Í¨³£Îª2£»
+DriveNumber    DB ?   ; ÓÃÓÚINT 0x13µÄÇý¶¯Æ÷ºÅ£¬0x00ÎªÈíÅÌ£¬0x80ÎªÓ²ÅÌ
+
+;====================================================================
+;
+; ÕæÕýµÄÆô¶¯´úÂë´ÓÕâ¿ªÊ¼( Æ«ÒÆ£º0x3E ) 
+; Æä¹¦ÄÜÊÇËÑË÷´ÅÅÌµÄ¸ùÄ¿Â¼£¬²éÕÒFDOSLDR.BINÎÄ¼þ£¬½«Æä¶ÁÈëÄÚ´æ²¢ÔËÐÐ¡£
+;
+;====================================================================
+;====================================================================
+;
+; Memory layout:
+;     9F000H - A0000H : Bootsector code,buffer,BP and SP
+;     9F000H - 9F3FFH : Boot sector code
+;     9F400H - 9F7FFH : Base address space.
+;     9F800H - 9FFFEH : Stack area of boot sector code.
+;     A0000H - A2000H : Temporary buffer for int 13h.
+;     Actual start address is 90000H
+;     
+_BOOT_CODE:
+
+;The following code is added by Garry.
+    cli                          ;;Mask all maskable interrupts.
+    mov ax,DEF_ORG_START         ;;First,the boot code move itself to DEF_-
+                                 ;;BOOT_START from DEF_ORG_START.
+    mov ds,ax
+
+    cld
+    mov si,0x0000
+    mov ax,DEF_BOOT_START
+    mov es,ax
+    mov di,0x0000
+    mov cx,0x0200                ;;The boot sector's size is 512B
+    rep movsb
+
+    mov ax,DEF_BOOT_START        ;;Prepare the execute context.
+    mov ds,ax
+    mov es,ax
+    mov ss,ax
+    mov bp,0x7f0                 ;!!!!!!! CAUTION !!!!!!!!!!!!!
+    mov sp,0xffe
+    jmp DEF_BOOT_START : gl_bootbgn  ;;Jump to the DEF_BOOT_START to execute.
+
+gl_bootbgn:
+ ; ³õÊ¼»¯Ïà¹Ø¼Ä´æÆ÷¼°±êÖ¾Î»
+ ;CLI      ; ÏÈ¹ØµôÖÐ¶Ï
+ ;CLD      ; ·½ÏòÎªÏòÇ°µÝÔö
+ ;XOR  AX,AX   ; AX = 0
+ ;MOV  DS,AX   ; ÉèÖÃÊý¾Ý¶Î¼Ä´æÆ÷ DS:SI
+ ;MOV  ES,AX   ; ÉèÖÃ¸½¼Ó¶Î¼Ä´æÆ÷ ES:DI
+ ;MOV  SS,AX   ; ÉèÖÃ¶ÑÕ»¶Î¼Ä´æÆ÷
+ ;MOV  BP,7C00H  ; ÉèÖÃ»ùÖ·¼Ä´æÆ÷
+ ;MOV  SP,STACK_ADDR ; ÉèÖÃ¶ÑÕ»Õ»¶¥
+ STI      ; ÔÊÐíÖÐ¶Ï  --Modified by Garry.xin--
+
+ ;====================================================================
+ ; ±£´æÆô¶¯µÄ´ÅÅÌ±àºÅ
+ ;====================================================================
+ MOV  [DriveNumber],DL; ¸ÃÖµÓÉBIOSÉèÖÃ£¬Èç¹ûÊÇ´ÓUSBÆô¶¯£¬¸ÃÖµÎª0x80
+       ; ¼´ÎªµÚÒ»¸öÓ²ÅÌµÄ±àºÅ£¬¸ÃÖµ½«ÓÃÓÚºóÐøµÄ´ÅÅÌ
+       ; ¶ÁÈ¡µ÷ÓÃ
+
+
+ ;====================================================================  
+ ; ×¼±¸FAT32ÎÄ¼þÏµÍ³³£ÓÃµÄ³£Êý£¬ÒÔ±ãºóÃæµÄ²Ù×÷
+ ;====================================================================
+ ;
+ ; [Òþ²ØÉÈÇø][±£ÁôÉÈÇø][FAT][DATA]
+ ;
+ ;====================================================================
+ 
+ MOV  BYTE [BP - DIR_PER_SECTOR],16 ; AL    = DirEntriesPerSector
+ 
+ ; FATÆðÊ¼ÉÈÇø
+ ; FATÆðÊ¼ÉÈÇø = Hidden+Reserved
+ MOV  AX ,WORD [ReservedSectors]
+ CWD          ; AX => DX : AX
+ ADD  AX, WORD [HiddenSectors]
+ ADC   DX, WORD [HiddenSectors+2]  
+ MOV  WORD[ BP - FAT_START_SECTOR  ],AX 
+ MOV   WORD[ BP - FAT_START_SECTOR+2],DX 
+ 
+ 
+ ; FAT±íËùÕ¼µÄÉÈÇøÊý
+ ; FAT_SECTORS = NumberOfFAT * SectorsPerFAT
+ XOR  EAX,EAX
+ MOV  AL, BYTE [NumberOfFATs]  ; FATµÄÊýÄ¿
+ MOV  EBX,DWORD [SectorsPerFAT32]
+ MUL  EBX        ; ³Ë»ý·ÅÈë EDX:EAX
+ MOV  DWORD [ BP - FAT_ENTRY_SECTORS  ] , EAX
+ 
+ ; ¼ÆËãÊý¾ÝÇøÆðÊ¼ÉÈÇø
+ ADD  EAX ,DWORD[ BP - FAT_START_SECTOR  ]
+ MOV  DWORD [ BP - DATA_START_SECTOR ],EAX 
+ 
+ 
+ ;====================================================================
+ ;
+ ; ³õÊ¼»¯DiskAddressPacket
+ ; Ê¹ÓÃÊ±Ö»ÐèÒªÐÞ¸Ä×Ö¶Î£ºDATA_BUFFER_OFF DATA_BUFFER_SEG 
+ ;       DAP_SECTOR_LOW  DAP_SECTOR_HIGH
+ ;
+ ;====================================================================
+ MOV  DWORD [BP - DAP_SECTOR_HIGH ],00H
+ MOV  BYTE  [BP - DAP_RESERVED1   ],00H
+ MOV  BYTE  [BP - DAP_RESERVED2   ],00H
+ MOV  BYTE  [BP - DAP_PACKET_SIZE ],10H
+ MOV  BYTE  [BP - DAP_READ_SECTORS],01H
+ ;MOV  WORD  [BP - DAP_BUFFER_SEG  ],00H
+ MOV  WORD  [BP - DAP_BUFFER_SEG  ],DEF_BOOT_START
+ MOV  BYTE  [BP - DAP_READ_SECTORS],01H  ; Ã¿´ÎÖ»¶ÁÈ¡Ò»¸öÉÈÇø 
+ 
+ ; ÏÂÃæ¿ªÊ¼²éÕÒ¸ùÄ¿Â¼²¢ÇÒ×°ÔØFDOSLDR.BIN
+ JMP  _SEARCH_LOADER
+ 
+;====================================================================
+; ´íÎó´¦Àí
+;====================================================================
+ 
+__ERROR:
+ ; µ÷ÓÃ¼üÅÌÖÐ¶Ï£¬µÈ´ýÓÃ»§°´¼ü
+ MOV  AH,00H
+ INT  16H
+
+__ERROR_1: 
+ ; ÖØÆô¼ÆËã»ú
+ INT  19H 
+
+;====================================================================
+; 
+; ×Ó¹ý³Ì
+; 
+;====================================================================
+
+;====================================================================
+; 
+; ¶ÁÈ¡Ò»¸ö´ÅÅÌÉÈÇø
+; ÊäÈë£º ÒÑ¾­ÉèÖÃÁËDAPÖÐÏàÓ¦µÄ×Ö¶Î
+; ÏÞÖÆ£º ²»ÄÜ¶ÁÈ¡³¬¹ýÒ»¸ö´ØµÄÄÚÈÝ   
+; 
+;====================================================================
+ReadSector:
+
+ PUSHA  ; ±£´æ¼Ä´æÆ÷
+ 
+;====================================================================
+; INT 13H  AH = 42H À©Õ¹´ÅÅÌµ÷ÓÃ
+;====================================================================
+ ; Ã¿´Î¶ÁÈ¡Ò»¸öÉÈÇø
+ MOV  AH,42H         ; ¹¦ÄÜºÅ 
+ LEA  SI ,[BP - DAP_PACKET_SIZE]    ; µØÖ·°üµØÖ·
+
+ ; Çý¶¯Æ÷ºÅ
+ MOV  DL ,[DriveNumber]      ; Çý¶¯Æ÷ºÅ
+ INT  13H
+ JC   __ERROR        ; ¶ÁÈ¡Ê§°Ü ------- DEBUG --------
+ POPA       ; »Ö¸´¼Ä´æÆ÷ 
+ RET
+
+;====================================================================
+; Êý¾ÝÇø
+;====================================================================
+LoaderName     db "HCNIMGE BIN"       ; µÚ¶þ½×¶ÎÆô¶¯³ÌÐò FDOSLDR.BIN
+ProcessDot     db "."
+
+;====================================================================
+; ²éÕÒ¸ùÄ¿Â¼£¬¼ì²éÊÇ·ñÓÐ FDOSLDR.BINÎÄ¼þ
+;====================================================================
+_SEARCH_LOADER: 
+
+
+ ; ÉèÖÃ»º³åÇø
+ MOV  WORD [ BP - DAP_BUFFER_OFF  ], DATA_BUF_OFF ; 0000:1000H
+ 
+ ; ¸ùÄ¿Â¼ÆðÊ¼ÉÈÇøºÅ
+ MOV  EAX,DWORD[RootDirectoryStart]
+ MOV  DWORD[ BP - CURRENT_CLUSTER ],EAX
+
+; ¼ì²éÏÂÒ»¸ö´Ø
+_NEXT_ROOT_CLUSTER:
+
+ ; ¸ù¾Ý´ØºÅ¼ÆËãÉÈÇøºÅ
+ DEC  EAX
+ DEC  EAX  ; EAX = EAX - 2
+ XOR  EBX,EBX 
+ MOV  BL, BYTE[ SectorsPerCluster]
+ MUL  EBX 
+ ADD  EAX,DWORD[ BP- DATA_START_SECTOR]
+ MOV  DWORD[ BP - DAP_SECTOR_LOW  ], EAX
+ MOV  DL,[SectorsPerCluster]
+
+; ¼ì²éÏÂÒ»¸öÉÈÇø
+_NEXT_ROOT_SECTOR:
+  
+ ; ÒÀ´Î¶ÁÈ¡Ã¿¸ö¸ùÄ¿Â¼ÉÈÇø£¬¼ì²éÊÇ·ñ´æÔÚFDOSLDR.BINÎÄ¼þ
+ CALL ReadSector
+ 
+ ; ¼ì²é¸ÃÉÈÇøÄÚÈÝ
+ MOV  DI,DATA_BUF_OFF
+ MOV  BL,BYTE [ BP - DIR_PER_SECTOR]
+
+; ¼ì²éÃ¿Ò»¸öÄ¿Â¼Ïî
+_NEXT_ROOT_ENTRY:
+ CMP  BYTE [DI],DIR_NAME_FREE
+ JZ  __ERROR    ; NO MORE DIR ENTRY
+ 
+ ; ¼ì²éÊÇ·ñ×°ÔØ³ÌÐò
+ PUSH  DI       ; ±£´æDI
+ MOV  SI,LoaderName
+ MOV  CX,11
+ REPE  CMPSB 
+ JCXZ  _FOUND_LOADER    ; ×°ÔØLoader²¢ÔËÐÐ
+  
+ ; ÊÇ·ñ»¹ÓÐÏÂÒ»¸öÄ¿Â¼Ïî(ÄÚ²ãÑ­»·)
+ POP  DI
+ ADD   DI,DIR_ENTRY_SIZE
+ DEC  BL 
+ JNZ   _NEXT_ROOT_ENTRY
+ 
+ ; ¼ì²éÊÇ·ñ»¹ÓÐÏÂÒ»¸öÉÈÇø¿É¶Á(Íâ²ãÑ­»·)
+ DEC  DL
+ JZ  _CHECK_NEXT_ROOT_CLUSTER
+ INC  DWORD [ BP - DAP_SECTOR_LOW ] ; Ôö¼ÓÉÈÇøºÅ
+ JMP  _NEXT_ROOT_SECTOR 
+ 
+; ¼ì²éÏÂÒ»¸ö´Ø
+_CHECK_NEXT_ROOT_CLUSTER:
+
+ ; ¼ÆËãFATËùÔÚµÄ´ØºÅºÍÆ«ÒÆ 
+ ; FatOffset = ClusterNum*4
+ XOR  EDX,EDX
+ MOV  EAX,DWORD[BP - CURRENT_CLUSTER]
+ SHL  EAX,2
+ XOR  ECX,ECX
+ MOV  CX,512
+ DIV  ECX  ; EAX = Sector EDX = OFFSET
+ ADD  EAX,DWORD [BP - FAT_START_SECTOR  ]
+ MOV  DWORD [ BP - DAP_SECTOR_LOW ], EAX 
+   
+ ; ¶ÁÈ¡ÉÈÇø
+ CALL  ReadSector
+  
+ ; ¼ì²éÏÂÒ»¸ö´Ø
+ MOV  DI,DX
+ ADD  DI,DATA_BUF_OFF
+ MOV  EAX,DWORD[DI]  ; EAX = ÏÂÒ»¸öÒª¶ÁµÄ´ØºÅ
+ AND  EAX,CLUSTER_MASK
+ MOV  DWORD[ BP - CURRENT_CLUSTER ],EAX
+ CMP  EAX,CLUSTER_LAST  ; CX >= 0FFFFFF8H£¬ÔòÒâÎ¶×ÅÃ»ÓÐ¸ü¶àµÄ´ØÁË
+ JB  _NEXT_ROOT_CLUSTER
+ JMP  __ERROR
+
+;====================================================================
+; ×°ÔØFDOSLDR.BINÎÄ¼þ
+;====================================================================
+_FOUND_LOADER:
+ ; Ä¿Â¼½á¹¹µØÖ··ÅÔÚDIÖÐ
+ POP  DI
+ XOR  EAX,EAX
+ MOV  AX,[DI+OFF_START_CLUSTER_HIGH] ; ÆðÊ¼´ØºÅ¸ß16Î»
+ ;SHL  AX,16
+ SHL  EAX,16 ;----- Modified by Garry.xin----
+ MOV  AX,[DI+OFF_START_CLUSTER_LOW]  ; ÆðÊ¼´ØºÅµÍ16Î»
+ MOV  DWORD[ BP - CURRENT_CLUSTER ],EAX
+ MOV  CX, OSLOADER_SEG      ; CX  = »º³åÇø¶ÎµØÖ· 
+ 
+  
+_NEXT_DATA_CLUSTER:
+ 
+ ; ¸ù¾Ý´ØºÅ¼ÆËãÉÈÇøºÅ
+ DEC  EAX
+ DEC  EAX  ; EAX = EAX - 2
+ XOR  EBX,EBX 
+ MOV  BL, BYTE[ SectorsPerCluster]
+ MUL  EBX 
+ ADD  EAX,DWORD[ BP- DATA_START_SECTOR]
+ MOV  DWORD[ BP - DAP_SECTOR_LOW  ], EAX
+ MOV  DL,[SectorsPerCluster]
+
+ ; ÉèÖÃ»º³åÇø
+ MOV  WORD [ BP - DAP_BUFFER_SEG   ],CX
+ MOV  WORD [ BP - DAP_BUFFER_OFF   ],00H
+   
+ ; Ã¿¸ö´ØÐèÒª¶ÁÈ¡µÄÉÈÇøÊý
+ MOV  BL , BYTE [SectorsPerCluster]
+
+_NEXT_DATA_SECTOR:
+ ; ¶ÁÈ¡´ØÖÐµÄÃ¿¸öÉÈÇø(ÄÚ²ãÑ­»·)
+ ; ×¢Òâ : Í¨¹ý¼ì²éÎÄ¼þ´óÐ¡£¬¿ÉÒÔ±ÜÃâ¶ÁÈ¡×îºóÒ»¸ö²»Âú´ØµÄËùÓÐ´óÐ¡
+ ; ¶ÁÈ¡Êý¾ÝÉÈÇø
+ CALL  ReadSector
+
+ ;Show loading process,modified by Garry.Xin
+ PUSH BX
+ MOV  AL,'.'
+ MOV  AH,0EH
+ MOV  BX,07H
+ INT  10H
+ POP  BX
+ 
+ ; ¸üÐÂµØÖ·£¬¼ÌÐø¶ÁÈ¡
+ MOV  AX, 512
+ ADD  WORD  [BP - DAP_BUFFER_OFF],AX 
+ INC  DWORD [BP - DAP_SECTOR_LOW]  ; µÝÔöÉÈÇøºÅ
+ DEC  BL        ; ÄÚ²ãÑ­»·¼ÆÊý
+ JNZ  _NEXT_DATA_SECTOR
+  
+ 
+ ; ¼ì²éÏÂÒ»¸ö´Ø
+  
+ ; ¸üÐÂ¶ÁÈ¡ÏÂÒ»¸ö´ØµÄ»º³åÇøµØÖ·
+ MOV  CL,BYTE [ SectorsPerCluster ]
+ MOV  AX ,512
+ SHR  AX ,4
+ MUL  CL
+ ADD  AX ,WORD [ BP - DAP_BUFFER_SEG ] 
+ MOV  CX,AX ; ±£´æÏÂÒ»¸ö´ØµÄ»º³åÇø¶ÎµØÖ·
+ 
+ ;====================================================================
+ ;
+ ; ¼ì²éÊÇ·ñ»¹ÓÐÏÂÒ»¸ö´Ø(¶ÁÈ¡FAT±íµÄÏà¹ØÐÅÏ¢)
+ ;  LET   N = Êý¾Ý´ØºÅ
+ ;  THUS FAT_BYTES  = N*4  (FAT32)
+ ;      FAT_SECTOR = FAT_BYTES / BytesPerSector
+ ;    FAT_OFFSET = FAT_BYTES % BytesPerSector
+ ;
+ ;====================================================================
+ 
+ ; ¼ÆËãFATËùÔÚµÄ´ØºÅºÍÆ«ÒÆ 
+ MOV  EAX,DWORD [BP - CURRENT_CLUSTER]
+ XOR  EDX,EDX
+ SHL  EAX,2
+ XOR  EBX,EBX
+ MOV  BX,512
+ DIV  EBX   ; EAX = Sector  EDX = Offset
+ 
+ ; ÉèÖÃ»º³åÇøµØÖ·
+ ADD  EAX,DWORD [BP - FAT_START_SECTOR  ]
+ MOV  DWORD [ BP - DAP_SECTOR_LOW ], EAX 
+ MOV   WORD [BP - DAP_BUFFER_SEG  ], DEF_BOOT_START 
+ MOV  WORD [BP - DAP_BUFFER_OFF  ], DATA_BUF_OFF ; 0000:1000H
+
+ ; ¶ÁÈ¡ÉÈÇø
+ CALL  ReadSector
+  
+ ; ¼ì²éÏÂÒ»¸ö´Ø
+ MOV  DI,DX
+ ADD  DI,DATA_BUF_OFF
+ MOV  EAX,DWORD[DI]  ; EAX = ÏÂÒ»¸öÒª¶ÁµÄ´ØºÅ
+ AND  EAX,CLUSTER_MASK
+ MOV  DWORD[ BP - CURRENT_CLUSTER ],EAX
+ CMP  EAX,CLUSTER_LAST  ; CX >= 0FFFFFF8H£¬ÔòÒâÎ¶×ÅÃ»ÓÐ¸ü¶àµÄ´ØÁË
+ JB  _NEXT_DATA_CLUSTER
+
+;¶ÁÈ¡Íê±Ï
+_RUN_LOADER: 
+
+ ; ÔËÐÐFDOSLDR.BIN
+ ;MOV  DL,[DriveNumber]
+ JMP  DEF_RINIT_START / 16 : 0
+
+Padding  TIMES 510-($-$$) db  00H
+Signature  DW 0AA55H

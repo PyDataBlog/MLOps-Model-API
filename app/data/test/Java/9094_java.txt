@@ -1,0 +1,291 @@
+/*
+ * jHears, acoustic fingerprinting framework.
+ * Copyright (C) 2009-2010  Juha Heljoranta.
+ *
+ * This file is part of jHears.
+ *
+ * jHears is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as
+ * published by the Free Software Foundation, either version 3 of the
+ * License, or (at your option) any later version.
+ *
+ * jHears is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Affero General Public License for more details.
+ *
+ * You should have received a copy of the GNU Affero General Public License
+ * along with jHears.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+package org.jhears.server;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.Map.Entry;
+import java.util.Set;
+
+import org.apache.commons.configuration.Configuration;
+import org.jhears.cache.ISegmentCache;
+import org.jhears.cache.ISegmentCacheValue;
+import org.jhears.cache.SegmentCacheValue;
+import org.jhears.cnf.Cnf.FingerprintKey;
+import org.jhears.cnf.Cnf.SearchKey;
+import org.jhears.data.FingerprintDataObj;
+import org.jhears.seq.FSeq;
+import org.jhears.web.rs.Segment;
+
+/**
+ * Searches cache for {@link #minimumHits} pieces of {@link Segment}s which are
+ * apart from each other by {@link #maxAllowedGap} at maximum.
+ * <p>
+ * This class is thread safe.
+ */
+public class SegmentCacheSearch {
+
+	/**
+	 * Encapsulates state variables making the parent class thread safe.
+	 * <p>
+	 * Algorithm description: All query entries are put into {@link #seMap} at
+	 * first. If the {@link #seMap} contains enough entries associated to single
+	 * fingerprint then the entry is moved into {@link #retval}. If the entry
+	 * doesn't have enough segments within #maxAllowedGap range then it is
+	 * removed from {@link #seMap}.
+	 */
+	private class Worker {
+
+		/**
+		 * Tracks position of a query. Starts with zero and ends with
+		 * {@link FSeq#getLength()} - {@link FSeq#getSegmentLength()}.
+		 */
+		private int currentPos;
+
+		/**
+		 * Map of search entries which had matches enough hits separated by the
+		 * {@link #maxAllowedGap} at some point in the query string.
+		 * <p>
+		 * Map keys are values of {@link FingerprintDataObj#getId()}.
+		 */
+		private final Map<Long, SearchEntry> retval;
+
+		/**
+		 * Search entries which are not yet considered as potential hits. Eldest
+		 * entry of the map is removed if (
+		 * {@link SearchEntry#getPositionLastSeen()} + {@link #maxAllowedGap} <
+		 * {@link #currentPos}). If the eldest entry has high enough score when
+		 * removed it is placed on {@link #retval} map.
+		 * <p>
+		 * Map keys are values of {@link FingerprintDataObj#getId()}.
+		 */
+		private final Map<Long, SearchEntry> seMap;
+
+		public Worker() {
+			retval = new HashMap<Long, SearchEntry>();
+			seMap = createLinkedHashMap();
+		}
+
+		/**
+		 * Adds segment and cache entry for match tracking.
+		 * <p>
+		 * Update {@link SearchEntry#setPositionLastSeen(int)} and record
+		 * {@link PotentialMatch}.
+		 * 
+		 * @param querySegment
+		 * @param ce
+		 */
+		private void addToSearchResults(Segment querySegment,
+				final ISegmentCacheValue ce) {
+			SearchEntry se = getOrCreateSearchEntry(Long.valueOf(ce
+					.getFingerprintId()), querySegment.getPosition());
+			// reconstruct segment object stored into cache
+			Segment cacheSegment = new Segment(querySegment.getData(), ce
+					.getSegmentPosition());
+			List<PotentialMatch> potentialMatches = se.getMap().get(
+					cacheSegment);
+			if (potentialMatches == null) {
+				potentialMatches = new ArrayList<PotentialMatch>();
+				se.getMap().put(cacheSegment, potentialMatches);
+			}
+			/*
+			 * Segments which have exactly the same position are unique. Key
+			 * used to fetch the list is unique for each entry in cache who have
+			 * the same audioId. Therefore the list cannot have duplicates.
+			 */
+			// refresh last known matching position
+			se.setPositionLastSeen(querySegment.getPosition());
+			int relativePosition = querySegment.getPosition()
+					- cacheSegment.getPosition();
+			potentialMatches.add(new PotentialMatch(querySegment,
+					relativePosition));
+		}
+
+		/**
+		 * Delegates a call {@link LinkedHashMap#removeEldestEntry(Entry)} to
+		 * {@link #removeEldestEntry(Entry)}.
+		 * 
+		 * @return
+		 */
+		@SuppressWarnings("serial")
+		private Map<Long, SearchEntry> createLinkedHashMap() {
+			return new LinkedHashMap<Long, SearchEntry>(16, 0.75f, true) {
+
+				@Override
+				protected boolean removeEldestEntry(
+						java.util.Map.Entry<Long, SearchEntry> eldest) {
+					return Worker.this.removeEldestEntry(eldest);
+				}
+			};
+		}
+
+		/**
+		 * Fetches {@link SegmentCacheValue}s matching the query segment and
+		 * starts tracking found entries.
+		 * 
+		 * @param querySegment
+		 */
+		private void fetchMatchingCacheEntries(Segment querySegment) {
+			Set<ISegmentCacheValue> ceList = cache.get(querySegment.getData());
+			for (final ISegmentCacheValue ce : ceList) {
+				addToSearchResults(querySegment, ce);
+			}
+		}
+
+		/**
+		 * Fetches search entry by using fingerprint id from cache. If there is
+		 * no search entry for the finger print then a new search entry is
+		 * created.
+		 * <p>
+		 * Perform match tracking indirectly by allowing {@link #seMap} to throw
+		 * out eldest entry. See {@link #removeEldestEntry(Entry)}
+		 * 
+		 * @param fingerprintId
+		 * @param lastSeen
+		 *            Position from query segment. .
+		 * @return
+		 */
+		private SearchEntry getOrCreateSearchEntry(final Long fingerprintId,
+				int lastSeen) {
+			SearchEntry se = seMap.get(fingerprintId);
+			if (se == null) {
+				se = retval.get(fingerprintId);
+				if (se == null) {
+					/*
+					 * SearchEntry must have the last seen position set
+					 * correctly before adding it into map, otherwise the
+					 * removeEldestEntry might throw it out immediately.
+					 */
+					se = new SearchEntry(lastSeen);
+					seMap.put(fingerprintId, se);
+				}
+			}
+			return se;
+		}
+
+		/**
+		 * Adds search entry to potential hits map if it has
+		 * {@link #minimumHits} or more matches.
+		 * 
+		 * @param id
+		 *            fingerprint identifier
+		 * @param se
+		 *            search entry associated to the fingerprint identifier
+		 */
+		private void potentiaHit(Long id, SearchEntry se) {
+			if (se.getMap().size() >= minimumHits) {
+				retval.put(id, se);
+			}
+		}
+
+		/**
+		 * Query cache for matching entries.
+		 * 
+		 * @param querySegments
+		 * @return Map keys are fingerprint identifiers. The values are search
+		 *         entries.
+		 */
+		public Map<Long, SearchEntry> query(List<Segment> querySegments) {
+			for (Segment querySegment : querySegments) {
+				currentPos = querySegment.getPosition();
+				fetchMatchingCacheEntries(querySegment);
+			}
+			// check remaining seMap entries.
+			// seMap is access ordered and would throw a
+			// ConcurrentModificationException on get() method. making a copy
+			// prevents this.
+			HashMap<Long, SearchEntry> copy = new HashMap<Long, SearchEntry>(
+					seMap);
+			for (Map.Entry<Long, SearchEntry> entry : copy.entrySet()) {
+				potentiaHit(entry.getKey(), entry.getValue());
+			}
+			return retval;
+		}
+
+		/**
+		 * Returns true if the search entry has not been updated since last
+		 * {@link #maxAllowedGap} positions while searching the fingerprint.
+		 * 
+		 * @param eldest
+		 * @return
+		 */
+		private boolean removeEldestEntry(Entry<Long, SearchEntry> eldest) {
+			SearchEntry val = eldest.getValue();
+			if (val.getPositionLastSeen() + maxAllowedGap < currentPos) {
+				potentiaHit(eldest.getKey(), eldest.getValue());
+				return true;
+			}
+			return false;
+		}
+
+	}
+
+	/**
+	 * Maximum allowed stretch in search string.
+	 */
+	private static final double THREE_PRECENT = 0.03;
+
+	private final ISegmentCache cache;
+
+	private final int maxAllowedGap;
+
+	private final int minimumHits;
+
+	private final int seglen;
+
+	public SegmentCacheSearch(ISegmentCache cache, Configuration fpConf,
+			Configuration searchConf) {
+		seglen = fpConf.getInt(FingerprintKey.SEGMENT_LENGTH);
+		minimumHits = searchConf.getInt(SearchKey.MINIMUM_HITS);
+		maxAllowedGap = minimumHits * seglen
+				+ (int) Math.ceil((minimumHits * seglen) * THREE_PRECENT);
+		this.cache = cache;
+	}
+
+	public void add(Long fpId, List<Segment> segments) {
+		for (Segment segment : segments) {
+			SegmentCacheValue ce = new SegmentCacheValue(fpId.longValue(),
+					segment.getPosition());
+			cache.add(segment.getData(), ce);
+		}
+	}
+
+	public void delete(long fpId, List<Segment> segments) {
+		for (Segment s : segments) {
+			SegmentCacheValue ce = new SegmentCacheValue(fpId, s.getPosition());
+			cache.delete(s.getData(), ce);
+		}
+	}
+
+	/**
+	 * 
+	 * @param querySegments
+	 * @return Map which key set represent values from
+	 *         {@link FingerprintDataObj#getId()}.
+	 */
+	public Map<Long, SearchEntry> query(List<Segment> querySegments) {
+		return new Worker().query(querySegments);
+	}
+
+}

@@ -1,0 +1,89 @@
+<?php
+
+/*
+ * This file is part of the Vermillion package.
+ *
+ * (c) Kilte Leichnam <nwotnbm@gmail.com>
+ *
+ * For the full copyright and license information,
+ * view the LICENSE file that was distributed with this source code.
+ */
+
+namespace Vermillion\JsonRpc;
+
+use Vermillion\JsonRpc\Exception\InternalException;
+use Vermillion\JsonRpc\Exception\InvalidRequestException;
+use Vermillion\JsonRpc\Exception\JsonRpcException;
+use Vermillion\JsonRpc\Exception\ParseException;
+use Vermillion\JsonRpc\Handler\HandlerInterface;
+use Vermillion\JsonRpc\Response\BatchResponse;
+use Vermillion\JsonRpc\Response\ErrorResponse;
+use Vermillion\JsonRpc\Response\ResponseInterface;
+
+/**
+ * @author Kilte Leichnam <nwotnbm@gmail.com>
+ */
+class Server
+{
+    /**
+     * @var HandlerInterface
+     */
+    private $handler;
+
+    /**
+     * @param HandlerInterface $handler
+     */
+    public function __construct(HandlerInterface $handler)
+    {
+        $this->handler = $handler;
+    }
+
+    /**
+     * Handles a request.
+     *
+     * @param string $request The JSON string
+     *
+     * @return ResponseInterface
+     */
+    public function handle($request)
+    {
+        $request = @json_decode($request, false);
+        if ($request instanceof \StdClass) {
+            $response = $this->handleRequest($request);
+        } elseif (!is_array($request)) {
+            $response = new ErrorResponse(new ParseException());
+        } else {
+            if (empty($request)) {
+                $response = new ErrorResponse(new InvalidRequestException());
+            } else {
+                $result = [];
+                foreach ($request as $item) {
+                    $result[] = $this->handleRequest($item);
+                }
+                $response = new BatchResponse($result);
+            }
+        }
+
+        return $response;
+    }
+
+    /**
+     * @param \StdClass $request
+     *
+     * @return ResponseInterface
+     */
+    private function handleRequest($request)
+    {
+        try {
+            $response = $this->handler->getResponse(new Request($request));
+        } catch (\Exception $e) {
+            if (!$e instanceof JsonRpcException) {
+                $e = new InternalException($e->getMessage());
+            }
+            $id = $request instanceof \StdClass && property_exists($request, 'id') ? $request->id : null;
+            $response = new ErrorResponse($e, Request::validateId($id) ? $id : null);
+        }
+
+        return $response;
+    }
+}

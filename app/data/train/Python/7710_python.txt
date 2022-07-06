@@ -1,0 +1,205 @@
+"""okc_scraper includes all the functions needed to scrape profiles from
+OKCupid"""
+
+import requests
+import cPickle as pickle
+import time
+from BeautifulSoup import BeautifulSoup
+
+
+def authorize(username, password):
+    """Log into OKCupid to scrape profiles"""
+
+    user_info = {"username": username, "password": password}
+
+    okc = requests.session()
+    okc.post("https://www.okcupid.com/login", data=user_info)
+    return okc
+
+
+def getProfiles(okc):
+    """Searches for profiles and returns a list of profiles (10)"""
+
+#     match_info = {"filter1": "0,63", "filter2": "2,100,18",
+#                   "filter3": "5,2678400", "filter4": "1,1",
+#                   "locid": "1", "custom_search": "0",
+#                   "matchOrderBy": "SPECIAL_BLEND",
+#                   "sa": "1", "sort_type": "0", "update_prefs": "1"}
+    soup = BeautifulSoup(okc.post("https://www.okcupid.com/match?filter1=0,63&filter2=2,100,18&filter3=5,2678400&filter4=1,1&locid=0&timekey=1&matchOrderBy=SPECIAL_BLEND&custom_search=0&fromWhoOnline=0&mygender=mwww.okcupid.com/match?filter1=0,63&filter2=2,100,18&filter3=5,2678400&filter4=1,1&locid=0&timekey=1&matchOrderBy=SPECIAL_BLEND&custom_search=0&fromWhoOnline=0&mygender=m").text)
+    users = soup.findAll("div", {"class": "user_info"})
+    return (["https://www.okcupid.com" +
+             user.find("a")["href"].replace("?cf=regular", "")
+             for user in users], soup)
+
+
+def getProfile(okc, profile_link):
+    """Takes a link to a profile and returns a BeautifulSoup object"""
+    page = BeautifulSoup(okc.get(profile_link).text)
+    return (page, page.find("form", {"id": "flag_form"})
+            .findAll("input")[0]["value"])
+
+
+def getInfo(profile, profile_id):
+    """Take a BeautifulSoup object corresponding to a profile's home page
+    and the profile's id and return a list of the profile's user info
+    (username, age, gender...)"""
+
+    try:
+        main = profile.find("div", {"id": "basic_info"}).findAll("span")
+        return {"id_table": {"user_id": profile_id,
+                             "user_name":  main[0].text,
+                             "user_age": main[1].text,
+                             "user_gender": main[2].text,
+                             "user_orient": main[3].text,
+                             "user_status": main[4].text,
+                             "user_location": main[5].text}, }
+    except:
+        print profile
+        return {"id_table": {"user_id": profile_id,
+                             "data": "NA"}}
+
+
+def getEssays(profile, profile_id):
+    """Takes a BeautifulSoup object corresponding to a profiles home
+    page and returns a list of the profile's essays"""
+
+    etd = {"user_id": profile_id, }
+    essay_index = ["self_summary", "my_life", "good_at", "first_thing",
+                   "favorite", "six_things", "lot_time", "typical_Friday",
+                   "most_private"]
+    main = profile.find("div", {"id": "main_column"})
+    for i in range(0, 9):
+        try:
+            etd[essay_index[i]] = (main.find("div", {"id": "essay_text_"
+                                                     + str(i)})
+                                   .getText(' '))
+        except:
+            etd[essay_index[i]] = ""
+    return {"essay_table": etd, }
+
+
+def getLookingFor(profile, profile_id):
+    """Takes a BeautifulSoup object corresponding to a profiles home
+    page and returns a list of the profile's looking for items"""
+
+    try:
+        main = (profile.find("div", {"id": "main_column"})
+                .find("div", {"id": "what_i_want"}).findAll("li"))
+        if len(main) == 4:
+            return {"looking_for_table": {"user_id": profile_id,
+                                          "other_user": main[0].text,
+                                          "other_age": main[1].text,
+                                          "other_location": main[2].text,
+                                          "other_type": main[3].text}, }
+        if len(main) == 5:
+            return {"looking_for_table": {"user_id": profile_id,
+                                          "other_user": main[0].text,
+                                          "other_age": main[1].text,
+                                          "other_location": main[2].text,
+                                          "other_status": main[3].text,
+                                          "other_type": main[4].text}, }
+    except:
+        print profile
+        return {"looking_for_table": {"user_id": profile_id,
+                                      "data": "NA"}}
+
+
+def getDetails(profile, profile_id):
+    """Takes a BeautifulSoup object corresponding to profiles home
+    page and returns a list of profile's details"""
+
+    try:
+        main = profile.find("div", {"id": "profile_details"}).findAll("dd")
+        return {"details_table": {"user_id": profile_id,
+                                  "last_online": main[0].text,
+                                  "ethnicity": main[1].text,
+                                  "height": main[2].text,
+                                  "body_type": main[3].text,
+                                  "diet": main[4].text,
+                                  "smokes": main[5].text,
+                                  "drinks": main[6].text,
+                                  "religion": main[7].text,
+                                  "sign": main[8].text,
+                                  "education": main[9].text,
+                                  "job": main[10].text,
+                                  "income": main[11].text,
+                                  "offspring": main[12].text,
+                                  "pets": main[13].text,
+                                  "speaks": main[14].text}, }
+    except:
+        print profile
+        return {"details_table": {"user_id": profile_id,
+                                  "data": "NA"}}
+
+
+def getQuestions(okc, profile_link, profile_id):
+    """Take a link to a profile and return a list the questions a user
+    has answered"""
+
+    # Currently this doesn't return anything.  All functions need to be
+    # changed up to work with mysql 07/19/2013 22:50
+
+    question_list = []
+    question_categories = ["Ethics", "Sex", "Religion", "Lifestyle",
+                           "Dating", "Other"]
+    for category in question_categories:
+        q = BeautifulSoup(okc.get(profile_link + "/questions?"
+                                  + category).text)
+        try:
+            max_page = int(q.find("div", {"class": "pages clearfix"})
+                           .findAll("li")[1].find("a").text)
+        except IndexError:
+            max_page = 1
+        except AttributeError:
+            return []
+        for page in range(1, max_page + 1):
+            q_page = BeautifulSoup(okc.get(profile_link + "/questions?"
+                                           + category + "="
+                                           + str(page)).text)
+            questions = [q for q in q_page.find("div", {"id": "questions"})
+                         .findAll("div",
+                                  {"class":
+                                   "question public talk clearfix"})]
+            for question in questions:
+                question_id = question["id"]
+                qtext = question.find("p", {"class": "qtext"}).text
+                atext = question.find("p",
+                                      {"class":
+                                       "answer target clearfix"}).text
+                question_list.append({"question_table":
+                                      {"user_id": profile_id,
+                                       "question_id": question_id,
+                                       "question_text": qtext,
+                                       "user_answer": atext,
+                                       "question_category": category},
+                                      })
+    return question_list
+
+
+def pickleDict(dict_, dir):
+    """Takes in a directory and a dictionary to be pickled and pickles
+    the dict in the directory"""
+
+    dict_id = dict_.keys()[0]
+    tab_i = pickle.load(open(dir + dict_id + ".p", "rb"))
+    tab_i.append(dict_)
+    pickle.dump(tab_i, open(dir + dict_id + ".p", "wb"))
+
+
+def main(okc_instance):
+    """The main event, takes an okc_instance (logged in) and writes a
+    profile to the docs"""
+
+    profiles, soup = getProfiles(okc_instance)
+    locations = [l.text.split(";")[1] for l in
+                 soup.findAll("div", {"class": "userinfo"})]
+    if len([l for l in locations if l == "Chicago, IL"]) > 2:
+        print "Possible Reset"
+    for profile in profiles:
+        prof = getProfile(okc_instance, profile)
+        pickleDict(getInfo(prof[0], prof[1]), "data/")
+        pickleDict(getEssays(prof[0], prof[1]), "data/")
+        pickleDict(getLookingFor(prof[0], prof[1]), "data/")
+        pickleDict(getDetails(prof[0], prof[1]), "data/")
+        time.sleep(2)
+        return prof[1]

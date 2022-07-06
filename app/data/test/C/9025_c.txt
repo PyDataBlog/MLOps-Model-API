@@ -1,0 +1,1046 @@
+#include "GlobalDef.h"
+#include "ADSType.h"
+#include "Input.h"
+#include "Periodic.h"
+#include "Led.h"
+#include "EEPROM.h"
+#include "ProgrammedModule.h"
+#include "Delay.h"
+#include "CAN.h"
+#include "BMW.h"
+#include "BMW_Database.h"
+#include "Tach.h"
+#include "Relay.h"
+#include "CANPack1.h"
+#include "J1850.h"
+#include "Data.h"
+#include "ProgSwitch.h"
+#include "GenericBypass.h"
+#include "VSource.h"
+#include "ModeSelection.h"
+#include "AnalogSource.h"
+
+#ifdef HW_BLADE
+#include "UartSwitch.h"
+#else
+#include "Keysense.h"
+#include "DoorStatus.h"
+#include "AlarmPort.h"
+#include "CtrlBMW_KIB.h"	// Control BMW KIB
+#endif
+
+
+#define TIMEOUT_DELAY	45  
+#define TIMEOUT			0
+
+
+#define MODE_RFID		0
+#define MODE_NOT_RFID	1
+
+//#define  OFF				0
+#define START_SEQUENCE		1
+#define IDLE_MODE			2
+#define IDLE_MODE_SHUTDOWN	3
+
+
+#ifndef CONST_TACH_MODE
+extern volatile Uint16 TachRPM;			// This variable is used to store desired RPM value.
+#endif
+
+// Globals
+static volatile Uint8 BMWPlatform=0xFF;
+static volatile Uint8 VINFound=0;
+static volatile Uint8 VIN[3];
+extern volatile Uint8 VINok;
+extern volatile Uint8 Learned;
+extern volatile Uint8 IAT;
+extern volatile Uint8 RxCANStatistic;
+
+static Uint8 EngineState = OFF;
+static Uint8 Timer = TIMEOUT;
+static Uint8 mode = MODE_RFID;
+static Uint8 state = OFF;
+static Uint8 TachDetectedOnBus = NO;
+static Uint8 DontCheckBrake = OFF;
+
+// Protos
+static Uint8 BMW_FindPlatform(void);
+static Uint8 BMW_WakeUpBus(void);
+void UpdateEngineStateInfo(void);
+
+static void StartIdleMode(void);
+static void StartSequence(void);
+static void StopSequence(void);
+	
+/*
+ * This function Initializes BMW App
+ */
+Uint8 BMW_CAN_Init(void)
+{
+	Uint8 BaudData[3];
+	
+	//find Platform
+	//BMWPlatform=0;VINFound=0x11;VINok=1;
+	if(BMW_FindPlatform()==FAIL)
+		return FAIL;
+	
+	// Get Baud rate configuration
+	memcpy_P(&BaudData[0],(const_Flash_void_ptr)(pgm_read_tAddr(&BMW_Baudrate_LUT[BMWPlatform])),3);
+	
+	// Initialize CAN controller
+	CAN_Init(BaudData[0],BaudData[1],BaudData[2]);
+	
+	#ifdef PLATFORM_HW_DL_CAN_V1_0
+	// Set High Speed Tranceiver
+	CAN_SetHSCAN();
+	#endif
+	
+	// Put tranceiver in normal mode
+	CAN_HSCAN_NormalMode();
+	
+	// Enable CAN interrupts
+	CAN_Enable_Interrupts();
+
+	GenericBypass_Init();
+	
+	VSource_SetDoorlockVoltage12V();
+	J1850_Init();
+	J1850_SetState(LOW);
+	
+	Data_SetPullUpUBP(OFF);
+	Data_SetGroundUBP(OFF);
+	Data_SetVadj0(OFF);
+	Data_SetGround0(OFF);
+	Data_SetVadj1(OFF);
+	Data_SetGround1(OFF);
+	Data_SetPU_ISO(OFF);
+	Data_SetGroundISO(OFF);
+	
+	AnalogSource_Init();
+	AnalogSource_SetVoltageReference(0x03FF);	// 5V
+	AnalogSource_SetPWMState(ON);				// Patch for old AIO version (for next version D20 will be add)
+	AnalogSource_SetOENState(OFF);
+	AnalogSource_SetOEPState(OFF);
+	
+	#ifdef HW_BLADE
+	UartSwitch_Init();
+	UartSwitch_SetState(OPEN);
+	#else
+	Keysense_Init();
+	#endif
+	
+	CtrlBMW_KIB_Init();
+	
+	#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+	#ifdef UART_TX_ENABLE
+	// Must make LUTs to Set Supported by Platform !!!
+	IDL2W_AlarmTrigger_SetSupportedZoneOn(FDSD_ZONE);
+	IDL2W_AlarmTrigger_SetSupportedZoneOn(FPSD_ZONE);
+	IDL2W_AlarmTrigger_SetSupportedZoneOff(RDSD_ZONE);
+	IDL2W_AlarmTrigger_SetSupportedZoneOff(RPSD_ZONE);
+	IDL2W_AlarmTrigger_SetSupportedZoneOn(TLG_ZONE);
+	IDL2W_AlarmTrigger_SetSupportedZoneOn(HD_ZONE);
+	IDL2W_AlarmTrigger_SetSupportedZoneOff(KS_ZONE);
+	IDL2W_SetBrakeSupportedOn(BRAKE_PEDAL);
+	IDL2W_SetBrakeSupportedOn(EBRAKE);
+	IDL2W_SetTachSupported(ON);
+	#endif
+	#endif
+	
+	if(Input_GetState(GROUND_OUT_ON)==ON){
+		// To avoid GWR append
+	}
+	
+	return SUCCESS;
+}
+
+/*
+ * This function sets up All mobs for BMW, except learn mob, VIN mob
+ */
+void BMW_SetUpAllRxMOBs(void)
+{	
+	Uint8 i;
+	
+	for(i=2;i<NB_MOB-1;i++)
+	{
+		BMW_SetUpRxMOB(i);
+	}
+}
+
+/*
+ * This function sets up one mob for BMW
+ */
+void BMW_SetUpRxMOB(Uint8 mob)
+{	
+	CANPack1_SetUpRxMOB(mob,pgm_read_tAddr(&BMW_ConfigMOB_LUT[BMWPlatform][mob]));
+}
+
+/*
+ * This function learns bytes required for BMW
+ */
+void BMW_Learn(void)
+{
+	
+	// Save Platform Here
+	ProgrammedModule_Save();
+	Learned=1;
+}
+
+/*
+ * This function handles doorlock features
+ */
+void BMW_Doorlock(void)
+{
+	// HORN_PANIC_ON ->  BROWN WIRE = DISARM
+	if((Input_GetState(DISARM_ON) || Input_GetState(HORN_PANIC_ON)))
+	{
+		BMW_WakeUpBus();
+		
+		CAN_QueueFrameFromFlash((const_Flash_Uint8_ptr)pgm_read_tAddr(&BMW_Functions_LUT[BMWPlatform][FN_DISARM]));
+	}
+	
+	// check for unlock driver
+	if(Input_GetState(UNLOCK_DRIVER_ON))
+	{
+		BMW_WakeUpBus();
+		
+		CAN_QueueFrameFromFlash((const_Flash_Uint8_ptr)pgm_read_tAddr(&BMW_Functions_LUT[BMWPlatform][FN_UNLOCK_DRIVER]));
+		
+		// For idle mode
+		// start 45 sec chrono
+		Timer=TIMEOUT_DELAY;
+		Periodic_Enable(PERIODIC_IDLE_TIMEOUT_EVENT, 100);
+	}
+	
+	// check for unlock all
+	if(Input_GetState(UNLOCK_ON))
+	{
+		BMW_WakeUpBus();
+		
+		CAN_QueueFrameFromFlash((const_Flash_Uint8_ptr)pgm_read_tAddr(&BMW_Functions_LUT[BMWPlatform][FN_UNLOCK]));
+	}
+	
+	// check for lock
+	if(Input_GetState(LOCK_ON))
+	{
+		BMW_WakeUpBus();
+		
+		CAN_QueueFrameFromFlash((const_Flash_Uint8_ptr)pgm_read_tAddr(&BMW_Functions_LUT[BMWPlatform][FN_LOCK]));
+		
+		// For idle mode
+		// reset chrono
+		Timer=TIMEOUT;
+	}
+	
+	// check for arm
+	if(Input_GetState(ARM_ON))
+	{
+		BMW_WakeUpBus();
+		
+		CAN_QueueFrameFromFlash((const_Flash_Uint8_ptr)pgm_read_tAddr(&BMW_Functions_LUT[BMWPlatform][FN_ARM]));	
+	}
+	
+	// check for trunk
+	if(Input_GetState(TRUNK_ON))
+	{
+		BMW_WakeUpBus();
+		
+		// All this code was add for X5 2008 (11-02-2009)
+		//CAN_QueueFrameFromFlash((const_Flash_Uint8_ptr)pgm_read_tAddr(&BMW_Functions_LUT[BMWPlatform][FN_DISARM]));
+		CAN_LoadFrameFromFlash((const_Flash_Uint8_ptr)pgm_read_tAddr(&BMW_Functions_LUT[BMWPlatform][FN_DISARM]));
+		CANTxFrame.delay=10;
+		CAN_QueueFrame();
+		// end of added code
+		
+		CAN_QueueFrameFromFlash((const_Flash_Uint8_ptr)pgm_read_tAddr(&BMW_Functions_LUT[BMWPlatform][FN_TRUNK]));	
+	}
+}
+
+/*
+ * This function updates tach value. 
+ */
+void BMW_Tach_Update(void)
+{
+	Uint8 Data[8];
+	Uint16 Tach;
+	
+	TachDetectedOnBus=NO;
+	
+	if(CAN_Get_DLC()==8)
+	{
+		CAN_Get_Data(Data);
+		
+		Tach = ((((Uint16)(Data[5]))<<8)|(Uint16)Data[4]);// Already multiplied by 4 like the standard
+		if(Tach != 0xFFFF){
+			Tach_SetRPM(Tach);
+		}
+		// Check if tach is on the bus
+		// tach is always broadcast
+		// Ignition off -> 0xFFFF
+		// Ignition on -> 0x0000 ...
+		TachDetectedOnBus=YES;
+	}
+}
+
+/*
+ * This function updates tach state
+ */
+void BMW_Tach(void)
+{
+	if(Input_GetState(IGNITION_ON))
+	{
+		Tach_Start();
+		EngineState=OFF;
+	}
+	if(Input_GetState(IGNITION_OFF))
+	{
+		Tach_Stop();
+		
+		// Set brake off
+		J1850_SetState(OFF);
+		
+		#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+		#ifdef UART_TX_ENABLE
+		IDL2W_SetBrakeOff(BRAKE_PEDAL);
+		#endif
+		#endif
+	}
+}
+
+/*
+ * This function sends IAT request
+ */
+void BMW_IAT_REQ(void)
+{
+	
+}
+
+/*
+ * This function updates IAT
+ */
+void BMW_IAT_Update(void)
+{
+}
+
+/*
+ * This function sends Keysense request
+ */
+void BMW_KeySense_REQ(void)
+{
+}
+
+/*
+ * This function update the accessory state from CAN
+ */
+void BMW_KeySense_Update(void)
+{
+	Uint8 Data[8];
+	
+	if(CAN_Get_DLC()==5)
+	{
+		CAN_Get_Data(Data);
+		// 130 : 40 XX XX XX XX    OFF
+		// 130 : 41 XX XX XX XX    ACCESSORY ON
+		// 130 : 45 XX XX XX XX    IGNITION ON
+		// 130 : 55 XX XX XX XX    CRANK(START)
+		
+		// IGNITION ON
+		if((Data[0]&0x04)==0x04)
+		{
+			Relay_SetState(ON);
+		}
+		else
+		{
+			Relay_SetState(OFF);
+		}
+	}
+
+
+}
+
+/*
+ * This function handles the keyless
+ */
+void BMW_HeatedAcc(void)
+{
+
+}
+
+
+/*
+ * This function handles the door/trunk/hood status
+ */
+void BMW_DoorStatus(void)
+{
+	Uint8 Data[8];
+	
+	if(CAN_Get_DLC()==7)
+	{
+		CAN_Get_Data(Data);
+		
+		if((Data[1]&0x05)==0)
+		{
+			#ifndef HW_BLADE
+			DoorStatus_SetState(DOOR_CLOSE);
+			#endif
+		}
+		else
+		{
+			#ifndef HW_BLADE
+			DoorStatus_SetState(DOOR_OPEN);
+			#endif
+		}
+		
+		#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+		#ifdef UART_TX_ENABLE
+		if((Data[1]&0x01)==0x01)
+			IDL2W_AlarmTrigger_SetZonesOn(FDSD_ZONE);
+		else
+			IDL2W_AlarmTrigger_SetZonesOff(FDSD_ZONE);
+		
+		if((Data[1]&0x04)==0x04)
+			IDL2W_AlarmTrigger_SetZonesOn(FPSD_ZONE);
+		else
+			IDL2W_AlarmTrigger_SetZonesOff(FPSD_ZONE);
+		
+		/*
+		if((Data[0]&0x08)==0x08)
+			IDL2W_AlarmTrigger_SetZonesOn(RDSD_ZONE);
+		else
+			IDL2W_AlarmTrigger_SetZonesOff(RDSD_ZONE);
+		
+		if((Data[0]&0x04)==0x04)
+			IDL2W_AlarmTrigger_SetZonesOn(RPSD_ZONE);
+		else
+			IDL2W_AlarmTrigger_SetZonesOff(RPSD_ZONE);
+		*/
+		#endif
+		#endif
+		
+		if((Data[2]&0x01)==0x01)
+		{
+			#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+			#ifdef UART_TX_ENABLE
+			IDL2W_AlarmTrigger_SetZonesOn(TLG_ZONE);
+			#endif
+			#endif
+			
+			#ifndef HW_BLADE
+			TrunkStatus_SetState(TRUNK_OPEN);
+			#endif
+		}
+		else
+		{
+			#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+			#ifdef UART_TX_ENABLE
+			IDL2W_AlarmTrigger_SetZonesOff(TLG_ZONE);
+			#endif
+			#endif
+			
+			#ifndef HW_BLADE
+			TrunkStatus_SetState(TRUNK_CLOSE);
+			#endif
+		}
+		
+		if((Data[2]&0x04)==0x04)
+		{
+			#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+			#ifdef UART_TX_ENABLE
+			IDL2W_AlarmTrigger_SetZonesOn(HD_ZONE);
+			#endif
+			#endif
+			
+			#ifndef HW_BLADE
+			HoodStatus_SetState(HOOD_OPEN);
+			#endif
+			
+		}
+		else
+		{
+			#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+			#ifdef UART_TX_ENABLE
+			IDL2W_AlarmTrigger_SetZonesOff(HD_ZONE);
+			#endif
+			#endif
+			
+			#ifndef HW_BLADE
+			HoodStatus_SetState(HOOD_CLOSE);
+			#endif
+			
+		}
+	
+		if(Data[0]==0x11)
+		{
+			// For idle mode
+			// start 45 sec chrono
+			Timer=TIMEOUT_DELAY;
+			Periodic_Enable(PERIODIC_IDLE_TIMEOUT_EVENT, 100);
+		}
+		
+		if(Data[0]==0x34)
+		{
+			Timer=TIMEOUT;
+		}
+	}
+}
+
+/*
+ * This function sends doorstatus request
+ */
+void BMW_DoorStatus_REQ(void)
+{
+	Uint8 Data[8];
+	
+	if(CAN_Get_DLC()==8)
+	{
+		CAN_Get_Data(Data);
+		
+		if(Input_GetState(IGNITION_STATE)==ON)
+		{
+			// 0x1B4 XX XX XX XX XX XX X2 XX
+			if((Data[6]&0x02)==0x02)
+			{
+				#ifndef HW_BLADE
+				Keysense_SetState(ON); // Green wire
+				#endif
+				
+				#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+				#ifdef UART_TX_ENABLE
+				IDL2W_SetBrakeOn(EBRAKE);
+				#endif
+				#endif
+			}
+			else
+			{
+				#ifndef HW_BLADE
+				Keysense_SetState(OFF); // Green wire
+				#endif
+				
+				#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+				#ifdef UART_TX_ENABLE
+				IDL2W_SetBrakeOff(EBRAKE);
+				#endif
+				#endif
+			}
+		}
+	}
+}
+
+/*
+ * This function sends Panic Code
+ */
+ 
+ // All this code was add for X5 2008 (11-02-2009)
+void BMW_Panic(void)
+{
+	static Uint8 panic = OFF;
+	
+	// Data
+	if(InputMode==INPUT_MODE_IDATALINK)
+	{
+		// check for Panic on
+		if(Input_GetState(PANIC_ON))
+		{
+			BMW_WakeUpBus();
+			
+			CAN_LoadFrameFromFlash(BMW_6Series_PanicOn);
+			CANTxFrame.delay=10;
+			CAN_QueueFrame();
+			CAN_QueueFrame();
+			CAN_QueueFrame();
+			CAN_QueueFrame();
+		}
+		
+		// check for Panic off
+		if(Input_GetState(PANIC_OFF))
+		{
+			BMW_WakeUpBus();
+			
+			CAN_LoadFrameFromFlash(BMW_6Series_PanicOff);
+			CANTxFrame.delay=10;
+			CAN_QueueFrame();
+			CAN_QueueFrame();
+			CAN_QueueFrame();
+			CAN_QueueFrame();
+		}		
+	}
+	// wired
+	else
+	{
+		if(Input_GetState(PANIC_ON))
+		{
+			if(panic == OFF){
+				BMW_WakeUpBus(); 
+				
+				CAN_LoadFrameFromFlash(BMW_6Series_PanicOn);
+				CANTxFrame.delay=10;
+				CAN_QueueFrame();
+				CAN_QueueFrame();
+				CAN_QueueFrame();
+				CAN_QueueFrame();
+				panic = ON;
+			}
+			else{
+				BMW_WakeUpBus();
+				
+				CAN_LoadFrameFromFlash(BMW_6Series_PanicOff);
+				CANTxFrame.delay=10;
+				CAN_QueueFrame();
+				CAN_QueueFrame();
+				CAN_QueueFrame();
+				CAN_QueueFrame();
+				panic = OFF;
+			}
+		}
+	}
+	
+
+}
+
+/*
+ * This function Receive Brake status via CAN
+ */
+void BMW_Tach_REQ(void)
+{	
+	Uint8 Data[8];
+	
+	if(CAN_Get_DLC()==3)
+	{
+		CAN_Get_Data(Data);
+		
+		if(Input_GetState(IGNITION_STATE)==ON)
+		{
+			// 0x21A 8X XX XX
+			if((DontCheckBrake == OFF) && ((Data[0]&0x80)==0x80))
+			{
+				J1850_SetState(ON);
+				
+				#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+				#ifdef UART_TX_ENABLE
+				IDL2W_SetBrakeOn(BRAKE_PEDAL);
+				#endif
+				#endif
+			}
+			else
+			{
+				J1850_SetState(OFF);
+				
+				#if defined(IDL_VERSION_2_ENABLE) || defined(D2D_ENABLE)
+				#ifdef UART_TX_ENABLE
+				IDL2W_SetBrakeOff(BRAKE_PEDAL);
+				#endif
+				#endif
+			}
+		}
+	}
+}
+
+/*
+ * This function controls OEM Alarm
+ * and start sequence for KIB module
+ */
+void BMW_Alarm(void)
+{
+//	static Uint8 IdleMode = OFF;
+	
+	// Send keepalive every 1.5 sec
+	// (must be done at least each 2 sec)
+	// without a keepalive, the KIB will undo the start sequence 
+	// or it will do a stop sequence if the car is not moving
+
+
+	SendKeepAlive();
+	
+	UpdateEngineStateInfo();
+	
+	if(Input_GetState(GROUND_OUT_ON)==ON)
+	{
+		#ifdef ENCRYPTOR_ENABLE
+		if(IDatalinkVersion==IDATALINK_VERSION_2E)
+			LED_DisplayStatus(LED_BYPASS, ORANGE,BMWPlatform+1);
+		else
+		{
+			if(InputMode==INPUT_MODE_IDATALINK && ReqManID2ndAttempt<REQ_MAN_ID_MAX_NUM_OF_ATTEMPTS)
+				LED_DisplayStatus(LED_BYPASS, TOGGLE,BMWPlatform+1);
+			else
+				LED_DisplayStatus(LED_BYPASS, GREEN,BMWPlatform+1);
+		}
+		#else
+		LED_DisplayStatus(LED_BYPASS, GREEN,BMWPlatform+1);
+		#endif
+		
+		if(Input_GetState(IGNITION_STATE)==ON)
+		{
+			// Goto Idle mode
+			StartIdleMode();
+		}
+		else
+		{
+			// Goto start sequence
+			StartSequence();
+		}
+	}
+	
+	if(Input_GetState(GROUND_OUT_OFF)==ON)
+	{
+		LED_Steady(LED_BYPASS, CLEAR);
+		
+		// Goto stop sequence
+		StopSequence();
+		
+		#ifdef ENCRYPTOR_ENABLE
+		#ifdef IDL_VERSION_2_ENABLE
+		#ifdef UART_TX_ENABLE
+		if(InputMode==INPUT_MODE_IDATALINK && ReqManID2ndAttempt<REQ_MAN_ID_MAX_NUM_OF_ATTEMPTS)
+		{
+			ReqManID2ndAttempt++;
+			if(EEPROM_Read(PROGRAM_MEMORY_MANUFACTURER_ID_ADDR)>MANUFACTURER_ID_COUNT)
+			{
+				EEPROM_Write(PROGRAM_MEMORY_MANUFACTURER_ID_ADDR,Input_GetManufacturerID());
+			}
+		}
+		#endif
+		#endif
+		#endif
+	}	
+	
+	
+	if(Input_GetState(GROUND_OUT_STATE)==ON)
+	{
+		
+		// Wait STATER_ON to
+		// complete the start sequence
+		if(state == START_SEQUENCE)
+		{
+			if(Input_GetState(STARTER_ON)==ON)
+			{
+				// Start only if EngineState is OFF
+				if(EngineState == OFF)
+				{
+					// Start the engine (pulse)
+					DontCheckBrake = ON;
+					Delay(15);
+					SendStartOn();					// 6 // Send start push pulse command
+					Delay(45);
+				}
+			}	
+			
+			// Finish to start the engine
+			// Ignition is unknown (it can be released before a completed start)
+			if(Input_GetState(STARTER_OFF)==ON)
+			{
+				// Release brake
+				SendStartOff();						// 7 // Release brake command
+				Timer=TIMEOUT;
+				
+				Delay(20);
+				DontCheckBrake = OFF;
+				
+			}			
+		}
+		
+		// Update unlock chrono
+		if(Periodic_GetState(PERIODIC_IDLE_TIMEOUT_EVENT))
+		{
+			if(Timer > TIMEOUT){
+				Timer--;
+				Periodic_Enable(PERIODIC_IDLE_TIMEOUT_EVENT, 100);
+			}
+		}
+	}	
+	
+	// Shutdown from takeover
+	if(state == IDLE_MODE_SHUTDOWN)
+	{
+		if(Input_GetState(IGNITION_STATE)==OFF)
+		{
+			Timer=TIMEOUT;
+			//StopSequence();
+			
+			TachDetectedOnBus=NO;
+			
+			Periodic_Disable(PERIODIC_IDLE_TIMEOUT_EVENT);
+			
+			SendKeyOut();							// 9 // Send key out command
+			SendCoil(OFF);							// 10 //
+			SendKeepAliveState(OFF);				// 11 //
+			
+			SendEngineState(EngineState);			// 12 // To synch. the start and stop
+			SendVehiculeMovingState(NO);			// 13 // The car can't be stopped when is moving
+			
+			state = OFF;	
+		}
+	}
+}
+
+
+
+void StartSequence(void)
+{
+	// Do it only if EngineState is OFF
+	if(EngineState == ON)
+		return;
+	
+	// To clear the start flag
+	if(Input_GetState(STARTER_ON)==ON){/* To avoid a start pulse before the GWR*/}
+	
+	// refresh engine state
+	// and vehicule state
+	SendEngineState(EngineState);		// 1 // To synch. the start and stop
+	SendVehiculeMovingState(NO);		// 2 // The car can't be stopped when is moving
+	
+	// Start keepalive on KIB module
+	// now the keepalive must be sent at least every 2 sec
+	SendKeepAliveState(ON);		// 3 //
+	SendCoil(ON);				// 4 //
+	Delay(1);
+	SendKeyIn();				// 5 // Send key in command
+
+	state = START_SEQUENCE;
+	Timer=TIMEOUT;
+	
+	if(!TachDetectedOnBus){
+		StopSequence();
+	}
+}
+
+void StopSequence(void)
+{
+	// To init flag for the next idle mode or remoteStart
+	// The flag will be set on the next CAN frame
+	TachDetectedOnBus=NO;
+	
+	// Timeout (Engine shutdown)
+	if(Timer == TIMEOUT)
+	{
+		Periodic_Disable(PERIODIC_IDLE_TIMEOUT_EVENT);
+		
+		// Stop only if EngineState is ON
+		if(EngineState == ON)
+		{
+			SendEngineState(EngineState);		// Send info to KIB
+			SendStop();							// 8 // Send stop push pulse command
+		}
+		
+		SendKeyOut();							// 9 // Send key out command
+		SendCoil(OFF);							// 10 //
+		SendKeepAliveState(OFF);				// 11 //
+		
+		SendEngineState(EngineState);			// 12 // To synch. the start and stop
+		SendVehiculeMovingState(NO);			// 13 // The car can't be stopped when is moving
+		
+		state = OFF;
+	}
+	// Stop from idle mode
+	else
+	{
+		state = IDLE_MODE_SHUTDOWN;
+	}
+
+}
+
+void StartIdleMode(void)
+{
+	if(mode == MODE_RFID)
+	{
+		if(state == OFF){
+			SendKeepAliveState(ON);
+			SendCoil(ON);
+			Delay(1);
+			SendKeyIn();
+			
+			Periodic_Enable(PERIODIC_IDLE_TIMEOUT_EVENT, 100);
+		}
+		state = IDLE_MODE;
+		Timer=TIMEOUT;
+	}
+	
+	// mode == MODE_NOT_RFID
+	else
+	{
+	
+	}
+}
+
+
+
+/*
+ * This function gets the VIN
+ */
+void BMW_GetVIN(void)
+{
+	/*
+	Uint32 id_ext;
+	Uint16 id_std;
+	
+	if(CAN_Get_IDE())
+	{
+		CAN_Get_EXT_ID(id_ext);
+		
+		if(id_ext==0x065373BA)
+		{
+			BMWPlatform=PLATFORM_BMW_1;
+			VINFound=0x11;
+		}
+		else if(id_ext==0x012173BE)
+		{
+			BMWPlatform=PLATFORM_BMW_1;
+			VINFound=0x11;
+		}
+	}
+	else
+	{
+		CAN_Get_STD_ID(id_std);
+		
+		// Detect Doorpin Header
+		if(id_std==0x0110)
+		{
+			BMWPlatform=PLATFORM_BMW_1;
+			VINFound=0x11;
+		}
+	}
+	*/
+}
+
+/*
+ * This function takes care of finding what platform of BMW we are in
+ */
+static Uint8 BMW_FindPlatform(void)
+{
+	BMWPlatform=PLATFORM_BMW_1;//EEPROM_Read(PLATFORM_2_PTR);
+	
+	if(BMWPlatform>=BMW_PLATFORM_COUNT)
+	{
+		// Wait for ignition to turn on
+		while(Input_GetState(IGNITION_STATE)==OFF)
+			wdt_reset();
+		
+		if(ProgSw_GetState())
+		{
+			while(ProgSw_GetState())
+			{
+				wdt_reset();
+			}
+			
+			ModeSelection_Enter((Uint8*)&BMWPlatform,BMW_PLATFORM_COUNT,RED);
+			
+			EEPROM_Write(PLATFORM_2_PTR,BMWPlatform);
+			goto BMWPlatformFound;
+		}
+		
+		VINok=0;
+		VINFound=0;
+		BMWPlatform=0;
+		
+		Retry_BMW_FindPlatform:
+		
+		// Enable CAN interrupts
+		CAN_Enable_Interrupts();
+		
+		// Set-up blank MOB to catch VIN
+		// In this case no vin, autolearns by detecting unique headers.
+		CAN_Set_MOB(_GET_VIN_);
+		CAN_Clear_MOB();
+		BMW_SetUpRxMOB(_GET_VIN_);
+		
+		// Start a periodic for 2 second timeout
+		Periodic_Enable(PERIODIC_VIN_TIMEOUT_EVENT,200);
+		
+		// Do nothing until VIN is caught
+		while(1)
+		{
+			wdt_reset();
+			if(VINFound==0x11)
+				goto VIN_Found; 	
+			
+			// Do nothing while waiting to catch a message
+			Delay(25);
+				
+			// if VIN detection timed-out return fail
+			if(Periodic_GetState(PERIODIC_VIN_TIMEOUT_EVENT)==ON)
+			{
+				// Disable CAN interrupts
+				CAN_Disable_Interrupts();
+				
+				// Try next BMW Platform
+				BMWPlatform++;
+				
+				if(BMWPlatform==BMW_PLATFORM_COUNT)
+					return FAIL;
+				else
+					goto Retry_BMW_FindPlatform;
+			}
+		}
+		
+		VIN_Found:
+		// Set flag to disable automatic re-enabling of mob
+		VINok=1;
+		Learned=1;
+		
+		// Save current platform in EEPROM 
+		EEPROM_Write(PLATFORM_2_PTR,BMWPlatform);
+		
+		// Everything required is learned, so save
+		ProgrammedModule_Save();
+		
+		return SUCCESS;
+	}
+	
+	BMWPlatformFound:
+	VINFound=0x11;
+	VINok=1;
+	Learned=1;
+	return SUCCESS;
+}
+
+static Uint8 BMW_WakeUpBus(void)
+{
+	
+	Uint8 BusAwakeCount=0;
+	
+	Periodic_Enable(PERIODIC_TIMEOUT_EVENT,50);
+	
+	while(!Periodic_GetState(PERIODIC_TIMEOUT_EVENT))
+	{
+		CAN_QueueFrameFromFlash(BMW_6Series_WakeUp);
+		
+		CAN_SendFrame();
+		Delay(10);
+		if(RxCANStatistic==1)
+		{
+			RxCANStatistic=0;
+			BusAwakeCount++;
+		}
+		if(BusAwakeCount==1)
+			return 1;
+	}
+	return 0;
+}
+
+void UpdateEngineStateInfo(void){
+	
+
+	// Update KIB info
+	// RPM > 400
+	if(Tach_GetRealRPM() > 400)	
+	{
+		// To send only one time
+		if(EngineState == OFF)
+		{
+			EngineState = ON;
+			SendEngineState(EngineState);		// Send info to KIB
+		}
+		
+	}
+	// RPM = 0
+	else
+	{
+		// To send only one time
+		if(EngineState == ON)
+		{
+			EngineState = OFF;
+			SendEngineState(EngineState);	// Send info to KIB
+		}
+	}	
+
+}

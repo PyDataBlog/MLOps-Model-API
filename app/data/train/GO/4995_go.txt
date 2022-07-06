@@ -1,0 +1,91 @@
+package goulash
+
+import (
+	"errors"
+	"fmt"
+
+	"github.com/pivotalservices/goulash/slackapi"
+	"github.com/pivotalservices/slack"
+)
+
+type restrictify struct {
+	api             slackapi.SlackAPI
+	params          []string
+	channel         slackapi.Channel
+	restrictingUser string
+
+	slackTeamName string
+}
+
+func (r *restrictify) searchVal() string {
+	return r.params[0]
+}
+
+const restrictifyParamsLen = 1
+
+func NewRestrictify(
+	api slackapi.SlackAPI,
+	rawParams []string,
+	channel slackapi.Channel,
+	restrictingUser string,
+
+	slackTeamName string,
+) Action {
+	params := make([]string, restrictifyParamsLen)
+	copy(params, rawParams)
+
+	return &restrictify{
+		api:             api,
+		params:          params,
+		channel:         channel,
+		restrictingUser: restrictingUser,
+
+		slackTeamName: slackTeamName,
+	}
+}
+
+func (r *restrictify) Do() (string, error) {
+	searchVal := r.searchVal()
+
+	user, err := r.check(searchVal)
+	if err != nil {
+		return r.failureMessage(err), err
+	}
+
+	err = r.api.SetRestricted(r.slackTeamName, user.ID)
+	if err != nil {
+		return r.failureMessage(err), err
+	}
+
+	return fmt.Sprintf("Successfully restrictified user %s", searchVal), nil
+}
+
+func (r *restrictify) failureMessage(err error) string {
+	return fmt.Sprintf(
+		"Failed to restrictify user '%s': %s",
+		r.searchVal(),
+		err.Error(),
+	)
+}
+
+func (r *restrictify) AuditMessage() string {
+	return fmt.Sprintf(
+		"@%s restrictified user '%s'",
+		r.restrictingUser,
+		r.searchVal(),
+	)
+}
+
+func (r *restrictify) check(searchVal string) (slack.User, error) {
+	if r.channel.IsDirectMessage(r.api) {
+		err := errors.New("command only works in channels/private groups")
+		return slack.User{}, err
+	}
+
+	user, err := findUser(searchVal, r.api)
+	if err != nil {
+		return slack.User{}, err
+	}
+
+	return user, nil
+}

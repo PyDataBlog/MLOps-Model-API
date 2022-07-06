@@ -1,0 +1,41 @@
+# Create Azure Policy based VPN
+# Vars
+$RG = 'RG-Datawan-PD'
+$Loc = 'SouthCentralUS'
+#  Subnet Vars
+$subnet1 = New-AzureRmVirtualNetworkSubnetConfig -Name 'GatewaySubnet' -AddressPrefix 10.8.0.0/28
+$subnet2 = New-AzureRmVirtualNetworkSubnetConfig -Name 'Datawan-pd-isnet' -AddressPrefix 10.8.1.0/27
+
+# Step 1
+# Create new RG if not using existing
+New-AzureRmResourceGroup -Name $RG -Location $Loc
+
+# Create VNET with Subnets
+New-AzureRmVirtualNetwork -Name 'datawan-pd-vnet' -ResourceGroupName $RG -Location $Loc -AddressPrefix 10.8.0.0/16 -Subnet $subnet1, $subnet2
+
+# Step 2
+# Create Local Network Gateway
+New-AzureRmLocalNetworkGateway -Name "DatawanSite" -ResourceGroupName $RG -Location $Loc -GatewayIpAddress '<YOUR PUBLIC IP>' -AddressPrefix '<YOU LAN SUBNET CIDR>'
+
+# Step 3
+# Request required public IP from Azure
+$gwpip = New-AzureRmPublicIpAddress -Name 'gw-pip' -ResourceGroupName $RG -Location $Loc -AllocationMethod Dynamic
+
+# Step 4
+# Create gateway IP Addressing Config
+$subnet = Get-AzureRmVirtualNetworkSubnetConfig -Name 'GatewaySubnet' -VirtualNetwork $vnet
+$gwipconfig = New-AzureRmVirtualNetworkGatewayIpConfig -Name gwipconfig1 -SubnetId $subnet.Id -PublicIpAddressId $gwpip.Id
+
+# Step 5
+# Create VPN Gateway
+New-AzureRmVirtualNetworkGateway -Name 'datawan-vng' -ResourceGroupName $RG -Location $Loc -IpConfigurations $gwipconfig -GatewayType Vpn -VpnType PolicyBased -GatewaySku Basic
+
+# Step 6
+# Get Azure VPN Public IP for use on on-prem device
+Get-AzureRmPublicIpAddress -Name gw-pip -ResourceGroupName $RG
+
+# Step 7
+# Create the VPN Connection
+$gateway1 = Get-AzureRmVirtualNetworkGateway -Name 'datawan-vng' -ResourceGroupName $RG
+$local = Get-AzureRmLocalNetworkGateway -Name 'DatawanSite' -ResourceGroupName $RG
+New-AzureRmVirtualNetworkGatewayConnection -Name AzureToDatawaSite -ResourceGroupName $RG -Location $Loc -VirtualNetworkGateway1 $gateway1 -LocalNetworkGateway2 $local -ConnectionType IPsec -RoutingWeight 10 -SharedKey 'secret'

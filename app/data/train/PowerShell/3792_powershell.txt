@@ -1,0 +1,49 @@
+param([switch]$Verbose,[switch]$Debug)
+
+Function Export-NRKSCOMManagementPack {
+    
+    Param([string]$BackupLocation)
+
+    $ManagementServer = "ScomAuto2016MA"    
+    $Subfolder = [DateTime]::Now.ToString("d").Replace("/","-")
+    $FullBackupLocation = [String]::Format("{0}\{1}",$BackupLocation,$Subfolder)
+    $Dummy = New-Item -ItemType Directory -Path $BackupLocation -Name $Subfolder 
+    
+    # Remove Old Backups
+    Get-ChildItem $BackupLocation -Recurse | Where-Object {$_.CreationTime -lt (Get-Date).AddDays(-7)} | Remove-Item -Recurse -Force
+
+    Import-Module -Name OperationsManager
+    $mgConn = New-SCOMManagementGroupConnection -ComputerName $ManagementServer -PassThru
+    Get-SCOMManagementPack | Export-SCOMmanagementpack -path $FullBackupLocation
+    $mgConn | Remove-SCOMManagementGroupConnection
+}
+
+
+# Initialization code
+$ScriptName        = 'Backup-SCOMManagementPack'
+$EventLog          = 'Automation'                                   # Event log to report to
+$EventSource       = $ScriptName                              # Event source for this script
+$GoodEvent         = 1000                                     # Event ID for SCOM Monitoring "Good event"
+$BadEvent          = 1001                                     # Event ID for SCOM Monitoring "Bad event"
+$BackupLocation    = "\\felles\it\Driftsdokumentasjon\SCOM2012\MPBackup2016"
+
+# Create event source
+New-EventLog -LogName $EventLog -Source $EventSource -ErrorAction SilentlyContinue
+# Create registry keys for SCOM
+
+Try {
+    Push-Location
+    Export-NRKSCOMManagementPack -BackupLocation $BackupLocation
+
+    # Write GOOD Event (For SCOM)
+    Write-Verbose "Backup succeeded."
+    Write-EventLog -LogName $EventLog -Source $EventSource -EntryType Information -EventId $GoodEvent -Message "Management Packs backed up successfully."
+}
+Catch {
+    # Write BAD Event (For SCOM)
+    Write-Verbose "Backup failed. $($_.Exception.Message)"
+    Write-EventLog -LogName $EventLog -Source $EventSource -EntryType Error -EventId $BadEvent -Message "Management Pack Backup failed. $($_.Exception.Message)"
+}
+Finally {
+    Pop-Location
+}

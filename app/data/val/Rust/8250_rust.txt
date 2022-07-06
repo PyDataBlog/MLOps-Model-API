@@ -1,0 +1,125 @@
+use std::path::PathBuf;
+use std::fs::File;
+use std::collections::HashMap;
+
+use errors::*;
+use ast::*;
+use symbols::*;
+use parser;
+use semantics;
+
+#[derive(Debug)]
+pub struct ModuleImporter {
+  modules: HashMap<PathBuf, Module>,
+  symbol_tables: HashMap<PathBuf, Scope>,
+  search_paths: Vec<PathBuf>,
+}
+
+impl ModuleImporter {
+  pub fn new(search_paths: Vec<PathBuf>) -> ModuleImporter {
+    ModuleImporter {
+      modules: HashMap::new(),
+      symbol_tables: HashMap::new(),
+      search_paths: search_paths,
+    }
+  }
+
+  fn resolve_import(&self, module_name: &str) -> Result<PathBuf> {
+
+    // generate file name from search path
+    let mut module_path_buf = PathBuf::new();
+    for module_part in module_name.split('.') {
+      module_path_buf.push(module_part);
+    }
+    module_path_buf.set_extension("silver");
+
+    // for all the search paths, check if the file exists
+    for search_path in &self.search_paths {
+      let module_file = search_path.join(&module_path_buf);
+      if module_file.exists() {
+        return Ok(module_file);
+      }
+    }
+
+    // if we get here, we can't find any module
+    Err(ErrorKind::ModuleNotFound(String::from(module_name)).into())
+  }
+
+  fn check_import_self(&self, module: &mut Module) -> Result<()> {
+    for import in &module.imports {
+      if import.module_id == module.module_id {
+        bail!(ErrorKind::ImportSelf(module.module_id.clone()));
+      }
+    }
+    Ok(())
+  }
+
+  fn inject_prelude(&self, module: &mut Module) {
+
+    if module.module_id == "Prelude" {
+      return ();
+    }
+
+    for import in &module.imports {
+      if import.module_id == "Prelude" {
+        return ();
+      }
+    }
+
+    module.imports.push(Import::new(String::from("Prelude"), Vec::new(), None))
+  }
+
+  pub fn resolve_imports(&self, module: &mut Module) -> Result<Vec<PathBuf>> {
+    try!(self.check_import_self(module));
+    self.inject_prelude(module);
+
+    let mut file_paths = Vec::new();
+
+    for import in &module.imports {
+      let import_file_path = try!(self.resolve_import(&import.module_id));
+      file_paths.push(import_file_path);
+    }
+
+    Ok(file_paths)
+  }
+
+  pub fn import_module(&mut self, file_path: PathBuf) -> Result<()> {
+
+    if !self.symbol_tables.contains_key(&file_path) {
+
+      // parse
+      let source_file = try!(File::open(&file_path));
+      let mut ast = try!(parser::parse(&source_file));
+
+      // recursively import modules
+      let mut root_scope: Scope = Default::default();
+
+      let resolved_module_paths = try!(self.resolve_imports(&mut ast));
+      for module_path in resolved_module_paths {
+        try!(self.import_module(module_path.clone()));
+        try!(root_scope.merge(&self.symbol_tables[&module_path]));
+      }
+
+      // semantics
+      let child_symbol_table = Scope::new(Some(Box::new(root_scope)));
+      let symbol_table = try!(semantics::is_ast_valid(&ast, child_symbol_table));
+
+      // inject into self
+      self.modules.insert(file_path.clone(), ast);
+      self.symbol_tables.insert(file_path.clone(), symbol_table);
+
+    }
+
+    Ok(())
+  }
+
+  pub fn resolve_symbol_tables(&mut self, module: &mut Module) -> Result<Vec<&Scope>> {
+    let resolved_module_paths = try!(self.resolve_imports(module));
+
+    for module_path in resolved_module_paths {
+      try!(self.import_module(module_path));
+    }
+
+    Ok(self.symbol_tables.values().collect::<Vec<_>>())
+  }
+}

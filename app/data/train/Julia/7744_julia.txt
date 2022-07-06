@@ -1,0 +1,110 @@
+#import Base.show, Base.==, Base.hash
+import Base.string
+
+"Substitute symbol s by s_new in expression e"
+function substitute!(e::Expr,s,s_new)
+    for (i,arg) in enumerate(e.args)
+        if isa(arg,Expr)
+            substitute!(arg,s,s_new)
+        else
+            if arg == s
+                e.args[i] = s_new
+            end
+        end
+    end
+end
+
+"Substitute all keys in s by its value"
+function substitute!(e::Expr,sub::Dict)
+    for (s,v) in sub
+        substitute!(e,s,v)
+    end
+end
+
+abstract type MathProblem end
+
+"Unique symbols in an expression"
+function unique_symbols(e::Expr,s=Symbol[])
+    for arg in e.args[2:end]
+        if isa(arg,Expr)
+            unique_symbols(arg,s)
+        elseif isa(arg,Symbol) && arg ∉ s
+            append!(s,[arg])
+        end
+    end
+    s
+end
+
+struct EquationProblem <: MathProblem
+    "Math equation expression"
+    expression::Expr
+    "Variable values"
+    variable_values::Dict{Symbol,Number}
+    "Unknown variable"
+    unknown::Symbol
+    function EquationProblem(expression,variable_values,unknown)
+        expression.args[1]==:(==) || error("Expression not an equation")
+        # Verify that variables in `expression` are the same as the
+        # variable in `variable_values`
+        ve = unique_symbols(expression); vv = keys(variable_values)
+        d = length(setdiff(ve,vv))+length(setdiff(vv,ve))
+        d==0 || error("Expression-variable mismatch")
+        # Verify whether variable values are correct
+        e = copy(expression)
+        substitute!(e,variable_values)
+        eval(e) || error("No equation: $(string(e))")
+        unknown ∈ keys(variable_values) || error("Unknown not in variables")
+        new(expression,variable_values,unknown)
+    end
+end
+
+function text_with_solution(p::EquationProblem)
+    e = copy(p.expression)
+    substitute!(e,p.variable_values)
+    string(e)
+end
+
+"Question string"
+function question(p::EquationProblem)
+    e = copy(p.expression)
+    substitute!(e,:(==),:(=))
+    substitute!(e,:x,(:□))
+    substitute!(e,p.variable_values)
+    string(e)
+end
+
+string(p::EquationProblem) = question(p)
+
+abstract type ProblemGenerator end
+
+"Addition problem generator"
+struct AdditionProblemGenerator <: ProblemGenerator
+    max_value::Int
+end
+
+"equation expression"
+equation(::Type{AdditionProblemGenerator}) = :(a+b==x)
+
+"Generate random problem"
+function generate_problem(g::AdditionProblemGenerator)
+    a = rand(0:g.max_value); b = rand(0:g.max_value)
+    x = a+b
+    variable_values = Dict(:a=>a,:b=>b,:x=>x)
+    EquationProblem(equation(typeof(g)),variable_values,:x)
+end
+
+#%% Start main
+# Construct expression
+expression = :(a+b==x)
+variable_values = Dict(:a=>4,:b=>8,:x=>12)
+p = EquationProblem(expression,variable_values,:x)
+show(p)
+
+# Generate addition problem
+gen = AdditionProblemGenerator(20)
+p = generate_problem(gen)
+#show(p)
+
+# problem_string
+Base.run(`clear`) # Clear console. Works in console, not in atom.
+print(e)

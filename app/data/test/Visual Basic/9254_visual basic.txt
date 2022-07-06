@@ -1,0 +1,322 @@
+﻿Imports System.Windows.Forms
+Imports Visomes.MySQL
+Imports System.Runtime.InteropServices
+Imports Visomes.SGV.Core
+Imports Visomes.Validation
+
+''' <summary>
+''' PREENCHIMENTO DE FFOS "DEFINIÇÃO DE TRANSPORTE"
+''' </summary>
+''' <remarks></remarks>
+Public Class CadTransporteFFOS
+
+    Private idFFOS As Integer
+    Private ffos As FFOS
+    Private valid As New Visomes.Validation.Validating()
+    Private moeda As New Visomes.Extras.Currency()
+    Private block As Boolean
+
+#Region "SHADOWN AERO"
+    Private drag As Boolean
+    Private mouseX As Integer
+    Private mouseY As Integer
+
+
+    Public Class NativeStructs
+        Public Structure MARGINS
+            Public leftWidth As Integer
+            Public rightWidth As Integer
+            Public topHeight As Integer
+            Public bottomHeight As Integer
+        End Structure
+    End Class
+
+    Public Class NativeMethods
+        <DllImport("dwmapi")> _
+        Public Shared Function DwmExtendFrameIntoClientArea(ByVal hWnd As IntPtr, ByRef pMarInset As NativeStructs.MARGINS) As Integer
+        End Function
+        <DllImport("dwmapi")> _
+        Friend Shared Function DwmSetWindowAttribute(ByVal hwnd As IntPtr, ByVal attr As Integer, ByRef attrValue As Integer, ByVal attrSize As Integer) As Integer
+        End Function
+        <DllImport("dwmapi.dll")> _
+        Public Shared Function DwmIsCompositionEnabled(ByRef pfEnabled As Integer) As Integer
+        End Function
+    End Class
+
+    Public Class NativeConstants
+        Public Const CS_DROPSHADOW As Integer = &H20000
+        Public Const WM_NCPAINT As Integer = &H85
+    End Class
+
+    '//////////////////SHADOWN AERO
+    Private aeroEnabled As Boolean
+    Protected Overrides ReadOnly Property CreateParams() As CreateParams
+        Get
+            CheckAeroEnabled()
+            Dim cp As CreateParams = MyBase.CreateParams
+            If Not aeroEnabled Then
+                cp.ClassStyle = cp.ClassStyle Or NativeConstants.CS_DROPSHADOW
+                Return cp
+            Else
+                Return cp
+            End If
+        End Get
+    End Property
+
+    Protected Overrides Sub WndProc(ByRef m As Message)
+        Select Case m.Msg
+            Case NativeConstants.WM_NCPAINT
+                Dim val = 2
+                If aeroEnabled Then
+                    NativeMethods.DwmSetWindowAttribute(Handle, 2, val, 4)
+                    Dim bla As New NativeStructs.MARGINS()
+                    With bla
+                        .bottomHeight = 1
+                        .leftWidth = 1
+                        .rightWidth = 1
+                        .topHeight = 1
+                    End With
+                    NativeMethods.DwmExtendFrameIntoClientArea(Handle, bla)
+
+                Else
+
+
+                End If
+
+                '  Case Else
+                Exit Select
+        End Select
+        MyBase.WndProc(m)
+    End Sub
+
+    Private Sub CheckAeroEnabled()
+        If Environment.OSVersion.Version.Major >= 6 Then
+            Dim enabled As Integer = 0
+            Dim response As Integer = NativeMethods.DwmIsCompositionEnabled(enabled)
+            aeroEnabled = (enabled = 1)
+        Else
+            aeroEnabled = False
+        End If
+    End Sub
+
+    Private Sub FrSobre_KeyDown(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyEventArgs) Handles MyBase.KeyDown
+        If e.KeyCode = Keys.Escape Then
+            Me.Close()
+        End If
+    End Sub
+
+    Private Sub frmAboutBox_MouseDown(ByVal sender As System.Object, ByVal e As System.Windows.Forms.MouseEventArgs) Handles MyBase.MouseDown
+        drag = True
+        mouseX = Windows.Forms.Cursor.Position.X - Me.Left
+        mouseY = Windows.Forms.Cursor.Position.Y - Me.Top
+    End Sub
+
+    Private Sub frmAboutBox_MouseMove(ByVal sender As System.Object, ByVal e As System.Windows.Forms.MouseEventArgs) Handles MyBase.MouseMove
+        If drag Then
+            Me.Top = Windows.Forms.Cursor.Position.Y - mouseY
+            Me.Left = Windows.Forms.Cursor.Position.X - mouseX
+        End If
+    End Sub
+
+    Private Sub frmAboutBox_MouseUp(ByVal sender As System.Object, ByVal e As System.Windows.Forms.MouseEventArgs) Handles MyBase.MouseUp
+        drag = False
+    End Sub
+#End Region
+
+    ''' <summary>
+    ''' INICIA UMA NOVA INSTÂNCIA DE frmFFOSCert
+    ''' </summary>
+    ''' <param name="idOs"></param>
+    ''' <remarks></remarks>
+    Public Sub New(ByVal idOs As String)
+        Me.block = True
+        InitializeComponent()
+        CarregaCombox()
+        Me.ffos = New FFOS(idOs)
+        Me.txtCodOs.Text = idOs
+        If ffos.IsNew() Then
+            Me.txtResp.Text = Core.Usuario.Funcionario.NomeCompleto
+            Me.ffos.DataTransporte = Core.CurrentDate().ToShortDateString()
+            Me.ffos.ResponsavelTransporte = New Funcionario(Core.Usuario.Funcionario.ID)
+        Else
+            CarregaCampos()
+        End If
+        Me.block = False
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA CAMPOS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CarregaCampos()
+        Me.block = True
+        If Not String.IsNullOrEmpty(ffos.DataTransporte) Then
+            Me.dtpDtCad.Value = CDate(ffos.DataTransporte)
+        Else
+            ffos.DataTransporte = Core.CurrentDate.ToShortDateString()
+        End If
+        If ffos.TipoTransporte IsNot Nothing Then
+            Me.cboTipoEnvio.SelectedItem = ffos.TipoTransporte.Descricao
+        End If
+        Me.chkTransporteCustoNaNF.Checked = ffos.TransporteCustoNaNF
+        Me.txtVlr.Text = String.Format("{0:N2}", ffos.CustoTransporteNF)
+        Me.txtObs.Text = Me.ffos.ObsTransporte
+        If Me.ffos.ResponsavelTransporte IsNot Nothing Then
+            Me.txtResp.Text = Me.ffos.ResponsavelTransporte.NomeCompleto
+        Else
+            Me.txtResp.Text = Core.Usuario.Funcionario.NomeCompleto
+            Me.ffos.ResponsavelTransporte = New Funcionario(Core.Usuario.Funcionario.ID)
+        End If
+        Me.block = False
+    End Sub
+
+
+    ''' <summary>
+    ''' CARREGA COMBOX
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CarregaCombox()
+        cboTipoEnvio.Items.Clear()
+        cboTipoEnvio.Items.AddRange(Core.FeedsLists("descricao", "tipo_transporte_cliente", "status = 1"))
+    End Sub
+
+    ''' <summary>
+    ''' FECHAMENTO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub frmFFOSCert_FormClosing(ByVal sender As System.Object, ByVal e As System.Windows.Forms.FormClosingEventArgs) Handles MyBase.FormClosing
+        SGV.FFOS.LiberarFFOS()
+    End Sub
+
+    ''' <summary>
+    ''' OK
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub OK_Button_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnOk.Click
+        If ValidSalvamento() Then
+            SalvaDados()
+            Me.DialogResult = Windows.Forms.DialogResult.OK
+            Me.Close()
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' VALIDA CAMPOS PARA SALVAMENTO
+    ''' </summary>
+    ''' <returns>TRUE - SALVA - FALSE - NÃO SALAVA</returns>
+    ''' <remarks></remarks>
+    Private Function ValidSalvamento() As Boolean
+        If ValidatesOutPut And IsNullField() Then
+            Return True
+        Else
+            MessageBox.Show(ErrorSavamento.ToString() & FieldBlank.ToString() & "Por favor, verifique-os e tente novamente.", _
+                            Core.STR_NOME_SISTEMA, _
+                            MessageBoxButtons.OK, _
+                            MessageBoxIcon.Error)
+            Me.DialogResult = Windows.Forms.DialogResult.None
+            Me.DialogResult = Windows.Forms.DialogResult.None
+            ErrorSavamento = New System.Text.StringBuilder("Campos incorretos: " & vbCrLf)
+            FieldBlank = New System.Text.StringBuilder("Os seguintes campos estão em braco e são obrigatórios: " & vbCrLf)
+            Return False
+        End If
+    End Function
+
+
+    ''' <summary>
+    ''' VERIFICA SE OS CAMPOS OBRIGATÓRIOS ESTÃO PREENCHIDOS
+    ''' </summary>
+    ''' <returns>TRUE - COMPLETO - FALSE - INCOMPLETO</returns>
+    Private Function IsNullField() As Boolean
+        If String.IsNullOrEmpty(cboTipoEnvio.Text) Then
+            FieldBlank.Append("Tipo de transporte não selecionado" & vbCrLf)
+            epvFFOS.SetError(cboTipoEnvio, "Tipo de transporte não selecionado")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Tipo de transporte não selecionado" & vbCrLf, "")
+            epvFFOS.SetError(cboTipoEnvio, "")
+        End If
+        Return True
+    End Function
+
+    ''' <summary>
+    ''' SALVA DADOS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub SalvaDados()
+        If Me.ffos.Commit() Then
+            Me.ffos.SetSituacao(Me.ffos.ConfiguraSituacao())
+            MessageBox.Show("Dados Salvos com sucesso!", Core.STR_NOME_SISTEMA)
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' VALOR TRANSPORTE
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtVl_TextChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles txtVlr.TextChanged
+        If Not Me.block Then
+            moeda.TextBoxCurrency(txtVlr)
+            Me.ffos.CustoTransporteNF = CDbl(Me.txtVlr.Text.Replace(".", ""))
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' VALOR NF
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtVl_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles txtVlr.KeyPress
+        valid.InputDecimal(sender, e)
+    End Sub
+
+    ''' <summary>
+    ''' VALOR NA NOTA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub chkTransporteCustoNaNF_CheckedChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles chkTransporteCustoNaNF.CheckedChanged
+        If Not Me.chkTransporteCustoNaNF.Checked Then
+            Me.block = True
+            Me.txtVlr.Text = "0.00"
+            Me.block = False
+            Me.txtVlr.Enabled = False
+        Else
+            Me.txtVlr.Enabled = True
+        End If
+        Me.ffos.TransporteCustoNaNF = Me.chkTransporteCustoNaNF.Checked
+    End Sub
+
+    ''' <summary>
+    ''' TIPO DE ENVIO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboTipoEnvio_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboTipoEnvio.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idTipoTransporteCliente", _
+                            "tipo_transporte_cliente", _
+                            "descricao = '" & cboTipoEnvio.Text & "'")
+        If MyData.Read() Then
+            Me.ffos.TipoTransporte = New TipoTransporte(MyData.GetInt32(0))
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' CADASTRO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dtpDtCad_ValueChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles dtpDtCad.ValueChanged
+        Me.ffos.DataTransporte = Me.dtpDtCad.Value.ToShortDateString()
+    End Sub
+
+    ''' <summary>
+    ''' OBS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtObs_TextChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles txtObs.TextChanged
+        Me.ffos.ObsTransporte = Me.txtObs.Text
+    End Sub
+
+    Private Sub Cancel_Button_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles Cancel_Button.Click
+        Me.Close()
+    End Sub
+End Class

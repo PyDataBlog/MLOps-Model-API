@@ -1,0 +1,458 @@
+extern crate env_logger;
+
+use std::collections::HashMap;
+
+use super::*;
+
+use core_rules::attack_result::AttackResult;
+use core_rules::weapon::{Weapon, WeaponComponent};
+use dice::Dice;
+use quantity::Quantity;
+
+#[test]
+fn is_alive_returns_true_for_a_model_at_full_health() {
+    let _ = env_logger::init();
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    let components = vec![];
+    let model = Model::new("Test Model", 5, weapons, components);
+    assert_eq!(model.is_alive(), true);
+}
+
+#[test]
+fn is_alive_returns_true_for_a_wounded_model() {
+    let _ = env_logger::init();
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    let components = vec![];
+    let mut model = Model::new("Test Model", 5, weapons, components);
+    model.apply_wounds(3);
+    assert_eq!(model.is_alive(), true);
+}
+
+#[test]
+fn is_alive_returns_false_for_a_model_with_zero_health() {
+    let _ = env_logger::init();
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    let components = vec![];
+    let mut model = Model::new("Test Model", 5, weapons, components);
+    model.apply_wounds(5);
+    assert_eq!(model.is_alive(), false);
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn model_at_full_health_has_model_status_FullHealth() {
+    let _ = env_logger::init();
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    let components = vec![];
+    let model = Model::new("Test Model", 10, weapons, components);
+    assert_eq!(model.status(), ModelStatus::FullHealth(10));
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn model_at_half_health_has_model_status_Wounded() {
+    let _ = env_logger::init();
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    let components = vec![];
+    let mut model = Model::new("Test Model", 10, weapons, components);
+    model.apply_wounds(5);
+    assert_eq!(model.status(), ModelStatus::Wounded(5, 10));
+}
+
+#[test]
+#[allow(non_snake_case)]
+fn model_at_zero_health_has_model_status_Dead() {
+    let _ = env_logger::init();
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    let components = vec![];
+    let mut model = Model::new("Test Model", 10, weapons, components);
+    model.apply_wounds(10);
+    assert_eq!(model.status(), ModelStatus::Dead(10));
+}
+
+#[test]
+#[should_panic(expected = "start of combat callback called")]
+fn model_start_of_combat_callbacks_get_called() {
+    let _ = env_logger::init();
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    struct StartOfCombatComponent;
+    impl StartOfCombatComponent {
+        pub fn new() -> Self {
+            StartOfCombatComponent {}
+        }
+    }
+    impl ModelComponent for StartOfCombatComponent {
+        fn start_of_combat_actions(
+            &mut self,
+            _dice: &mut Dice,
+            _model: &mut ModelProperties,
+        ) {
+            panic!("start of combat callback called");
+        }
+    }
+
+    let mut dice = Dice::new_pregenerated(Dice::empty_rolls(), Dice::empty_rolls());
+
+    let components: Vec<RefCell<Box<ModelComponent>>> = vec![
+        RefCell::new(Box::new(StartOfCombatComponent::new())),
+    ];
+    let mut model = Model::new("Test Model", 1, weapons, components);
+    model.start_of_combat_actions(&mut dice);
+}
+
+#[test]
+#[should_panic(expected = "end of combat callback called")]
+fn model_end_of_combat_callbacks_get_called() {
+    let _ = env_logger::init();
+
+    let mut loaded_dice = Dice::new_pregenerated(
+        Dice::empty_rolls(),
+        Dice::empty_rolls()
+    );
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    struct EndOfCombatComponent;
+    impl EndOfCombatComponent {
+        pub fn new() -> Self {
+            EndOfCombatComponent {}
+        }
+    }
+    impl ModelComponent for EndOfCombatComponent {
+        fn end_of_combat_actions(
+            &mut self,
+            _dice: &mut Dice,
+            _model: &mut ModelProperties,
+        ) {
+            panic!("end of combat callback called");
+        }
+    }
+
+    let components: Vec<RefCell<Box<ModelComponent>>> = vec![
+        RefCell::new(Box::new(EndOfCombatComponent::new())),
+    ];
+    let mut model = Model::new("Test Model", 1, weapons, components);
+    model.end_of_combat_actions(&mut loaded_dice);
+}
+
+#[test]
+#[should_panic(expected = "start of turn callback called")]
+fn model_start_of_turn_callbacks_get_called() {
+    let _ = env_logger::init();
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    struct StartOfTurnComponent;
+    impl StartOfTurnComponent {
+        pub fn new() -> Self {
+            StartOfTurnComponent {}
+        }
+    }
+    impl ModelComponent for StartOfTurnComponent {
+        fn start_of_turn_actions(
+            &mut self,
+            _dice: &mut Dice,
+            _model: &mut ModelProperties,
+        ) {
+            panic!("start of turn callback called");
+        }
+    }
+
+    let mut dice = Dice::new_pregenerated(Dice::empty_rolls(), Dice::empty_rolls());
+
+    let components: Vec<RefCell<Box<ModelComponent>>> = vec![
+        RefCell::new(Box::new(StartOfTurnComponent::new())),
+    ];
+    let mut model = Model::new("Test Model", 1, weapons, components);
+    model.start_of_turn_actions(&mut dice);
+}
+
+#[test]
+#[should_panic(expected = "end of turn callback called")]
+fn model_end_of_turn_callbacks_get_called() {
+    let _ = env_logger::init();
+
+    let mut loaded_dice = Dice::new_pregenerated(
+        Dice::empty_rolls(),
+        Dice::empty_rolls()
+    );
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    struct EndOfTurnComponent;
+    impl EndOfTurnComponent {
+        pub fn new() -> Self {
+            EndOfTurnComponent {}
+        }
+    }
+    impl ModelComponent for EndOfTurnComponent {
+        fn end_of_turn_actions(
+            &mut self,
+            _dice: &mut Dice,
+            _model: &mut ModelProperties,
+        ) {
+            panic!("end of turn callback called");
+        }
+    }
+
+    let components: Vec<RefCell<Box<ModelComponent>>> = vec![
+        RefCell::new(Box::new(EndOfTurnComponent::new())),
+    ];
+    let mut model = Model::new("Test Model", 1, weapons, components);
+    model.end_of_turn_actions(&mut loaded_dice);
+}
+
+#[test]
+fn attack_only_uses_weapons_in_range() {
+    let _ = env_logger::init();
+
+    let defender = Unit::new(
+        "Test Defender",
+        false,       // hero
+        false,       // wizard
+        1.0,
+        1,          // max unit size
+        1,          // move_in
+        false,      // flying
+        None,       // save vs. regular wounds
+        None,       // save vs. mortal wounds
+        10,         // bravery
+        Vec::with_capacity(0),
+        Vec::with_capacity(0),
+    );
+
+    let mut loaded_dice = Dice::new_pregenerated(
+        Dice::empty_rolls(),
+        Dice::empty_rolls()
+    );
+
+    let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+    let weapon = Weapon::new(
+        "Test Weapon",
+        1,          // range
+        Quantity::Fixed(1), // base num attacks
+        4,          // base to hit
+        4,          // base to wound
+        0,          // base rend
+        Quantity::Fixed(1),
+        weapon_components,
+    );
+    let mut weapons = ArrayVec::new();
+    weapons.push(weapon);
+
+    let components: Vec<RefCell<Box<ModelComponent>>> = vec![];
+    let model = Model::new("Test Model", 1, weapons, components);
+    let result = model.attack(
+        &mut loaded_dice,
+        &defender,
+        2,                  // range between attacker and defender
+        0,                  // num attacks modifier
+        ArrayVec::new(),    // bonus attacks callbacks
+        0,                  // to hit modifiers
+        ArrayVec::new(),    // reroll to hit callbacks
+        0,                  // to wound modifiers
+        ArrayVec::new(),    // reroll to wound callbacks
+    );
+    assert_eq!(result, AttackResult::default());
+}
+
+#[test]
+fn attack_uses_all_weapons_in_range() {
+    let _ = env_logger::init();
+
+    let defender = Unit::new(
+        "Test Defender",
+        false,       // hero
+        false,       // wizard
+        1.0,
+        1,          // max unit size
+        1,          // move_in
+        false,      // flying
+        None,       // save vs. regular wounds
+        None,       // save vs. mortal wounds
+        10,         // bravery
+        Vec::with_capacity(0),
+        Vec::with_capacity(0),
+    );
+
+    let mut d6_rolls = Dice::empty_rolls();
+    d6_rolls.push(6);
+    d6_rolls.push(6);
+    d6_rolls.push(6);
+    d6_rolls.push(6);
+    let mut loaded_dice = Dice::new_pregenerated(d6_rolls, Dice::empty_rolls());
+
+    info!("info");
+    let mut weapons = ArrayVec::new();
+    for count in 1..4 {
+        info!("count: {}", count);
+        let weapon_components: Vec<RefCell<Box<WeaponComponent>>> = vec![];
+        let weapon = Weapon::new(
+            format!("Test Weapon {}", count),
+            count,      // range
+            Quantity::Fixed(1), // base num attacks
+            4,          // base to hit
+            4,          // base to wound
+            0,          // base rend
+            Quantity::Fixed(1),
+            weapon_components,
+        );
+        weapons.push(weapon);
+    }
+
+    let components: Vec<RefCell<Box<ModelComponent>>> = vec![];
+    let model = Model::new("Test Model", 1, weapons, components);
+    let result = model.attack(
+        &mut loaded_dice,
+        &defender,
+        2,                  // range between attacker and defender
+        0,                  // num attacks modifier
+        ArrayVec::new(),    // bonus attacks callbacks
+        0,                  // to hit modifiers
+        ArrayVec::new(),    // reroll to hit callbacks
+        0,                  // to wound modifiers
+        ArrayVec::new(),    // reroll to wound callbacks
+    );
+
+    let mut expected_wounds = HashMap::new();
+    expected_wounds.insert(0, vec![1, 1]);
+    let expected_result = AttackResult {
+        saveable_wounds: expected_wounds,
+        mortal_wounds: 0,
+    };
+    assert_eq!(result, expected_result);
+}

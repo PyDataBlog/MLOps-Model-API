@@ -1,0 +1,300 @@
+	.486p
+	.model flat
+
+UNICODE	equ	0
+INCLUDE	..\win32\Win32.INC
+INCLUDE	..\win32\WinMM.INC
+INCLUDELIB	..\win32\Win32.LIB
+INCLUDELIB	..\win32\GDI32.LIB
+INCLUDELIB	..\win32\msimg32.LIB
+
+INCLUDE	..\win32\Wsock2.INC
+INCLUDELIB	..\win32\ws2_32.lib
+
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; sidplug implementation
+INCLUDE	..\win32\npsid.inc
+INCLUDELIB	..\win32\npsid.lib
+
+INCLUDE	Constants.inc
+INCLUDE	Structures.inc
+
+	.data
+engine_count_data:
+versionTag	db	'Just Another Ninja Engine v3',0Dh,0Ah,0Dh,0Ah
+		db	'Written by Marq Watkin',0Dh,0Ah
+		db	'http://www.pmprog.co.uk',0
+
+janeID		db	'JANE v3 (Multiplayer)',0
+engineCLS	db	'jFXwindow',0
+engineICO	db	'APPICO',0
+
+lookup_items	dd	00h
+
+	.data?
+engineClass		WNDCLASS	?
+engineInstance	dd      	?
+engineWnd		dd		?
+engineMsg		MSG		?
+enginePaint		PAINTSTRUCT	?
+engineIcon		dd		?
+
+WindRect:
+wr_left		dd	?
+wr_top			dd	?
+wr_righ		dd	?
+wr_bott		dd	?
+
+INCLUDE	Globals.inc
+INCLUDE	Data-Animation.inc
+
+	.code
+start:
+engine_count_code:
+	push	0
+	call	GetModuleHandle
+	mov	engineInstance, eax
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Load Icon
+	push	0
+	push	0
+	push	0
+	push	IMAGE_ICON
+	push	offset engineICO
+	push	eax
+	call	LoadImage
+	mov	engineClass.w_hIcon,eax
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Register jFX window class
+	push	IDC_ARROW
+	push	0
+	call	LoadCursor				;Set standard cursors for the windows
+	mov	engineClass.w_hCursor,eax
+	mov	engineClass.w_style, CS_HREDRAW + CS_VREDRAW + CS_DBLCLKS
+	mov	engineClass.w_lpfnWndProc, offset WndProc
+	mov	engineClass.w_lpszMenuName,offset engineCLS
+	mov	engineClass.w_lpszClassName,offset engineCLS
+	mov	engineClass.w_hbrBackground, COLOR_WINDOW
+	push	offset engineClass
+	call	RegisterClassA
+
+	call	GetDesktopWindow
+	push	offset WindRect
+	push	eax
+	call	GetWindowRect
+
+	mov	eax, wr_bott
+	shr	eax, 1
+	sub	eax, (GAME_SCREEN_HEIGHT / 2)
+	mov	ebx, wr_righ
+	shr	ebx, 1
+	sub	ebx, (GAME_SCREEN_WIDTH / 2)
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Create normal window and prepare drawing areas
+	push	0
+	push	engineInstance
+	push	0
+	push	0
+	push	GAME_SCREEN_HEIGHT
+	push	GAME_SCREEN_WIDTH
+	push	eax
+	push	ebx
+	push	WS_VISIBLE + WS_SYSMENU
+	push	offset janeID
+	push	offset engineCLS
+	push	0
+	call	CreateWindowEx
+	mov	engineWnd, eax
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Set up Double Buffer
+	push	eax
+	call	GetWindowDC
+	mov	engineDC, eax
+
+	push	eax
+	call	CreateCompatibleDC
+	mov	bufferDC, eax
+
+	push	GAME_SCREEN_HEIGHT
+	push	GAME_SCREEN_WIDTH
+	push	engineDC
+	call	CreateCompatibleBitmap
+	mov	bufferBMP, eax
+
+	push	eax
+	push	bufferDC
+	call	SelectObject
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Set up Action Area buffer
+	push	engineDC
+	call	CreateCompatibleDC
+	mov	actionDC, eax
+
+	push	GAME_ACTION_HEIGHT + NINJA_FRAME_HEIGHT
+	push	GAME_ACTION_WIDTH + NINJA_FRAME_WIDTH
+	push	engineDC
+	call	CreateCompatibleBitmap
+	mov	actionBMP, eax
+
+	push	eax
+	push	actionDC
+	call	SelectObject
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Set up Log Area buffer
+	push	engineDC
+	call	CreateCompatibleDC
+	mov	logwndDC, eax
+
+	push	MESSAGE_LOG_HEIGHT
+	push	MESSAGE_LOG_WIDTH
+	push	engineDC
+	call	CreateCompatibleBitmap
+	mov	logwndBMP, eax
+
+	push	eax
+	push	logwndDC
+	call	SelectObject
+
+	push	TRANSPARENT
+	push	logwndDC
+	call	SetBkMode
+
+	;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;; Set up Copier DC
+	push	engineDC
+	call	CreateCompatibleDC
+	mov	copierDC, eax
+
+	call	OnLoad
+
+	push	0
+	push	20h
+	push	TIMER_PAINTER
+	push	engineWnd
+	call	SetTimer
+
+	push	0
+	push	40h
+	push	TIMER_ANIMATOR
+	push	engineWnd
+	call	SetTimer
+
+Messagz:
+	push	0 0 0
+	push	offset engineMsg
+	call	GetMessage
+	cmp	ax,0
+	je	finn
+
+	push	offset engineMsg
+	call	TranslateMessage
+
+	push	offset engineMsg
+	call	DispatchMessage
+
+	jmp	Messagz
+
+finn:	call	ExitProcess
+
+
+;/////////////////////////////////////////////////////////////////////////
+WndProc		proc	STDCALL, hwnd:DWORD, wmsg:DWORD, wparam:DWORD, lparam:DWORD
+	mov	eax,wmsg
+	mov	ebx, wparam
+
+	pusha
+
+	.IF ax == WM_DESTROY
+		call	OnExit
+
+		push	0
+		call	PostQuitMessage
+		ret
+	.ELSEIF ax == WM_TIMER
+		.IF ebx == TIMER_PAINTER
+			call	OnPaint
+		.ELSE
+			push	ebx
+			call	OnTimer
+		.ENDIF
+	.ELSEIF ax == WM_KEYDOWN
+		push	ebx
+		call	KeyDown
+	.ELSEIF ax == WM_KEYUP
+		push	ebx
+		call	KeyUp
+	.ELSEIF ax == MM_JOY1MOVE
+		mov	ebx, lparam
+		push	ebx
+		call	OnJoystickMove
+	.ELSEIF ax == MM_JOY1BUTTONDOWN
+		push	ebx
+		call	OnJoystickButtonDown
+	.ELSEIF ax == MM_JOY1BUTTONUP
+		push	ebx
+		call	OnJoystickButtonUp
+	.ELSEIF ax == MM_MCINOTIFY
+		call	SeekTrack
+		mov	mciPlaying, 0
+	.ELSEIF ax == WM_SOCKET
+		mov	eax, lparam
+		.IF ax == FD_ACCEPT
+			call	OnSocketRequest
+		.ELSEIF ax == FD_READ
+			; Handle data requests
+			push	wparam
+			call	OnSocketData
+		.ELSEIF ax == FD_CLOSE
+			push	wparam
+			call	OnSocketClose
+		.ENDIF
+	.ELSE
+		popa
+		call	DefWindowProc, hwnd,wmsg,wparam,lparam
+		ret
+	.ENDIF
+
+	popa
+
+	xor eax,eax
+	ret
+WndProc		endp
+;/////////////////////////////////////////////////////////////////////////
+
+INCLUDE	Events-Win.inc
+INCLUDE	Resource.inc
+
+INCLUDE	Events-Ninja.inc
+
+INCLUDE	Painter-Menu.inc
+INCLUDE	Painter-Game.inc
+
+INCLUDE	Network.inc
+INCLUDE	Events-Net.inc
+
+INCLUDE	Map.inc
+
+RandomNumber	proc	STDCALL, SeedExtra:DWORD
+	call	GetTickCount
+	mov	ebx, SeedExtra
+	xor	eax, ebx
+	mov	ebx, randomSeed
+	xor	eax, ebx
+	rol	eax, 3h
+	mov	randomSeed, eax
+	ret
+RandomNumber	endp
+
+;INCLUDE	MusicMP3.inc
+INCLUDE	MusicSID.inc
+
+INCLUDE	Animator.inc
+INCLUDE	Controller.inc
+INCLUDE	ConnectBox.inc
+INCLUDE	Collision.inc
+INCLUDE	Events-Joy.inc
+INCLUDE	Projectiles.inc
+INCLUDE	NameBox.inc
+
+INCLUDE	MessageLogs.inc
+INCLUDE	Scoreboard.inc
+
+	end	start

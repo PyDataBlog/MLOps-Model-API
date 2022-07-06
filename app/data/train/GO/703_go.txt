@@ -1,0 +1,67 @@
+package main
+
+import (
+	"fmt"
+	"os"
+	"os/signal"
+	"syscall"
+)
+
+func Print(format string, params ...interface{}) {
+	fmt.Fprintf(os.Stderr, format+"\n", params...)
+}
+
+func Info(format string, params ...interface{}) {
+	Print("Info: " + format, params...)
+}
+
+func Error(err error) {
+	Print("Error: %s", err)
+}
+
+func Fatal(err error) {
+	Print("Fatal: %s", err)
+	os.Exit(1)
+}
+
+func main() {
+	var config Config
+	var err error
+	if config, err = LoadConfig(); err != nil {
+		Fatal(err)
+	}
+
+	if err = config.Verify(); err != nil {
+		Fatal(err)
+	}
+
+	var svcmon ServiceMonitor
+	if svcmon, err = NewServiceMonitor(&config); err != nil {
+		Fatal(err)
+	}
+
+	cleanup := func() {
+		svcmon.Close()
+	}
+
+	defer cleanup()
+	sigchan := make(chan os.Signal, 1)
+	signal.Notify(sigchan, syscall.SIGINT)
+	signal.Notify(sigchan, syscall.SIGTERM)
+	quit := make(chan bool)
+
+	go func() {
+		<-sigchan
+		cleanup()
+		quit <- true
+	}()
+
+	go func() {
+		if err = svcmon.Run(); err != nil {
+			Fatal(err)
+		}
+		quit <- true
+	}()
+
+	<-quit
+}

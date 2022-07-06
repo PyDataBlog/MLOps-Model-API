@@ -1,0 +1,500 @@
+﻿Imports System
+Imports System.Threading
+Imports System.IO
+Imports System.Net
+Imports System.Net.Sockets
+Imports System.Configuration
+Imports System.Runtime.Serialization.Formatters.Binary
+
+Module Main
+    Private SerialPort As System.IO.Ports.SerialPort
+    Private listener As TcpListener
+    Private publisher As UdpClient
+    Private threads(4) As Thread
+    Private NuvoZones As New Collections.Generic.List(Of NuvoZone)
+    Private NuvoSources As New Collections.Generic.List(Of NuvoSource)
+    Private NeedToWakeUp As Boolean = True
+
+    Public Sub Main()
+
+        Try
+
+            InitializeSerialPort()
+            AddHandler SerialPort.DataReceived, AddressOf SerialDataReceived
+            InitializeNuvoSources()
+            InitializeNuvoZones()
+
+            listener = New System.Net.Sockets.TcpListener(IPAddress.Any, 2055)
+            listener.Start()
+
+            LogInformation("Server listening to Port: {0}", listener.LocalEndpoint)
+
+            For i As Integer = 0 To threads.Length - 1
+                threads(i) = New Thread(New ThreadStart(AddressOf Service))
+                threads(i).Start()
+            Next
+
+        Catch ex As Exception
+
+            LogInformation(ex.Message)
+
+            For Each t As Thread In threads
+                If IsNothing(t) = False Then
+                    t.Abort()
+                End If
+            Next
+
+            If IsNothing(listener) = False Then
+                listener.Stop()
+            End If
+
+        End Try
+
+    End Sub
+
+
+    Public Sub Service()
+        Dim client As TcpClient
+
+        Try
+
+            client = New TcpClient
+
+            Do While True
+
+                LogInformation("Service Thread: {0} Waiting...", CStr(System.Threading.Thread.CurrentThread.ManagedThreadId))
+
+                client = listener.AcceptTcpClient()
+
+                LogInformation("Service Thread: {0} Connected: {1}", CStr(System.Threading.Thread.CurrentThread.ManagedThreadId), client.Client.RemoteEndPoint)
+
+                Call LoopOnMessage(client)
+
+                'if Service Pause/Stop exit Loop
+
+            Loop
+
+        Catch ex As System.Threading.ThreadAbortException
+
+            ' thread is being shut down
+            LogInformation("Service Thread {0} Aborted", System.Threading.Thread.CurrentThread.ManagedThreadId)
+
+        Catch ex2 As Exception
+
+            LogInformation("Service Thread {0} Exception {1}", CStr(System.Threading.Thread.CurrentThread.ManagedThreadId), ex2.Message)
+
+        End Try
+
+    End Sub
+    Private Sub LoopOnMessage(ByVal client As TcpClient)
+        Dim rsp As String
+        Dim msg As String
+        Dim b As New System.Runtime.Serialization.Formatters.Binary.BinaryFormatter
+
+
+        Try
+
+            Using s As Stream = client.GetStream,
+               sr As New StreamReader(s),
+               sw As New StreamWriter(s)
+
+                sw.AutoFlush = True
+
+                Do While True
+
+                    Try
+                        msg = sr.ReadLine
+
+                        If IsNothing(msg) Then
+                            LogInformation("Service Thread: {0} msg Is Nothing", System.Threading.Thread.CurrentThread.ManagedThreadId)
+                            Throw New Exception("exit")
+                        End If
+
+                        LogInformation("Received {0}", msg)
+
+                        Select Case msg.ToUpper.Trim
+                            Case "CLOSE"
+                                Throw New Exception("exit")
+
+                            Case "NUVOZONES"
+                                b.Serialize(s, NuvoZones)
+
+                            Case "NUVOSOURCES"
+                                b.Serialize(s, NuvoSources)
+
+                            Case ""
+                                'do nothing
+
+                            Case Else
+
+                                ' this is a command
+                                rsp = AskSerialPort(msg)
+                                LogInformation("Response {0} ", rsp)
+
+                        End Select
+
+                    Catch ex As Exception
+
+                        If ex.Message = "exit" Then
+                            LogInformation("Service Thread {0} Exiting", System.Threading.Thread.CurrentThread.ManagedThreadId)
+                        Else
+                            LogInformation("Service Thread {0} Exception {1}", System.Threading.Thread.CurrentThread.ManagedThreadId, ex.Message)
+                        End If
+
+                        Exit Do
+
+                    End Try
+
+                Loop
+
+                sr.Close()
+                sw.Close()
+                s.Close()
+
+            End Using
+
+        Catch ex As Exception
+
+            LogInformation("Service Thread {0} Exception {1}", System.Threading.Thread.CurrentThread.ManagedThreadId, ex.Message)
+
+        End Try
+
+    End Sub
+
+    Private Sub SerialDataReceived(ByVal sender As System.Object, ByVal e As System.IO.Ports.SerialDataReceivedEventArgs)
+        Dim s As String
+
+        Try
+
+            s = ""
+            Do While SerialPort.BytesToRead > 0
+                s = s & SerialPort.ReadLine
+            Loop
+
+            LogInformation("Serial Data Received {0} {1}", CStr(Now), s)
+
+            If System.Text.RegularExpressions.Regex.IsMatch(s, "#ALLOFF") Then
+                NeedToWakeUp = True
+            End If
+
+            HandleUnsolicitedMessages(s)
+
+        Catch ex As Exception
+
+            LogInformation("SerialDataReceived Error: " & ex.Message)
+
+        End Try
+
+    End Sub
+
+    Public Sub InitializeSerialPort()
+
+        Try
+
+            SerialPort = New System.IO.Ports.SerialPort
+
+            SerialPort.PortName = "COM3"
+            SerialPort.Handshake = IO.Ports.Handshake.None
+            SerialPort.DtrEnable = True
+            SerialPort.DiscardNull = False
+            SerialPort.NewLine = vbCrLf
+            SerialPort.ReceivedBytesThreshold = 1
+            SerialPort.BaudRate = 57600
+            SerialPort.Parity = IO.Ports.Parity.None
+            SerialPort.StopBits = IO.Ports.StopBits.One
+            SerialPort.DataBits = 8
+            SerialPort.Open()
+
+            Call WakeUpSerialPort()
+
+        Catch ex As Exception
+            Throw New Exception("InitializeSerialPort Failed: " & ex.Message)
+        End Try
+
+    End Sub
+
+    Public Sub WakeUpSerialPort()
+
+        Try
+
+            SerialPort.Write(vbCrLf)
+            System.Threading.Thread.Sleep(20)
+            NeedToWakeUp = False
+
+        Catch ex As Exception
+            Throw New Exception("WakeUpSerialPort Failed: " & ex.Message)
+        End Try
+
+    End Sub
+
+    Public Sub SendMessage(ByVal msg As String)
+
+        Try
+
+            If NeedToWakeUp = True Then
+                WakeUpSerialPort()
+            End If
+
+            SerialPort.WriteLine(msg)
+
+        Catch ex As Exception
+            Throw New Exception("SendMessage Failed: " & ex.Message)
+        End Try
+
+    End Sub
+    Public Function AskSerialPort(ByVal msg As String) As String
+
+        Dim rsp As String = ""
+
+        Try
+
+            SerialPort.WriteLine(msg)
+            System.Threading.Thread.Sleep(50)
+
+            LogInformation("Bytes to Read {0}", CStr(SerialPort.BytesToRead))
+            Do While SerialPort.BytesToRead > 0
+                rsp = rsp & SerialPort.ReadLine
+            Loop
+
+            HandleUnsolicitedMessages(rsp)
+
+        Catch ex As Exception
+
+            LogInformation("AskSerialPort Error: {0}", ex.Message)
+            rsp = ""
+
+        End Try
+
+        Return rsp
+
+    End Function
+
+    Public Sub InitializeNuvoZones()
+        Dim i As Integer
+        Dim z As NuvoZone
+        Dim request As String = ""
+
+        Try
+
+            'create all the classes first because we might have a gap in the 
+            'zone sequence if there are slave zones
+            For i = 1 To 12
+                z = New NuvoZone(i)
+                NuvoZones.Add(z)
+            Next i
+
+            For i = 1 To 12
+                z = NuvoZones(i - 1)
+
+                '*ZCFGzSTATUS?
+                request = "*ZCFG" & CStr(z.Number) & "STATUS?" & vbCrLf
+                LogInformation(request)
+                SendMessage(request)
+                System.Threading.Thread.Sleep(50)
+
+                ''*ZCFGzEQ?
+                request = "*ZCFG" & CStr(z.Number) & "EQ?" & vbCrLf
+                SendMessage(request)
+                System.Threading.Thread.Sleep(50)
+
+                ''*ZCFGzVOL?
+                request = "*ZCFG" & CStr(z.Number) & "VOL?" & vbCrLf
+                SendMessage(request)
+                System.Threading.Thread.Sleep(50)
+
+                ''*ZCFGzDISP?
+                request = "*ZCFG" & CStr(z.Number) & "DISP?" & vbCrLf
+                SendMessage(request)
+                System.Threading.Thread.Sleep(50)
+
+                ''*ZzSTATUS?
+                request = "*Z" & CStr(z.Number) & "STATUS?" & vbCrLf
+                SendMessage(request)
+                System.Threading.Thread.Sleep(50)
+
+            Next
+
+        Catch ex As Exception
+            Throw New Exception("InitializeNuvoZones Failed: " & ex.Message)
+        End Try
+
+    End Sub
+
+
+    Public Function InitializeNuvoSources() As Boolean
+        Dim i As Integer
+        Dim s As NuvoSource
+        Dim request As String = ""
+
+        Try
+
+            For i = 1 To 6
+                s = New NuvoSource(i)
+                NuvoSources.Add(s)
+            Next i
+
+            For i = 1 To 6
+                s = NuvoSources(i - 1)
+
+                '*SCFGsSTATUS?
+                request = "*SCFG" & CStr(s.Number) & "STATUS?" & vbCrLf
+                SendMessage(request)
+                System.Threading.Thread.Sleep(50)
+
+                ''#SsDISPLINEx,"y"
+                ''*SsDISPLINE?
+                request = "*S" & CStr(s.Number) & "DISPLINE?" & vbCrLf
+                SendMessage(request)
+                System.Threading.Thread.Sleep(50)
+
+                '*SsDISPINFO?
+                ''#SsDISPINFO,DURATIONx,POSITIONy,STATUSz
+                request = "*S" & CStr(s.Number) & "DISPINFO?" & vbCrLf
+                SendMessage(request)
+                System.Threading.Thread.Sleep(50)
+
+            Next i
+
+        Catch ex As Exception
+            Throw New Exception("InitializeNuvoSources Failed: " & ex.Message)
+        End Try
+
+    End Function
+
+    Public Function HandleUnsolicitedMessages(ByVal pdata As String) As Boolean
+        'Dim pdata As Byte()
+        Dim ep As System.Net.IPEndPoint = Nothing
+        Dim msg As String = ""
+        Dim r() As String       'array of strings
+        Dim idx As Integer      'index
+        Dim pattern As String = "S\dDISPLINE\d,"".*"""
+        Dim foundstring As System.Text.RegularExpressions.Match
+
+        Try
+
+
+            For Each msg In pdata.Split("#")
+                'LogInformation("** message received: " & msg)
+
+                '#ZCFG5,ENABLE1,NAME"Master Bath",SLAVETO4,GROUP0,SOURCES3, XSRC0, IR1, DND0, LOCKED0, SLAVEEQ0
+                '#ZCFG1,ENABLE1,NAME"M3 A",SLAVETO0,GROUP0,SOURCES0,XSRC0,IR0,DND0,LOCKED0
+                '#ZCFG1,ENABLE0
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ZCFG\d,ENABLE\d") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 1)) - 1
+                    Call NuvoZone.LoadZoneConfiguration(NuvoZones(idx), r)
+                End If
+
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ZCFG\d\d,ENABLE\d") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 2)) - 1
+                    Call NuvoZone.LoadZoneConfiguration(NuvoZones(idx), r)
+                End If
+
+                '#ZCFG1,BASS0,TREB0,BALC,LOUDCMP0
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ZCFG\d,BASS\d,TREB\d") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 1)) - 1
+                    Call NuvoZone.LoadZoneEQConfiguration(NuvoZones(idx), r)
+                End If
+
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ZCFG\d\d,BASS\d,TREB\d") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 2)) - 1
+                    Call NuvoZone.LoadZoneEQConfiguration(NuvoZones(idx), r)
+                End If
+
+                '#ZCFG1,MAXVOL0,INIVOL0,PAGEVOL0,PARTYVOL0,VOLRST0
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ZCFG\d,MAXVOL") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 1)) - 1
+                    Call NuvoZone.LoadZoneVolumeConfiguration(NuvoZones(idx), r)
+                End If
+
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ZCFG\d\d,MAXVOL") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 2)) - 1
+                    Call NuvoZone.LoadZoneVolumeConfiguration(NuvoZones(idx), r)
+                End If
+
+
+                '#ZCFG1,BRIGHT0,AUTODIM0,DIM0,DISPMODE0,TIME1
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ZCFG\d,BRIGHT") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 1)) - 1
+                    Call NuvoZone.LoadZoneDisplayConfiguration(NuvoZones(idx), r)
+                End If
+
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ZCFG\d\d,BRIGHT") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 2)) - 1
+                    Call NuvoZone.LoadZoneDisplayConfiguration(NuvoZones(idx), r)
+                End If
+
+                '#Z1,ON,SRC4,VOL60,DND0,LOCK0 - POWER ON
+                '#Z1,OFF - POWER OFF
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "Z\d,ON") Or _
+                   System.Text.RegularExpressions.Regex.IsMatch(msg, "Z\d,OFF") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 2, 1)) - 1
+                    Call NuvoZone.LoadZoneStatus(NuvoZones(idx), r)
+                    'RaiseEvent PowerStateChanged(NuvoZones(idx))
+                End If
+
+                '#ALLOFF
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "ALLOFF") Then
+                    NuvoZones.Clear()
+                    Call InitializeNuvoZones()
+                End If
+
+                '#Z11,ON,SRC4,VOL60,DND0,LOCK0 - POWER ON
+                '#Z11,OFF - POWER OFF
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "Z\d\d,ON") Or _
+                   System.Text.RegularExpressions.Regex.IsMatch(msg, "Z\d\d,OFF") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 2, 2)) - 1
+                    Call NuvoZone.LoadZoneStatus(NuvoZones(idx), r)
+                    'RaiseEvent PowerStateChanged(NuvoZones(idx))
+                End If
+
+                '#SCFGx,ENABLE1,NAME"M3 A",GAIN0,NUVONET1,SHORTNAMEM3A
+                '#SCFG1,ENABLE0
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "SCFG\d,ENABLE\d") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 5, 1)) - 1
+                    Call NuvoSource.LoadSourceConfiguration(NuvoSources(idx), r)
+                End If
+
+                '#SxDISPLINE1,""#SxDISPLINE2,""#SxDISPLINE3,"SOURCE x"#SxDISPLINE4,""
+                '#Z0S1IRCTL9#S1DISPLINE1,"98.1"#S1DISPLINE2,"KING"
+
+
+                foundstring = System.Text.RegularExpressions.Regex.Match(msg, pattern)
+                If foundstring.Success = True Then
+                    'Debug.Print(foundstring.ToString)
+                    r = foundstring.ToString.Split(",")
+                    idx = CInt(Mid(r(0), 2, 1)) - 1
+                    Call NuvoSource.LoadSourceDisplayLine(NuvoSources(idx), r)
+                End If
+
+
+                '#SsDISPINFO,DURx,POSy,STATUSz
+                If System.Text.RegularExpressions.Regex.IsMatch(msg, "S\dDISPINFO") Then
+                    r = msg.Split(",")
+                    idx = CInt(Mid(r(0), 2, 1)) - 1
+                    Call NuvoSource.LoadSourceTrackStatus(NuvoSources(idx), r)
+                End If
+
+                ' Debug.Print("Unknown Message: " & msg)
+
+            Next
+
+        Catch ex As Exception
+
+            LogInformation("HandleUnsolicitedMessages Error: {0} {1}", ex.Message, pdata)
+
+        End Try
+
+    End Function
+
+End Module

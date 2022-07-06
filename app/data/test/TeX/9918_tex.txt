@@ -1,0 +1,261 @@
+\newcommand{\code}{\texttt}
+
+\documentclass{beamer}
+%\usetheme{default}
+%\usetheme{Boadilla}
+%\usetheme{Madrid}
+\usetheme{Pittsburgh}
+%\usetheme{Rochester}
+%\usetheme{Copenhagen}
+%\usetheme{Warsaw}
+%\usetheme{Singapore}
+%\usetheme{Malmoe}
+%\usecolortheme{albatross}
+
+\usepackage{pseudocode}
+\usepackage{listings}
+
+
+\title[RCImmix]{A Description of the RCImmix Algorithm}
+\subtitle[RC]{Reference Counting with better heap allocation}
+\author[N. Jervis]{Nathan Jervis}
+\institute[McMaster]{
+  Department of Computer Science\\
+  McMaster University, Hamilton\\
+  \texttt{jervisnd@mcmaster.ca}\\
+  \texttt{1211159}
+}
+
+
+\begin{document}
+
+
+%--- the titlepage frame -------------------------%
+\begin{frame}[plain]
+  \titlepage
+\end{frame}
+
+%--- the presentation begins here ----------------%
+\begin{frame}{Overview}
+	\begin{itemize}
+		\item Introduction to automatic memory management
+		\item Problems with existing reference counting
+		\item Optimizations to reference counting
+		\item RCImmix algorithm
+	\end{itemize}
+\end{frame}
+
+\begin{frame}{Manual Memory Management}
+	\textbf{Manual Memory Management}
+	\begin{itemize}
+		\item Difficult to use
+		\item Can cause dangling pointers
+		\item Leads to memory leaks
+	\end{itemize}
+	\emph{Much better if the compiler/runtime can manage memory for us}
+\end{frame}
+
+\begin{frame}{Automatic Memory Management}
+	\textbf{Tracing Garbage Collector:}
+	\begin{itemize}
+		\item Periodically pause program and follow program references
+		\item Collect anything not referred to
+	\end{itemize}
+	\textbf{Reference Counting:}
+	\begin{itemize}
+		\item Counter keeps track of how many things are pointing to it
+		\item When counter reaches 0, free memory
+		\item \code{Allocate}, \code{Retain}, \code{Release}
+	\end{itemize}
+\end{frame}
+
+\begin{frame}{Reference Counting vs Tracing}
+	\textbf{Tracing Garbage Collector:}
+	\begin{itemize}
+		\item Little work for allocation
+		\item Better cache performance (with compacting)
+		\item Requires pausing to collect
+	\end{itemize}
+	\textbf{Reference Counting:}
+	\begin{itemize}
+		\item Doesn't pause
+		\item Huge overhead
+		\item Poor cache locality
+	\end{itemize}
+\end{frame}
+
+\begin{frame}{RCImmix Optimizations}
+	\textbf{Optimizations}
+	\begin{itemize}
+		\item Tracing collector as a backup
+		\item Limited Bit Count
+		\item Block Based allocation
+		\item Nursery Allocation and Copying Collectors
+		\item Objects are born as dead
+	\end{itemize}
+\end{frame}
+
+\begin{frame}{Tracing Backup Collector}
+	\begin{itemize}
+		\item Naive reference counting won't collect cycles
+		\item Reference counting handle normal memory collection
+		\item When cycle garbage accumulates too much, call Tracer
+		\item Tracer will very rarely be called, so you still don't have to worry about pauses too much
+	\end{itemize}
+\end{frame}
+
+\begin{frame}{Limited bit count}
+	\begin{itemize}
+		\item In theory everything could point to object, requires 32/64 bits
+		\item In practice most objects only a few things pointing to it
+		\item Using 3-4 bits is fine
+		\item If it overflows, just leave it at max, don't decrement
+		\item Tracer will fix it when it collects
+	\end{itemize}
+\end{frame}
+
+\begin{frame}{Block Based Allocation}
+	\begin{itemize}
+		\item Items are allocated out of a block
+		\item Block keeps a pointer to the next free spot
+		\item Count of number of live objects on the block
+		\item Great for cache performance
+	\end{itemize}
+\end{frame}
+
+\begin{frame}{Nurseries and Copying Collection}
+	\begin{itemize}
+		\item Objects are allocated into a nursery
+		\item Move when mature (copied or pass collection cycle)
+		\item Only new objects in nursery
+			\begin{itemize}
+				\item Will be collected during collection cycles
+				\item Most objects die young, not copied
+				\item Nurseries are cheap way to collect
+			\end{itemize}
+	\end{itemize}
+\end{frame}
+
+\begin{frame}{Objects are born as dead}
+	\begin{itemize}
+		\item When you create the object, garbage collector already considers it dead
+		\item Only when it moves or matures do you consider it alive
+		\item ModBuffer contains all objects that have created new objects
+		\item Can process ModBuffer to check if "dead" objects are actually alive
+	\end{itemize}
+\end{frame}
+
+\addtocounter{section}{1}
+
+
+\begin{frame}{Typical Use}
+\begin{pseudocode}{User Code}{args}
+\MAIN
+	x \GETS \CALL{Allocate}{size}\\
+	\ldots\\
+	\CALL{Retain}{x}\\
+	y \GETS x\\
+	\ldots\\
+	\CALL{Release}{y}\\
+	\ldots\\
+	\CALL{release}{x}\\
+\ENDMAIN
+\end{pseudocode}
+\end{frame}
+
+\addtocounter{section}{1}
+
+\begin{frame}{Allocate}
+\begin{pseudocode}{Allocate}{size}
+	\GLOBAL{bumpPointer, block}\\\\
+	\IF size < block.end - bumpPointer \THEN
+		\BEGIN
+			pointer \GETS bumpPointer\\
+			bumpPointer \GETS bumpPointer + size + 1\\
+		\END\\
+	\ELSE
+		\BEGIN
+			block \GETS \CALL{GetNewFreeBlock}{}\\
+			\RETURN{\CALL{Allocate}{size}}\\
+		\END\\\\
+	pointer.new \GETS \TRUE\\
+	pointer.count \GETS 0\\
+	\RETURN{pointer}
+\end{pseudocode}
+\end{frame}
+
+
+\begin{frame}{Retain}
+\begin{pseudocode}{Retain}{object}
+	\IF object.new = \FALSE \THEN
+	\BEGIN
+		\IF object.count \NOT max \THEN
+		object.count \GETS object.count + 1\\
+		\RETURN{}
+	\END\\
+	pointer \GETS \CALL{CopyToNewLocation}{object}\\
+	\CALL{AddToModBuffer}{object}\\
+	object.count \GETS 2\\
+	object.block.liveCount \GETS object.block.liveCount + 1\\
+	\RETURN{}\\
+\end{pseudocode}
+\end{frame}
+
+\begin{frame}{Release}
+\begin{pseudocode}{Release}{object}
+	\IF object.new = \TRUE \THEN
+		\RETURN{}\\
+	\IF object.count \NOT max \THEN
+	object.count \GETS object.count - 1\\
+	\IF object.count = 0 \THEN
+	\BEGIN
+		\CALL{ProcessModBuffer}{}\\
+		object.block.liveCount \GETS object.block.liveCount - 1\\
+		\CALL{FreeBlocks}{}\\
+	\END
+\end{pseudocode}
+\end{frame}
+
+\addtocounter{section}{1}
+
+\begin{frame}{ModBuffer}
+\begin{pseudocode}{AddToModBuffer}{object}
+	\GLOBAL{ModBuffer}\\
+	\CALL{ModBuffer.Push}{object}
+\end{pseudocode}
+\begin{pseudocode}{ProcessModBuffer}{none}
+	\GLOBAL{ModBuffer}\\
+	\FOREACH obj \in ModBuffer \DO
+	\BEGIN
+		\FOREACH child \in obj.references \DO
+		\BEGIN
+			\IF child.new = \TRUE \THEN 
+			\BEGIN
+				\CALL{Retain}{child}
+				child.count \GETS 1
+			\END
+		\END
+	\END
+\end{pseudocode}
+\end{frame}
+
+\renewcommand{\arraystretch}{2}
+\begin{frame}{Conclusion}
+	\begin{tabular}{p{3cm}|c|c|c}
+	 & Reference Counting & Tracing & RCImmix (Both)\\\hline
+	Overhead & Significant & None & Minimal\\
+	Speed & Slow & Fast & Fast\\
+	Cache \mbox{Performance} & Poor & Good & Good\\
+	Pauses & Short & Long & Mostly short\\
+	Implementation Difficulty & Easy & Hard & Very Hard
+	\end{tabular}
+\end{frame}
+
+\begin{frame}{Resources}
+\bibliographystyle{unsrt}
+\nocite{rcimmix}
+\nocite{rc}
+\bibliography{JervisNathan_1211159_WA4}
+\end{frame}
+
+\end{document}

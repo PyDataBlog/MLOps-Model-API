@@ -1,0 +1,64 @@
+-- | This module contains functions that act on factions.
+module Game.Cosanostra.Faction
+    ( factionMembers
+    , effectsFaction
+    , winners
+    ) where
+
+import Game.Cosanostra.Effect
+import Game.Cosanostra.Lenses
+import Game.Cosanostra.Types
+
+import Control.Lens
+import Data.Maybe
+import qualified Data.Set as S
+
+-- | Get all members of a action.
+factionMembers :: Players -> Turn -> Phase -> Faction -> S.Set Player
+factionMembers players turn phase faction =
+    S.fromList $ filter (\player -> player ^. to (playerFaction players turn phase) == faction)
+                        (playerKeys players)
+
+effectsFaction :: [Effect] -> Faction
+effectsFaction =
+    (^?! to effectsRecruited . effectType . effectTypeRecruitedFaction)
+
+-- | Get the faction for a player.
+--
+-- Note this function is non-total, that is, will cause an error if the player
+-- does not have a faction.
+playerFaction :: Players -> Turn -> Phase -> Player -> Faction
+playerFaction players turn phase player =
+    player ^?! to (playerEffects players player turn phase)
+             . to effectsRecruited
+             . effectType
+             . effectTypeRecruitedFaction
+
+factionsPrimaryWinners :: Players -> Turn -> Phase -> Factions -> S.Set Faction
+factionsPrimaryWinners players turn phase factions =
+    S.fromList [faction
+                | player <- playerKeys players
+                , isNothing (player ^. to (playerEffects players player turn phase)
+                                     . to effectsCauseOfDeath)
+                , let faction = player ^. to (playerFaction players turn phase)
+                , factions ^?! ix faction . factionTraitsIsPrimary
+                ]
+
+winners :: Players -> Turn -> Phase -> Factions -> Maybe [Player]
+winners players turn phase factions
+ | S.size winningFactions > 1 = Nothing
+ | otherwise = Just [player
+                    | player <- playerKeys players
+                    , let recruit = player ^?! to (playerEffects players player
+                                                                 turn phase)
+                                             . to effectsRecruited
+                                             . effectType
+                    , let faction = recruit ^?! effectTypeRecruitedFaction
+                    , let factionTraits = factions ^?! ix faction
+                    , not (factionTraits ^. factionTraitsIsPrimary) ||
+                      faction `S.member` winningFactions
+                    , checkConstraint players player turn phase
+                                      (recruit ^?! effectTypeAgenda)
+                    ]
+  where
+    winningFactions = factionsPrimaryWinners players turn phase factions

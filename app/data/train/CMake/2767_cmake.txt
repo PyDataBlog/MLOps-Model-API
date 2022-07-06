@@ -1,0 +1,25 @@
+FIND_PATH(HELLO_INCLUDE_DIR hello.h /Users/moses/iboxpay/cmake/t3/install/include/hello)
+FIND_LIBRARY(HELLO_LIBRARY NAMES hello libhello.a PATHS  /Users/moses/iboxpay/cmake/t3/install/lib)
+
+IF(HELLO_INCLUDE_DIR AND HELLO_LIBRARY)
+   SET(HELLO_FOUND TRUE)
+ENDIF(HELLO_INCLUDE_DIR AND HELLO_LIBRARY)
+
+IF(NOT HELLO_INCLUDE_DIR)
+       MESSSAGE(STATUS "can not found hello include dir")
+ENDIF(NOT HELLO_INCLUDE_DIR)
+
+IF(NOT HELLO_LIBRARY)
+       MESSAGE(STATUS "can not found hello library dir")
+ENDIF(NOT HELLO_LIBRARY)
+
+IF(HELLO_FOUND)
+    IF(NOT HELLO_FIND_QUIETLY)
+           MESSAGE(STATUS "Found Hello: ${HELLO_LIBRARY}")
+    ENDIF(NOT HELLO_FIND_QUIETLY)
+ELSE(HELLO_FOUND)
+    IF(HELLO_FIND_REQUIRED)
+        MESSAGE(FATAL_ERROR "Cound not find hello library")
+    ENDIF(HELLO_FIND_REQUIRED)
+ENDIF(HELLO_FOUND)
+

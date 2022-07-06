@@ -1,0 +1,331 @@
+
+
+CREATE OR REPLACE FUNCTION fct_get_price_for_pricegroup(  sModul varchar, iModulID integer, iArticleID integer) returns  float AS '
+ 
+    DECLARE
+        sSql    text ;
+        fPrice float ;
+        iAddressID integer ;
+        recData record ;
+        pricegroupID integer ;
+        
+    BEGIN 
+        fPrice := 0.00 ;
+           IF sModul = ''grave'' THEN
+               sSql := '' select pricegroup1, pricegroup2,pricegroup3,pricegroup4,pricegroup_none from grave where grave.id = '' || iModulID ;
+            ELSEIF sModul = ''orderposition'' THEN
+               sSql := '' select pricegroup1, pricegroup2,pricegroup3,pricegroup4,pricegroup_none from orderbook where id = '' || iModulID ;
+               
+            END IF ;
+            execute(sSql) into recData ;
+            
+            if recData.pricegroup1 IS NULL then
+                pricegroupID :=5 ;
+            ELSEIF recData.pricegroup1 = TRUE THEN 
+                pricegroupID :=1 ;
+            ELSEIF recData.pricegroup2 = TRUE THEN 
+                pricegroupID :=2 ;
+            ELSEIF recData.pricegroup3 = TRUE THEN 
+                pricegroupID :=3 ;
+            ELSEIF recData.pricegroup4 = TRUE THEN 
+                pricegroupID :=4 ;
+            ELSEIF recData.pricegroup_none = TRUE THEN 
+                pricegroupID :=5 ;
+            ELSE 
+                pricegroupID :=5 ;
+            END IF ;
+            
+            raise notice '' pricegroup id = % '',pricegroupID ;
+            
+            
+            
+            IF pricegroupID = 5 then
+                
+            IF sModul = ''grave'' THEN
+                select into recData addressid from grave where id = iModulID ;
+                -- raise notice '' address id = % '',recData.addressid ;
+                iAddressID = recData.addressid ;
+            ELSEIF sModul = ''orderposition'' THEN
+                select into recData addressnumber from orderbook  where orderbook.id = iModulID ;
+                -- raise notice '' address id = % '',recData.addressnumber;
+                iAddressID = recData.addressnumber ;
+            END IF ;
+            
+            
+                
+                
+                
+                select into recData pricegroup1, pricegroup2,pricegroup3,pricegroup4,pricegroup_none from addresses_misc where address_id = iAddressID ;
+                -- raise notice '' pricegroup by address = %, % , %'',recData.pricegroup1, recData.pricegroup2,recData.pricegroup3;
+                if recData.pricegroup1 IS NULL then
+                    pricegroupID :=1 ;
+                ELSEIF recData.pricegroup1 = TRUE THEN 
+                    pricegroupID :=1 ;
+                ELSEIF recData.pricegroup2 = TRUE THEN 
+                    pricegroupID :=2 ;
+                ELSEIF recData.pricegroup3 = TRUE THEN 
+                    pricegroupID :=3 ;
+                ELSEIF recData.pricegroup4 = TRUE THEN 
+                    pricegroupID :=4 ;
+                ELSEIF recData.pricegroup_none = TRUE THEN 
+                    pricegroupID :=5 ;
+                ELSE 
+                    pricegroupID :=1 ;
+                END IF ;
+            END IF ;
+        
+        -- raise notice '' pricegroup id last value = % '',pricegroupID ;
+        
+        if pricegroupID < 5 then 
+            sSql = ''select sellingprice''||pricegroupID||'' as price from articles where id = '' || iArticleID ;
+            -- raise notice '' sql  = % '',sSql ;
+            
+            for recData in execute sSql 
+                LOOP 
+            END LOOP ;
+        
+            -- raise notice '' price = % '', recData.price ;
+         
+            fPrice := recData.price ;
+            if fPrice IS NULL THEN 
+                fPrice := 0.00 ;
+            END IF ;
+            -- raise notice '' price = % '',fPrice ;
+        END IF ;
+         
+        return fPrice ;
+    END ;
+    ' LANGUAGE 'plpgsql'; 
+
+    
+CREATE OR REPLACE FUNCTION fct_get_new_tax_vat_for_article_1(iArticleID int) returns float AS '
+ DECLARE
+    sSql text   ;
+     r0 record ;
+    iNewTaxVat int ;
+    sNewTaxVat text ;
+    iMGroup record ;
+    aMGroups int[] ;
+    aMGroupsString text[] ;
+    
+    sMGroups text ;
+    iMGroupsTaxVat int ;
+    iClient int ;
+    i int ;
+    fTaxVat float ;
+    
+    BEGIN
+        iNewTaxVat = -1;
+        fTaxVat := 0.00 ;
+        
+        iClient = fct_getUserDataClient(  ) ;
+        sMGroups = fct_get_config_option(iClient,''clients.ini'', ''CLIENT_'' || iClient, ''order_grave_materialgroups_for_tax_vat_1'') ;
+        sNewTaxVat = fct_get_config_option(iClient,''clients.ini'', ''CLIENT_'' || iClient, ''order_grave_materialgroups_new_tax_vat_id_1'') ;
+        
+        sSql := ''select articles.material_group  from articles where articles.id = '' || iArticleID  ;
+        execute(sSql) into r0 ;
+       
+        aMGroupsString =  string_to_array(sMGroups, '','') ; 
+        
+        IF r0.material_group IS NOT NULL THEN 
+            FOR i IN 1..array_length(aMGroupsString, 1) LOOP
+                IF r0.material_group = aMGroupsString[i]::INTEGER THEN 
+                    iNewTaxVat =sNewTaxVat::integer ;
+                END IF ;
+            END LOOP; 
+  
+        END IF ;
+    
+        -- IF iNewTaxVat > -1 THEN 
+        --     select into fTaxVat vat_value from tax_vat where id = iNewTaxVat ;
+        -- END IF ;
+        
+        if iNewTaxVat = -1 then
+            iNewTaxVat = 0 ;
+        end if ;
+        return iNewTaxVat::float;
+    END ;
+    
+     ' LANGUAGE 'plpgsql'; 
+    
+    
+CREATE OR REPLACE FUNCTION fct_get_taxvat_for_article( iArticleID integer) returns  float AS '
+ 
+    DECLARE
+        sSql    text ;
+        fTaxVat float ;
+        iTaxVatArticle integer ;
+        rData  record ;
+    BEGIN 
+        fTaxVat := 0.00;
+    
+        select into rData tax_vat_id from articles where id = iArticleID ;
+        IF rData.tax_vat_id IS NULL then
+            iTaxVatArticle = 0;
+        ELSE
+            iTaxVatArticle = rData.tax_vat_id ;
+        END IF ;
+        
+        IF iTaxVatArticle= 0 THEN
+            select into rData  material_group.tax_vat from articles,material_group where articles.id = iArticleID and articles.material_group = material_group.id ;
+            IF rData.tax_vat IS NULL then
+                iTaxVatArticle = 0;
+            ELSE
+                iTaxVatArticle = rData.tax_vat ;
+            END IF ;
+        END IF ;
+        IF iTaxVatArticle>0 then
+            select into rData vat_value from tax_vat where id = iTaxVatArticle;
+            fTaxVat = rData.vat_value ;
+        else
+        
+            fTaxVat = 0.00 ;
+        END IF;
+
+        
+        return fTaxVat ;
+    END ;
+    ' LANGUAGE 'plpgsql'; 
+
+       
+    
+CREATE OR REPLACE FUNCTION fct_get_net_for_article( iArticleID integer) returns  bool AS '
+ 
+    DECLARE
+        sSql    text ;
+        bNet bool ;
+        net bool ;
+        rData  record ;
+    BEGIN 
+        bNet := true ;
+        raise notice '' net value is %'',bNet ;
+        select into rData price_type_net from material_group, articles where articles.id = iArticleID and articles.material_group = material_group.id ;
+        
+        if rData.price_type_net is null then 
+            bNet := true ;
+        else
+            bNet := rData.price_type_net ;
+        end if ;
+        
+        raise notice '' net value is %'',bNet ;
+       return bNet ;
+    END ;
+    ' LANGUAGE 'plpgsql'; 
+
+    
+    
+    
+CREATE OR REPLACE FUNCTION  fct_duplicateArticle( iArticleID integer) returns  integer AS '
+    DECLARE
+        sSql    text ;
+        newID integer ;
+         rData  record ;
+         
+    BEGIN 
+        newID = 0 ;
+        
+        select nextval(''articles_id'') into newID ;
+         
+        select into rData * from articles where articles.id = iArticleID ;
+        
+        insert into articles (id , client, sep_info_1 , sep_info_2 , sep_info_3 , number , designation  , wrapping , quantumperwrap , unit , manufactor_id , weight , sellingprice1 , sellingprice2 , sellingprice3 , sellingprice4 , tax_vat , material_group , associated_with , associated_id , tax_vat_id ) values (newID ,  rData.client,  rData.sep_info_1 , rData.sep_info_2 , rData.sep_info_3 , ''NEW-'' || rData.number , rData.designation  , rData.wrapping , rData.quantumperwrap , rData.unit , rData.manufactor_id , rData.weight , rData.sellingprice1 ,  rData.sellingprice2 ,  rData.sellingprice3 ,  rData.sellingprice4 , rData. tax_vat ,  rData.material_group ,  rData.associated_with , rData.associated_id ,  rData.tax_vat_id );
+        
+        
+        return newID ;
+    END ;
+    ' LANGUAGE 'plpgsql'; 
+
+    
+    
+CREATE OR REPLACE FUNCTION  fct_getSellingPricesForArticle ( iArticleID integer, iPartID integer) returns   record AS '
+
+DECLARE
+        sSql    text ;
+        rData  record ;
+        rData2  record ;
+         
+    BEGIN 
+    
+    sSql = ''select apl.quantities, sellingprice1, sellingprice2, sellingprice3, sellingprice4, 0.0::float as t1, 0.0::float as t2,0.0::float as t3,0.0::float as t4 from articles, articles_parts_list as apl  where articles.id = '' || iArticleID || '' and  articles.id = apl.part_id and apl.article_id = '' || iPartID || '' '' || fct_getWhere(2,''apl.'') ; 
+    execute(sSql) into rData ;
+    
+    if rData.sellingprice1 IS NULL then
+        rData.sellingprice1 := 0.0::float  ;
+    end if ;
+    
+    if rData.sellingprice2 IS NULL then
+        rData.sellingprice2 := 0.0::float  ;
+    end if ;
+      if rData.sellingprice3 IS NULL then
+        rData.sellingprice3 := 0.0::float  ;
+    end if ;
+      if rData.sellingprice4 IS NULL then
+        rData.sellingprice4 := 0.0::float  ;
+    end if ;
+    
+    rData.t1 =  rData.sellingprice1 * rData.quantities ;
+    rData.t2 =  rData.sellingprice2 * rData.quantities ;
+    rData.t3 =  rData.sellingprice3 * rData.quantities ;
+    rData.t4 =  rData.sellingprice4 * rData.quantities ; 
+  
+    return  rData ;
+    
+    END ;
+    
+    ' LANGUAGE 'plpgsql'; 
+
+    
+  
+CREATE OR REPLACE FUNCTION  fct_getTotalSellingPricesForArticle ( iPartID integer) returns   record AS '
+
+    DECLARE
+        sSql    text ;
+        rData  record ;
+        rData2  record ;
+        ft1 float ;
+        ft2 float ;
+        ft3 float ;
+        ft4 float ;
+        
+    BEGIN 
+     ft1 := 0.00 ;
+     ft2 := 0.00 ;
+     ft3 := 0.00 ;
+     ft4 := 0.00 ;
+     
+     
+    sSql := ''select  apl.quantities, sellingprice1, sellingprice2, sellingprice3, sellingprice4, 0.0::float as t1, 0.0::float as t2,0.0::float as t3,0.0::float as t4 from articles,  articles_parts_list as apl where articles.id = apl.part_id and apl.article_id = '' || iPartID || '' '' || fct_getWhere(2,''apl.'') ;
+    
+    raise notice '' sSql = %'', sSql ;
+    
+    FOR rData in execute(sSql) LOOP 
+    
+        if rData.sellingprice1 IS NOT NULL then
+            raise notice ''sellingprice 1 = % , %  %'', rData.sellingprice1, rData.quantities, rData.t1 ;
+            ft1 :=  ft1 + (rData.sellingprice1 * rData.quantities );
+             raise notice ''sellingprice 1 = % , % '', rData.sellingprice1, rData.t1 ;
+        end if ;
+        if rData.sellingprice2 IS NOT NULL then
+            ft2 :=  ft2 + (rData.sellingprice2 * rData.quantities );
+        end if ;
+        if rData.sellingprice3 IS NOT NULL then
+            ft3 :=  ft3 + (rData.sellingprice3 * rData.quantities );
+        end if ;
+        if rData.sellingprice4 IS NOT NULL then
+            ft4 :=  ft4 + (rData.sellingprice4 * rData.quantities );
+        end if ;
+        
+        
+        
+        
+    END LOOP ;
+    
+        rData.t1 := ft1 ;
+        rData.t2 := ft2 ;
+        rData.t3 := ft3 ;
+        rData.t4 := ft4 ;
+        
+        return  rData ;
+    END ;
+    
+    ' LANGUAGE 'plpgsql'; 

@@ -1,0 +1,183 @@
+Imports System.IO
+Imports System.Net
+Imports System.Net.Sockets
+Imports System.Runtime.InteropServices
+
+Public Class LibTime
+
+    ' Note that the GetSystemTime function returns Coordinated Universal Time 
+    ' (UTC, also known as Greenwich Mean Time). To get your local time, you must 
+    ' add or subtract the number of hours between your time zone and UTC. 
+    ' For example, 24:00 (midnight) in UTC is 19:00 in New York--an offset of minus 5 hours (UTC5).
+
+    ' To determine the UTC offset for your time zone, see the Time Zone tab of 
+    ' Date and Time Properties.
+
+    ' Note that some device emulators do not initially set 
+    ' daylight-saving time correctly, which could affect your result.
+
+#If CONFIG = "Desktop" Then
+    Private Declare Function GetSystemTime Lib "Kernel32.dll" (ByRef lpSystemTime As SYSTEMTIME) As UInteger
+    Private Declare Function SetSystemTime Lib "Kernel32.dll" (ByRef lpSystemTime As SYSTEMTIME) As UInteger
+    Private Declare Function SetLocalTime Lib "Kernel32.dll" (ByRef time As SYSTEMTIME) As Boolean
+#Else
+    Private Declare Function GetSystemTime Lib "CoreDll.dll" (ByRef lpSystemTime As SYSTEMTIME) As UInteger
+    Private Declare Function SetSystemTime Lib "CoreDll.dll" (ByRef lpSystemTime As SYSTEMTIME) As UInteger
+    Private Declare Function SetLocalTime Lib "CoreDll.dll" (ByRef time As SYSTEMTIME) As Boolean
+#End If
+
+    Public Function GetDateTime() As Date
+        Dim st As SYSTEMTIME
+        GetSystemTime(st)
+        Return New Date(st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond, st.wMilliseconds)
+    End Function
+
+    Private Structure SYSTEMTIME
+        Public wYear As UShort
+        Public wMonth As UShort
+        Public wDayOfWeek As UShort
+        Public wDay As UShort
+        Public wHour As UShort
+        Public wMinute As UShort
+        Public wSecond As UShort
+        Public wMilliseconds As UShort
+    End Structure
+
+    'Internet Time Server class by Alastair Dallas 01/27/04
+
+    ' that Windows clock can deviate from NIST and still be okay
+    'Server IP addresses from 
+    'http://www.boulder.nist.gov/timefreq/service/time-servers.html
+    Private Const THRESHOLD_SECONDS As Integer = 15 'Number of seconds
+    Private Servers() As String = { _
+          "129.6.15.28" _
+        , "129.6.15.29" _
+        , "132.163.4.101" _
+        , "132.163.4.102" _
+        , "132.163.4.103" _
+        , "128.138.140.44" _
+        , "192.43.244.18" _
+        , "131.107.1.10" _
+        , "66.243.43.21" _
+        , "216.200.93.8" _
+        , "208.184.49.9" _
+        , "207.126.98.204" _
+        , "205.188.185.33" _
+    }
+
+    Private LastHost As String = String.Empty
+    Private LastSysTime As DateTime
+    Private LastHostTime As DateTime
+    Private Function GetNISTTime(ByVal host As String) As DateTime
+        'Returns DateTime.MinValue if host unreachable or does not produce time
+        'Dim result As DateTime
+        Dim timeStr As String
+
+        Try
+            Dim reader As New StreamReader(New TcpClient(host, 13).GetStream)
+            LastSysTime = DateTime.UtcNow()
+            timeStr = reader.ReadToEnd()
+            reader.Close()
+        Catch ex As SocketException
+            'Couldn't connect to server, transmission error
+            Debug.WriteLine("Socket Exception [" & host & "]")
+            Return DateTime.MinValue
+        Catch ex As Exception
+            'Some other error, such as Stream under/overflow
+            Return DateTime.MinValue
+        End Try
+
+        'Parse timeStr
+        If (timeStr.Substring(38, 9) <> "UTC(NIST)") Then
+            'This signature should be there
+            Return DateTime.MinValue
+        End If
+        If (timeStr.Substring(30, 1) <> "0") Then
+            'Server reports non-optimum status, time off by as much as 5 seconds
+            Return DateTime.MinValue    'Try a different server
+        End If
+
+        Dim jd As Integer = Integer.Parse(timeStr.Substring(1, 5))
+        Dim yr As Integer = Integer.Parse(timeStr.Substring(7, 2))
+        Dim mo As Integer = Integer.Parse(timeStr.Substring(10, 2))
+        Dim dy As Integer = Integer.Parse(timeStr.Substring(13, 2))
+        Dim hr As Integer = Integer.Parse(timeStr.Substring(16, 2))
+        Dim mm As Integer = Integer.Parse(timeStr.Substring(19, 2))
+        Dim sc As Integer = Integer.Parse(timeStr.Substring(22, 2))
+
+        If (jd < 15020) Then
+            'Date is before 1900
+            Return DateTime.MinValue
+        End If
+        If (jd > 51544) Then yr += 2000 Else yr += 1900
+
+        Return New DateTime(yr, mo, dy, hr, mm, sc)
+
+    End Function
+    Private Function GetTime_UTC() As DateTime
+        'Returns UTC/GMT using an NIST server if possible, 
+        ' degrading to simply returning the system clock
+
+        'If we are successful in getting NIST time, then
+        ' LastHost indicates which server was used and
+        ' LastSysTime contains the system time of the call
+        ' If LastSysTime is not within 15 seconds of NIST time,
+        '  the system clock may need to be reset
+        ' If LastHost is "", time is equal to system clock
+
+        Dim host As String
+        Dim result As DateTime
+
+        LastHost = String.Empty
+        For Each host In Servers
+            result = GetNISTTime(host)
+            If result > DateTime.MinValue Then
+                LastHost = host
+                Exit For
+            End If
+        Next
+
+        If LastHost = String.Empty Then
+            result = DateTime.UtcNow()
+        End If
+
+        Return result
+    End Function
+
+    Private Function SecondsDifference(ByVal dt1 As DateTime, ByVal dt2 As DateTime) As Integer
+        Dim span As TimeSpan = dt1.Subtract(dt2)
+        Return span.Seconds + (span.Minutes * 60) + (span.Hours * 360)
+    End Function
+    Private Function WindowsClockIncorrect() As Boolean
+        LastHostTime = GetTime_UTC()
+        If (Math.Abs(SecondsDifference(LastHostTime, LastSysTime)) > THRESHOLD_SECONDS) Then
+            Return True
+        End If
+        Return False
+    End Function
+    Private Sub SetWindowsClock(ByVal dt As DateTime)
+        'Sets system time. 
+        'Note: Use UTC time, Windows will apply time zone
+        Dim timeStru As SYSTEMTIME
+        Dim result As Int32
+
+        timeStru.wYear = CType(dt.Year, Int16)
+        timeStru.wMonth = CType(dt.Month, Int16)
+        timeStru.wDay = CType(dt.Day, Int16)
+        timeStru.wDayOfWeek = CType(dt.DayOfWeek, Int16)
+        timeStru.wHour = CType(dt.Hour, Int16)
+        timeStru.wMinute = CType(dt.Minute, Int16)
+        timeStru.wSecond = CType(dt.Second, Int16)
+        timeStru.wMilliseconds = CType(dt.Millisecond, Int16)
+
+        result = SetSystemTime(timeStru)
+
+    End Sub
+
+    Public Sub AdjustClock()
+        If WindowsClockIncorrect() Then
+            SetWindowsClock(LastHostTime)
+        End If
+    End Sub
+
+End Class

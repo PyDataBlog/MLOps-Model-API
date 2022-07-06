@@ -1,0 +1,78 @@
+$OKAY=[System.Text.Encoding]::UTF8.GetBytes("OKAY")
+$FAIL=[System.Text.Encoding]::UTF8.GetBytes("FAIL")
+
+$client=New-Object System.Net.Sockets.TcpClient "localhost",5037
+$stream=$client.GetStream()
+$stream.ReadTimeout=5000
+
+function send([string]$command){
+    $buffer=[System.Text.Encoding]::UTF8.GetBytes($command)
+    $stream.Write([System.Text.Encoding]::UTF8.GetBytes([string]::Format("{0:X4}",$buffer.Length)),0,4)
+    $stream.Write($buffer,0,$buffer.Length)
+}
+
+function sync_request([string]$command,[string]$data){
+    $buffer=[System.Text.Encoding]::UTF8.GetBytes($data)
+    $stream.Write([System.Text.Encoding]::ASCII.GetBytes($command)+[System.BitConverter]::GetBytes($buffer.Length),0,8)
+    $stream.Write($buffer,0,$buffer.Length)
+}
+
+function receive([bool]$hasMessage=$true){
+    $buffer=New-Object byte[] 4
+    $stream.Read($buffer,0,$buffer.Length)|Out-Null
+    if([System.Linq.Enumerable]::SequenceEqual($buffer,$OKAY)){
+        if($hasMessage){
+            $buffer=New-Object byte[] (,[System.Convert]::ToUInt16([System.Text.Encoding]::UTF8.GetString($buffer,0,$stream.Read($buffer,0,$buffer.Length)),16))
+            "Success:"+[System.Text.Encoding]::UTF8.GetString($buffer,0,$stream.Read($buffer,0,$buffer.Length))|Out-Host
+        }else{
+            "Success"
+        }
+    }elseif([System.Linq.Enumerable]::SequenceEqual($buffer,$FAIL)){
+        $buffer=New-Object byte[] (,[System.Convert]::ToUInt16([System.Text.Encoding]::UTF8.GetString($buffer,0,$stream.Read($buffer,0,$buffer.Length)),16))
+        "Fail:"+[System.Text.Encoding]::UTF8.GetString($buffer,0,$stream.Read($buffer,0,$buffer.Length))|Out-Host
+    }else{
+        throw
+    }
+}
+
+#send "host:version"
+#send "host:devices-l"
+#send "host:get-serialno"
+#send "host:features"
+#send "host:transport-any"
+#send "shell:"
+#send "sync:"
+#send "exec:toolbox"
+#send "unroot:"
+
+#receive $false
+#receive
+
+<#
+send "host:transport-any"
+receive $false
+
+send "shell:ls -l -a"
+#send "exec:cat /sdcard/Download/Term.apk"
+receive $false
+#>
+send "host:transport-any"
+receive $false
+#send "sync:"
+#receive $false
+#sync_request "LIST" "/"
+#sync_request "QUIT"
+<#
+$buffer=New-Object System.IO.MemoryStream
+$stream.CopyTo($buffer)
+[System.Text.Encoding]::UTF8.GetString($buffer.GetBuffer(),0,$buffer.Length)|Out-Host
+$buffer.Close()
+#>
+<#
+$file=[System.IO.File]::OpenWrite("Term.apk")
+$stream.CopyTo($file)
+$file.Close()
+#>
+
+$stream.Close()
+$client.Close()

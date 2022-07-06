@@ -1,0 +1,88 @@
+from db_utils import deleteLinksByHost
+from db_utils import deleteHost
+from db_utils import addNewHost
+from db_utils import getAllHosts
+from error_message import showErrorPage
+from error_message import ErrorMessages
+import utils
+
+import webapp2
+from google.appengine.api import users
+from google.appengine.ext import ndb
+
+JINJA_ENVIRONMENT = utils.getJinjaEnvironment()
+
+class AddHost(webapp2.RequestHandler):
+  def get(self):
+    """
+      descripion:
+        adds a new host to the database, and redirect to '/'
+
+      params:
+        name - host name
+        interval - pinging interval for all the links belonging to the host.
+
+      response:
+        redirect to '/admin'
+    """
+    name = self.request.get('name')
+    if name is None or len(name) == 0:
+      showErrorPage(self, ErrorMessages.invalidHostName())
+      return
+    if ndb.Key('Host', name).get() is not None:
+      showErrorPage(self, ErrorMessages.duplicatingHostName())
+      return
+    try:
+      interval = int(self.request.get('interval'))
+    except ValueError:
+      showErrorPage(self, ErrorMessages.invalidHostInterval())
+      return
+    if interval == 0:
+      showErrorPage(self, ErrorMessages.invalidHostInterval())
+      return
+    addNewHost(name, interval)
+    self.redirect('/admin')
+
+
+class DeleteHost(webapp2.RequestHandler):
+  def get(self):
+    """
+      description:
+        deletes an existing host, and redirects to '/'. All the links belonging
+        to the host will also be deleted.
+
+      params:
+        name - host name
+
+      response:
+        redirect to '/'
+    """
+    name = self.request.get('name')
+    if name is None or len(name) == 0:
+      showErrorPage(self, ErrorMessages.invalidHostName())
+      return
+    hostKey = ndb.Key('Host', name)
+    if hostKey.get() is None:
+      showErrorPage(self, ErrorMessages.hostDoesNotExist())
+      return
+    deleteLinksByHost(name)
+    deleteHost(name)
+    self.redirect('/')
+
+
+class AdminPage(webapp2.RequestHandler):
+  def get(self):
+    user = users.get_current_user()
+    hosts = getAllHosts()
+    template_values = {
+      'hosts': hosts,
+      'user': user,
+    }
+    template = JINJA_ENVIRONMENT.get_template('admin.html')
+    self.response.write(template.render(template_values))
+
+
+app = webapp2.WSGIApplication([
+      ('/admin/host/add', AddHost),
+      ('/admin/host/delete', DeleteHost),
+  ], debug=True)

@@ -1,0 +1,114 @@
+// Common routines and constants for creating a new silica site
+
+use ::logger::{log_err, log_info};
+use std::fs::{self, File};
+use std::io::Write;
+use git2::Repository;
+use cmdline::{CUR_CONFIG_NAME, SITE_EXISTS, NOT_SILICA_SITE};
+use chrono::*;
+use ::errors::*;
+
+// Macro to check if we are in a valid silica site
+// This must be used in a function with a Result as the return type
+macro_rules! assert_valid_site {
+    () => ( match fs::metadata("./silica.toml") {
+        Ok(_) => true,
+        Err(_) => {
+            if let Ok(_) = fs::metadata("../silica.toml") {
+                true
+            } else {
+            	println!("Hello");
+                bail!(NOT_SILICA_SITE);
+            }
+        }
+        }
+    )
+}
+
+macro_rules! join_str {
+	($a:expr, $b:expr) => ({
+		let mut a = "".to_owned();
+		a.push_str(&$a);
+		a.push_str(&$b);
+		a
+	});
+}
+
+pub fn exists_config(conf_path: &str) -> bool {
+    if let Ok(val) = fs::metadata(conf_path) {
+        return val.is_file();
+    }
+    false
+}
+
+pub fn exists_dir(dir_path: &str) -> bool {
+	if let Ok(val) = fs::metadata(dir_path) {
+		return val.is_dir();
+	}
+	false
+}
+
+pub fn populate_directories(base_dir: &str) {
+	let config_file = join_str!(base_dir, "/silica.toml");
+    let content_dir = join_str!(base_dir, "/content");
+    let static_dir = join_str!(base_dir, "/static");
+    let themes_dir = join_str!(base_dir, "/themes");
+    let posts_dir = join_str!(base_dir, "/content/posts");
+    let _ = fs::create_dir(&base_dir);
+    let _ = fs::create_dir(&static_dir);
+    let _ = fs::create_dir(&content_dir);
+    let _ = fs::create_dir(&themes_dir);
+    let _ = fs::create_dir(&posts_dir);
+    match File::create(config_file) {
+        Ok(mut fd) => {
+            let _ = fd.write(b"# global config file\n\nname =\nauthor =\ntheme =\n[[social]]\ngithub =\nfacebook =\ntwitter =\n");
+        }
+        Err(why) => {
+            println!("{:?}", why);
+        }
+    }
+}
+
+pub fn create_new_site(site_name: &str) {
+    if exists_config(CUR_CONFIG_NAME) || exists_dir(site_name) {
+        return log_err(SITE_EXISTS);
+    }
+    let prefix = "./";
+    let base_dir = join_str!(prefix, site_name);
+    let repo = match Repository::init(&base_dir[..]) {
+        Ok(repo) => repo,
+        Err(e) => panic!("failed to init: {}", e),
+    };
+    log_info(&format!("Initialized empty Git repository in {}", base_dir));
+    populate_directories(&base_dir);
+    
+    println!("\nHey, your new site is ready at: {}\n", base_dir);
+}
+
+pub fn create_new_post(post_name: &str, as_draft: bool) -> Result<()> {
+    assert_valid_site!();
+    let mut post_name = post_name.to_owned();
+    if !post_name.contains(".md") {
+		post_name.push_str(".md");
+    }
+    let post_name = "./content/posts/".to_owned() + &post_name;
+    let local_time: DateTime<Local> = Local::now();
+    let local_time = local_time.format("%a %b %e %T %Y").to_string();
+    let post_timestamp = "date = ".to_owned() + &local_time + "\n";
+    let post_metadata_end = "---\n";
+    let post_title = "title = ".to_owned() + &post_name + "\n";
+    let draft_flag = "draft = ".to_owned() + &as_draft.to_string() + "\n";
+    let f = File::create(&post_name[..]);
+    match f {
+        Ok(mut handle) => {
+
+            let _ = handle.write(post_timestamp.as_bytes());
+            let _ = handle.write(post_title.as_bytes());
+            let _ = handle.write(draft_flag.as_bytes());
+            let _ = handle.write_all(post_metadata_end.as_bytes());
+            log_info(&format!("\nCreated a post at: {}\n", post_name));
+        }
+        Err(_) => bail!("Error creating post")
+    }
+    Ok(())
+}

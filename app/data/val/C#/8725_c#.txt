@@ -1,0 +1,91 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+
+namespace ShaderCompiler {
+    class Program {
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="args"></param>
+        static void Main(string[] args) {
+            Console.WriteLine("Compiling shaders...");
+            if (args.Length == 5) {
+                CompileSingleShader(args);
+            } else if (args.Length == 2) {
+                CompileShaderDir(args);
+            } else {
+                Console.Error.WriteLine("Invalid arguments");
+            }
+        }
+
+        /// <summary>
+        /// Cmdline: $(SolutionDir)Tools\ShaderCompiler\bin\$(Configuration)\ShaderCompiler.exe 
+        ///             $(ProjectDir)Shaders 
+        ///             %(FullPath) 
+        ///             $(SolutionDir)Bin/Shaders 
+        ///             $(IntermediateOutputPath)Shaders 
+        ///             $(Configuration)
+        /// Outputs: $(IntermediateOutputPath)Shaders\%(Filename).out
+        /// </summary>
+        /// <param name="args"></param>
+        static void CompileSingleShader(string[] args) {
+            string shaderBasePath = args[0];
+            string shaderFile = args[1];
+            string outPath = args[2];
+            string intermediatePath = args[3];
+            string configuration = args[4].ToLower();
+
+            string filenameNoExt = Path.GetFileNameWithoutExtension(shaderFile);
+            string shaderName = Path.GetFileName(Path.GetDirectoryName(shaderFile));
+            string shaderType = filenameNoExt.Substring(filenameNoExt.Length - 2).ToLower();
+
+            var buildInfo = BuildParser.ParseBuildScript(Path.Combine(shaderBasePath, "Build.json"));
+            var shaders = buildInfo.ShaderInfo.Find(p => p.Shader == shaderName);
+
+            string shaderProfile = string.Format("{0}_{1}", shaderType, buildInfo.ShaderModel);
+
+            foreach (var permutation in shaders.Permutations) {
+                string outFile = Path.Combine(outPath, shaderName, permutation.Id + "." + shaderType + "o");
+                int exitCode = new Compiler("fxc.exe").Compile(shaderFile, outFile, shaderProfile, permutation.Defines, configuration);
+                if (exitCode == 0) {
+                    File.WriteAllText(Path.Combine(intermediatePath, filenameNoExt + ".out"), "hi");
+                }
+            }
+        }
+
+        /// <summary>
+        /// 
+        /// </summary>
+        /// <param name="args"></param>
+        static void CompileShaderDir(string[] args) {
+            string shaderBasePath = args[0];
+            string outPath = args[1];
+
+            Console.WriteLine(Path.GetFullPath(shaderBasePath));
+            var buildInfo = BuildParser.ParseBuildScript(Path.Combine(shaderBasePath, "Build.json"));
+            var compiler = Compiler.AutoDetectCompiler();
+            Directory.CreateDirectory(outPath);
+
+            var shaderFiles = Directory.GetFiles(shaderBasePath, "*.hlsl", SearchOption.AllDirectories);
+            foreach (var shaderFile in shaderFiles) {
+                string filenameNoExt = Path.GetFileNameWithoutExtension(shaderFile);
+                string shaderName = Path.GetFileName(Path.GetDirectoryName(shaderFile));
+                string shaderType = filenameNoExt.Substring(filenameNoExt.Length - 2).ToLower();
+
+                var shader = buildInfo.ShaderInfo.Find(p => p.Shader == shaderName);
+                string shaderProfile = string.Format("{0}_{1}", shaderType, buildInfo.ShaderModel);
+
+                if (shader == null || shader.Permutations == null) {
+                    string outFile = Path.Combine(outPath, Path.GetDirectoryName(shaderFile), filenameNoExt + ".cso");
+                    compiler.Compile(shaderFile, outFile, shaderProfile, null, "debug");
+                } else {
+                    foreach (var permutation in shader.Permutations) {
+                        string outFile = Path.Combine(outPath, shaderName, permutation.Id + "_" + shaderType.ToUpper() + ".cso");
+                        compiler.Compile(shaderFile, outFile, shaderProfile, permutation.Defines, "debug");
+                    }
+                }
+            }
+        }
+    }
+}

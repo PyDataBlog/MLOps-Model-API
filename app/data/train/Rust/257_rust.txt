@@ -1,0 +1,178 @@
+use regex::Regex;
+use hyper::Method;
+use hyper::server::Request;
+use context::{Context, Params, ParamType};
+
+type Handler = fn(Context) -> ::Response;
+
+pub struct Router {
+    pub routes: Vec<Route>
+}
+
+impl Router {
+    pub fn new() -> Router {
+        Router {
+            routes: Vec::new()
+        }
+    }
+
+    pub fn get(&mut self, path: &str, handler: Handler) {
+        self.routes.push(
+            Route::new(Method::Get, path, handler)
+        );
+    }
+}
+
+#[derive(Clone)]
+pub struct Route {
+    pub method: Method,
+    pub path: RoutePath,
+    pub handler: Handler
+}
+
+impl Route {
+    pub fn new(method: Method, path: &str, handler: Handler) -> Route {
+        Route {
+            method: method,
+            path: RoutePath::new(path),
+            handler: handler
+        }
+    }
+
+    pub fn matches_request(&self, request: &Request) -> Option<Params> {
+        if self.method != *request.method() {
+            return None;
+        }
+
+        return self.path.matches_path(request.path());
+    }
+}
+
+#[derive(Clone, PartialEq, Debug)]
+pub enum PathToken {
+    Str(String),
+    Var {
+        key: String,
+        datatype: String
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct RoutePath {
+    pub tokenized_path: Vec<PathToken>
+}
+
+impl RoutePath {
+    pub fn new(path: &str) -> Self {
+        let vec_path = RoutePath::tokenize_path(path);
+        RoutePath {
+            tokenized_path: vec_path
+        }
+    }
+
+    fn tokenize_path(path: &str) -> Vec<PathToken> {
+        let path = &path[1..]; // Remove root
+
+        let re = Regex::new(r"^\{([a-zA-Z_]+)\}$").unwrap();
+
+        let path_vec = path.split("/")
+            .map(|t| {
+                if re.is_match(t) {
+                    // Capture the variable name between {}
+                    let cap = re.captures(t).unwrap();
+                    // There should be only one, grab it as str
+                    let key = cap.get(1).unwrap().as_str();
+                    return PathToken::Var { key: String::from(key), datatype: String::from("string") }
+                }
+                PathToken::Str(String::from(t))
+            })
+            .collect::<Vec<PathToken>>();
+        path_vec
+    }
+
+    pub fn matches_path(&self, request_path: &str) -> Option<Params> {
+        // Remove /, split on /, into vec of Strings
+        let incoming_path = &request_path[1..].split("/").map(|i| {
+            String::from(i)
+        }).collect::<Vec<String>>();
+
+        // Both RoutePath and Request should have equal length tokenized paths
+        if self.tokenized_path.len() != incoming_path.len() {
+            return None;
+        }
+
+        // Save url params while processing
+        let mut params = Params::new();
+
+        for (index, token) in self.tokenized_path.iter().enumerate() {
+            match token {
+                &PathToken::Str(ref s) => {
+                    if *s != incoming_path[index] {
+                        return None
+                    }
+                },
+                &PathToken::Var {ref key, ref datatype} => {
+                    if datatype == "string" {
+                        params.insert(
+                            key.to_string(),
+                            ParamType::Str(incoming_path[index].to_string())
+                        );
+                    }
+                } 
+            }
+        }
+        Some(params)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+    use hyper::{Request, Response, Method, Uri};
+    use super::{Route, RoutePath, PathToken, Context};
+
+    fn generic_handler(_context: Context) -> Response {
+        return Response::new();
+    }
+
+    #[test]
+    fn routepath_for_root() {
+        let routepath = RoutePath::new("/");
+        assert_eq!(routepath.tokenized_path, vec![PathToken::Str(String::from(""))]);
+    }
+
+    #[test]
+    fn routepath_for_user_profile() {
+        let routepath = RoutePath::new("/user/profile");
+        assert_eq!(routepath.tokenized_path, vec![
+            PathToken::Str(String::from("user")),
+            PathToken::Str(String::from("profile"))
+            ]
+        )
+    }
+
+    #[test]
+    fn route_should_be_matched() {
+        let route = Route::new(Method::Get, "/monkeys", generic_handler);
+        let path = Uri::from_str("http://example.com/monkeys").unwrap();
+        let request: Request = Request::new(Method::Get, path);
+        assert!(route.matches_request(&request).is_some());
+    }
+
+    #[test]
+    fn route_should_not_be_matched() {
+        let route = Route::new(Method::Get, "/monkeys", generic_handler);
+        let path = Uri::from_str("http://example.com/nomatch").unwrap();
+        let request: Request = Request::new(Method::Get, path);
+        assert!(route.matches_request(&request).is_none());
+    }
+
+    #[test]
+    fn route_should_match_with_variables() {
+        let route = Route::new(Method::Get, "/user/{username}", generic_handler);
+        let path = Uri::from_str("http://example.com/user/johndoe").unwrap();
+        let request: Request = Request::new(Method::Get, path);
+        assert!(route.path.matches_path(request.path()).is_some());
+        assert!(route.matches_request(&request).is_some());
+    }
+}

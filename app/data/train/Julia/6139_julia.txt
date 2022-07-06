@@ -1,0 +1,111 @@
+type Grammar
+    rules
+    vocabulary
+    first
+    table
+end
+
+function Grammar()
+    Grammar(Dict(), Set(["EOS"]), Dict(), Dict())
+end
+
+function addrule!(g, lhs, rhs)
+    if !haskey(g.rules, lhs)
+        g.rules[lhs] = []
+    end
+
+    push!(g.vocabulary, lhs)
+    productions = map(strip, split(rhs, "|"))
+
+    for p in productions
+        ps = split(p)
+        push!(g.rules[lhs], (ps...))
+        push!(g.vocabulary, ps...)
+    end
+end
+
+function isterminal(g, symbol)
+    return in(symbol, g.vocabulary) && !haskey(g.rules, symbol)
+end
+
+function compute_first!(g)
+    for s in g.vocabulary
+        if isterminal(g, s)
+            g.first[s] = Set(Any[s])
+        else
+            g.first[s] = Set()
+        end
+    end
+
+    while true
+        change = Set()
+        for (lhs, rhs) in g.rules
+            for production in rhs
+                nextfirst = union(g.first[lhs], g.first[production[1]])
+                change = union(change, setdiff(nextfirst, g.first[lhs]))
+                g.first[lhs] = nextfirst
+            end
+        end
+
+        if isempty(change)
+            break
+        end
+    end
+end
+
+function naive_generate(g, symbol)
+    sentence = ""
+
+    production = rand(g.rules[symbol])
+
+    for s in production
+        if !isterminal(g, s)
+            sentence *= generate(g, s)
+        else
+            sentence *= s * " "
+        end
+    end
+
+    return sentence
+end
+
+function conv_generate(g, symbol; factor=0.25)
+    function _conv_generate(g, symbol, factor, count)
+        sentence = ""
+
+        ps = []
+        for s in g.rules[symbol]
+            if haskey(count, s)
+                push!(ps, factor^count[s])
+            else
+                push!(ps, 1)
+            end
+        end
+
+        production = g.rules[symbol][sample(ps / sum(ps))]
+        current = get(count, production, 0)
+        count[production] = current + 1
+
+        for s in production
+            if !isterminal(g, s)
+                sentence *= _conv_generate(g, s, factor, count)
+            else
+                sentence *= s * " "
+            end
+        end
+
+        count[production] -= 1
+
+        return sentence
+    end
+
+    return _conv_generate(g, symbol, factor, Dict())
+end
+
+function sample(p)
+    r = rand(Float32)
+    for c = 1:length(p)
+        r -= p[c]
+        r < 0 && return c
+    end
+end

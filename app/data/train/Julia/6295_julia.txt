@@ -1,0 +1,110 @@
+include("./lib/probs.jl")
+include("./lib/utils.jl")
+include("./lib/pccf.jl")
+
+module Sim2
+# ;; SIMULATION TO DEMONSTRATE IMPROVEMENT DEPENDING ON THE THRESHOLD
+# ;; PLOT: CALC FRACTION OF REMOVED FAs and PREDICTED TPs
+using Pccf
+using Probs
+
+# 1
+function generateErrors(ratePerMu, mu, delayConfirm, maxDelay)
+	# Generate locations of errors within _cinfirmation_ delay interval uniformly on average rate-per-my errors per mu points
+	# maxDelay ~ length of the signal
+	avgNumOfErrors = div(maxDelay, mu) * ratePerMu
+	filter(x -> x < delayConfirm, rand(1:maxDelay, Int(avgNumOfErrors)))
+end
+
+# 2
+function fracOfRemovedFa(h, probs, delayConfirm, allErrors)
+    # Given PCCF and threshold values function counts fraction of
+    # the candidates which fall in the regions where probs are
+    # lower than threshold and therefore we predict that they are
+    # FA. If probs are higher than a threshold then we expect that
+    # this is a change.
+    idxsBelowH = Set(Probs.belowH(h, probs, delayConfirm))
+    errors     = Set(filter(x -> x <= delayConfirm, allErrors))
+    inter      = intersect(errors, idxsBelowH)
+    n          = length(errors)
+    if 1 == 0
+            println("...")
+            println("Errors within a confirmation delay:", errors)
+            println("Pccf vals below h:", idxsBelowH)
+            println("Intersection:", inter)
+    end
+    n > 0 ? length(inter) / n : 0
+end
+
+# 3
+function fracOfPredictedTp(h, probs, delayConfirm, allChanges)
+    idxsAboveH = Set(Probs.aboveH(h, probs, delayConfirm))
+    chps       = Set(filter(x -> x <= delayConfirm, allChanges))
+    inter      = intersect(chps, idxsAboveH)
+    n          = length(chps)
+    n > 0 ? length(inter)/n : 0
+end
+
+# 4
+function genAndCountFa(h, probs, errRate, mu, delayConfirm, maxDelay)
+    # Single simulation: given probs and threshold generate errors
+    # locations (given erro rate per mu) count fraction of those who
+    # are below threshold
+    errorLocations=filter(x->x<=delayConfirm, generateErrors(errRate, mu, delayConfirm, maxDelay))
+    length(errorLocations)==0 ? 0 : fracOfRemovedFa(h, probs, delayConfirm, errorLocations)
+end
+
+# 5
+function genAndCountTp(h, probs, mu, sigma, n, delayConfirm, width)
+    # Generate locations of true changes and count TP which are
+    # coorectly predicted by the prediction intervals (probs > h)
+    chpsLocations = Probs.generateChanges(n, mu, sigma, width)
+    length(chpsLocations)==0 ? 0 : fracOfPredictedTp(h,probs, delayConfirm, chpsLocations)
+end
+
+# 6
+function improvementVsDelay(mu, sigma, width, h, chpsnum, errRate, probs,
+                            delayConfirm, maxDelay, numSim)
+    # N simulations for a given delay; function returns averaged fractions
+    removedFractionFA = Float64[]
+    predictedTP       = Float64[]
+    for i in 1:numSim
+        frfa = genAndCountFa(h, probs, errRate, mu, delayConfirm, maxDelay)
+        frtp = genAndCountTp(h, probs, mu, sigma, chpsnum, delayConfirm, width)
+        push!(removedFractionFA, frfa)
+        push!(predictedTP, frtp)
+    end
+    return mean(removedFractionFA), mean(predictedTP)
+end
+
+# 7
+function improvementVsDelayMulti(mu, sigma, width, chpsnum, errRate, delayFrom,
+                                 delayTo, numSim, outfile, mainpath)
+    # Pairs [delay vs improvement in fa vs improvement in tp ]
+    threshold = errRate/mu
+    probs = Pccf.pccf(width*chpsnum, mu, sigma) # ?
+    delVsImpr = zeros(delayTo-delayFrom+1, 3)
+    for d in delayFrom:delayTo
+        nextAvgImpr = improvementVsDelay(mu, sigma, width, threshold, chpsnum, errRate, probs, d, delayTo, numSim)
+        delVsImpr[d-delayFrom+1, :] = [d, nextAvgImpr[1], nextAvgImpr[2]]
+    end
+    fullpath = mainpath * outfile
+    writedlm_header(fullpath, delVsImpr, "Delay, CorrectFA, CorrectTP")
+    println("... Results are written into: ", fullpath)
+end
+
+function run()
+    s = Dict("mu"=>10.0, "sigma"=>0.7, "width"=>20, "chpsnum"=>50,
+             "errrate"=>0.5, "numSim"=>500, "minDealay"=>5, "maxDelay"=>300)
+    mpath="D:/MyTemp/gitlocal/Pccf/r-code/out/"
+
+    improvementVsDelayMulti(s["mu"], s["sigma"], s["width"], s["chpsnum"],
+                            s["errrate"], s["minDealay"], s["maxDelay"],
+                            s["numSim"], "sim2_a.txt", mpath)
+
+    improvementVsDelayMulti(s["mu"], s["sigma"], s["width"], s["chpsnum"],
+                            2           , s["minDealay"], s["maxDelay"],
+                            s["numSim"], "sim2_b.txt", mpath)
+end
+
+end # module

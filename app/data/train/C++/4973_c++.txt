@@ -1,0 +1,845 @@
+#include "mainwindow.h"
+#include "ui_mainwindow.h"
+
+#include <QtNetwork/QNetworkAccessManager>
+#include <QDebug>
+#include <QNetworkCookieJar>
+#include <QMessageBox>
+#include <QWebFrame>
+#include <QWebElementCollection>
+#include <QWebElement>
+#include <QTimer>
+#include <QThread>
+#include <QFileDialog>
+#include <QFile>
+
+MainWindow::MainWindow(QWidget *parent) :
+    QMainWindow(parent),
+    ui(new Ui::MainWindow)
+{
+    ui->setupUi(this);
+
+    //GetPage();
+    manager = new QNetworkAccessManager(this);
+    QObject::connect(manager, SIGNAL(finished(QNetworkReply*)), this, SLOT(replyFinished(QNetworkReply*)));
+    manager->setCookieJar(new QNetworkCookieJar(manager));
+    loggedIn = false;
+    allPagesProcessed = false;
+    userID = "";
+    canNavigateLoggedIn = false;
+    ui->downloadGB->setEnabled(false);
+    ui->saveGB->setDisabled(true);
+    numOfActiveRequests = 0;
+    postsToExtract = 0;
+
+    activeRequests = 0;
+    postsStored = 0;
+    commentsStored = 0;
+    ui->progressBarGather->setMaximum(100);
+    ui->progressBarSave->setMaximum(100);
+    ui->passwordLE->setEchoMode(QLineEdit::Password);
+}
+
+MainWindow::~MainWindow()
+{
+    delete ui;
+}
+
+void MainWindow::replyFinished(QNetworkReply *reply)
+{
+    QString body = reply->readAll();
+    int code = qvariant_cast<int>(reply->attribute(QNetworkRequest::HttpStatusCodeAttribute));
+
+    if( currentOp == LOGIN )
+    {
+        if(code == 302)
+        {
+            loggedIn = true;
+            ui->loggedInL->setText("Logged in. Now go to step 2.");
+            ui->downloadGB->setEnabled(true);
+            ui->loginGB->setDisabled(true);
+        }
+    }
+    else if(currentOp == GETUSERPAGE)
+    {
+        if(code == 200)
+        {
+            replybody = body;
+            activeRequests--;
+        }
+    }
+    else if( currentOp == GETPOSTSFIRSTPAGE )
+    {
+        if(code == 200)
+        {
+            replybody = body;
+            activeRequests--;
+        }
+    }
+    else if( currentOp == GETTINGEACHPOSTSPAGE )
+    {
+        // ensure we get each posts link from each page
+        ExtractPosts(body);
+        activeRequests--;
+        ui->accessNumL->setText(QString::number(activeRequests));
+    }
+    else if( currentOp == GETTINGPOSTS )
+    {
+        if( code == 404 )
+        {
+            QNetworkRequest originalRequest = reply->request();
+            QString requestUrl = originalRequest.url().toString();
+
+            // map
+            if( !mapOfErrors.contains(requestUrl) )
+            {
+                // add the url to the error map and then retry
+                mapOfErrors[requestUrl] = 1;
+                currentUrl = QUrl(requestUrl);
+                QNetworkRequest request(currentUrl);
+                request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+                request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+                manager->get(request);
+            }
+            else if( mapOfErrors.contains(requestUrl) && mapOfErrors[requestUrl] == 5 )
+            {
+                // do not retry
+                // remove from mapoferrors and add to error list
+                errorUrls.append(requestUrl);
+                ui->errorsL->setText(QString::number(errorUrls.size()));
+                mapOfErrors.remove(requestUrl);
+                activeRequests--;
+                ui->accessNumL->setText(QString::number(activeRequests));
+            }
+            else if( mapOfErrors.contains(requestUrl) && mapOfErrors[requestUrl] < 5 )
+            {
+                int currentNumOfErrors = mapOfErrors[requestUrl];
+                mapOfErrors[requestUrl] = currentNumOfErrors+1;
+                currentUrl = QUrl(requestUrl);
+                QNetworkRequest request(currentUrl);
+                request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+                request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+                manager->get(request);
+            }
+        }
+        else
+        {
+            // Process page
+            ProcessPost(body);
+            activeRequests--;
+            ui->accessNumL->setText(QString::number(activeRequests));
+        }
+    }
+    else if(currentOp == GETFIRSTCOMMENTSPAGE)
+    {
+        replybody = body;
+        activeRequests--;
+    }
+    else if(currentOp == GETEACHCOMMENT)
+    {
+        // ensure we get each posts link from each page
+        ExtractComments(body);
+        activeRequests--;
+        ui->accessNumL->setText(QString::number(activeRequests));
+    }
+
+    reply->deleteLater();
+}
+
+void MainWindow::triggerPostsPage()
+{
+    if( activeRequests == 0 )
+    {
+        ui->statusL->setText("Retrieving first posts page...");
+
+        // trigger method to extract posts
+        currentOp = GETPOSTSFIRSTPAGE;
+        GetUserID();
+
+        // execute request to get posts page
+        currentUrl = QUrl("http://popularliberty.com/user/" + userID + "/posts");
+        QNetworkRequest request(currentUrl);
+        request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+        activeRequests++;
+        manager->get(request);
+        QTimer::singleShot(5000, this, SLOT(triggerEachPostsPage()));
+    }
+    else
+    {
+        QTimer::singleShot(5000, this, SLOT(triggerPostsPage()));
+    }
+}
+
+void MainWindow::triggerEachPostsPage()
+{
+    if( activeRequests == 0 )
+    {
+        ui->statusL->setText("Retrieving remaining posts pages...");
+
+        // get number of pages of posts
+        int numPages = GetNumberOfPages(replybody);
+
+        // get the posts link from the first page
+        ExtractPosts(replybody);
+        activeRequests++;
+
+        currentOp = GETTINGEACHPOSTSPAGE;
+
+        // get the links from every other page
+        numPages--;
+
+        QTimer::singleShot(5000, this, SLOT(triggerGetPosts()));
+        for(int i=1; i <= numPages; i++)
+        {
+            currentUrl = QUrl("http://popularliberty.com/user/" + userID + "/posts?page=" + QString::number(i));
+            QNetworkRequest request(currentUrl);
+            request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+            request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+
+            activeRequests++;
+            ui->accessNumL->setText(QString::number(activeRequests));
+            manager->get(request);
+        }
+        activeRequests--;
+    }
+    else
+    {
+        QTimer::singleShot(5000, this, SLOT(triggerEachPostsPage()));
+    }
+}
+
+void MainWindow::triggerGetPosts()
+{
+    // We now have our list of post links, and so we can begin to extract each post individually
+    if( activeRequests == 0 )
+    {
+        ui->statusL->setText("Retrieving individual posts...");
+
+        // download each post
+        currentOp = GETTINGPOSTS;
+        QTimer::singleShot(5000, this, SLOT(triggerCommentRetrieval()));
+        foreach(QString link, extractList)
+        {
+            currentUrl = QUrl("http://popularliberty.com" + link);
+            QNetworkRequest request(currentUrl);
+            request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+            request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+            activeRequests++;
+            ui->accessNumL->setText(QString::number(activeRequests));
+
+            manager->get(request);
+        }
+    }
+    else
+    {
+        QTimer::singleShot(5000, this, SLOT(triggerGetPosts()));
+    }
+}
+
+void MainWindow::triggerCommentRetrieval()
+{
+    if(activeRequests == 0)
+    {
+        ui->statusL->setText("Retrieving first comments page...");
+
+        currentOp = GETFIRSTCOMMENTSPAGE;
+
+        currentUrl = QUrl("http://popularliberty.com/user/" + userID + "/comments");
+        QNetworkRequest request(currentUrl);
+        request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+        activeRequests++;
+        ui->accessNumL->setText(QString::number(activeRequests));
+
+        QTimer::singleShot(5000, this, SLOT(triggerGetEachCommentsPage()));
+        manager->get(request);
+    }
+    else
+    {
+        QTimer::singleShot(5000, this, SLOT(triggerCommentRetrieval()));
+    }
+}
+
+void MainWindow::triggerGetEachCommentsPage()
+{
+    if( activeRequests == 0 )
+    {
+        ui->statusL->setText("Retrieving remaining comments pages...");
+
+        int numPages = GetNumberOfPagesOfComments(replybody);
+        ExtractComments(replybody);
+        activeRequests++;
+
+        currentOp = GETEACHCOMMENT;
+
+        // get the comments from every other page
+        numPages--;
+
+        QTimer::singleShot(5000, this, SLOT(triggerSave()));
+
+        for(int i=1; i <= numPages; i++)
+        {
+            currentUrl = QUrl("http://popularliberty.com/user/" + userID + "/comments?page=" + QString::number(i));
+            QNetworkRequest request(currentUrl);
+            request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+            request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+
+            activeRequests++;
+            ui->accessNumL->setText(QString::number(activeRequests));
+            manager->get(request);
+        }
+        activeRequests--;
+    }
+    else
+    {
+        QTimer::singleShot(5000, this, SLOT(triggerGetEachCommentsPage()));
+    }
+}
+
+void MainWindow::triggerSave()
+{
+    if( activeRequests == 0 )
+    {
+        // Set up ui to alert user to completion and readiness to save
+        ui->saveGB->setDisabled(false);
+        ui->progressBarGather->setMaximum(100);
+        ui->downloadGB->setDisabled(true);
+    }
+    else
+    {
+        QTimer::singleShot(5000, this, SLOT(triggerSave()));
+    }
+}
+
+void MainWindow::on_loginBtn_clicked()
+{
+    currentOp = LOGIN;
+    QString username = ui->usernameLE->text();
+    QString pass = ui->passwordLE->text();
+    if( username == "" || pass == "" )
+    {
+        QMessageBox msgBox;
+        msgBox.setText("Either your username or password is blank. Please enter both of them.");
+        msgBox.exec();
+    }
+    else
+    {
+        // Login to website
+        QUrl url("http://popularliberty.com/user/login");
+
+        QNetworkRequest request(url);
+        request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+        QByteArray dataToSend = "name=";
+        dataToSend.append(username);
+        dataToSend.append("&pass=");
+        dataToSend.append(pass);
+        dataToSend.append("&remember_me=1&form_build_id=form-QzmRWmsAFz_84IR4_6NDQ6BAQGW67JH_CDECk-lhYig&form_id=user_login&feed_me=&op=Log+in");
+
+        manager->post(request, dataToSend);
+    }
+}
+
+void MainWindow::on_downloadBtn_clicked()
+{
+    // book-keeping
+    ui->statusL->setText("Processing.....");
+    extractList.clear();
+    QString username = ui->dlUsernameLE->text();
+    ui->progressBarGather->setMaximum(0);
+
+    if(username == "")
+    {
+        QMessageBox msgBox;
+        msgBox.setText("Please enter a username before you continue.\nEnter a username and click the button again.");
+        msgBox.exec();
+        ui->statusL->setText("Idle.");
+    }
+    else
+    {
+        // Send request
+        activeRequests++;
+
+        // remove spaces and replace with hyphens
+        username = despacify(username);
+
+        currentOp = GETUSERPAGE;
+        currentUrl = QUrl("http://popularliberty.com/user/" + username);
+
+        QNetworkRequest request(currentUrl);
+        request.setHeader(QNetworkRequest::ContentTypeHeader, "application/x-www-form-urlencoded");
+        request.setHeader(QNetworkRequest::UserAgentHeader, "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/47.0.2526.106 Safari/537.36");
+
+        // Start timer to trigger function to continue
+        QTimer::singleShot(5000, this, SLOT(triggerPostsPage()));
+
+        manager->get(request);
+    }
+}
+
+void MainWindow::ProcessPost(QString body)
+{
+    QWebPage page;
+    QWebFrame *frame = page.mainFrame();
+    frame->setHtml(body, currentUrl);
+
+    QEventLoop loop;
+    QTimer::singleShot(1000, &loop, SLOT(quit()));
+    loop.exec();
+
+    QWebElement document = frame->documentElement();
+
+    QWebElement bodyElem = document.findFirst("body");
+
+    // find title
+    QWebElement titleElem = bodyElem.findFirst("h1.node__title");
+    QString title = titleElem.toInnerXml();
+
+    // find date
+    QRegularExpression reDate("on <time.*=\"(.*)\">");
+    QString textOf = bodyElem.toOuterXml();
+    QRegularExpressionMatch matchDate = reDate.match(textOf);
+    QString date = "";
+
+    if(matchDate.hasMatch())
+    {
+        date = matchDate.captured(1);
+    }
+
+    // find username
+    QRegularExpression reUsername("<a href=\"/user/.*datatype=\"\">(.*)</a>");
+    QRegularExpressionMatch matchUsername = reUsername.match(textOf);
+    QString username = "";
+
+    if(matchUsername.hasMatch())
+    {
+        username = matchUsername.captured(1);
+    }
+
+    // get content
+    QRegularExpression reContent("content:encoded\">(.*?)</div>", QRegularExpression::DotMatchesEverythingOption);
+    QRegularExpressionMatch matchContent = reContent.match(textOf);
+    QString content = "";
+
+    if(matchContent.hasMatch())
+    {
+        content = matchContent.captured(1);
+    }
+
+    // Store this post in postList
+    QList<QString>* postList = new QList<QString>;
+
+    postList->append(username);
+    postList->append(date);
+    postList->append(title);
+    postList->append(content);
+
+    posts.push_back(postList);
+
+    postsToExtract--;
+    ui->postsL->setText(QString::number(postsToExtract));
+    postsStored++;
+    ui->postsMemL->setText(QString::number(postsStored));
+}
+
+void MainWindow::GetUserID()
+{
+    QWebPage page;
+    QWebFrame *frame = page.mainFrame();
+    frame->setHtml(replybody, currentUrl);
+
+    QEventLoop loop;
+    QTimer::singleShot(1000, &loop, SLOT(quit()));
+    loop.exec();
+
+    QWebElement document = frame->documentElement();
+
+    QWebElement bodyElem = document.findFirst("body");
+
+    QWebElementCollection elems = bodyElem.findAll("li.tabs-primary__tab");
+    QRegularExpression re("/user/(.*)/posts");
+    foreach(QWebElement element, elems)
+    {
+        QString textOf = element.toInnerXml();
+        QRegularExpressionMatch match = re.match(textOf);
+        if( match.hasMatch() )
+        {
+            userID = match.captured(1);
+        }
+    }
+}
+
+int MainWindow::GetNumberOfPages(QString body)
+{
+    QWebPage page;
+    QWebFrame *frame = page.mainFrame();
+    frame->setHtml(body, currentUrl);
+
+    QEventLoop loop;
+    QTimer::singleShot(1000, &loop, SLOT(quit()));
+    loop.exec();
+
+    QWebElement document = frame->documentElement();
+
+    QWebElement bodyElem = document.findFirst("body");
+
+    QWebElement pager = bodyElem.findFirst("ul.pager");
+    QRegularExpression re(">.* of (.*)<");
+    QString textOf = pager.toInnerXml();
+
+    QRegularExpressionMatch match = re.match(textOf);
+    int totalPages = 0;
+    if( match.hasMatch() )
+    {
+        totalPages = match.captured(1).toInt();
+    }
+
+    return totalPages;
+}
+
+int MainWindow::GetNumberOfPagesOfComments(QString body)
+{
+    QWebPage page;
+    QWebFrame *frame = page.mainFrame();
+    frame->setHtml(body, currentUrl);
+
+    QEventLoop loop;
+    QTimer::singleShot(1000, &loop, SLOT(quit()));
+    loop.exec();
+
+    QWebElement document = frame->documentElement();
+
+    QWebElement bodyElem = document.findFirst("body");
+
+    QWebElement pager = bodyElem.findFirst("li.pager-last");
+    QRegularExpression re("page=(.*)\"");
+    QString textOf = pager.toInnerXml();
+
+    QRegularExpressionMatch match = re.match(textOf);
+    int totalPages = 0;
+    if( match.hasMatch() )
+    {
+        totalPages = match.captured(1).toInt();
+    }
+
+    return totalPages;
+}
+
+void MainWindow::ExtractPosts(QString body)
+{
+    QWebPage page;
+    QWebFrame *frame = page.mainFrame();
+    frame->setHtml(body, currentUrl);
+
+    QEventLoop loop;
+    QTimer::singleShot(1000, &loop, SLOT(quit()));
+    loop.exec();
+
+    QWebElement document = frame->documentElement();
+
+    QWebElement bodyElem = document.findFirst("body");
+
+    QWebElementCollection elems = bodyElem.findAll("article.node");
+    QRegularExpression re("a href=\"(.*?)\">");
+    foreach(QWebElement element, elems)
+    {
+        QWebElement header = element.findFirst("header");
+
+        QString textOf = header.toInnerXml();
+        QRegularExpressionMatch match = re.match(textOf);
+        if( match.hasMatch() )
+        {
+            QString link = match.captured(1);
+            extractList.append(link);
+            postsToExtract++;
+            ui->postsL->setText(QString::number(postsToExtract));
+        }
+    }
+}
+
+void MainWindow::ExtractComments(QString body)
+{
+    QWebPage page;
+    QWebFrame *frame = page.mainFrame();
+    frame->setHtml(body, currentUrl);
+
+    QEventLoop loop;
+    QTimer::singleShot(1000, &loop, SLOT(quit()));
+    loop.exec();
+
+    QWebElement document = frame->documentElement();
+
+    QWebElement bodyElem = document.findFirst("body");
+
+    QWebElementCollection articles = bodyElem.findAll("article.comment");
+
+    foreach(QWebElement element, articles)
+    {
+        // extract username
+        QWebElement headerElem = element.findFirst("header");
+        QRegularExpression reUsername("=\"\">(.*?)<");
+        QRegularExpressionMatch matchUsername = reUsername.match(headerElem.toInnerXml());
+        QString username = "";
+        if( matchUsername.hasMatch() )
+        {
+            username = matchUsername.captured(1);
+        }
+
+        // extract date
+        QRegularExpression reDate("datetime=\"(.*?)\"");
+        QRegularExpressionMatch matchDate = reDate.match(headerElem.toInnerXml());
+        QString date = "";
+        if(matchDate.hasMatch())
+        {
+            date = matchDate.captured(1);
+        }
+
+        // extract title
+        QRegularExpression reTitle("<h3.*mark\">(.*?)<", QRegularExpression::DotMatchesEverythingOption);
+        QRegularExpressionMatch matchTitle = reTitle.match(headerElem.toInnerXml());
+        QString title = "";
+        if(matchTitle.hasMatch())
+        {
+            title = matchTitle.captured(1);
+        }
+
+        // extract body
+        QRegularExpression reContent("content:encoded\">(.*?)</div>", QRegularExpression::DotMatchesEverythingOption);
+        QRegularExpressionMatch matchContent = reContent.match(element.toInnerXml());
+        QString content = "";
+
+        if(matchContent.hasMatch())
+        {
+            content = matchContent.captured(1);
+        }
+
+        // Add comment to saved data
+        QList<QString>* comment = new QList<QString>;
+
+        comment->append(username);
+        comment->append(date);
+        comment->append(title);
+        comment->append(content);
+        comments.push_back(comment);
+
+        // increment comment count
+        commentsStored++;
+        ui->commentsMemL->setText(QString::number(commentsStored));
+    }
+}
+
+QString MainWindow::despacify(QString name)
+{
+    QString result = "";
+    if(name.contains(" "))
+    {
+        // remove spaces and replace with hyphens, then make all lower-case
+        result = name.replace(' ', '-');
+        result = result.toLower();
+    }
+    else
+    {
+        usernameToSave = name;
+        return name;
+    }
+    usernameToSave = name;
+    return result;
+}
+
+void MainWindow::on_saveButton_clicked()
+{
+    ui->progressBarSave->setMaximum(0);
+    ui->saveL->setText("Saving...");
+    QString filenameComments = "";
+    QString filenamePosts = "";
+    if( ui->saveDirLE->text() == "" )
+    {
+        QMessageBox msgBox;
+        msgBox.setText("Please choose a save location first, and then click the save button.");
+        msgBox.exec();
+    }
+    else if( !saveDirectory.exists() )
+    {
+        QMessageBox msgBox;
+        msgBox.setText("Your save directory does not exist. Please choose another, and then retry.");
+        msgBox.exec();
+    }
+    else
+    {
+        if(ui->typeCB->currentIndex() == 0)
+        {
+            // Save the data to file
+            filenameComments = usernameToSave + "-comments.csv";
+            filenamePosts = usernameToSave + "-posts.csv";
+            QFile commentsFile, postsFile;
+            commentsFile.setFileName(saveDirectory.absoluteFilePath(filenameComments));
+            postsFile.setFileName(saveDirectory.absoluteFilePath(filenamePosts));
+
+            // save comments to file
+            if(commentsFile.exists())
+            {
+                QMessageBox msgBox;
+                msgBox.setText("A file of the same name already exists - if you have already downloaded this user's comments/posts, please move all files with the user's username out of the directory and try again.");
+                msgBox.exec();
+            }
+            else if(!commentsFile.open(QIODevice::WriteOnly | QIODevice::Text))
+            {
+                QMessageBox msgBox;
+                msgBox.setText("File write error.");
+                msgBox.exec();
+            }
+            else
+            {
+                QTextStream out(&commentsFile);
+                out << "\"author\",\"datetime\",\"comment_title\",\"comment_body\"\n";
+
+                // output comments to file
+                foreach( QList<QString> *list, comments )
+                {
+                    QString line = "";
+                    foreach( QString current, *list )
+                    {
+                        line = line + "\"" + current + "\"" + ",";
+                    }
+                    line = line.remove(line.length()-1, 1);
+                    line = line + "\r\n";
+                    out << line;
+                }
+
+                // close file
+                commentsFile.close();
+            }
+
+            if(postsFile.exists())
+            {
+                QMessageBox msgBox;
+                msgBox.setText("A file of the same name already exists - if you have already downloaded this user's comments/posts, please move all files with the user's username out of the directory and try again.");
+                msgBox.exec();
+            }
+            else if(!postsFile.open(QIODevice::WriteOnly | QIODevice::Text))
+            {
+                QMessageBox msgBox;
+                msgBox.setText("File write error.");
+                msgBox.exec();
+            }
+            else
+            {
+                QTextStream postsOut(&postsFile);
+                postsOut << "\"author\",\"datetime\",\"post_title\",\"post_body\"\n";
+
+                // output comments to file
+                foreach( QList<QString> *list, posts )
+                {
+                    QString line = "";
+                    foreach( QString current, *list )
+                    {
+                        line = line + "'" + current + "'" + ",";
+                    }
+                    line = line.remove(line.length()-1, 1);
+                    line = line + "\r\n";
+                    postsOut << line;
+                }
+
+                // close file
+                postsFile.close();
+            }
+        }
+        else if(ui->typeCB->currentIndex() == 1)
+        {
+            // Save the data to file
+            filenameComments = usernameToSave + "-comments.txt";
+            filenamePosts = usernameToSave + "-posts.txt";
+            QFile commentsFile, postsFile;
+            commentsFile.setFileName(saveDirectory.absoluteFilePath(filenameComments));
+            postsFile.setFileName(saveDirectory.absoluteFilePath(filenamePosts));
+
+            // save comments to file
+            if(commentsFile.exists())
+            {
+                QMessageBox msgBox;
+                msgBox.setText("A file of the same name already exists - if you have already downloaded this user's comments/posts, please move all files with the user's username out of the directory and try again.");
+                msgBox.exec();
+            }
+            else if(!commentsFile.open(QIODevice::WriteOnly | QIODevice::Text))
+            {
+                QMessageBox msgBox;
+                msgBox.setText("File write error.");
+                msgBox.exec();
+            }
+            else
+            {
+                QTextStream out(&commentsFile);
+
+                // output comments to file
+                foreach( QList<QString> *list, comments )
+                {
+                    QString author, datetime, title, body;
+                    author = list->at(0);
+                    datetime = list->at(1);
+                    title = list->at(2);
+                    body = list->at(3);
+
+                    out << "Author: " << author << "\r\n";
+                    out << "Datetime: " << datetime << "\r\n";
+                    out << "Title: " << title << "\r\n";
+                    out << "Comment:\r\n" << body << "\r\n";
+                    out << "\r\n";
+                }
+
+                // close file
+                commentsFile.close();
+            }
+
+            if(postsFile.exists())
+            {
+                QMessageBox msgBox;
+                msgBox.setText("A file of the same name already exists - if you have already downloaded this user's comments/posts, please move all files with the user's username out of the directory and try again.");
+                msgBox.exec();
+            }
+            else if(!postsFile.open(QIODevice::WriteOnly | QIODevice::Text))
+            {
+                QMessageBox msgBox;
+                msgBox.setText("File write error.");
+                msgBox.exec();
+            }
+            else
+            {
+                QTextStream postsOut(&postsFile);
+
+                // output comments to file
+                foreach( QList<QString> *list, posts )
+                {
+                    QString author, datetime, title, body;
+                    author = list->at(0);
+                    datetime = list->at(1);
+                    title = list->at(2);
+                    body = list->at(3);
+
+                    postsOut << "Author: " << author << "\r\n";
+                    postsOut << "Datetime: " << datetime << "\r\n";
+                    postsOut << "Title: " << title << "\r\n";
+                    postsOut << "Comment:\r\n" << body << "\r\n";
+                    postsOut << "\r\n";
+                }
+
+                // close file
+                postsFile.close();
+            }
+        }
+    }
+    ui->progressBarSave->setMaximum(100);
+    ui->saveL->setText("Complete!");
+
+    QMessageBox msgBox;
+    msgBox.setText("Congratulations! The download is complete!\nPosts have been saved as " + filenamePosts + "\nComments have been saved as " + filenameComments + "\nIf you would like to get another user's comments/posts, please close and restart the program.");
+    msgBox.exec();
+}
+
+void MainWindow::on_dirChooseButton_clicked()
+{
+    QFileDialog fDialog(this);
+    fDialog.setFileMode(QFileDialog::Directory);
+    saveDirectory = fDialog.getExistingDirectory();
+    ui->saveDirLE->setText(saveDirectory.absolutePath());
+}

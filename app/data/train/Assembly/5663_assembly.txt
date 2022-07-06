@@ -1,0 +1,210 @@
+; Copyright (c) 2012 Bartosz Szczesny
+; LICENSE: The MIT License (MIT)
+
+; key		keystream		plaintext	ciphertext
+;------------------------------------------------------------------------------------
+; Key		EB9F7781B734CA72A719...	Plaintext	BBF316E8D940AF0AD3
+; Wiki		6044DB6D41B7...		pedia		1021BF0420
+; Secret	04D46B053CA87B59...	Attack at dawn	45A01F645FC35B383552544B9BF5
+;
+; source: http://en.wikipedia.org/wiki/Rc4#Test_vectors
+
+
+section .bss
+	buf:	resb 1
+	state:	resb 256
+
+
+section .data
+	;key: db "Key"
+	;key: db "Wiki"
+	key: db "Secret"
+	keylen equ $ - key
+
+	;txt: db "Plaintext"
+	;txt: db "pedia"
+	txt: db "Attack at dawn"
+	txtlen equ $ - txt
+
+	hex: db "0123456789ABCDEF"
+	new: db 10 ; "\n"
+	spa: db " "
+
+
+section .text
+	global _start
+	_start:
+		; initalise states
+		mov ecx, 0			; c = 0
+		.InitStates:			; InitStates:
+			mov [state + ecx], ecx	; state[c] = c
+			;call PrintHex
+			;call PrintNewline
+			inc ecx			; c++
+			cmp ecx, 256		; if (c < 256)
+			jb .InitStates		;	goto InitStates
+
+		;
+		; d = (d + state[c] + key[k]) % 256   where   k = c % keylen
+		;
+		mov ecx, 0	; c = 0
+		mov edx, 0	; d = 0
+		mov eax, 0	; k = 0
+		.SwapStates:
+			cmp eax, keylen			; if (k < keylen)
+			jb .NoModulo			;	goto NoModulo
+				sub eax, keylen		; k -= keylen
+			.NoModulo:			; NoModulo:
+			add edx, [key + eax]		; d += key[k]
+
+			add edx, [state + ecx]		; d += state[c]
+			call edxMod256			; d %= 256
+
+			push eax
+			mov al, [state + ecx]
+			mov bl, [state + edx]
+
+			xchg eax, ebx			; swap(state[c], state[d])
+			mov [state + ecx], al
+			mov [state + edx], bl
+
+			pop eax
+
+			inc ecx				; c++
+			inc eax				; k++
+			cmp ecx, 256
+			jb .SwapStates
+
+		call PrintNewline
+		call PrintNewline
+
+		mov edx, 0
+		.PrintStates:
+			mov ecx, 0
+			mov cl, [state + edx]
+
+			inc edx
+			cmp edx, 256
+			jb .PrintStates
+
+		mov eax, 0
+		mov ebx, 0
+		mov ecx, 0 ; txtlen
+		mov edx, 0
+		.KeyStream:
+			push ecx
+			push ecx
+
+						; a = (a + 1) % 256
+			mov edx, eax
+			add edx, 1
+			call edxMod256
+			mov eax, edx
+
+						; a = (b + state[a]) % 256
+			mov edx, ebx
+			add edx, [state + eax]
+			call edxMod256
+			mov ebx, edx
+
+			mov cl, [state + eax]
+			mov dl, [state + ebx]
+			xchg ecx, edx		; swap(state[a], state[b])
+			mov [state + eax], cl
+			mov [state + ebx], dl
+
+			add edx, ecx		; d = (state[a] + state[b])
+			call edxMod256		; d %= 256
+			mov cl, [state + edx]	; K = state[d]
+			call PrintHex
+
+			mov edx, ecx
+			pop ecx
+			mov cl, [txt + ecx]
+
+			xor ecx, edx
+			call PrintHex
+			call PrintNewline
+
+			pop ecx
+			inc ecx
+			cmp ecx, txtlen
+			jb .KeyStream
+
+
+		mov eax, 1	; __NR_exit
+		mov ebx, 0	; return value
+		int 0x80	; call kernel
+
+
+		edxMod256:
+			.check:
+			cmp edx, 256
+			jb .quit
+				sub edx, 256
+				jmp .check
+			.quit:
+			ret
+
+
+		PrintSpace:
+			pusha
+			mov eax, 4
+			mov ebx, 1
+			mov ecx, spa
+			mov edx, 1
+			int 0x80
+			popa
+			ret
+
+
+		PrintNewline:
+			pusha
+			mov eax, 4
+			mov ebx, 1
+			mov ecx, new
+			mov edx, 1
+			int 0x80
+			popa
+			ret
+
+
+		PrintHex:
+			pusha
+			mov eax, 0xF0000000	; m = 0xF0000000	// nibble mask
+			mov ebx, 8		; n = 8			// nibble number
+			mov edx, ecx
+
+			.PrintNibble:
+				mov ecx, edx
+				and ecx, eax
+				push ebx
+				cmp ebx, 1
+				je .NoShift
+				.ShiftRight:
+					shr ecx, 4	; c = c >> 4
+					dec ebx
+					cmp ebx, 1
+					ja .ShiftRight
+				.NoShift:
+				call PrintHex1
+				shr eax, 4		; m = m >> 4;
+				pop ebx
+				dec ebx
+				cmp ebx, 0
+				ja .PrintNibble
+
+			call PrintSpace
+			popa
+			ret
+
+
+		PrintHex1:
+			pusha
+			mov eax, 4
+			mov ebx, 1
+			add ecx, hex
+			mov edx, 1
+			int 0x80
+			popa
+			ret

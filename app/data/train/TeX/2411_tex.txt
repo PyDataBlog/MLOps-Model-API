@@ -1,0 +1,177 @@
+\documentclass[12pt, UTF8, nofonts]{ctexart}
+
+\setCJKmainfont[BoldFont=STHeiti,ItalicFont=STKaiti]{STKaiti}
+\setCJKsansfont[BoldFont=STHeiti]{STXihei}
+\setCJKmonofont{STFangsong}
+
+\usepackage[letterpaper,left=.5in,right=.5in,top=1in,bottom=.5in]{geometry}
+\usepackage{afterpage, color, multirow}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage[titlenotnumbered,lined,linesnumbered]{algorithm2e}
+
+\definecolor{bgcolor}{RGB}{13, 12, 12}
+\definecolor{ttcolor}{RGB}{0, 255, 0}
+\pagecolor{bgcolor}\afterpage{\nopagecolor}
+\makeatletter
+\newcommand{\globalcolor}[1]{\color{#1}\global\let\default@color\current@color}
+\makeatother
+\AtBeginDocument{\globalcolor{ttcolor}}
+
+\begin{document}
+
+%[aside_content]
+
+\section*{标准多重网格技术之：二重网格}
+
+完整的多重网格（Multigrid）方法将涉及以下几个内容：1）粗网格问题和光滑子、2）二重网格模式、3）V-型和 W-型多重网格模式、4）完全多重网格方法。上文（见标准多重网格技术之：粗网格问题和光滑子一文）就第一点展开了详细的讨论，主要介绍了如何选取粗网格算子，以及常见的一些迭代光滑子（smoother），并且还介绍了一种完全多重网格方法中较为常用的嵌套迭代方法。本文将就第二点：二重网格，展开详细的讨论。事实上，通过二重网格，便可以将其扩充到多重网格，以及 V-型和 W-型的多重网格。
+
+\subsection*{二重网格方法及算法实现}
+
+\subsubsection*{二重网格核心思想}
+
+已知将一个迭代光滑子作用于细网格上的线性方程组并迭代一定步数后，得到的[label]残差向量[/label]可以表示为：
+
+\begin{equation}
+  \label{eq:res}
+  \boldsymbol{r}^h = \boldsymbol{f}^{h} - \boldsymbol{A}_h\boldsymbol{u}^h
+\end{equation}
+
+通常，式（\ref{eq:res}）最后获得的残差向量所对应的[label]误差[/label]仍然会比较大。但是，其中有一部分对应的是[label]高频[/label]（[label]振荡[/label]）模式。那么，如果能在更低一层的网格上B精确求解与之相对应的线性方程组，便能消除这些高频部分，从而获得一个近似效果更好的结果。这就是[label]二重网格[/label]方法（two-grid cycle）的核心思想。
+
+[alert type="info"]通常由于生成的粗网格仍然较大而无法进行精确求解，所以一般实际过程中很少单纯地使用二重网格方法，但其理论分析依然十分重要和有用，且由此可以扩充到多重网格。[/alert]
+
+\subsubsection*{二重网格算法实现}
+
+对于给定的细网格上线性方程组$\boldsymbol{A}_h\boldsymbol{u}^h=\boldsymbol{f}^h$，如果令$\boldsymbol{u}^h_{\ast}$为真解，$\boldsymbol{u}^h$是通过计算得到后的近似解，[label]误差向量[/label]为$\boldsymbol{e}^h = \boldsymbol{u}^h_{\ast}-\boldsymbol{u}_h$，那么结合式（\ref{eq:res}），便能得到如下的[label]残差方程[/label]：
+
+\begin{equation}
+  \label{eq:errres}
+  \left.\begin{aligned}
+    \boldsymbol{r}^h &= \boldsymbol{f}^h - \boldsymbol{A}_h\boldsymbol{u}^h \\ \boldsymbol{e}^h &= \boldsymbol{u}^h_{\ast} - \boldsymbol{u}^h \\
+  \end{aligned}\;\right\} \;\Rightarrow\;
+  \boldsymbol{r}^h = \boldsymbol{f}^h - \boldsymbol{A}_h(\boldsymbol{u}_\ast^h-\boldsymbol{e}^h) = \boldsymbol{A}_h\boldsymbol{e}^h
+\end{equation}
+
+令粗网格的网格大小为$H=2h$，前光滑和后光滑处理的迭代次数分别为$\nu_1$和$\nu_2$。那么，对于给定的初始值$\boldsymbol{u}_{0}^{h}$，二重网格方法的算法可以实现如下：
+
+%[latex mode=1]
+%[+preamble]
+%\usepackage[titlenotnumbered,lined,linesnumbered]{algorithm2e}
+%[/preamble]
+\TitleOfAlgo{Two-Grid Cycle}
+\begin{algorithm}[H]
+  $\boldsymbol{u}^h \gets \textbf{\texttt{smooth}}^{\nu_1}(\boldsymbol{A}_h,\boldsymbol{u}_{0}^h,\boldsymbol{f}^h)$
+  \tcp*[r]{Pre-smooth}
+  $\boldsymbol{r}^h \gets \boldsymbol{f}^h - \boldsymbol{A}_h \boldsymbol{u}^h$
+  \tcp*[r]{Get Residual}
+  $\boldsymbol{r}^{H} \gets \boldsymbol{R}_{h}^{H}\boldsymbol{r}^h$
+  \tcp*[r]{Coarsen}
+  $\boldsymbol{A}_{H} \boldsymbol{e}^{H} = \boldsymbol{r}^{H}$
+  \tcp*[r]{Solve}
+  $\boldsymbol{e}^h \gets \boldsymbol{P}_{H}^{h} \boldsymbol{e}^{H}$
+  \tcp*[r]{Interpolation}
+  $\boldsymbol{u}^h \gets \boldsymbol{u}^h + \boldsymbol{e}^h$
+  \tcp*[r]{Correct}
+  $\boldsymbol{u}^h \gets \textbf{\texttt{smooth}}^{\nu_2}(\boldsymbol{A}_h, \boldsymbol{u}^h, \boldsymbol{f}^h)$
+  \tcp*[r]{Post-smooth}
+\end{algorithm}
+%[/latex]
+
+\subsection*{二重网格方法的理论分析}
+
+如果把上述算法看作是一次光滑迭代的话，那么它便可以表示为如下形式，即：
+
+\begin{equation}
+  \label{eq:iterformM}
+  \boldsymbol{u}_{new}^{h} = \boldsymbol{M}_{h}\boldsymbol{u}_0^h + g_{\boldsymbol{M}_h}
+\end{equation}
+
+于是，问题转换为了如何确定迭代算子$\boldsymbol{M}_h$。为了方便起见，假定原线性方程组中的$\boldsymbol{f}^h$为$0$，则显然有$\boldsymbol{g}_{\boldsymbol{M}_h}$也为$0$。如果前光滑和后光滑的迭代格式中的迭代矩阵都为$\boldsymbol{G}_h$，那么式（\ref{eq:iterformM}）的迭代矩阵$\boldsymbol{M}_h$可以表示为：
+
+\begin{equation}
+  \label{eq:itermatM}
+  \begin{aligned}
+    \boldsymbol{u}^h_{pre} &= (\boldsymbol{G}_{h})^{\nu_1}\boldsymbol{u}_{0}^{h} \\
+    \boldsymbol{r}^h &= - \boldsymbol{A}_h\boldsymbol{u}^h_{pre} \\
+    \boldsymbol{r}^{H} &= \boldsymbol{R}_{h}^{H}\boldsymbol{r}^h \\
+    \boldsymbol{e}^{H} &= \boldsymbol{A}^{-1}_{H}\boldsymbol{r}^{H} \\
+    \boldsymbol{e}^{h} &= \boldsymbol{P}^{h}_{H}\boldsymbol{e}^{H} \\
+    \boldsymbol{u}^h_{crt} &= \boldsymbol{u}^{h}_{pre} + \boldsymbol{e}^h \\
+    \boldsymbol{u}^{h}_{new} &= (\boldsymbol{G}_h)^{\nu_2} \boldsymbol{u}_{crt}^h \\
+  \end{aligned} \;\Rightarrow\;
+  \begin{aligned}
+    \boldsymbol{u}^h_{new} &= \boldsymbol{G}_h^{\nu_2}\Big(\boldsymbol{G}_h^{\nu_1}\boldsymbol{u}_0^h + \boldsymbol{P}_H^h\boldsymbol{A}_H^{-1}\boldsymbol{R}_{h}^{H} \left(-\boldsymbol{A}_h\boldsymbol{G}_h^{\nu_1}\boldsymbol{u}_0^h\right)\Big) \\
+    \boldsymbol{M}_h &= \boldsymbol{G}_{h}^{\nu_2}\Big( \boldsymbol{I} - \boldsymbol{P}_H^{h}\boldsymbol{A}_{H}^{-1}\boldsymbol{R}_{h}^{H}\boldsymbol{A}_h \Big)\boldsymbol{G}_{h}^{\nu_1}
+  \end{aligned}
+\end{equation}
+
+式（\ref{eq:itermatM}）给出了二重网格方法的迭代矩阵（[label]迭代算子[/label]）。进一步观察式（\ref{eq:itermatM}），定义括号内的部分为：
+
+\begin{equation}
+  \label{eq:itermatT}
+  \boldsymbol{T}_h^H = \boldsymbol{I} - \boldsymbol{P}_{H}^{h}\boldsymbol{A}^{-1}_{H}\boldsymbol{R}_{h}^{H}\boldsymbol{A}_h
+\end{equation}
+
+事实上，式（\ref{eq:itermatT}）定义的$\boldsymbol{T}_{h}^{H}$是二重网格方法在没有前后光滑处理（即$\nu_1=\nu_2=0$）的特例情况下的迭代算子，因为此时式（\ref{eq:itermatM}）的迭代算子$\boldsymbol{M}_h$中的$\boldsymbol{G}_{h}^{\nu_1}=\boldsymbol{G}_h^{\nu_2}=1$。此种情况下的迭代称为[label]粗网格修正[/label]（coarse grid correction）；对应的迭代算子$\boldsymbol{T}_{h}^{H}$称为粗网格修正算子。
+
+最后，如果使用$\boldsymbol{T}_h^{H}$作为式（\ref{eq:iterformM}）迭代格式的迭代算子，并加入[label]预处理[/label]操作的话，预处理矩阵$\boldsymbol{B}_h$可以表示为：
+
+\[
+  \boldsymbol{B}_h \equiv (\boldsymbol{I}-\boldsymbol{T}_{h}^{H})\boldsymbol{A}_h^{-1} =
+  \boldsymbol{P}_{H}^{h}\boldsymbol{A}_{H}^{-1}\boldsymbol{R}_{h}^{H}
+\]
+
+\subsubsection*{粗网格修正算子的性质}
+
+在标准多重网格技术之：粗网格问题和光滑子一文中指出，[label]粗网格算子[/label]可以通过如下的选取方式得到，即：
+
+\begin{equation}
+  \label{eq:galerkin}
+  \boldsymbol{A}_{H} = \boldsymbol{R}_{h}^{H} \boldsymbol{A}_h \boldsymbol{P}_{H}^{h} \;,\quad
+  \boldsymbol{f}^{H} = \boldsymbol{R}_{h}^{H}\boldsymbol{f}^h
+\end{equation}
+
+式（\ref{eq:galerkin}）也称为 [label]Galerkin 条件[/label]。如果粗网格算子$\boldsymbol{A}_H$是通过此 Galerkin 条件获得的，且假定细网格算子（细网格系数矩阵）$\boldsymbol{A}_h$是对称正定的话，那么式（\ref{eq:itermatT}）给出的粗网格修正算子$\boldsymbol{T}_{h}^{H}$满足如下几条性质：
+
+- 粗网格修正算子$\boldsymbol{T}_{h}^{H}$是[label]投影算子[/label]（projector）；
+
+- 粗网格修正算子$\boldsymbol{T}_h^H$关于$\boldsymbol{A}_h$-内积自伴随；
+
+- 粗网格修正算子$\boldsymbol{T}_h^H$的[label]列空间[/label][label]$\boldsymbol{A}_h$-正交[/label]于$\boldsymbol{R}_h^H$的列空间；
+
+性质$1$可以通过证明$\boldsymbol{I}-\boldsymbol{T}_{h}^{H}$是投影算子（$\boldsymbol{P}\cdot\boldsymbol{P}=\boldsymbol{P}$）来证明$\boldsymbol{T}_{h}^{H}$也是投影算子，其中使用了式（\ref{eq:galerkin}）的 Galerkin 条件，即：
+
+\[
+  \begin{aligned}
+    (\boldsymbol{I}-\boldsymbol{T}_h^H)(\boldsymbol{I}-\boldsymbol{T}_h^H) &=
+    (\boldsymbol{P}_H^h\boldsymbol{A}_{H}^{-1}\boldsymbol{R}_h^H\boldsymbol{A}_h)(\boldsymbol{P}_H^h\boldsymbol{A}_{H}^{-1}\boldsymbol{R}_h^H\boldsymbol{A}_h) \\
+    &= \boldsymbol{P}_H^h\boldsymbol{A}_{H}^{-1}\underbrace{(\boldsymbol{R}_h^H\boldsymbol{A}_h\boldsymbol{P}_H^h)}_{\boldsymbol{A}_H}\boldsymbol{A}_{H}^{-1}\boldsymbol{R}_h^H\boldsymbol{A}_h \\
+    &= \boldsymbol{P}_H^h\boldsymbol{A}_H^{-1}\boldsymbol{R}_{h}^{H}\boldsymbol{A}_h = \boldsymbol{I} - \boldsymbol{T}_h^H
+  \end{aligned}
+\]
+
+性质$2$的证明同样也可以从证明$\boldsymbol{I}-\boldsymbol{T}_h^H=\boldsymbol{P}_H^h\boldsymbol{A}_H^{-1}\boldsymbol{R}_h^H\boldsymbol{A}_h$出发。已知如果矩阵$\boldsymbol{A}$关于任意内积的[label]伴随矩阵[/label]是矩阵$\boldsymbol{B}$，则有$\langle\boldsymbol{Ax},\boldsymbol{y}\rangle=\langle\boldsymbol{x},\boldsymbol{By}\rangle$；如果$\boldsymbol{A}=\boldsymbol{B}$，则称其是[label]自伴随[/label]的。由欧拉内积可知，$\langle\boldsymbol{Ax},\boldsymbol{y}\rangle=\langle\boldsymbol{x},\boldsymbol{A}^H\boldsymbol{y}\rangle$；再由对称正定性可以推知：
+
+\[
+  \begin{array}{rc}
+    & \Big\langle(\boldsymbol{A}_h \boldsymbol{P}_H^h \boldsymbol{A}_H^{-1} \boldsymbol{R}_h^H\boldsymbol{A}_h)\boldsymbol{x},\boldsymbol{y}\Big\rangle = \Big\langle\boldsymbol{x}, (\boldsymbol{A}_h \boldsymbol{P}_H^h \boldsymbol{A}_H^{-1}\boldsymbol{R}_h^H\boldsymbol{A}_h)\boldsymbol{y}\Big\rangle \\
+    \Rightarrow\;&
+    \Big\langle(\boldsymbol{P}_H^h \boldsymbol{A}_H^{-1} \boldsymbol{R}_h^H\boldsymbol{A}_h)\boldsymbol{x},\boldsymbol{y}\Big\rangle_{\boldsymbol{A}_h} = \Big\langle\boldsymbol{x}, (\boldsymbol{P}_H^h \boldsymbol{A}_H^{-1}\boldsymbol{R}_h^H\boldsymbol{A}_h)\boldsymbol{y}\Big\rangle_{\boldsymbol{A}_h} \\
+    \Rightarrow\;& \Big\langle\boldsymbol{T}_h^H\boldsymbol{x},\boldsymbol{y}\Big\rangle_{\boldsymbol{A}_h} = \Big\langle\boldsymbol{x},\boldsymbol{T}_h^H\boldsymbol{y}\Big\rangle_{\boldsymbol{A}_h}
+  \end{array}
+\]
+
+最后，性质$3$的含义是对于所有具有$\boldsymbol{x}=\boldsymbol{T}_h^T\boldsymbol{y}$形式的向量$\boldsymbol{x}$，都有$\boldsymbol{A}_h\boldsymbol{x}$在$\boldsymbol{R}_h^H$的[label]零空间[/label]内。换言之，只要证明$\boldsymbol{R}_h^H(\boldsymbol{A}_h\boldsymbol{x})=0$即可，因此有：
+
+\[
+  \begin{aligned}
+    \boldsymbol{R}_h^H(\boldsymbol{A}_h\boldsymbol{x}) &= \boldsymbol{R}_h^H\boldsymbol{A}_h(\boldsymbol{T}_h^H\boldsymbol{y}) = \boldsymbol{R}_h^H\boldsymbol{A}_h\Big(\boldsymbol{I} - \boldsymbol{P}_H^h\boldsymbol{A}_H^{-1}\boldsymbol{R}_h^H\boldsymbol{A}_h\Big)\boldsymbol{y} \\
+    &= \Big(\boldsymbol{R}_h^H\boldsymbol{A}_h - \underbrace{\boldsymbol{R}_h^H\boldsymbol{A}_h\boldsymbol{P}_H^h}_{\boldsymbol{A}_H}\boldsymbol{A}_H^{-1}\boldsymbol{R}_h^H\boldsymbol{A}_h\Big)\boldsymbol{y} = 0
+  \end{aligned}
+\]
+
+%[/aside_content]
+
+\end{document}

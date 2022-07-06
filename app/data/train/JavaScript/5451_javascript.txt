@@ -1,0 +1,108 @@
+import {getTims} from '../api/api';
+
+
+export function loadData() {
+  return getTims().then(data => {
+    const parser = new DOMParser();
+    const doc = parser.parseFromString(data, 'text/xml');
+    if (doc.documentElement.nodeName === 'parseerror') {
+      throw new Error(doc);
+    }
+    return toJSON(doc);
+  }).catch(e => {
+    console.error(e);
+  });
+}
+
+
+function toJSON(doc) {
+  const json = {
+    published: null,
+    disruptions: []
+  };
+  const { header, disruptions } = getChildren(doc.documentElement, 'header', 'disruptions');
+  if (header) {
+    const publishedElement = getChild(header, 'publishdatetime');
+    if (publishedElement) {
+      const pubDateAttr = getAttr(publishedElement, 'canonical');
+      if (pubDateAttr) {
+        json.published = pubDateAttr.value;
+      }
+    }
+    const refreshRateElement = getChild(header, 'refreshrate');
+    if (refreshRateElement) {
+      const refreshRate = Number(refreshRateElement.textContent);
+      if (!isNaN(refreshRate) && refreshRate > 0) {
+        json.refreshRate = refreshRate;
+      }
+    }
+  }
+  if (disruptions) {
+    json.disruptions = mapDisruptions(disruptions);
+  }
+  return json;
+}
+
+
+function mapDisruptions(disruptions) {
+  const res = {};
+  for (let i = 0; i < disruptions.children.length; ++i) {
+    const disr = disruptions.children[i];
+    const idAttr = getAttr(disr, 'id');
+    if (!idAttr || !idAttr.value) {
+      continue;
+    }
+    const props = {};
+    for (let j = 0; j < disr.children.length; ++j) {
+      const propElem = disr.children[j];
+      if (propElem.children.length === 0) {
+        props[propElem.nodeName] = propElem.textContent;
+      } else if (propElem.nodeName.toLowerCase() === 'causearea') {
+        const displayPoint = getChild(propElem, 'displaypoint');
+        if (displayPoint) {
+          const point = getChild(displayPoint, 'point');
+          if (point) {
+            const coords = getChild(point, 'coordinatesll');
+            if (coords) {
+              const split = coords.textContent.split(',');
+              if (split.length === 2) {
+                props.coords = {
+                  lat: parseFloat(split[1]),
+                  lng: parseFloat(split[0])
+                };
+              }
+            }
+          }
+        }
+      }
+    }
+    res[idAttr.value] = props;
+  }
+  return res;
+}
+
+
+function getChildren(element, ...names) {
+  const res = {};
+  for (let i = 0; i < element.children.length; ++i) {
+    const name = element.children[i].nodeName.toLowerCase();
+    if (names.find(n => n === name)) {
+      res[name] = element.children[i];
+    }
+  }
+  return res;
+}
+
+function getChild(element, name) {
+  const res = getChildren(element, name);
+  return res[name] || null;
+}
+
+function getAttr(element, name) {
+  for (let i = 0; i < element.attributes.length; ++i) {
+    if (element.attributes[i].name === name) {
+      return element.attributes[i];
+    }
+  }
+  return null;
+}

@@ -1,0 +1,7 @@
+set(_CATKIN_CURRENT_PACKAGE "scarab")
+set(scarab_MAINTAINER "bcharrow <bcharrow@seas.upenn.edu>")
+set(scarab_DEPRECATED "")
+set(scarab_VERSION "0.0.0")
+set(scarab_BUILD_DEPENDS "geometry_msgs")
+set(scarab_RUN_DEPENDS "geometry_msgs")
+set(scarab_BUILDTOOL_DEPENDS "catkin")

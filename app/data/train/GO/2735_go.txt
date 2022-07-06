@@ -1,0 +1,384 @@
+// lib-gode-rules.go
+package gode_rules
+
+import (
+	"reflect"
+	"bytes"
+	"encoding/gob"
+	"encoding/json"
+	"fmt"
+	"log"
+	"strings"
+	"github.com/robertkrimen/otto"
+)
+
+type RuleEngine struct {
+	Rules []Rule
+	ActiveRules []Rule
+	IgnoreFactChanges bool
+	Otto *otto.Otto
+}
+
+type Rule map[string]interface{}
+type Options map[string]interface{}
+type Fact map[string]interface{}
+type Filter map[string]interface{}
+
+func quicksortRules(rules []Rule, lo int, hi int) {
+	if len(rules) == 2 && lo < hi {
+		if rules[0].higherThan(&rules[1]) {
+			rules[0], rules[1] = rules[1], rules[0]
+		}
+		return
+	}
+	if len(rules) > 2 && lo < hi {
+		p := partitionRules(rules, lo, hi)
+		quicksortRules(rules, lo, p - 1)
+		quicksortRules(rules, p + 1, hi)
+	}
+}
+
+func partitionRules(rules []Rule, lo int, hi int) int {
+	pivot := rules[len(rules)-1]
+	i := lo
+	for j := lo; j <= hi; j++ {
+		if rules[j].higherThan(&pivot) {
+			rules[j], rules[i] = rules[i], rules[j]
+			i += 1
+		}
+	}
+	rules[hi], rules[i] = rules[i], rules[hi]
+	return i
+}
+
+func (thisRule *Rule) higherThan(otherRule *Rule) bool {
+	a, ok_a := (*thisRule)["priority"]
+	b, ok_b := (*otherRule)["priority"]
+	if ok_a && ok_b {
+		a_i, ok_a := a.(int)
+		b_i, ok_b := b.(int)
+		if ok_a && ok_b {
+			return b_i < a_i
+		} else if ok_a {
+			return true
+		} else {
+			return false
+		}
+	} else if ok_a {
+		_, ok_a := a.(int)
+		if ok_a {
+			return true
+		} else {
+			return false
+		}
+	} else {
+		return false
+	}
+}
+
+func NewRuleEngine() *RuleEngine {
+	return NewRuleEngineFromRules(nil, nil)
+}
+
+func NewRuleEngineFromRule(rule Rule, options Options) *RuleEngine {
+	return NewRuleEngineFromRules([]Rule{ rule }, options)
+}
+
+func NewRuleEngineFromRules(rules []Rule, options Options) *RuleEngine {
+	R := new(RuleEngine)
+	R.Otto = otto.New()
+	R.Init(nil)
+	if rules != nil {
+		R.RegisterRules(rules)
+	}
+	if options != nil {
+		if value, ok := options["ignoreFactChanges"]; ok {
+			if ignoreFactChanges, ok := value.(bool); ok {
+				R.IgnoreFactChanges = ignoreFactChanges
+			} else {
+				R.IgnoreFactChanges = false
+			}
+		}
+	} else {
+		R.IgnoreFactChanges = false
+	}
+	return R
+}
+
+func (R *RuleEngine) Init(rules []Rule) {
+	R.Rules = []Rule{}
+	R.ActiveRules = []Rule{}
+}
+
+func (R *RuleEngine) RegisterRule(rule Rule) {
+	if rule != nil {
+		R.Rules = append(R.Rules, rule)
+	}
+	R.Sync()
+}
+
+func (R *RuleEngine) RegisterRules(rules []Rule) {
+	if rules != nil {
+		R.Rules = append(R.Rules, rules...)
+	}
+	R.Sync()
+}
+
+func (R *RuleEngine) Sync() {
+	activeRules := []Rule{}
+	for _, rule := range R.Rules {
+		if _, ok := rule["on"]; !ok {
+			rule["on"] = true
+		}
+		if value, ok := rule["on"].(bool); ok && value {
+			activeRules = append(activeRules, rule)
+		}
+	}
+	quicksortRules(activeRules, 0, len(activeRules)-1)
+	R.ActiveRules = activeRules
+}
+
+func copyFact(fact Fact) *Fact {
+	var err error
+	factCopy := Fact{ }
+	buffer := new(bytes.Buffer)
+	encoder := gob.NewEncoder(buffer)
+	decoder := gob.NewDecoder(buffer)
+	if err = encoder.Encode(fact); err != nil {
+		log.Fatalln(err.Error())
+	}
+	if err = decoder.Decode(&factCopy); err != nil {
+		log.Fatalln(err.Error())
+	}
+	return &factCopy
+}
+
+func (thisFact *Fact) equals(thatFact *Fact) bool {
+	return reflect.DeepEqual(*thisFact, *thatFact)
+}
+
+func (R *RuleEngine) Execute(fact *Fact, extf func(*Fact)) {
+	R.Otto.Set("LOG", func(call otto.FunctionCall) otto.Value {
+		log.Println(call.Argument(0).ToString())
+		return otto.UndefinedValue()
+	})
+	complete := false
+	(*fact)["result"] = true
+	session := copyFact(*fact)
+	lastSession := copyFact(*fact)
+	index := 0
+	RESTART := func() {
+		index = 0
+	}
+	NEXT := func() {
+		if R.IgnoreFactChanges || lastSession.equals(session) {
+			index += 1
+		} else {
+			lastSession = copyFact(*session)
+			RESTART()
+		}
+	}
+	STOP := func() {
+		complete = true
+		RESTART()
+	}
+	WHEN := func(ruleIndex int, outcome bool) {
+		if outcome {
+			if val, ok := R.ActiveRules[ruleIndex]["consequence"]; ok {
+				if _consequence, ok := val.(string); ok {
+					var err error
+					if err = R.Otto.Set("RESTART", func(call otto.FunctionCall) otto.Value {
+						RESTART()
+						return otto.UndefinedValue()
+					}); err != nil {
+						log.Fatal(err.Error())
+					}
+					if err = R.Otto.Set("STOP", func(call otto.FunctionCall) otto.Value {
+						STOP()
+						return otto.UndefinedValue()
+					}); err != nil {
+						log.Fatal(err.Error())
+					}
+					if err = R.Otto.Set("NEXT", func(call otto.FunctionCall) otto.Value {
+						NEXT()
+						return otto.UndefinedValue()
+					}); err != nil {
+						log.Fatal(err.Error())
+					}
+					if _, err := R.Otto.Run(fmt.Sprintf("var F = %v;", toJSON(session))); err != nil {
+						log.Fatal(err.Error())
+					}
+					if _, err = R.Otto.Run(_consequence); err != nil {
+						log.Fatal(err.Error())
+					}
+					var (
+						oval otto.Value
+						ival interface{}
+						fval map[string]interface{}
+						f Fact
+					)
+					if oval, err = R.Otto.Get("F"); err != nil {
+						log.Fatal(err.Error())
+					}
+					if ival, err = oval.Export(); err != nil {
+						log.Fatal(err.Error())
+					}
+					if fval, ok = ival.(map[string]interface{}); !ok {
+						log.Fatal("WHEN: F is not a Fact")
+					}
+					f = Fact(fval)
+					session = &f
+				} else {
+					log.Fatal("WHEN: consequence not a string")
+				}
+			} else {
+				log.Fatal("WHEN: rule has no field 'consequence'")
+			}
+		} else {
+			NEXT()
+		}
+	}
+	for index < len(R.ActiveRules) {
+		if complete {
+			break
+		}
+		if value, ok := R.ActiveRules[index]["condition"]; ok {
+			if _condition, ok := value.(string); ok {
+				var err error
+				when := func(call otto.FunctionCall) otto.Value {
+					if len(call.ArgumentList) == 1 && call.Argument(0).IsBoolean() {
+						var b bool
+						if b, err = call.Argument(0).ToBoolean(); err != nil {
+							log.Fatal(err.Error())
+						} else {
+							WHEN(index, b)
+						}
+					} else {
+						log.Fatal("Execute: WHEN called with wrong argument(s)")
+					}
+					return otto.UndefinedValue()
+				}
+				if err := R.Otto.Set("WHEN", when); err != nil {
+					log.Fatal(err.Error())
+				}
+				if _, err = R.Otto.Run(fmt.Sprintf("var F = %v;", toJSON(session))); err != nil {
+					log.Fatal(err.Error())
+				}
+				if _, err = R.Otto.Run(_condition); err != nil {
+					log.Fatal(err.Error())
+				}
+				var (
+					oval otto.Value
+					ival interface{}
+					fval map[string]interface{}
+					f Fact
+				)
+				if oval, err = R.Otto.Get("F"); err != nil {
+					log.Fatal(err.Error())
+				}
+				if ival, err = oval.Export(); err != nil {
+					log.Fatal(err.Error())
+				}
+				if fval, ok = ival.(map[string]interface{}); !ok {
+					log.Fatal("Execute: F is not a Fact")
+				}
+				f = Fact(fval)
+				session = &f
+			} else {
+				log.Fatal("Execute: condition not a string")
+			}
+		} else {
+			log.Fatal("Execute: rule has no field 'condition'")
+		}
+	}
+	extf(session)
+}
+
+func (R *RuleEngine) FindRules(filter Filter) []Rule {
+	if filter == nil {
+		return R.Rules
+	} else {
+		var filteredRules = []Rule{ }
+		RuleCheck:
+		for _, rule := range R.Rules {
+			for filterKey, filterValue := range filter {
+				if elem, ok := rule[filterKey]; !ok || (ok && elem != filterValue) {
+					continue RuleCheck
+				} else {
+					filteredRules = append(filteredRules, rule)
+				}
+			}
+		}
+		return filteredRules
+	}
+}
+
+func (R *RuleEngine) Turn(state string, filter Filter) {
+	var ruleState bool
+	if state == "on" || state == "ON" {
+		ruleState = true
+	} else {
+		ruleState = false
+	}
+	rules := R.FindRules(filter)
+	for _, rule := range rules {
+		rule["on"] = ruleState
+	}
+	R.Sync()
+}
+
+func (R *RuleEngine) Prioritize(priority int, filter Filter) {
+	rules := R.FindRules(filter)
+	for _, rule := range rules {
+		rule["priority"] = priority
+	}
+	R.Sync()
+}
+
+func (R *RuleEngine) ToJSON() string {
+	return toJSON(R.Rules)
+}
+
+func (R *RuleEngine) FromJSON(rules string) {
+	R.Init(nil)
+	json := fromJSON(rules)
+	var (
+		arr []interface{}
+		rule map[string]interface{}
+		ok bool
+	)
+	if arr, ok = json.([]interface{}); !ok {
+		if rule, ok = json.(map[string]interface{}); ok {
+			R.RegisterRule(Rule(rule))
+			return
+		} else {
+			log.Fatal("FromJSON: string is neither rule or rules")
+		}
+	}
+	newRules := make([]Rule, len(arr))
+	for i, val := range arr {
+		if rule, ok = val.(map[string]interface{}); !ok {
+			log.Fatal("FromJSON: array doesn't contain rules")
+		}
+		newRules[i] = Rule(rule)
+	}
+	R.RegisterRules(newRules)
+}
+
+func toJSON(v interface{}) string {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	if err := enc.Encode(v); err != nil {
+		log.Fatalln(err.Error())
+	}
+	return string(buf.Bytes())
+}
+
+func fromJSON(j string) interface{} {
+	var v interface{}
+	dec := json.NewDecoder(strings.NewReader(j))
+	if err := dec.Decode(&v); err != nil {
+		log.Fatalln(err.Error())
+	}
+	return v
+}

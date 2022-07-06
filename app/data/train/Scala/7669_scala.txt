@@ -1,0 +1,180 @@
+/*
+ * Copyright (C)2011 Gerald de Jong - GNU General Public License v3
+ * please see the "license" in this distribution for details.
+ *
+ * Contact: "Gerald de Jong" <geralddejong@gmail.com>
+ */
+
+package eu.beautifulcode.eig
+
+object Tensegrity {
+    private var pullIntensity: Option[Pull => Double] = None
+
+    var pushIdealLength = 1.0
+
+    def pullIntensity(intensityFunction: Pull => Double) {
+        pullIntensity = Some(intensityFunction)
+    }
+
+    def apply() = new Tensegrity().push
+
+    def pullIntensity(pull: Pull): Double = pullIntensity.get(pull)
+
+}
+
+class Tensegrity(var ends: List[End] = Nil, var pushes: List[Push] = Nil, var pulls: List[Pull] = Nil) {
+    ends.foreach(j => j.me = this)
+
+    def push = new Push(end, end)
+
+    def end = new End(this)
+
+    def +=(anyRef: AnyRef) {
+        anyRef match {
+            case end: End => ends = end :: ends
+            case push: Push => pushes = push :: pushes
+            case pull: Pull => pulls = pull :: pulls
+            case _ => throw new IllegalArgumentException
+        }
+    }
+
+    def -=(anyRef: AnyRef) {
+        anyRef match {
+            case joint: End => ends = ends.filterNot(_ == joint)
+            case push: Push => pushes = pushes.filterNot(_ == push)
+            case pull: Pull => pulls = pulls.filterNot(_ == pull)
+            case _ => throw new IllegalArgumentException
+        }
+    }
+
+    def +(that: Tensegrity): Tensegrity = {
+        if (that eq this) this
+        else new Tensegrity(
+            ends = ends ::: that.ends,
+            pushes = pushes ::: that.pushes,
+            pulls = pulls ::: that.pulls
+        )
+    }
+
+    def tick() {
+        pushes.foreach(_.act())
+        ends.foreach(_.force.zero())
+        pulls.foreach(_.refresh())
+        pulls.foreach(_.act())
+    }
+
+    def radius = {
+        val center = new Arrow
+        ends.foreach(center += _.location)
+        center /= ends.length
+        var max = 0.0
+        ends.foreach(j => {
+            val quadrance = j.location ~ center
+            if (quadrance > max) {
+                max = quadrance
+            }
+        })
+        (math.sqrt(max), center.length)
+    }
+
+    def someDistanceMeasure = distanceAmong(pushes.map(_.alpha.location)) + distanceAmong(pushes.map(_.omega.location))
+
+    def distanceAmong(loc0: List[Arrow]) = {
+        val loc1 = loc0.tail ::: List(loc0.head)
+        val distances = loc0.zip(loc1).map(tup => tup._1 ~~ tup._2)
+        distances.foldLeft(0.0)(_ + _)
+    }
+}
+
+class End(var me: Tensegrity, var push: Option[Push] = None) {
+    val location = new Arrow
+    me += this
+    val force = new Arrow
+    val oldLocation = new Arrow
+
+    def move() {
+        oldLocation := location
+        location += force
+    }
+
+    def speed = {
+        location ~~ oldLocation
+    }
+
+    override def toString = {
+        F(speed)
+    }
+}
+
+abstract class Interval(var alpha: End, var omega: End) {
+    val unit = new Arrow
+    var length = -1.0
+    me += this
+
+    def me = alpha.me + omega.me
+
+    def refresh() {
+        if (alpha.location == omega.location) {
+            unit.rand()
+            length = 0.0
+        }
+        else {
+            unit := omega.location
+            unit -= alpha.location
+            length = !unit
+        }
+    }
+
+    override def toString = {
+        F(length)
+    }
+}
+
+class Push(alpha: End, omega: End) extends Interval(alpha, omega) {
+    alpha.push = Some(this)
+    omega.push = Some(this)
+
+    def >>(push : Push) : List[Pull] = {
+        if (me != push.me) {
+            for { myEnd <- me.ends; theirEnd <- push.me.ends } yield new Pull(myEnd, theirEnd)
+        }
+        else {
+            List(
+                new Pull(alpha, push.alpha), new Pull(omega, push.omega),
+                new Pull(omega, push.alpha), new Pull(alpha, push.omega)
+            )
+        }
+    }
+
+    def act() {
+        alpha.move()
+        omega.move()
+        refresh()
+        acquireIdealLength()
+    }
+
+    private def acquireIdealLength() {
+        val ideal = Tensegrity.pushIdealLength
+        alpha.location.push(unit, (length - ideal) / 2)
+        omega.location.push(unit, (ideal - length) / 2)
+        length = ideal
+    }
+}
+
+class Pull(alpha: End, omega: End) extends Interval(alpha, omega) {
+    def act() {
+        val intensity = Tensegrity.pullIntensity(this) / 2
+        if (intensity > 0) {
+            alpha.force.push(unit, length * intensity)
+            omega.force.push(unit, -length * intensity)
+        }
+    }
+}
+
+object F {
+    import java.text.DecimalFormat
+
+    val formatter = new DecimalFormat("0.#############")
+
+    def apply(d: Double) = formatter.format(d)
+}

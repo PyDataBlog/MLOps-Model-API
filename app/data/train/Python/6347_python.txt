@@ -1,0 +1,333 @@
+import os
+import sys
+import shutil
+import straight.plugin
+import numpy as np
+import pkg_resources
+from os import path
+from core import utils
+from core import argparser
+from core import log
+from core import parser
+
+def main():
+    ## Parse arguments
+    ap = argparser.init_arg_parser()
+    options = ap.parse_args()
+
+    ## Collect input gbks from folder
+    input_files = []
+    if not path.isdir(options["input_folder"]):
+        log.error("Specified folder didn't exist '%s'" % (options["input_folder"]))
+        sys.exit(1)
+    else:
+        for filename in os.listdir(options["input_folder"]):
+            filepath = path.join(options["input_folder"], filename)
+            if not path.isdir(filepath):
+                ext = path.splitext(filepath)[1][1:]
+                if ext in ["gbk"]:
+                    input_files.append(filename)
+
+    ## Initial check parameters
+    metadata = {}
+    if options["mode"] == "train":
+        ## check and load metadata file
+        if not path.exists(options["training_metadata"]):
+            log.error("Specified file didn't exist '%s'" % (options["training_metadata"]))
+            sys.exit(1)
+        else:
+            metadata = parser.parse_training_metadata(options["training_metadata"])
+            options["single_values"] = [[]] * len(input_files)
+            options["train_set"] = []
+            options["test_set"] = []
+            # remove GBKs not listed in metadata
+            input_files[:] = [bgc for bgc in input_files if utils.get_bgc_name(bgc) in metadata["bgc"]]
+            # features
+            if "features" not in options:
+                if "features" not in metadata:
+                    options["features"] = [{"name": plugin.name, "params": [], "subs": [sub for sub in plugin.features]} for plugin in utils.load_plugins("feature_extraction")]
+                else:
+                    options["features"] = metadata["features"]
+            # algorithm mode (classification / regression)
+            if metadata["mode"] == "CLASSIFICATION":
+                options["algo_mode"] = "classification"
+                if "algorithm" not in options:
+                    if "algorithm" not in metadata:
+                        options["algorithm"] = {"name": "svm", "params": []}
+                    else:
+                        options["algorithm"] = metadata["algorithm"]
+            elif metadata["mode"] == "REGRESSION":
+                options["algo_mode"] = "regression"
+                if "algorithm" not in options:
+                    if "algorithm" not in metadata:
+                        options["algorithm"] = {"name": "linear_regression", "params": []}
+                    else:
+                        options["algorithm"] = metadata["algorithm"]
+            else:
+                log.error("Incorrect metadata file format '%s'" % (options["training_metadata"]))
+                sys.exit(1)
+            # single values (from right hand side of data column) & train/test set distribution
+            for i, fp in enumerate(input_files):
+                bgc_id = utils.get_bgc_name(fp)
+                if bgc_id in metadata["bgc"]:
+                    idx_meta = metadata["bgc"].index(bgc_id)
+                    options["single_values"][i] = metadata["single_values"][idx_meta]
+                    if idx_meta in metadata["train_set"]:
+                        options["train_set"].append(i)
+                    if idx_meta in metadata["test_set"]:
+                        options["test_set"].append(i)
+                else:
+                    log.error("'%s' is not included in your metadata" % (bgc_id))
+                    sys.exit(1)
+            # pair values for training set (from its own table from the metadata)
+            options["train_pair_values"] = [[None] * len(options["train_set"]) for _ in range(len(options["train_set"]))]
+            for i, idx1 in enumerate(options["train_set"]):
+                for j, idx2 in enumerate(options["train_set"]):
+                    if len(metadata["train_pair_values"]) > i and len(metadata["train_pair_values"][i]) > j:
+                        options["train_pair_values"][i][j] = metadata["train_pair_values"][i][j]
+            # pair values for test set (from its own table from the metadata)
+            options["test_pair_values"] = [[None] * len(options["test_set"]) for _ in range(len(options["test_set"]))]
+            for i, idx1 in enumerate(options["test_set"]):
+                for j, idx2 in enumerate(options["test_set"]):
+                    if len(metadata["test_pair_values"]) > i and len(metadata["test_pair_values"][i]) > j:
+                        options["test_pair_values"][i][j] = metadata["test_pair_values"][i][j]
+    if options["mode"] == "predict":
+        ## check and load model file
+        print "..."
+
+    ## further checks..
+    algo_type = utils.get_algo_type(options["algorithm"]["name"])
+    if algo_type not in ["classification", "regression"]:
+        log.error("Selected algorithm '%s' did not exist" % (algo["name"]))
+        sys.exit(1)
+    if options["algo_mode"] != algo_type:
+        log.error("Selected algorithm '%s' is for %s, but the provided data is for %s." % (options["algorithm"]["name"], algo_type, options["algo_mode"]))
+        sys.exit(1)
+    options["features_scope"] = ""
+    for idx, feature in enumerate(options["features"]):
+        for plugin in utils.load_plugins("feature_extraction"):
+            if plugin.name == feature["name"]:
+                if len(options["features_scope"]) > 0 and plugin.scope != options["features_scope"]:
+                    log.error("You selected features of different scope ('%s:%s', '%s:%s'). Please select only combination of features with the same scope." % (feature["name"], plugin.scope, options["features"][idx - 1]["name"], options["features_scope"]))
+                    sys.exit(1)
+                options["features_scope"] = plugin.scope
+                break
+        if len(feature["subs"]) < 1:
+            for plugin in utils.load_plugins("feature_extraction"):
+                if plugin.name == feature["name"]:
+                    feature["subs"].extend(plugin.features)
+                    break
+        for sub in feature["subs"]:
+            for plugin in utils.load_plugins("feature_extraction"):
+                if plugin.name == feature["name"]:
+                    if sub not in plugin.features:
+                        log.error("Feature unknown: '%s'" % sub)
+                        sys.exit(1)
+
+    ## Check output folder
+    if not options["output_folder"]:
+        options["output_folder"] = path.join(os.getcwd(), path.basename(options["input_folder"]))
+    if path.isdir(options["output_folder"]):
+        # output folder exist, probable disrupted job
+        if not options["continue"] and not options["overwrite"]:
+            log.error("Output folder '%s' exist. Previous run? use --continue to continue, or --overwrite to start over." % options["output_folder"])
+            sys.exit(1)
+        elif options["overwrite"]:
+            shutil.rmtree(options["output_folder"])
+            os.makedirs(options["output_folder"])
+        elif options["reset_preprocesses"]:
+            bgcjsonpath = path.join(options["output_folder"], "bgcjson")
+            if path.exists(bgcjsonpath):
+                shutil.rmtree(bgcjsonpath)
+    else:
+        os.makedirs(options["output_folder"])
+
+    ## Parse gbks
+    ## TODO: multi-threading?
+    log.info("Started preprocessing input files..")
+    utils.print_progress(0, len(input_files), prefix='Preprocessing input GBKs..', suffix='', decimals=1)
+    for i, filename in enumerate(input_files):
+        filepath = path.join(options["input_folder"], filename)
+        if not (path.exists(path.join(options["output_folder"], "bgcjson", "%s.bgcjson" % utils.get_bgc_name(filepath)))):
+            bgc = parser.parse_gbk(filepath)
+            if bgc is not None:
+                utils.save_bgcjson(bgc, options["output_folder"])
+        utils.print_progress(i + 1, len(input_files), prefix='Preprocessing input GBKs..', suffix='', decimals=1, bar_length=100)
+    log.info("Finished preprocessing input files..")
+
+    ## Do feature extraction
+    # step 1: make folder structure & index file
+    feature_folder = utils.create_feature_folder(input_files, options["output_folder"])
+    # step 2: traverse FE modules and run algorithms, then save the results
+    feature_extraction_plugins = []
+    for plugin in utils.load_plugins("feature_extraction"):
+        if ("features" not in options) or (plugin.name in [feature["name"] for feature in options["features"]]):
+            feature_extraction_plugins.append(plugin)
+    # calculate features
+    options["feature_values"] = {}
+    if options["features_scope"] == "pair":
+        log.info("Started feature extraction for all BGC pairs..")
+        nrcomb = len(input_files) * (len(input_files) - 1) / 2
+        count = 0
+        utils.print_progress(0, nrcomb, prefix='Feature extraction..', suffix='', decimals=1)
+        for i, fn1 in enumerate(input_files):
+            for j, fn2 in enumerate(input_files):
+                if i < j:
+                    bgc1 = parser.parse_bgcjson(path.join(options["output_folder"], "bgcjson", "%s.bgcjson" % utils.get_bgc_name(fn1)))
+                    bgc2 = parser.parse_bgcjson(path.join(options["output_folder"], "bgcjson", "%s.bgcjson" % utils.get_bgc_name(fn2)))
+                    for plugin in feature_extraction_plugins:
+                        if plugin.name not in options["feature_values"]:
+                            options["feature_values"][plugin.name] = {}
+                        results = plugin.calculate(bgc1, bgc2)
+                        options["feature_values"][plugin.name]["%d+%d" % (i, j)] = [float(result) for result in results]
+                    count += 1
+                    utils.print_progress(count, nrcomb, prefix='Feature extraction..', suffix='', decimals=1)
+    elif options["features_scope"] == "single":
+        log.info("Started feature extraction for all BGCs..")
+        count = 0
+        utils.print_progress(0, len(input_files), prefix='Feature extraction..', suffix='', decimals=1)
+        for i, fn in enumerate(input_files):
+            bgc = parser.parse_bgcjson(path.join(options["output_folder"], "bgcjson", "%s.bgcjson" % utils.get_bgc_name(fn)))
+            for plugin in feature_extraction_plugins:
+                if plugin.name not in options["feature_values"]:
+                    options["feature_values"][plugin.name] = {}
+                results = plugin.calculate(bgc)
+                options["feature_values"][plugin.name]["%d" % (i)] = [float(result) for result in results]
+            count += 1
+            utils.print_progress(count, len(input_files), prefix='Feature extraction..', suffix='', decimals=1)
+    else:
+        log.error("Invalid features scope: '%s'" % options["features_scope"])
+        sys.exit(1)
+
+    ## Load features & value matrix
+    features_rows = []
+    if options["features_scope"] == "pair":
+        for i, fn1 in enumerate(input_files):
+            for j, fn2 in enumerate(input_files):
+                if i < j:
+                    features_rows.append([i, j])
+    elif options["features_scope"] == "single":
+        for i in xrange(0, len(input_files)):
+            features_rows.append([i])
+    else:
+        log.error("Invalid features scope: '%s'" % options["features_scope"])
+        sys.exit(1)
+    if "features_columns" not in options:
+        options["features_columns"] = []
+        for feature in options["features"]:
+            for sub in feature["subs"]:
+                options["features_columns"].append("%s.%s" % (feature["name"], sub))
+    features_matrix = {}
+    for row_ids in ["+".join([str(row_id) for row_id in row_ids]) for row_ids in features_rows]:
+        row = [None] * len(options["features_columns"])
+        for plugin in feature_extraction_plugins:
+            plugin_folder = path.join(feature_folder, plugin.name)
+            values = options["feature_values"][plugin.name][row_ids]
+            if (len(values) != len(plugin.features)):
+                # technically impossible to reach this, unless output from calculate != #of results expected
+                log.error("...")
+                sys.exit(1)
+            else:
+                for n, col in enumerate(plugin.features):
+                    colname = ("%s.%s" % (plugin.name, col))
+                    if colname in options["features_columns"]:
+                        row[options["features_columns"].index(colname)] = values[n]
+        features_matrix[row_ids] = row
+
+    ## Execute algorithms & save results
+    if options["mode"] == "train":
+        ## Fetch feature & values training matrix
+        training_matrix = []
+        training_target = []
+        training_rownames = []
+        if options["features_scope"] == "pair":
+            for i, idx1 in enumerate(options["train_set"]):
+                for j, idx2 in enumerate(options["train_set"]):
+                    if idx1 < idx2:
+                        training_matrix.append(features_matrix["%d+%d" % (idx1, idx2)])
+                        training_rownames.append("%s+%s" % (utils.get_bgc_name(input_files[idx1]), utils.get_bgc_name(input_files[idx2])))
+                        if options["algo_mode"] == "classification":
+                            class1 = options["single_values"][idx1].split(",")
+                            class2 = options["single_values"][idx2].split(",")
+                            training_target.append(int(len(set(class1) & set(class2)) > 0))
+                        elif options["algo_mode"] == "regression":
+                            training_target.append(float(options["train_pair_values"][i][j]))
+        elif options["features_scope"] == "single":
+            for idx in options["train_set"]:
+                training_matrix.append(features_matrix["%d" % (idx)])
+                training_rownames.append("%s" % (utils.get_bgc_name(input_files[idx1])))
+                training_target.append(options["single_values"][idx])
+        training_matrix = np.array(training_matrix)
+        training_target = np.array(training_target)
+        ## Fetch feature & values testing matrix
+        testing_matrix = []
+        testing_target = []
+        testing_rownames = []
+        if options["features_scope"] == "pair":
+            for i, idx1 in enumerate(options["test_set"]):
+                for j, idx2 in enumerate(options["test_set"]):
+                    if idx1 < idx2:
+                        testing_matrix.append(features_matrix["%d+%d" % (idx1, idx2)])
+                        testing_rownames.append("%s+%s" % (utils.get_bgc_name(input_files[idx1]), utils.get_bgc_name(input_files[idx2])))
+                        if options["algo_mode"] == "classification":
+                            class1 = options["single_values"][idx1].split(",")
+                            class2 = options["single_values"][idx2].split(",")
+                            testing_target.append(int(len(set(class1) & set(class2)) > 0))
+                        elif options["algo_mode"] == "regression":
+                            testing_target.append(float(options["test_pair_values"][i][j]))
+        elif options["features_scope"] == "single":
+            for idx in options["test_set"]:
+                testing_matrix.append(features_matrix["%d" % (idx)])
+                testing_rownames.append("%s" % (utils.get_bgc_name(input_files[idx1])))
+                testing_target.append(options["single_values"][idx])
+        testing_matrix = np.array(testing_matrix)
+        testing_target = np.array(testing_target)
+        ## Load the training model
+        module = None
+        for plugin in utils.load_plugins(options["algo_mode"]):
+            if plugin.name == options["algorithm"]["name"]:
+                module = plugin
+                break
+        if module == None:
+            log.error("Failed to load module: '%s.%s'" % (options["algo_mode"], options["algorithm"]["name"]))
+            sys.exit(1)
+        else:
+            log.info("Training model...")
+            classifier = module.train(training_matrix, training_target, options["algorithm"]["params"])
+            # save model & its metadata to file
+            model_metadata = {
+                "mode": options["algo_mode"],
+                "algorithm": options["algorithm"],
+                "features": options["features"],
+                "columns": options["features_columns"],
+                "training_data_count": len(training_matrix),
+                "environment": {
+                    "bgc-learn": utils.get_version(),
+                    "scikit-learn": pkg_resources.get_distribution("scikit-learn").version,
+                    "numpy": pkg_resources.get_distribution("numpy").version,
+                    "scipy": pkg_resources.get_distribution("scipy").version,
+                }
+            }
+            save_name = utils.save_result_model(classifier, model_metadata, options["output_folder"])
+            # calculate accuracies & save summaries
+            result_training = ({}, [])
+            if len(training_matrix) > 0:
+                result_training = module.test(training_matrix, training_target, classifier)
+            utils.save_result_testing("training-%s" % (save_name), training_rownames, options["features_columns"], training_matrix, training_target, result_training, options["output_folder"])
+            result_testing = ({}, [])
+            if len(testing_matrix) > 0:
+                result_testing = module.test(testing_matrix, testing_target, classifier)
+            utils.save_result_testing("testing-%s" % (save_name), testing_rownames, options["features_columns"], testing_matrix, testing_target, result_testing, options["output_folder"])
+
+    elif options["mode"] == "predict":
+        print "..."
+
+    ## Cleanup
+    log.info("Cleaning up..")
+    shutil.rmtree(feature_folder) # remove feature folder
+
+    ## done
+    log.info("Analysis done. your result is available inside the folder '%s'." % options["output_folder"])
+
+if __name__ == "__main__":
+    main()

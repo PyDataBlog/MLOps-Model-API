@@ -1,0 +1,866 @@
+package misc
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"go.uber.org/multierr"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+)
+
+var (
+	rawLogger     *zap.Logger
+	whisperLogger *WhisperLogger
+	LogLevel      = zap.NewAtomicLevel()
+	logEntryPool  = sync.Pool{New: func() interface{} { return &logEntry{} }}
+)
+
+type LogConfig struct {
+	// Level is the minimum enabled logging level. Note that this is a dynamic
+	// level, so calling Config.Level.SetLevel will atomically change the log
+	// level of all loggers descended from this config.
+	Level zap.AtomicLevel `json:"level" yaml:"level"`
+	// Development puts the logger in development mode, which changes the
+	// behavior of DPanicLevel and takes stacktraces more liberally.
+	Development bool `json:"development" yaml:"development"`
+	// DisableCaller stops annotating logs with the calling function's file
+	// name and line number. By default, all logs are annotated.
+	DisableCaller bool `json:"disableCaller" yaml:"disableCaller"`
+	// Sampling sets a sampling policy. A nil SamplingConfig disables sampling.
+	Sampling *zap.SamplingConfig `json:"sampling" yaml:"sampling"`
+	// Encoding sets the logger's encoding. Valid values are "json" and
+	// "console", as well as any third-party encodings registered via
+	// RegisterEncoder.
+	Encoding string `json:"encoding" yaml:"encoding"`
+	// EncoderConfig sets options for the chosen encoder. See
+	// zapcore.EncoderConfig for details.
+	EncoderConfig zapcore.EncoderConfig `json:"encoderConfig" yaml:"encoderConfig"`
+	// OutputPaths is a list of paths to write logging output to. See Open for
+	// details.
+	OutputPaths []string `json:"outputPaths" yaml:"outputPaths"`
+	// AdditionalWriters is list of custom log writers.
+	AdditionalWriters []zapcore.WriteSyncer
+	// InitialFields is a collection of fields to add to the root logger.
+	InitialFields map[string]interface{} `json:"initialFields" yaml:"initialFields"`
+}
+
+func (this *LogConfig) SetOutputPaths(paths ...string) {
+	this.OutputPaths = paths
+}
+
+func (this *LogConfig) AddAdditionalWriters(writers ...zapcore.WriteSyncer) {
+	this.AdditionalWriters = append(this.AdditionalWriters, writers...)
+}
+
+func NewDevelopLogConfig() *LogConfig {
+	encoderConfig := zap.NewDevelopmentEncoderConfig()
+	encoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	encoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+		enc.AppendString(t.Format("15:04:05"))
+	}
+
+	return &LogConfig{
+		Level:         zap.NewAtomicLevelAt(zap.DebugLevel),
+		Development:   true,
+		Encoding:      "console",
+		EncoderConfig: encoderConfig,
+		OutputPaths:   []string{"stderr"},
+	}
+}
+
+func NewProductionLogConfig() *LogConfig {
+	encoderConfig := zap.NewProductionEncoderConfig()
+	encoderConfig.EncodeTime = func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+		enc.AppendInt64(t.Unix())
+	}
+
+	return &LogConfig{
+		Level:       zap.NewAtomicLevelAt(zap.InfoLevel),
+		Development: false,
+		Sampling: &zap.SamplingConfig{
+			Initial:    100,
+			Thereafter: 100,
+		},
+		Encoding:      "json",
+		EncoderConfig: encoderConfig,
+		OutputPaths:   []string{"stderr"},
+	}
+}
+
+func InitLogger(cfg *LogConfig, fields ...zapcore.Field) (*WhisperLogger, error) {
+	if rawLogger != nil {
+		return nil, errors.New("the logger has been initialized")
+	}
+
+	logger, hourlyFile, err := newZapLogger(cfg)
+	if err != nil {
+		return nil, err
+	}
+	if len(fields) > 0 {
+		logger = logger.With(fields...)
+	}
+
+	whisperLogger = &WhisperLogger{
+		zapLogger:     logger,
+		queue:         NewMpscQueue(),
+		chFlush:       make(chan chan error),
+		hourlyFile:    hourlyFile,
+		disableCaller: cfg.DisableCaller,
+	}
+
+	rawLogger = logger
+	go flushLogs()
+
+	return whisperLogger, nil
+}
+
+func Logger() *WhisperLogger {
+	return whisperLogger
+}
+
+func RawLogger() *zap.Logger {
+	return rawLogger
+}
+
+type HourlyFile struct {
+	f       *os.File
+	pattern string
+	part    string
+	utcTime bool
+}
+
+func NewHourlyFile(pattern string, utcTime bool) (*HourlyFile, error) {
+	hFile := &HourlyFile{pattern: pattern, utcTime: utcTime}
+	return hFile, hFile.Renew()
+}
+
+func (this *HourlyFile) Renew() error {
+	var str1 string
+	now := time.Unix(UnixNow(), 0)
+	if this.utcTime {
+		str1 = now.UTC().Format("2006010215")
+	} else {
+		str1 = now.Format("2006010215")
+	}
+	if str1 == this.part {
+		return nil
+	}
+
+	str2 := strings.Replace(this.pattern, "*", str1, 1)
+	f, err := os.OpenFile(str2, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	if this.f != nil {
+		_ = this.f.Close()
+	}
+
+	this.f = f
+	this.part = str1
+	return nil
+}
+
+func (this *HourlyFile) Write(p []byte) (n int, err error) {
+	return this.f.Write(p)
+}
+
+func (this *HourlyFile) Sync() error {
+	return this.f.Sync()
+}
+
+func newZapLogger(cfg *LogConfig) (*zap.Logger, *HourlyFile, error) {
+	n := 0
+	var pattern string
+	for _, p := range cfg.OutputPaths {
+		if strings.Contains(p, "*") {
+			pattern = p
+			n++
+		}
+	}
+	if n > 1 {
+		return nil, nil, errors.New("you can only specify 1 output path including '*'")
+	}
+
+	var hourlyFile *HourlyFile
+	if pattern != "" {
+		var err error
+		var utcTime = !cfg.Development
+		hourlyFile, err = NewHourlyFile(pattern, utcTime)
+		if err != nil {
+			return nil, nil, err
+		}
+	}
+
+	additionalWriters := cfg.AdditionalWriters
+	if hourlyFile != nil {
+		additionalWriters = append(additionalWriters, hourlyFile)
+	}
+
+	zapConfig := &zap.Config{
+		Level:             cfg.Level,
+		Development:       cfg.Development,
+		DisableCaller:     cfg.DisableCaller,
+		DisableStacktrace: true,
+		Sampling:          cfg.Sampling,
+		Encoding:          cfg.Encoding,
+		EncoderConfig:     cfg.EncoderConfig,
+		OutputPaths:       cfg.OutputPaths,
+		AdditionalWriters: additionalWriters,
+		ErrorOutputPaths:  []string{"stderr"},
+		InitialFields:     cfg.InitialFields,
+	}
+
+	logger, err := zapConfig.Build()
+	if err != nil {
+		return nil, nil, err
+	} else {
+		return logger.WithOptions(zap.AddCallerSkip(2)), hourlyFile, nil
+	}
+}
+
+const (
+	kLogStyle_Normal = 0
+	kLogStyle_Format = 1
+	kLogStyle_With   = 2
+)
+
+type logEntry struct {
+	wl     *WhisperLogger
+	style  int8
+	level  int8
+	str1   string
+	args   []interface{}
+	caller *zapcore.EntryCaller
+}
+
+type WhisperLogger struct {
+	zapLogger     *zap.Logger
+	queue         *MpscQueue
+	chFlush       chan chan error
+	hourlyFile    *HourlyFile
+	disableCaller bool
+}
+
+// With adds a variadic number of fields to the logging context. It accepts a
+// mix of strongly-typed zapcore.Field objects and loosely-typed key-value
+// pairs. When processing pairs, the first element of the pair is used as the
+// field key and the second as the field value.
+//
+// For example,
+//   WhisperLogger.With(
+//     "hello", "world",
+//     "failure", errors.New("oh no"),
+//     Stack(),
+//     "count", 42,
+//     "user", User{Name: "alice"},
+//  )
+//
+// Note that the keys in key-value pairs should be strings. In development,
+// passing a non-string key panics. In production, the logger is more
+// forgiving: a separate error is logged, but the key-value pair is skipped
+// and execution continues. Passing an orphaned key triggers similar behavior:
+// panics in development and errors in production.
+func (this *WhisperLogger) With(args ...interface{}) *WhisperLogger {
+	newZapLogger := this.zapLogger.With(this.sweetenFields(args)...)
+	return &WhisperLogger{
+		zapLogger:     newZapLogger,
+		queue:         this.queue,
+		chFlush:       this.chFlush,
+		hourlyFile:    this.hourlyFile,
+		disableCaller: this.disableCaller,
+	}
+}
+
+func (this *WhisperLogger) QueueLen() int64 {
+	return this.queue.Len()
+}
+
+func (this *WhisperLogger) getCaller() *zapcore.EntryCaller {
+	if this.disableCaller {
+		return nil
+	} else {
+		return zapcore.NewEntryCaller(runtime.Caller(2))
+	}
+}
+
+// Debug uses fmt.Sprint to construct and log a message.
+func (this *WhisperLogger) Debug(args ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.DebugLevel) {
+		return
+	}
+
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Normal
+	entry.level = int8(zap.DebugLevel)
+	entry.str1 = ""
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Info uses fmt.Sprint to construct and log a message.
+func (this *WhisperLogger) Info(args ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.InfoLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Normal
+	entry.level = int8(zap.InfoLevel)
+	entry.str1 = ""
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Warn uses fmt.Sprint to construct and log a message.
+func (this *WhisperLogger) Warn(args ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.WarnLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Normal
+	entry.level = int8(zap.WarnLevel)
+	entry.str1 = ""
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Error uses fmt.Sprint to construct and log a message.
+func (this *WhisperLogger) Error(args ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.ErrorLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Normal
+	entry.level = int8(zap.ErrorLevel)
+	entry.str1 = ""
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// DPanic uses fmt.Sprint to construct and log a message. In development, the
+// logger then panics. (See DPanicLevel for details.)
+func (this *WhisperLogger) DPanic(args ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Normal
+	entry.level = int8(zap.DPanicLevel)
+	entry.str1 = ""
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Panic uses fmt.Sprint to construct and log a message, then panics.
+func (this *WhisperLogger) Panic(args ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Normal
+	entry.level = int8(zap.PanicLevel)
+	entry.str1 = ""
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Fatal uses fmt.Sprint to construct and log a message, then calls os.Exit.
+func (this *WhisperLogger) Fatal(args ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Normal
+	entry.level = int8(zap.FatalLevel)
+	entry.str1 = ""
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Debugf uses fmt.Sprintf to log a templated message.
+func (this *WhisperLogger) Debugf(template string, args ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.DebugLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Format
+	entry.level = int8(zap.DebugLevel)
+	entry.str1 = template
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Infof uses fmt.Sprintf to log a templated message.
+func (this *WhisperLogger) Infof(template string, args ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.InfoLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Format
+	entry.level = int8(zap.InfoLevel)
+	entry.str1 = template
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Warnf uses fmt.Sprintf to log a templated message.
+func (this *WhisperLogger) Warnf(template string, args ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.WarnLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Format
+	entry.level = int8(zap.WarnLevel)
+	entry.str1 = template
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Errorf uses fmt.Sprintf to log a templated message.
+func (this *WhisperLogger) Errorf(template string, args ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.ErrorLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Format
+	entry.level = int8(zap.ErrorLevel)
+	entry.str1 = template
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// DPanicf uses fmt.Sprintf to log a templated message. In development, the
+// logger then panics. (See DPanicLevel for details.)
+func (this *WhisperLogger) DPanicf(template string, args ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Format
+	entry.level = int8(zap.DPanicLevel)
+	entry.str1 = template
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Panicf uses fmt.Sprintf to log a templated message, then panics.
+func (this *WhisperLogger) Panicf(template string, args ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Format
+	entry.level = int8(zap.PanicLevel)
+	entry.str1 = template
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Fatalf uses fmt.Sprintf to log a templated message, then calls os.Exit.
+func (this *WhisperLogger) Fatalf(template string, args ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_Format
+	entry.level = int8(zap.FatalLevel)
+	entry.str1 = template
+	entry.args = args
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Debugw logs a message with some additional context. The variadic key-value
+// pairs are treated as they are in With.
+//
+// When debug-level logging is disabled, this is much faster than
+//  this.With(keysAndValues).Debug(msg)
+func (this *WhisperLogger) Debugw(msg string, keysAndValues ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.DebugLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_With
+	entry.level = int8(zap.DebugLevel)
+	entry.str1 = msg
+	entry.args = keysAndValues
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Infow logs a message with some additional context. The variadic key-value
+// pairs are treated as they are in With.
+func (this *WhisperLogger) Infow(msg string, keysAndValues ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.InfoLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_With
+	entry.level = int8(zap.InfoLevel)
+	entry.str1 = msg
+	entry.args = keysAndValues
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Warnw logs a message with some additional context. The variadic key-value
+// pairs are treated as they are in With.
+func (this *WhisperLogger) Warnw(msg string, keysAndValues ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.WarnLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_With
+	entry.level = int8(zap.WarnLevel)
+	entry.str1 = msg
+	entry.args = keysAndValues
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Errorw logs a message with some additional context. The variadic key-value
+// pairs are treated as they are in With.
+func (this *WhisperLogger) Errorw(msg string, keysAndValues ...interface{}) {
+	if !this.zapLogger.Core().Enabled(zap.ErrorLevel) {
+		return
+	}
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_With
+	entry.level = int8(zap.ErrorLevel)
+	entry.str1 = msg
+	entry.args = keysAndValues
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// DPanicw logs a message with some additional context. In development, the
+// logger then panics. (See DPanicLevel for details.) The variadic key-value
+// pairs are treated as they are in With.
+func (this *WhisperLogger) DPanicw(msg string, keysAndValues ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_With
+	entry.level = int8(zap.DPanicLevel)
+	entry.str1 = msg
+	entry.args = keysAndValues
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Panicw logs a message with some additional context, then panics. The
+// variadic key-value pairs are treated as they are in With.
+func (this *WhisperLogger) Panicw(msg string, keysAndValues ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_With
+	entry.level = int8(zap.PanicLevel)
+	entry.str1 = msg
+	entry.args = keysAndValues
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+// Fatalw logs a message with some additional context, then calls os.Exit. The
+// variadic key-value pairs are treated as they are in With.
+func (this *WhisperLogger) Fatalw(msg string, keysAndValues ...interface{}) {
+	entry := logEntryPool.Get().(*logEntry)
+	entry.wl = this
+	entry.style = kLogStyle_With
+	entry.level = int8(zap.FatalLevel)
+	entry.str1 = msg
+	entry.args = keysAndValues
+	entry.caller = this.getCaller()
+	this.queue.Push(entry)
+}
+
+func (this *WhisperLogger) debugImpl(e *logEntry) {
+	if len(e.args) == 1 {
+		this.log(zap.DebugLevel, "%+v", e.args, nil, e.caller)
+	} else {
+		this.log(zap.DebugLevel, "", e.args, nil, e.caller)
+	}
+}
+
+func (this *WhisperLogger) infoImpl(e *logEntry) {
+	if len(e.args) == 1 {
+		this.log(zap.InfoLevel, "%+v", e.args, nil, e.caller)
+	} else {
+		this.log(zap.InfoLevel, "", e.args, nil, e.caller)
+	}
+}
+
+func (this *WhisperLogger) warnImpl(e *logEntry) {
+	if len(e.args) == 1 {
+		this.log(zap.WarnLevel, "%+v", e.args, nil, e.caller)
+	} else {
+		this.log(zap.WarnLevel, "", e.args, nil, e.caller)
+	}
+}
+
+func (this *WhisperLogger) errorImpl(e *logEntry) {
+	if len(e.args) == 1 {
+		this.log(zap.ErrorLevel, "%+v", e.args, nil, e.caller)
+	} else {
+		this.log(zap.ErrorLevel, "", e.args, nil, e.caller)
+	}
+}
+
+func (this *WhisperLogger) dpanicImpl(e *logEntry) {
+	if len(e.args) == 1 {
+		this.log(zap.DPanicLevel, "%+v", e.args, nil, e.caller)
+	} else {
+		this.log(zap.DPanicLevel, "", e.args, nil, e.caller)
+	}
+}
+
+func (this *WhisperLogger) panicImpl(e *logEntry) {
+	if len(e.args) == 1 {
+		this.log(zap.PanicLevel, "%+v", e.args, nil, e.caller)
+	} else {
+		this.log(zap.PanicLevel, "", e.args, nil, e.caller)
+	}
+}
+
+func (this *WhisperLogger) fatalImpl(e *logEntry) {
+	if len(e.args) == 1 {
+		this.log(zap.FatalLevel, "%+v", e.args, nil, e.caller)
+	} else {
+		this.log(zap.FatalLevel, "", e.args, nil, e.caller)
+	}
+}
+
+func (this *WhisperLogger) debugfImpl(e *logEntry) {
+	this.log(zap.DebugLevel, e.str1, e.args, nil, e.caller)
+}
+
+func (this *WhisperLogger) infofImpl(e *logEntry) {
+	this.log(zap.InfoLevel, e.str1, e.args, nil, e.caller)
+}
+
+func (this *WhisperLogger) warnfImpl(e *logEntry) {
+	this.log(zap.WarnLevel, e.str1, e.args, nil, e.caller)
+}
+
+func (this *WhisperLogger) errorfImpl(e *logEntry) {
+	this.log(zap.ErrorLevel, e.str1, e.args, nil, e.caller)
+}
+
+func (this *WhisperLogger) dpanicfImpl(e *logEntry) {
+	this.log(zap.DPanicLevel, e.str1, e.args, nil, e.caller)
+}
+
+func (this *WhisperLogger) panicfImpl(e *logEntry) {
+	this.log(zap.PanicLevel, e.str1, e.args, nil, e.caller)
+}
+
+func (this *WhisperLogger) fatalfImpl(e *logEntry) {
+	this.log(zap.FatalLevel, e.str1, e.args, nil, e.caller)
+}
+
+func (this *WhisperLogger) debugwImpl(e *logEntry) {
+	this.log(zap.DebugLevel, e.str1, nil, e.args, e.caller)
+}
+
+func (this *WhisperLogger) infowImpl(e *logEntry) {
+	this.log(zap.InfoLevel, e.str1, nil, e.args, e.caller)
+}
+
+func (this *WhisperLogger) warnwImpl(e *logEntry) {
+	this.log(zap.WarnLevel, e.str1, nil, e.args, e.caller)
+}
+
+func (this *WhisperLogger) errorwImpl(e *logEntry) {
+	this.log(zap.ErrorLevel, e.str1, nil, e.args, e.caller)
+}
+
+func (this *WhisperLogger) dpanicwImpl(e *logEntry) {
+	this.log(zap.DPanicLevel, e.str1, nil, e.args, e.caller)
+}
+
+func (this *WhisperLogger) panicwImpl(e *logEntry) {
+	this.log(zap.PanicLevel, e.str1, nil, e.args, e.caller)
+}
+
+func (this *WhisperLogger) fatalwImpl(e *logEntry) {
+	this.log(zap.FatalLevel, e.str1, nil, e.args, e.caller)
+}
+
+// Sync flushes any buffered log entries.
+func (this *WhisperLogger) Sync() error {
+	chDone := make(chan error)
+	this.chFlush <- chDone
+	return <-chDone
+}
+
+func (this *WhisperLogger) log(lvl zapcore.Level, template string, fmtArgs []interface{}, context []interface{}, caller *zapcore.EntryCaller) {
+	// Format with Sprint, Sprintf, or neither.
+	msg := template
+	if msg == "" && len(fmtArgs) > 0 {
+		msg = fmt.Sprint(fmtArgs...)
+	} else if msg != "" && len(fmtArgs) > 0 {
+		msg = fmt.Sprintf(template, fmtArgs...)
+	}
+
+	if ce := this.zapLogger.Check(caller, lvl, msg); ce != nil {
+		ce.Caller = caller
+		ce.Write(this.sweetenFields(context)...)
+	}
+}
+
+func (this *WhisperLogger) sweetenFields(args []interface{}) []zapcore.Field {
+	if len(args) == 0 {
+		return nil
+	}
+
+	// Allocate enough space for the worst case; if users pass only structured
+	// fields, we shouldn't penalize them with extra allocations.
+	fields := make([]zapcore.Field, 0, len(args))
+	var invalid invalidLogPairs
+
+	for i := 0; i < len(args); {
+		// This is a strongly-typed field. Consume it and move on.
+		if f, ok := args[i].(zapcore.Field); ok {
+			fields = append(fields, f)
+			i++
+			continue
+		}
+
+		// Make sure this element isn't a dangling key.
+		if i == len(args)-1 {
+			this.zapLogger.DPanic(nil, "Ignored key without a value.", zap.Any("ignored", args[i]))
+			break
+		}
+
+		// Consume this value and the next, treating them as a key-value pair. If the
+		// key isn't a string, add this pair to the slice of invalid pairs.
+		key, val := args[i], args[i+1]
+		if keyStr, ok := key.(string); !ok {
+			// Subsequent errors are likely, so allocate once up front.
+			if cap(invalid) == 0 {
+				invalid = make(invalidLogPairs, 0, len(args)/2)
+			}
+			invalid = append(invalid, invalidLogPair{i, key, val})
+		} else {
+			fields = append(fields, zap.Any(keyStr, val))
+		}
+		i += 2
+	}
+
+	// If we encountered any invalid key-value pairs, log an error.
+	if len(invalid) > 0 {
+		this.zapLogger.DPanic(nil, "Ignored key-value pairs with non-string keys.", zap.Array("invalid", invalid))
+	}
+	return fields
+}
+
+type invalidLogPair struct {
+	position   int
+	key, value interface{}
+}
+
+func (p invalidLogPair) MarshalLogObject(enc zapcore.ObjectEncoder) error {
+	enc.AddInt64("position", int64(p.position))
+	zap.Any("key", p.key).AddTo(enc)
+	zap.Any("value", p.value).AddTo(enc)
+	return nil
+}
+
+type invalidLogPairs []invalidLogPair
+
+func (ps invalidLogPairs) MarshalLogArray(enc zapcore.ArrayEncoder) error {
+	var err error
+	for i := range ps {
+		err = multierr.Append(err, enc.AppendObject(ps[i]))
+	}
+	return err
+}
+
+func flushLogs() {
+	defer func() {
+		if r := recover(); r != nil {
+			rawLogger.Error(nil, fmt.Sprintf("[flushLogs] panic: %s, %+v", IdentifyPanic(), r))
+		}
+	}()
+
+	impls := [...]func(*WhisperLogger, *logEntry){
+		(*WhisperLogger).debugImpl,
+		(*WhisperLogger).debugfImpl,
+		(*WhisperLogger).debugwImpl,
+		(*WhisperLogger).infoImpl,
+		(*WhisperLogger).infofImpl,
+		(*WhisperLogger).infowImpl,
+		(*WhisperLogger).warnImpl,
+		(*WhisperLogger).warnfImpl,
+		(*WhisperLogger).warnwImpl,
+		(*WhisperLogger).errorImpl,
+		(*WhisperLogger).errorfImpl,
+		(*WhisperLogger).errorwImpl,
+		(*WhisperLogger).dpanicImpl,
+		(*WhisperLogger).dpanicfImpl,
+		(*WhisperLogger).dpanicwImpl,
+		(*WhisperLogger).panicImpl,
+		(*WhisperLogger).panicfImpl,
+		(*WhisperLogger).panicwImpl,
+		(*WhisperLogger).fatalImpl,
+		(*WhisperLogger).fatalfImpl,
+		(*WhisperLogger).fatalwImpl,
+	}
+
+	t := time.Tick(time.Millisecond * 100)
+	for {
+		var n int64
+		var chDone chan error
+		select {
+		case <-t:
+			n = whisperLogger.queue.Len()
+			if n > 0 {
+				n = Max64(1000, n/10)
+			}
+		case chDone = <-whisperLogger.chFlush:
+			n = whisperLogger.queue.Len()
+		}
+
+		if whisperLogger.hourlyFile != nil {
+			if n > 0 {
+				_ = whisperLogger.hourlyFile.Renew()
+			}
+		}
+
+		for i := int64(0); i < n; i++ {
+			entry := whisperLogger.queue.Pop()
+			if entry == nil {
+				break
+			}
+
+			e := entry.(*logEntry)
+			implIdx := e.level*3 + e.style + 3
+			impls[implIdx](e.wl, e)
+			logEntryPool.Put(e)
+		}
+
+		if chDone != nil {
+			err := whisperLogger.zapLogger.Sync()
+			go func() {
+				chDone <- err
+			}()
+		}
+	}
+}

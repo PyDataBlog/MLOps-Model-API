@@ -1,0 +1,344 @@
+require(".const")
+local Card = require('.card')
+local M = {}
+
+--所有的find方法，数据结构是{name = CARD_TYPE.XXX, {}, {}}
+--里面保存的是索引，而不是牌面值
+function M:findDan(cards)
+    if #cards < 1 then return nil end
+    local dan = {name = CARD_TYPE.DAN}
+    local preCard = -1
+    for i, v in ipairs(cards) do
+        if v ~= preCard then
+            table.insert(dan, {i})
+            preCard = v
+        end
+    end
+    if #dan == 0 then return nil end
+    return dan
+end
+
+function M:findDui(cards)
+    if #cards < 2 then return nil end
+    local dui = {name = CARD_TYPE.DUI}
+    local i = 1
+    local lastDuiVal = -1
+    while(i <= #cards-1) do
+        local card = cards[i]
+        if card == cards[i+1] and card ~= lastDuiVal then
+            local group = {i, i+1}
+            table.insert(dui, group)
+            i = i + 2
+            lastDuiVal = card
+        else
+            i = i + 1
+        end
+    end
+    if #dui == 0 then return nil end
+    return dui
+end
+
+function M:findSan(cards)
+    if #cards < 3 then return nil end
+
+    local san = {name = CARD_TYPE.SAN}
+    local i = 1
+    while(i < #cards-2) do
+        local card = cards[i]
+        if card == cards[i+1] and card == cards[i+2] then
+            local group = {i, i+1, i+2}
+            table.insert(san, group)
+            i = i + 3
+        else
+            i = i + 1
+        end
+    end
+    if #san == 0 then return nil end
+    return san
+end
+
+function M:findSanDaiYi(cards)
+    if #cards < 4 then return nil end
+
+    local san = self:findSan(cards) --{{1,2,3}, {7,8,9}}
+    local sanDaiYi = {}
+    for _, v in ipairs(san) do
+        for i, c in ipairs(cards) do
+            if c ~= cards[v[1]] then 
+                local tmp = self:backUpTable(v)
+                table.insert(tmp, i)
+                table.insert(sanDaiYi, tmp)
+            end
+        end
+    end
+    if #sanDaiYi == nil then return nil end
+    return sanDaiYi
+end
+
+function M:findSiDaiEr(cards)
+
+end
+
+function M:findLianDui(cards)
+    --连对至少要有6张牌
+    if #cards < 6 then return nil end
+    local dui = self:findDui(cards)
+    if not dui then return nil end
+    local lianDui = {name = CARD_TYPE.LIAN_DUI}
+    
+    for i=1, #dui-2 do
+        local startDuiIdx = dui[i][1]
+        local startDuiVal = cards[startDuiIdx]
+        if startDuiVal == cards[dui[i+1][1]]-1 and startDuiVal == cards[dui[i+2][1]]-2 then
+            local tmp = {dui[i], dui[i+1], dui[i+2]}
+            table.insert(lianDui, tmp)
+            local lastDuiVal = cards[dui[i+2][1]]
+            for j=i+3, #dui do
+                local dIdx = dui[j][1]
+                local dVal = cards[dui[j][1]]
+                if dVal == lastDuiVal+1 then
+                    lastDuiVal = cards[dui[j][1]]
+                    local backUpTmp = self:backUpTable(tmp)
+                    table.insert(backUpTmp, dui[j])
+                    table.insert(lianDui, backUpTmp)
+                end
+            end
+        end
+    end
+    if #lianDui == 0 then return nil end
+    return lianDui
+end
+
+function M:findNumAddOne(x, cards, idx)
+    for i = idx+1, idx+4 do
+        if cards[i] == x+1 then return i end
+    end
+    return false
+end
+
+function M:findShun(cards)
+    if #cards < 5 then return nil end
+
+    local shun = {name = CARD_TYPE.SHUN}
+    local preCard = -1
+    for i = 1, #cards do
+        local card = cards[i]
+        if card ~= preCard then
+            preCard = card
+            self:findShunZiStartAtX(card, shun, cards, i)
+        end
+    end
+    if #shun == 0 then return nil end
+    return shun
+end
+
+function M:findSanLian(cards)
+    local san = self:findSan(cards)
+    local SanLian = {}
+    for i=1, #san-1 do
+        local startIdx = san[i][1]
+        local startVal = cards[startIdx]
+        local preVal = startVal
+        local group = san[i]
+        for j=i+1, #san do
+            if preVal == cards[san[j][1]] - 1 then
+                preVal = cards[san[j][1]]
+                local g = self:backUpTable(group)
+                for _, v in ipairs(san[j]) do
+                    table.insert(g, v)
+                end
+                table.insert(SanLian, g)
+                group = g
+            else
+                break
+            end
+        end
+    end
+    if #SanLian == 0 then return nil end
+    return SanLian
+end
+
+function M:findFeiJi(cards)
+    if #cards < 8 then return nil end
+    local SanLian = self:findSanLian(cards)
+    local FeiJi = {name = CARD_TYPE.FEI_JI}
+    for k=1, #SanLian do
+        local group = SanLian[k]
+        for i=1, #cards-1 do
+            for j=i+1, #cards do
+                if (i<group[1] or i>group[#group]) and (j<group[1] or j>group[#group]) then --将索引不在连对范围内的添加进来
+                    local g = self:backUpTable(group)
+                    table.insert(g, i)
+                    table.insert(g, j)
+                    table.insert(FeiJi, g)
+                end
+            end
+        end
+    end
+    if #FeiJi == 0 then return nil end
+    return FeiJi             
+end
+
+function M:backUpTable(t)
+	local t1 = {}
+	for k, v in pairs(t) do
+		local tmp = v
+		if type(v) == 'table' then
+			tmp = self:backUpTable(v)
+		end
+		t1[k] = tmp
+	end
+	return t1
+end
+
+function M:findShunZiStartAtX(x, shunGroup, cards, idx)
+    local idxs = {idx}
+    for i = x, x+3 do
+        local idx = self:findNumAddOne(i, cards, idxs[#idxs])
+        if idx then table.insert(idxs, idx) else return false end
+    end
+    if #idxs ~= 5 then error('shun group size is not 5') end  --测试没问题可以删掉这句
+    table.insert(shunGroup, self:backUpTable(idxs))
+    for i = x+4, x+10 do
+        local idx = self:findNumAddOne(i, cards, idxs[#idxs])
+        if idx then 
+            table.insert(idxs, idx) 
+            table.insert(shunGroup, self:backUpTable(idxs))
+        else
+            break
+        end
+    end
+end
+
+function M:findZha(cards)
+    if #cards < 4 then return nil end
+    local four = {name = CARD_TYPE.ZHA}
+    local i = 1
+    while(i < #cards-3) do
+        local card = cards[i]
+        if card == cards[i+1] and card == cards[i+2] and card == cards[i+3] then
+            local group = {i, i+1, i+2, i+3}
+            table.insert(four, group)
+            i = i + 4
+        else
+            i = i + 1
+        end
+    end
+    if #four == 0 then return nil end
+    return four
+end
+
+function M:findWangZha(cards)
+    if #cards < 2 then return nil end
+    local WangZha = {name = CARD_TYPE.WANG_ZHA}
+    if cards[#cards] == 19 and cards[#cards-1] == 18 then
+        table.insert(WangZha, #cards-1)
+        table.insert(WangZha, #cards)
+    end
+    if #WangZha == 0 then return nil end
+    return WangZha
+end
+
+function M:getAllTypes()
+    return {CARD_TYPE.DAN, CARD_TYPE.DUI, CARD_TYPE.SAN_DAI_YI
+    , CARD_TYPE.SAN, CARD_TYPE.SI_DAI_ER, CARD_TYPE.ZHA, CARD_TYPE.LIAN_DUI
+    , CARD_TYPE.SHUN, CARD_TYPE.WANG_ZHA}
+end
+
+function M:getOutCartTypes(tableDB, user)
+    local tableCard = tableDB:getTableCard()
+    --当牌桌上的牌的是我自己出的那张的时候说明绕了一圈没人打得起
+    --或者游戏刚刚开始的时候
+    --这两种情况可以出的牌就是所有种类
+    if tableDB.gameStatus == GAME_STATUS.START or tableCard.owner.name == user.name then
+        return self:getAllTypes()
+    end
+
+    local outCardTypes = {}
+    --当不是炸的时候就可以出炸弹或者和当前牌对应的牌的种类
+    --如果是炸弹就只能出炸弹
+    --如果是王炸就返回一个空的table
+    if tableCard.typeCode ~= CARD_TYPE.ZHA or tableCard.typeCode ~= CARD_TYPE.WANG_ZHA then
+        table.insert(outCardTypes, tableCard.typeCode)
+        table.insert(outCardTypes, CARD_TYPE.ZHA)
+        table.insert(outCardTypes, CARD_TYPE.WANG_ZHA)
+    elseif tableCard.typeCode == CARD_TYPE.ZHA then
+        table.insert(outCardTypes, CARD_TYPE.ZHA)
+        table.insert(outCardTypes, CARD_TYPE.WANG_ZHA)
+    end
+    return outCardTypes 
+end
+
+function M:findCardChoices(tableDB, user)
+    if #user.cards == 4 and user.name == 'p2' then
+        print('')
+    end
+    --先根据table card来判断能打哪些类型牌
+    local types = self:getOutCartTypes(tableDB, user) --{CARD_TYPE.DUI, CARD_TYPE.ZHA, CARD_TYPE.WANG_ZHA}
+    local outCardChoices = {}
+    local cards = user.cards
+    
+    --先找到所有要找的类型
+    for _, v in pairs(types) do
+        if v == CARD_TYPE.DAN then table.insert(outCardChoices, self:findDan(cards)) 
+        elseif v == CARD_TYPE.DUI then table.insert(outCardChoices, self:findDui(cards))
+        elseif v == CARD_TYPE.SAN then table.insert(outCardChoices, self:findSan(cards)) 
+        elseif v == CARD_TYPE.SAN_DAY_YI then table.insert(outCardChoices, self:findSanDaiYi(cards)) 
+        elseif v == CARD_TYPE.SHUN then table.insert(outCardChoices, self:findShun(cards))
+        elseif v == CARD_TYPE.LIAN_DUI then table.insert(outCardChoices, self:findLianDui(cards))
+        -- elseif v == CARD_TYPE.SI_DAI_ER then table.insert(outCardChoices, self:findSiDaiEr(cards)) 
+        elseif v == CARD_TYPE.ZHA then table.insert(outCardChoices, self:findZha(cards))
+        elseif v == CARD_TYPE.WANG_ZHA then table.insert(outCardChoices, self:findWangZha(cards)) end
+    end
+    
+    --outCardChoices = {{name = CARD_TYPE.PASS}, {name = CARD_TYPE.DUI,{1,2},{3,4}},{name = CARD_TYPE.ZHA, {5,6,7,8}}, {name = CARD_TYPE.WANG_ZHA, {9,10}}}
+    --过滤掉比tableCard小的牌
+    local tableCard = tableDB:getTableCard()
+    local tableCardType = tableCard.typeCode
+    --tableCard不可能是PASS，所以不用是考虑PASS
+    --自己随意出牌的时候，就不用继续过滤，直接return
+    if tableDB.gameStatus == GAME_STATUS.START or tableCard.owner.name == user.name then return outCardChoices end
+
+    for i = 1, #outCardChoices do 
+        local choice = outCardChoices[i]
+        local choiceType = choice.name
+        --单，对子，三个，三带一，四代二，炸  这几种只要比较第一个元素就知道大小了
+        if tableCardType >= CARD_TYPE.DAN and tableCardType < CARD_TYPE.LIAN_DUI  and choiceType == tableCardType then
+            for k = #choice, 1, -1 do -- k是个table，里面装了这个对子
+                if cards[choice[k][1]] <= tableCard.value[1] then table.remove(choice, k) end
+            end
+        end 
+        --连队和顺子就要比较长度以及第一个数
+        if (tableCardType == CARD_TYPE.LIAN_DUI  or tableCardType == CARD_TYPE.SHUN) and choiceType == tableCardType then
+            for k = #choice, 1, -1 do
+                if #choice[k] ~= #tableCard.value or cards[choice[k][1]] <= tableCard.value[1] then table.remove(choice, k) end
+            end
+        end
+    end
+    return outCardChoices
+end
+
+function M:createTableCard(tableDB, card, user, type)
+    local tableCard = {}
+    tableCard.cardUser = user
+    tableCard.type = type
+    tableCard.value = {}
+    
+    for i, v in ipairs(card) do
+        tableCard.value[i] = user.cards[v]
+    end
+    
+    return tableCard
+end
+
+function M:parseCardIdx(user, cardsIdx, typeCode)
+    -- cardsIdx是一个装满了idx的table，这里将idx转换成一个card
+    local cards = user.cards
+    local value = {}
+    for _, idx in ipairs(cardsIdx) do
+        table.insert(value, cards[idx])
+    end
+    local card =  Card:new(typeCode, value, user)
+    return card
+end
+return M

@@ -1,0 +1,156 @@
+package adtoyou.spark.analysis.azkaban
+
+import java.text.SimpleDateFormat
+import java.util.{Calendar, Date}
+
+import adtoyou.spark.analysis.MyRDDFunctions._
+import adtoyou.spark.analysis.util.MD5Util
+import com.redislabs.provider.redis._
+import org.apache.spark.{SparkConf, SparkContext}
+import redis.clients.util.JedisClusterCRC16
+
+
+/**
+  * Created by wangqy on 2017/5/19.
+  */
+object UMLRefresh {
+  
+  def main(args: Array[String]): Unit = {
+    val conf = new SparkConf()
+      .set("spark.shuffle.file.buffer", "128k")
+      .set("spark.reducer.maxSizeInFlight", "96m")
+      .set("redis.host", "192.168.3.156")
+      .set("redis.port", "9801")
+      .set("redis.timeout", "30000")
+    
+    val sc = new SparkContext(conf)
+    
+    rmFromRedis(sc)
+    
+    val dtFormat = new SimpleDateFormat("yyyyMM")
+    val cal: Calendar = Calendar.getInstance
+    val now = new Date
+    cal.setTime(now)
+    cal.add(Calendar.MONTH, -2)
+    val prev2Month = dtFormat.format(cal.getTime)
+    cal.add(Calendar.MONTH, -1)
+    val prev3Month = dtFormat.format(cal.getTime)
+    cal.add(Calendar.MONTH, -1)
+    val prev4Month = dtFormat.format(cal.getTime)
+    val userFile: String = s"/drp/tyv2/data/user_data/{$prev2Month*,$prev3Month*,$prev4Month*}"
+    val userRDD = sc.textFile(userFile)
+      .map(_.split('\t')(1).trim)
+      .filter(u => u.length != 0 && u.length != 32 && u.length != 40)
+      .map(u => (MD5Util.toMD516(u), u))
+      .filter(_._1 != null)
+      .map(x => ("UML|" + x._1, x._2))
+      .reduceByKey((v1, _) => v1)
+    
+    sc.toRedisKV(userRDD, 10, 250)
+    
+    sc.stop
+  }
+  
+  def rmFromRedis(sc: SparkContext)
+    (implicit redisConfig: RedisConfig = new RedisConfig(new RedisEndpoint(sc.getConf))) {
+    //    val hosts = testScaleHosts(redisConfig, 250)
+    //    println(hosts.size)
+    //    hosts.foreach(x => println(x.productIterator.mkString(",")))
+    
+    sc.fromRedisKeyPattern("UML|*", 250)
+      .foreachPartition { keys =>
+        if (keys.hasNext) {
+          val keyArr = keys.map(k => (JedisClusterCRC16.getSlot(k), k)).toArray
+          val k = keyArr(0)._2
+          val conn = redisConfig.connectionForKey(k)
+          val pipeline = conn.pipelined()
+          keyArr.groupBy(_._1)
+            .foreach(x =>
+              pipeline.del(x._2.map(_._2): _*)
+            )
+          conn.close()
+        }
+      }
+    
+    //    redisConfig.hosts.foreach { host =>
+    //      println("clear host=" + host.endpoint.host + ":" + host.endpoint.port)
+    //      val jedis = host.connect()
+    //      try {
+    //        val pipeline = jedis.pipelined
+    //        for (i <- '0' to 'f') {
+    //          val response = pipeline.keys(s"UML|$i*")
+    //          pipeline.sync
+    //          val keySet = response.get
+    //          val len = keySet.size
+    //          val strArr = new Array[String](len)
+    //          val keyArr = keySet.toArray(strArr)
+    //            .map(k => (JedisClusterCRC16.getSlot(k), k))
+    //          keyArr.groupBy(_._1)
+    //            .foreach(x =>
+    //              pipeline.del(x._2.map(_._2): _*)
+    //            )
+    //          pipeline.sync
+    //        }
+    //      } catch {
+    //        case e: Throwable =>
+    //          System.out.println(ExceptionUtils.getFullStackTrace(e))
+    //      } finally {
+    //        if (jedis != null) jedis.close()
+    //      }
+    //    }
+  }
+  
+  // for test only
+  def testScaleHosts(redisConfig: RedisConfig, partitionNum: Int): Seq[(String, Int, Int, Int)] = {
+    def split(host: RedisNode, cnt: Int) = {
+      val endpoint = host.endpoint
+      val start = host.startSlot
+      val end = host.endSlot
+      val range = (end - start) / cnt
+      println(endpoint.host + ":" + endpoint.port)
+      println(start + "~" + end)
+      println("cnt=" + cnt)
+      (0 until cnt).map(i => {
+        (endpoint.host,
+          endpoint.port,
+          if (i == 0) start else (start + range * i + 1),
+          if (i != cnt - 1) (start + range * (i + 1)) else end)
+      })
+    }
+    
+    val hosts = redisConfig.hosts.sortBy(_.startSlot)
+    println("hosts size=" + hosts.size)
+    
+    if (hosts.size == partitionNum) {
+      hosts.map(x => (x.endpoint.host, x.endpoint.port, x.startSlot, x.endSlot))
+    } else if (hosts.size < partitionNum) {
+      val presExtCnt = partitionNum / hosts.size
+      val lastExtCnt = if (presExtCnt * hosts.size < partitionNum)
+        (partitionNum - presExtCnt * (hosts.size - 1)) else presExtCnt
+      
+      println("presExtCnt=" + presExtCnt)
+      println("lastExtCnt=" + lastExtCnt)
+      hosts.zipWithIndex.flatMap {
+        case (host, idx) => {
+          split(host, if (idx == hosts.size - 1) lastExtCnt else presExtCnt)
+        }
+      }
+    } else {
+      val presExtCnt = hosts.size / partitionNum
+      (0 until partitionNum).map {
+        idx => {
+          val ip = hosts(idx * presExtCnt).endpoint.host
+          val port = hosts(idx * presExtCnt).endpoint.port
+          val start = hosts(idx * presExtCnt).startSlot
+          val end = hosts(if (idx == partitionNum - 1) {
+            (hosts.size - 1)
+          } else {
+            ((idx + 1) * presExtCnt - 1)
+          }).endSlot
+          (ip, port, start, end)
+        }
+      }
+    }
+  }
+  
+}

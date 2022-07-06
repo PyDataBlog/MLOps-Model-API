@@ -1,0 +1,282 @@
+#include "spheroid.h"
+#include "boost/foreach.hpp"
+#include "cinder/app/AppBasic.h"
+#include "cinder/gl/Material.h"
+#include "cinder/ImageIo.h"
+#include "utility/utility.h"
+#include "core/azathoth.h"
+
+using namespace cinder;
+using namespace cinder::app;
+using namespace std;
+
+const double PI = 3.1415926535897;
+
+Spheroid::Spheroid() :
+    triangles(360),
+    sphereSpace(20),
+    vertexCount((90 / sphereSpace+1) * (360 / sphereSpace) * 4),
+    sCount(0),
+    kCount(0),
+    hCount(2),
+    sSwitch(true),
+    kSwitch(true),
+    hSwitch(true),
+    sinCount(0),
+    osc1(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc2(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc3(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc4(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc5(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc6(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc7(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc8(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc9(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc10(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc11(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc12(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc13(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc14(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc15(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc16(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc17(Oscillator::SINE,100,190,0.01,rand()*0),
+    osc18(Oscillator::SINE,300,380,0.01,rand()*0)
+{
+    std::cout << "SPHEROID!" << std::endl;
+
+    try {
+        gl::Texture::Format fmt;
+        //        fmt.setWrap( GL_REPEAT,GL_REPEAT );
+        fmt.setWrap(GL_CLAMP,GL_CLAMP);
+        fmt.enableMipmapping( false );
+
+        std::cout << "FORMAT!" << std::endl;
+
+        size = 1.0;
+#ifndef __LINUX__
+        diffuseMap = gl::Texture(loadImage(loadResource("Glitch1_COLOR.png")),fmt);
+        normalMap = gl::Texture(loadImage(loadResource("Glitch1_NRM.png")),fmt);
+        specularMap = gl::Texture(loadImage(loadResource("Glitch1_SPEC.png")),fmt);
+        occlusionMap = gl::Texture(loadImage(loadResource("Glitch1_OCC.png")),fmt);
+#else
+        diffuseMap = az::util::loadImageQT("./resources/Glitch1_COLOR.png", fmt);
+        normalMap = az::util::loadImageQT("./resources/Glitch1_NRM.png", fmt);
+        specularMap = az::util::loadImageQT("./resources/Glitch1_SPEC.png", fmt);
+        occlusionMap = az::util::loadImageQT("./resources/Glitch1_OCC.png", fmt);
+#endif
+
+        std::cout << "TERXTURES LOADED!" << std::endl;
+
+        //        diffuseMap = az::util::loadPNGTexture(az::getWorkingDirectory().append("/resources/MicroCrystal_COLOR.png"),fmt);
+        //        normalMap = az::util::loadPNGTexture(az::getWorkingDirectory().append("/resources/MicroCrystal_NRM.png"),fmt);
+        //        specularMap = az::util::loadPNGTexture(az::getWorkingDirectory().append("/resources/MicroCrystal_SPEC.png"),fmt);
+        //        occlusionMap = az::util::loadPNGTexture(az::getWorkingDirectory().append("/resources/MicroCrystal_OCC.png"),fmt);
+
+    } catch( ... ) {
+        std::cout << "Unable to load terrain texture" << std::endl;
+    }
+
+    try {
+#ifndef __LINUX__
+        bumpShader = gl::GlslProg( loadResource( "bumpMapping_vert.glsl" ), loadResource( "bumpMapping_frag.glsl" ) );
+        //        bumpShader = gl::GlslProg( loadResource( "phong_vert.glsl" ), loadResource( "phong_frag.glsl" ) );
+        //        bumpShader = gl::GlslProg( loadResource( "blur_vert.glsl" ), loadResource( "blur_frag.glsl" ) );
+#else
+        std::string bumpShaderVert, bumpShaderFrag;
+        az::util::loadFile("./resources/bumpMapping_vert.glsl", &bumpShaderVert);
+        az::util::loadFile("./resources/bumpMapping_frag.glsl", &bumpShaderFrag);
+        bumpShader = gl::GlslProg(bumpShaderVert.c_str(), bumpShaderFrag.c_str());
+#endif
+    } catch( ci::gl::GlslProgCompileExc &exc ) {
+        std::cout << "Shader compile error: " << std::endl;
+        std::cout << exc.what();
+    } catch( ... ) {
+        std::cout << "Unable to load shader" << std::endl;
+    }
+
+    //Create Layout and init terrainMesh
+    gl::VboMesh::Layout layout;
+    layout.setStaticIndices();
+    layout.setStaticPositions();
+    layout.setStaticNormals();
+    layout.setStaticTexCoords2d();
+    //    layout.setDynamicPositions();
+    //    layout.setDynamicColorsRGB();
+    //    layout.setDynamicNormals();
+    //    layout.setDynamicTexCoords2d();
+
+    sphereMesh = gl::VboMesh(vertexCount,vertexCount,layout, GL_TRIANGLE_STRIP);
+    //Create Indicies
+    vector<u_int32_t> indicies;
+    int i=0;
+    while(i<vertexCount) {
+        indicies.push_back(i);
+        i++;
+    }
+    sphereMesh.bufferIndices(indicies);
+    createSphere(400.0,getWindowWidth()*-0.4,300,0);
+}
+
+int wrap(int kX, int const kLowerBound, int const kUpperBound)
+{
+    int range_size = kUpperBound - kLowerBound + 1;
+
+    if (kX < kLowerBound)
+        kX += range_size * ((kLowerBound - kX) / range_size + 1);
+
+    return kLowerBound + (kX - kLowerBound) % range_size;
+}
+
+void Spheroid::draw()
+{
+
+    bumpShader.bind();
+
+    diffuseMap.bind(0);
+    bumpShader.uniform("diffuseTexture",0);
+    normalMap.bind(1);
+    bumpShader.uniform("normalTexture",1);
+    specularMap.bind(2);
+    bumpShader.uniform("specularTexture",2);
+    occlusionMap.bind(3);
+    bumpShader.uniform("occlusionTexture",3);
+    if(sSwitch) {
+        sCount++;
+        if(sCount>100) {
+            sSwitch = false;
+        }
+    } else {
+        sCount-=1;
+        if(sCount<-100) {
+            sSwitch = true;
+        }
+    }
+    if(kSwitch) {
+        kCount++;
+        if(kCount>140) {
+            kSwitch = false;
+        }
+    } else {
+        kCount-=1;
+        if(kCount<-140) {
+            kSwitch = true;
+        }
+    }
+    if(hSwitch) {
+        hCount++;
+        if(hCount>200) {
+            hSwitch = false;
+        }
+    } else {
+        hCount-=1;
+        if(hCount<50) {
+            hSwitch = true;
+        }
+    }
+
+
+    sphereSpace = hCount;
+    createSphere(400.0,getWindowWidth()*-0.4+(kCount+hCount*2.25),abs(kCount*4)+200,abs(sCount)*15+100);
+    sinCount++;
+    gl::pushMatrices();
+    gl::translate(8000,-16000,10000);
+    //    gl::draw(sphereMesh);
+
+    gl::rotate(Vec3f(0,180,0));
+    gl::draw(sphereMesh);
+    gl::rotate(Vec3f(0,180,0));
+    //    sphereMesh.unbindBuffers();
+    gl::popMatrices();
+    /*
+    gl::draw(sphereMesh);
+    gl::rotate(90);
+    gl::draw(sphereMesh);
+    gl::rotate(90);
+    */
+    bumpShader.unbind();
+    diffuseMap.unbind(0);
+    normalMap.unbind(1);
+    specularMap.unbind(2);
+    occlusionMap.unbind(3);
+}
+
+void Spheroid::createSphere(double r, double h, double k, double z)  {
+
+    int n;
+    double a;
+    double b;
+    double sphereSize = 60;
+    n = 0;
+    //    std::cout << osc2.oscillate() << std::endl;
+    vector<Vec3f> positions;
+    vector<Vec3f> normals;
+    vector<Vec2f> texCoords;
+    //Put oscillators on every 180 thing.
+    for( b = 0; b <= osc17.oscillate() - sphereSpace; b+=sphereSpace){
+        for( a = 0; a <= osc18.oscillate() - sphereSpace; a+=sphereSpace){
+            Vec3f pos = Vec3f(0,0,0);
+            Vec3f normal = Vec3f(0,0,0);
+            Vec2f texCoord = Vec2f(0,0);
+
+            pos.x = r * sin((a) / osc1.oscillate() * PI) * sin((b) / osc4.oscillate() * PI) - h;
+            pos.y = r * cos((a) / osc2.oscillate() * PI) * sin((b) / osc5.oscillate() * PI) + k;
+            pos.z = r * cos((b) / osc3.oscillate() * PI) - z;
+            pos = pos * sphereSize;
+            pos = pos - (pos*0.5);
+            normal.x = pos.x - h;
+            normal.y = pos.y - k;
+            normal.z = pos.z - z;
+            positions.push_back(pos);
+            normals.push_back(normal.normalized());
+            texCoord.x = (sin((a) / osc1.oscillate() * PI) * sin((b) / osc4.oscillate() * PI))*size;
+            texCoord.y = (cos((a) / osc2.oscillate() * PI) * sin((b) / osc5.oscillate() * PI))*size;
+            texCoords.push_back(texCoord);
+
+            pos.x = r * sin((a) / osc6.oscillate() * PI) * sin((b + sphereSpace) / osc8.oscillate() * PI) - h;
+            pos.y = r * cos((a) / osc7.oscillate() * PI) * sin((b + sphereSpace) / osc9.oscillate() * PI) + k;
+            pos.z = r * cos((b + sphereSpace) / 180 * PI) - z;
+            pos = pos * sphereSize;
+            pos = pos - (pos*0.5);
+            normal.x = pos.x - h;
+            normal.y = pos.y - k;
+            normal.z = pos.z - z;
+            positions.push_back(pos);
+            normals.push_back(normal.normalized());
+            texCoord.x = (sin((a) / osc6.oscillate() * PI) * sin((b + sphereSpace) / osc8.oscillate() * PI))*size;
+            texCoord.y = (cos((a) / osc7.oscillate() * PI) * sin((b + sphereSpace) / osc9.oscillate() * PI))*size;
+            texCoords.push_back(texCoord);
+
+            pos.x = r * sin((a + sphereSpace) / osc10.oscillate() * PI) * sin((b) / osc12.oscillate() * PI) - h;
+            pos.y = r * cos((a + sphereSpace) / osc11.oscillate() * PI) * sin((b) / osc13.oscillate() * PI) + k;
+            pos.z = r * cos((b) / 176 * PI) + z;
+            pos = pos * sphereSize;
+            pos = pos - (pos*0.5);
+            normal.x = pos.x - h;
+            normal.y = pos.y - k;
+            normal.z = pos.z + z;
+            positions.push_back(pos);
+            normals.push_back(normal.normalized());
+            texCoord.x = (sin((a + sphereSpace) / osc10.oscillate() * PI) * sin((b) / 180 * PI))*size;
+            texCoord.y = (cos((a + sphereSpace) / osc11.oscillate() * PI)  * sin((b) / 180 * PI))*size;
+            texCoords.push_back(texCoord);
+
+            pos.x = r * sin((a + sphereSpace) / osc14.oscillate() * PI) * sin((b + sphereSpace) / 182 * PI) - h;
+            pos.y = r * cos((a + sphereSpace) / osc15.oscillate() * PI) * sin((b + sphereSpace) / 180 * PI) + k;
+            pos.z = r * cos((b + sphereSpace) / osc16.oscillate() * PI) + z;
+            pos = pos * sphereSize;
+            pos = pos - (pos*0.5);
+            normal.x = pos.x - h;
+            normal.y = pos.y - k;
+            normal.z = pos.z - z;
+            positions.push_back(pos);
+            normals.push_back(normal.normalized());
+            texCoord.x = (sin((a + sphereSpace) / osc14.oscillate() * PI) * sin((b + sphereSpace) / 180 * PI))*size;
+            texCoord.y = (cos((a + sphereSpace) / osc15.oscillate() * PI)  * sin((b + sphereSpace) / 180 * PI))*size;
+            texCoords.push_back(texCoord);
+
+        }
+    }
+    sphereMesh.bufferPositions(positions);
+    sphereMesh.bufferNormals(normals);
+    sphereMesh.bufferTexCoords2d(0,texCoords);
+}

@@ -1,0 +1,178 @@
+<?php
+
+namespace Anax\Comments;
+
+/**
+ * A controller for comments and such events.
+ */
+class CommentsController implements \Anax\DI\IInjectionAware
+{
+	use \Anax\DI\TInjectable;
+
+	/**
+	 * Initialize the controller.
+	 *
+	 * @return void
+	 */
+	public function initialize()
+	{
+		$this->comments = new \Anax\Comments\Comment();
+		$this->comments->setDI($this->di);
+
+		$this->users = new \Anax\Users\User();
+		$this->users->setDI($this->di);
+
+		$this->scores = new \KGW\Discussion\Score();
+		$this->scores->setDI($this->di);
+	}
+
+	/**
+	 * List all comments.
+	 *
+	 * @return void
+	 */
+	public function viewAction($key = null, $type = null, $redirect = '')
+	{
+		$this->initialize();
+
+		$comments = $this->comments->findAll($key, $type);
+		$user = $this->users;
+
+		if ($this->di->request->getGet('edit-comment')) {
+			
+			$commentId = $this->di->request->getGet('edit-comment');
+
+			for ($i = 0; $i < count($comments); $i++) {
+				if ($comments[$i]->id == $commentId) {
+					
+					$url = current(explode('?', $this->di->request->getCurrentUrl()));
+					$redirect = $this->url->create($url);
+					
+					if ($user->isAuthenticated() && ($user->isCurrentUser($comments[$i]->getProperties()['userId'] || $user->isAdmin()))) {
+
+						$value = $comments[$i]->content;
+						$updateForm = new \Anax\HTMLForm\CFormCommentEdit($commentId, $value, $redirect);
+						$updateForm->setDI($this->di);
+						$status = $updateForm->check();
+
+						$comments[$i] = $updateForm->getHTML();
+					} else {
+						$this->response->redirect($url);
+					}
+				}
+			}
+		}
+		
+		$form = null;
+		if ($user->isAuthenticated() && $this->di->request->getGet('comment-reply') != null) {
+			$commentId   = $this->di->request->getGet('comment-reply');
+			$commentType = $this->di->request->getGet('type');
+
+			
+			if ($key == $commentId && $type == $commentType) {
+				$form = new \Anax\HTMLForm\CFormCommentAdd($commentId, $commentType, $redirect);
+				$form->setDI($this->di);
+				$status = $form->check();
+				$form = $form->getHTML();
+			}
+		}
+		$scores = $this->scores;
+		$this->views->add('comment/comments', [
+			'comments' 		=> $comments,
+			'questionId'	=> $key,
+			'type'			=> $type,
+			'user'			=> $user,
+			'scores'		=> $scores,
+			'form'			=> $form,
+		], 'main');
+	}
+
+	/**
+	 * Edit a comment
+	 *
+	 *@return void
+	 */
+	public function editAction($id = null, $key = null, $type = null)
+	{
+		$comment = $this->comments->find($id);
+		$now = gmdate('Y-m-d H:i:s');
+
+		if ($comment) {
+
+			if ($this->users->isAuthenticated() && ($this->users->isCurrentUser($id) || $this->users->isAdmin())) {
+				$value = $comment->getProperties()['content'];
+
+				$redirect = '';
+				$form = new \Anax\HTMLForm\CFormCommentEdit($id, $value, $redirect);
+				$form->setDI($this->di);
+				$status = $form->check();
+
+				$this->views->add('comment/form',[
+					'title' => "Uppdatera kommentar",
+					'content' => $form->getHTML(),
+				], 'main');
+			}
+		}
+	}
+
+	/**
+	 * Deletes a comment
+	 *
+	 * @return void
+	 */
+	public function deleteAction($id = null)
+	{
+		if (!isset($id)) {
+			die("Missing id");
+		}
+
+		$res = $this->comments->delete($id);
+		
+		$this->response->redirect($this->request->getServer('HTTP_REFERER'));
+
+	}
+
+	/**
+	 * Delete all comments confirmation-
+	 *
+	 * @return void
+	 */
+	public function deleteAllCommentsAction()
+	{
+		$this->theme->setTitle("Radera samtliga kommentarer");
+		$this->views->add('comment/delete-comments', [], 'main');
+	}
+
+	/**
+	 * Deletes all comments.
+	 *
+	 * @return void
+	 */
+	public function deleteAllAction()
+	{
+		$this->comments->deleteAll();
+		$url = $this->url->create('comments');
+		$this->response->redirect($url);
+	}
+
+	/**
+	 * Brings the setup confirmation.
+	 *
+	 * @return void
+	 */
+	public function setupCommentsAction()
+	{
+		$this->theme->setTitle("Återställ kommentarer");
+		$this->views->add('comment/setup-comments', [], 'main');
+	}
+
+	/**
+	 * Used to setup the database to it's original condition.
+	 *
+	 * @return void
+	 */
+	public function setupAction()
+	{
+		$this->comments->setup();
+	}
+}

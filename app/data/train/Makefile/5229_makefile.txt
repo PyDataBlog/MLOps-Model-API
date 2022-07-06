@@ -1,0 +1,164 @@
+############################################################################
+# This file is part of "Velox Linux Build Environment"
+#
+# Copyright (C) 2012-2017 Stewart Maguire <stewart.maguire@s2ack.com>
+#
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA
+# 02110-1301, USA.
+#
+############################################################################
+
+ifeq ($(VELOX_COREDIR),)
+$(error error : VELOX_COREDIR undefined,  source configure-velox-project.sh in Velox Project)
+else
+include $(VELOX_COREDIR)/etc/common_defines.mk
+include $(VELOX_COREDIR)/$(LOCAL_PORTS_DIR)/etc/defines.mk
+endif
+
+PORTNAME=mesa
+PORTVERSION=17.2.1
+DISTNAME=$(PORTNAME)-$(PORTVERSION)
+DISTFILE=$(DISTNAME).tar.xz
+DISTURL=ftp://ftp.freedesktop.org/pub/mesa
+DISTMD5=f53ed38110237d9df5f9198c09ef0ab0
+MAINTAINER=Stewart Maguire <stewart.maguire@s2ack.com>
+DISTMTS=yes
+DEPENDS=devel/libdrm devel/libgbm devel/python devel/expat
+DEPENDS_NATIVE=devel/bison devel/flex
+
+ifneq ($(VELOX_ARCH), $(VELOX_ARCH_NATIVE))
+all: build
+else
+all: build
+endif
+
+VELOX_CONFIG_ARGS+= \
+CFLAGS="$(VELOX_CFLAGS)" CXXFLAGS="$(VELOX_CXXFLAGS)" CPPFLAGS="$(VELOX_CPPFLAGS)" LDFLAGS="$(VELOX_LDFLAGS)" \
+--with-dri-drivers="swrast" \
+--with-dri-driverdir="/usr/lib/dri" \
+--with-dri-searchpath="/usr/lib/dri" \
+--disable-static \
+--enable-opengl \
+--enable-dri \
+--disable-libunwind \
+--without-vulkan-drivers
+
+#texture
+ifeq ($(VELOX_PACKAGE_MESA_ENABLE_TEXTURE_FLOAT),y)
+VELOX_CONFIG_ARGS+= --enable-texture-float
+else
+VELOX_CONFIG_ARGS+= --disable-texture-float
+endif
+
+#glx
+ifeq ($(VELOX_PACKAGE_MESA_ENABLE_GLX),y)
+DEPENDS+=dispsys/X11/glproto dispsys/X11/dri2proto
+DEPENDS+=dispsys/X11/libxcb
+else
+VELOX_CONFIG_ARGS+= --disable-glx
+endif
+
+#egl
+ifeq ($(VELOX_PACKAGE_MESA_ENABLE_EGL),y)
+VELOX_CONFIG_ARGS+= --enable-egl
+else
+VELOX_CONFIG_ARGS+= --disable-egl
+endif
+
+#platform
+ifeq ($(VELOX_PACKAGE_MESA_PLATFORM_DRM),y)
+PLATFORMS+=drm
+endif
+
+ifeq ($(VELOX_PACKAGE_MESA_PLATFORM_X11),y)
+PLATFORMS+=x11
+endif
+
+ifeq ($(VELOX_PACKAGE_MESA_PLATFORM_WAYLAND),y)
+PLATFORMS+=wayland
+WAYLAND_OPTS = \
+	WAYLAND_PROTOCOLS_DATADIR=$(VELOX_DESTDIR)/usr/share/wayland-protocols
+endif
+
+#DRI 3
+ifeq ($(VELOX_PACKAGE_MESA_ENABLE_DRI3),y)
+VELOX_CONFIG_ARGS+= --enable-dri3
+DEPENDS+=dispsys/X11/dri3proto dispsys/X11/libxcb
+DEPENDS+=dispsys/X11/libxshmfence
+else
+VELOX_CONFIG_ARGS+= --disable-dri3
+endif
+
+#GLES
+ifeq ($(VELOX_PACKAGE_MESA_ENABLE_GLES),y)
+VELOX_CONFIG_ARGS+= --enable-gles1 --enable-gles2
+else
+VELOX_CONFIG_ARGS+= --disable-gles1 --disable-gles2
+endif
+
+#gallium
+ifeq ($(VELOX_PACKAGE_MESA_GALLIUM_SW_RAST),y)
+GALIUM_DRIVERS+=swrast
+endif
+
+ifeq ($(VELOX_PACKAGE_MESA_GALLIUM_VC4),y)
+GALIUM_DRIVERS+=vc4
+endif
+
+ifeq ($(VELOX_PACKAGE_MESA_GALLIUM_FREEDRENO),y)
+GALIUM_DRIVERS+=freedreno
+endif
+
+ifeq ($(VELOX_PACKAGE_MESA_GALLIUM_ETNAVIV),y)
+GALIUM_DRIVERS+=etnaviv imx
+endif
+
+ifneq ($(VELOX_ARCH),$(VELOX_ARCH_NATIVE))
+VELOX_CONFIG_ARGS+= --host=$(VELOX_HOST_TRIPLET) --build=$(VELOX_BUILD_TRIPLET) \
+--with-gallium-drivers=$(subst $(space),$(comma),$(GALIUM_DRIVERS)) \
+--with-platforms=$(subst $(space),$(comma),$(PLATFORMS))
+else
+VELOX_CONFIG_ARGS+= --build=$(VELOX_BUILD_TRIPLET) --disable-dri --disable-openvg
+endif
+
+extract: genericextract
+
+$(CONFIGURE):
+	cd $(VELOX_WORK)/$(DISTNAME) && $(VELOX_AUTORECONF) && $(VELOX_CONFIGURE) $(VELOX_CONFIG_ARGS)
+
+build: genericbuild
+	$(MAKE) $(JOBS) $(WAYLAND_OPTS) -C $(VELOX_WORK)/$(DISTNAME)
+
+
+install_staging:
+	mkdir -p $(VELOX_WORK)/staging/usr/lib/dri
+	$(MAKE) $(WAYLAND_OPTS) -C $(VELOX_WORK)/$(DISTNAME)/ DESTDIR=$(CURDIR)/$(VELOX_WORK)/staging install
+ifeq ($(VELOX_PACKAGE_MESA_DISABLE_GL_LIB_INSTALL),y)
+	rm -f $(VELOX_WORK)/staging/usr/lib/libGL.*
+endif	
+ifeq ($(VELOX_PACKAGE_MESA_DISABLE_GL_HEADER_INSTALL),y)
+	rm -f $(VELOX_WORK)/staging/usr/include/GL/gl.h \
+		$(VELOX_WORK)/staging/usr/include/GL/glext.h
+endif
+
+install_output:
+	mkdir -p $(VELOX_WORK)/staging/usr/lib/dri
+	cp -rf $(VELOX_WORK)/staging/* $(VELOX_DESTDIR)
+
+install: install_staging
+	$(PORTINSTALL) $(MAKE) install_output
+	$(MAKE) portinstalled
+
+include $(VELOX_COREDIR)/$(LOCAL_PORTS_DIR)/etc/rules.mk

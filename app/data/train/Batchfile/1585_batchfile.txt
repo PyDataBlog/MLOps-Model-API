@@ -1,0 +1,1 @@
+cmd_sound/soc/codecs/snd-soc-rt5642.o := /home/josh/gcc-linaro-arm-linux-gnueabihf-4.7-2013.04-20130415_linux/bin/arm-linux-gnueabihf-ld -EL    -r -o sound/soc/codecs/snd-soc-rt5642.o sound/soc/codecs/rt5640.o sound/soc/codecs/rt5640-dsp.o 

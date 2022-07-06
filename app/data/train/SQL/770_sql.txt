@@ -1,0 +1,77 @@
+-- create network topology tables
+set serveroutput on size 1000000
+set trimspool on
+set long 5000
+set linesize 123
+set pagesize 9999
+set numwidth 15
+set timing on
+set termout on
+set wrap off;
+
+/*
+ïîñòðîèòü òîïîëîãè÷åñêóþ ñåòü:
+
+pipegeom    - òðóáû
+boilgeom    - óçëû, ïîòðåáèòåëè, çàäâèæêè
+boltgeom    - óçëû, çàäâèæêè
+grpgeom     - óçëû, ïîòðåáèòåëè, çàäâèæêè
+grsgeom     - óçëû, èñòî÷íèêè, çàäâèæêè
+
+*/
+
+drop sequence seqtopoapps;
+create sequence seqtopoapps;
+
+drop table toponode;
+create table toponode (
+    id number, -- id	óíèêàëüíûé àéäè óçëà â òîïîñåòè
+    x number, -- lon	x êîîðäèíàòà
+    y number, -- lat	y êîîðäèíàòà
+    type varchar2(10), -- type	òèï óçëà - GRS, GRP, BOIL, BOLT, JUNC (ÒðóáîÑîåäèíèòåëü), END (õâîñò òðóáû)...
+    objid number, -- objid	àéäè îáüåêòà ïðåäñòàâëÿåìîãî óçëîì. íàïðèìåð àéäè ÃÐÑ, åñëè óçåë ïðåäñòàâëÿåò ÃÐÑ.
+--	active varchar2(1) default 'Y' -- active	y/n àêòèâåí èëè íåò. ó÷àñòâóåò â ñåòè èëè íåò.
+    active varchar2(1) -- active	y/n àêòèâåí èëè íåò. ó÷àñòâóåò â ñåòè èëè íåò.
+);
+ALTER TABLE toponode ADD CONSTRAINT pk_toponode PRIMARY KEY(id);
+-- drop index idx_toponodecoord;
+-- create unique index idx_toponodecoord on toponode(x, y);
+
+drop table topolink;
+create table topolink (
+    id number, -- id	óíèêàëüíûé àéäè ëèíêà â ñåòè
+    startnodeid number, -- startnodeid	àéäè óçëà îòêóäà ëèíê âûõîäèò
+    endnodeid number, -- endnodeid	àéäè óçëà êóäà ïðèõîäèò
+--	type varchar2(10) default 'PART', -- type	WHOLE, PART, òèï ëèíêà. íàïðèìåð ñîñòàâíîé èëè îäèí ê îäíîìó ñîîòâåòñòâóåò òðóáå.
+    type varchar2(10), -- type	WHOLE, PART, òèï ëèíêà. íàïðèìåð ñîñòàâíîé èëè îäèí ê îäíîìó ñîîòâåòñòâóåò òðóáå.
+    objid number, -- objid	àéäè îáüåêòà, òðóáû.
+--	active varchar2(1) default 'Y', -- active	ó÷àñòâóåò â ñåòè èëè íåò.
+    active varchar2(1), -- active	ó÷àñòâóåò â ñåòè èëè íåò.
+    GEOM  MDSYS.SDO_GEOMETRY
+);
+alter table topolink add constraint pk_topolink primary key(id);
+-- create index idxtopolinknodes on topolink(startnodeid, endnodeid);
+
+DELETE FROM USER_SDO_GEOM_METADATA WHERE TABLE_NAME = 'TOPOLINK' AND COLUMN_NAME = 'GEOM' ;
+INSERT INTO USER_SDO_GEOM_METADATA (TABLE_NAME, COLUMN_NAME, DIMINFO, SRID)
+VALUES ( 'TOPOLINK', 'GEOM', MDSYS.SDO_DIM_ARRAY (
+    MDSYS.SDO_DIM_ELEMENT('X', 33.000000000, 41.000000000, 0.000000100),
+    MDSYS.SDO_DIM_ELEMENT('Y', 53.000000000, 58.000000000, 0.000000100) ),
+NULL);
+
+EXECUTE SDO_MIGRATE.TO_CURRENT('TOPOLINK','GEOM');
+select count(*) from (
+    SELECT p.id, SDO_GEOM.VALIDATE_GEOMETRY_WITH_CONTEXT(p.geom, 0.0000001) as vld
+    FROM topolink p where p.id > 0
+    ) where vld <> 'TRUE';
+CREATE INDEX idxspat_topolink ON topolink (geom) INDEXTYPE IS MDSYS.SPATIAL_INDEX;
+
+drop table toposrc;
+create table toposrc (
+    objtype varchar2(10), -- type		òèï òîïîîáüåêòà NODE, LINK
+    objid number, -- id		àéäè òîïîîáüåêòà èç ñîîòâ. òàáëèöû óçëîâ èëè ëèíêîâ
+    srcid number -- id		àéäè NODE, îò êîòîðîãî ïèòàåòñÿ îáüåêò (ìîæåò ïèòàòüñÿ, ãàç äîòåêàåò) (â íàøåì ñëó÷àå òîëüêî ÃÐÑ ìîãóò áûòü èñòî÷íèêàìè)
+);
+create unique index idx_toposrc on toposrc (objtype, objid, srcid);
+
+COMMIT;

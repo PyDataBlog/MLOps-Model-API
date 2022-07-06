@@ -1,0 +1,152 @@
+package MOrg::Command::Verify;
+
+use strict;
+
+use base qw(MOrg::Command);
+
+use File::Basename;
+
+use MOrg::Exception;
+use MOrg::Stat;
+use MOrg::Content::Iterator::Postfix;
+use MOrg::Log;
+
+sub new() {
+	my $self = shift()->SUPER::new(@_);
+
+	$self->{stat} = MOrg::Stat->new(
+		file_fail => 'files not matching template',
+		dir_empty => 'directory missing content',
+		dir_missing => 'directory is missing',
+	);
+
+	return $self;
+}
+
+sub name {
+	return 'verify';
+}
+
+sub order {
+	return 1;
+}
+
+sub execute {
+	my ($self, @args) = @_;
+
+	my $result = 1;
+	for my $content ( @{$self->content} ) {
+		my $iter = MOrg::Content::Iterator::Postfix->new(root => $content);
+		do {
+			my @location = $iter->path();
+
+			$result &= $self->process_location(@location);
+		} while ($iter->next());
+	}
+	$self->{stat}->display();
+	return $result;
+}
+
+sub process_location {
+	my ($self, @location) = @_;
+
+	my $path = File::Spec->catdir( map { $_->directory ? $_->directory : 'MISSING_DIRECTORY_NAME' } @location);
+	log_buffer_push(0, "process (%s), path='%s'", $self->location_string(\@location, ', '), $path);
+
+	if ( grep { not defined($_->directory) } @location ) {
+		$self->{stat}->peg('content_missing');
+		log_message(1, " * directory attribute is missing in xpath '%s'", $self->location_string(\@location, ', ') );
+		return 0;
+	}
+
+	my $result = 1;
+	$result &= $self->verify_path($path);
+	$result &= $self->verify_child_items($location[-1]);
+
+	if ( 0 == scalar @{$location[-1]->content} ) {
+		my %params = ();
+		for my $element ( @location ) {
+			$params{ $element->type } = $element->id;
+			$params{ name } = $element->name if ( 'manga' eq $element->type );
+		}
+
+		my @formats = $self->format->only(type => MOrg::Format::RENAME, params => [ keys %params ]);
+		if ( 0 == scalar @formats ) {
+			log_message(0," * unable to find format with (%s)", join(", ", keys %params));
+			return 0;
+		} else {
+			$result &= $self->verify_filename_format($path, \@formats);
+		}
+	}
+
+	$location[-1]->verified($result);
+	log_buffer_clear();
+	return $result;
+}
+
+sub verify_path {
+	my ($self, $path) = @_;
+
+	if ( not -d $path ) {
+		$self->{stat}->peg('dir_missing');
+		log_message(1, " * directory '%s' does not exist", $path );
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+sub verify_filename_format {
+	my ($self, $path, $formats) = @_;
+
+	my ($ok, $fail) = (0, 0);
+	for my $file ( <$path/*> ) {
+		my $filename = basename($file);
+
+		my $is_verified = 0;
+		for my $format ( @$formats ) {
+			if ( $format->verify($filename) ) {
+				$is_verified = 1;
+				last;
+			}
+		}
+
+		$is_verified ? $ok++ : $fail++;
+		if ( $is_verified ) {
+			$ok ++;
+		} else {
+			$self->{stat}->peg('file_fail');
+		}
+	}
+
+	if ( 0 == $ok + $fail ) {
+		log_message(1, " * no file found in path");
+		$self->{stat}->peg('dir_empty');
+		return 0;
+	}
+
+	if ( 0 != $fail ) {
+		log_message(1, " * %s files does not match template", $fail);
+		return 0;
+	}
+
+	return 1;
+}
+
+sub verify_child_items {
+	my ($self, $parent_item) = @_;
+
+	my $fail = 0;
+	for my $item ( @{ $parent_item->content } ) {
+		$fail += 1 if not $item->verified;
+	}
+
+	if ( $fail ) {
+		log_message(1, " * %s child items are not verified", $fail);
+		return 0;
+	} else {
+		return 1;
+	}
+}
+
+1;

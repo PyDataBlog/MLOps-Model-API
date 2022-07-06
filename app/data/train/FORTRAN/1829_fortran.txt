@@ -1,0 +1,219 @@
+!> This module defines a class for handling Verlet neighbor lists.
+!! @remark Reference: Allen and Tildesley, Computer Simulation of Liquids, Oxford University Press,
+!!                    1987.
+!! 
+!! @author Charlles R. A. Abreu (abreu@eq.ufrj.br)
+!! @date Aug 29, 2013
+module mNeighbor
+use mGlobal
+use mCells
+implicit none
+
+!> A class for handling Verlet neighbor lists.
+type tNeighbor
+
+  !> Number of neighbor lists builded since the object's creation.
+  integer :: nBuilds = 0
+
+  !> True if the number of particles might change between neighbor list builds.
+  logical :: change_number = .false.
+
+  !> True if the box dimensions, cutoff distance, and/or skin size might change
+  !! between neighbor list builds.
+  logical :: change_dimensions = .false.
+
+  !> Size of array Index(:).
+  integer :: size
+ 
+  !> Sequence of neighbor lists of all particles.
+  integer, allocatable :: Index(:)
+
+  !> Location of the first neighbor of each particle i.
+  integer, allocatable :: First(:)
+
+  !> Location of the first neighbor of each particle i whose index j is larger than i.
+  integer, allocatable :: FirstMD(:)
+
+  !> Location of the last neighbor of each particle i.
+  integer, allocatable :: Last(:)
+
+  ! Private attributes:
+
+  real(rb), private :: Lx, Ly, Lz
+  real(rb), private :: InvLx, InvLy, InvLz
+  real(rb), private :: LxSq, LySq, LzSq
+  logical,  private :: PBCx = .true., PBCy = .true., PBCz = .true.
+  logical,  private :: MC
+  real(rb), private :: MaxDisp2, MaxDist2
+  real(rb), allocatable, private :: x0(:), y0(:), z0(:)
+
+  type(tCells), private :: Cells
+
+  contains
+
+    procedure, private :: Create_Neighbor_List
+    !> Initiates a tNeighbor structure.
+    !!
+    !! @param[in] Lbox a real, dimension(3) vector with the length of the
+    !!            simulation box in each direction.
+    !! @param[in] CutOff a real scalar with the largest cutoff distance
+    !!            for pairwise interaction calculations.
+    !! @param[in] Skin a real scalar with the additional distance beyond
+    !!            Cutoff used to classify particles as neighbors.
+    generic :: Create => Create_Neighbor_List
+
+    procedure, private :: Build_Neighbor_List
+    generic :: Build => Build_Neighbor_List
+
+    procedure, private :: Handle_Neighbor_List
+    generic :: Handle => Handle_Neighbor_List
+
+end type tNeighbor
+
+contains
+  !-------------------------------------------------------------------
+  subroutine Create_Neighbor_List( List, L, Rc, Skin, MonteCarlo )
+
+    class(tNeighbor),  intent(inout) :: List
+    real(rb),          intent(in)    :: L(3), Rc, Skin
+    logical, optional, intent(in)    :: MonteCarlo
+
+    integer  :: M(3)
+
+    List%MC = present(MonteCarlo)
+    if (List%MC) List%MC = MonteCarlo
+    List%Lx = L(1)
+    List%Ly = L(2)
+    List%Lz = L(3)
+    ! Save inverses:
+    List%InvLx = 1.0_rb/L(1)
+    List%InvLy = 1.0_rb/L(2)
+    List%InvLz = 1.0_rb/L(3)
+    ! Save squares:
+    List%LxSq = L(1)**2
+    List%LySq = L(2)**2
+    List%LzSq = L(3)**2
+    ! Divide box into cells with side-length of about (Rc+Skin)/2
+    M = max(4,nint(2*L/(Rc+Skin)))
+    call List%Cells%Create( M, L, Rc+Skin )
+    ! Allocate arrays:
+    allocate( List%First(0), List%FirstMD(0), List%Last(0),     &
+              List%x0(0), List%y0(0), List%z0(0), List%Index(0) )
+    List%MaxDisp2 = Skin**2
+    List%MaxDist2 = (Rc + Skin)**2
+    List%nBuilds = 0
+    List%size = 0
+
+  end subroutine Create_Neighbor_List
+  !-------------------------------------------------------------------
+  subroutine Build_Neighbor_List( List, N, x, y, z, mol )
+
+    class(tNeighbor), intent(inout)        :: List
+    integer,          intent(in)           :: N
+    real(rb),         intent(in)           :: x(N), y(N), z(N)
+    integer,          intent(in), optional :: mol(N)
+
+    integer  :: icell, i, j, ii, jj, m
+    real(rb) :: xi, yi, zi, dx, dy, dz, r2
+    real(rb) :: xl(N), yl(N), zl(N)
+    logical  :: exclude, check
+
+    exclude = present(mol)
+
+    List%nBuilds = List%nBuilds + 1
+    if (size(List%First) < N) then
+      deallocate(List%First);   allocate( List%First(N) )
+      deallocate(List%FirstMD); allocate( List%FirstMD(N) )
+      deallocate(List%Last);    allocate( List%Last(N) )
+      deallocate(List%x0);      allocate( List%x0(N) )
+      deallocate(List%y0);      allocate( List%y0(N) )
+      deallocate(List%z0);      allocate( List%z0(N) )
+    end if
+    call List%Cells%Distribute( x, y, z )
+    xl = List%InvLx * x
+    yl = List%InvLy * y
+    zl = List%InvLz * z
+    m = 0
+    do icell = 0, List%Cells%Last
+      call List%Cells%Update( icell )
+      if (m+N*List%Cells%Nlocal > List%size) call Reallocate( List%size, m+N*List%Cells%Nlocal )
+      do ii = 1, List%Cells%Nlocal
+        i = List%Cells%Particle(ii)
+        List%First(i) = m+1
+        xi = xl(i)
+        yi = yl(i)
+        zi = zl(i)
+        do jj = ii+1, List%Cells%Ntotal
+          j = List%Cells%Particle(jj)
+          if (exclude) then
+            check = mol(j) /= mol(i)
+          else
+            check = .true.
+          end if
+          if (check) then
+            dx = xi - xl(j)
+            dy = yi - yl(j)
+            dz = zi - zl(j)
+            if (List%PBCx) dx = dx - nint(dx)
+            if (List%PBCy) dy = dy - nint(dy)
+            if (List%PBCz) dz = dz - nint(dz)
+            r2 = List%LxSq*dx*dx + List%LySq*dy*dy + List%LzSq*dz*dz
+            if (r2 <= List%MaxDist2) then
+              m = m + 1
+              List%Index(m) = j
+            end if
+          end if
+        end do
+        List%Last(i) = m
+      end do
+    end do
+    List%x0 = x
+    List%y0 = y
+    List%z0 = z
+
+    contains
+
+      subroutine Reallocate( Ncurr, Nmax )
+        integer, intent(in) :: Ncurr, Nmax
+        integer :: iAux(Ncurr)
+        iAux = List%Index(1:Ncurr)
+        deallocate( List%Index )
+        allocate( List%Index(Nmax) )
+        List%size = Nmax
+        List%Index(1:Ncurr) = iAux
+      end subroutine Reallocate
+
+  end subroutine Build_Neighbor_List
+  !-----------------------------------------------------------------------------
+  subroutine Handle_Neighbor_List( List, N, x, y, z, mol )
+    class(tNeighbor), intent(inout) :: List
+    integer,          intent(in)    :: N
+    real(rb),         intent(in)    :: x(:), y(:), z(:)
+    integer,          intent(in), optional :: mol(:)
+
+    integer :: i
+    real(rb) :: dx, dy, dz, dist2, largest, next
+
+    largest = 0.0_rb
+    next = 0.0_rb
+    do i = 1, N
+      dx = x(i) - List%x0(i)
+      dy = y(i) - List%y0(i)
+      dz = z(i) - List%z0(i)
+      dist2 = dx*dx + dy*dy + dz*dz
+      if (dist2 > largest) then
+        next = largest
+        largest = dist2
+      end if
+    end do
+    if ( largest + 2.0_rb*sqrt(largest*next) + next > List%MaxDisp2 ) then
+      if (present(mol)) then
+        call List%Build( N, x, y, z, mol )
+      else
+        call List%Build( N, x, y, z )
+      end if
+    end if
+
+  end subroutine Handle_Neighbor_List
+  !-----------------------------------------------------------------------------
+end module mNeighbor

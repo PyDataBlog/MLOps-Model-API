@@ -1,0 +1,140 @@
+var socket = io()
+
+var app = angular.module('alcohol', ['ui.router', 'ui.router.grant', 'ngStorage'])
+
+app.run(['grant', 'authService', function (grant, authService) {
+  grant.addTest('auth', function () {
+    console.log(authService.isLoggedIn())
+    return authService.isLoggedIn()
+  })
+}])
+
+app.config(['$stateProvider', '$urlRouterProvider', '$locationProvider', function ($stateProvider, $urlRouterProvider, $locationProvider) {
+
+  $stateProvider
+    .state('home', {
+      url: '/',
+      controller: 'homeController',
+      templateUrl: 'templates/home.html'
+    })
+    .state('about', {
+      url: '/about',
+      templateUrl: 'templates/about.html'
+    })
+    .state('profile', {
+      url: '/profile',
+      controller: 'profileController',
+      templateUrl: 'templates/profile.html',
+      resolve: {
+        auth: function(grant) {
+          return grant.only({test: 'auth', state: 'nope'});
+        }
+      }
+    })
+    .state('party', {
+      url: '/:id',
+      controller: 'partyController',
+      templateUrl: 'templates/party.html',
+      resolve: {
+        auth: function(grant) {
+          return grant.only({test: 'auth', state: 'nope'});
+        }
+      }
+    })
+    .state('nope', {
+      url: '/nope',
+      templateUrl: 'templates/nope.html'
+    })
+    .state('invalid', {
+      url: '/404',
+      templateUrl: 'templates/404.html'
+    })
+
+  $locationProvider.html5Mode(true)
+  $urlRouterProvider.otherwise('/404')
+}])
+
+app.factory('authService', ['$http', '$window', '$localStorage', function ($http, $window, $localStorage) {
+  var service = {},
+      user = {},
+      isLoggedIn = $localStorage.isLoggedIn || false
+
+  $http
+    .get('http://localhost:8080/api/profile')
+    .then(function (response) {
+      user.name = response.data.name
+      user.email = response.data.email
+      user.id = response.data.facebookId
+    })
+
+  return {
+    login: function () {
+      $localStorage.isLoggedIn = true
+      $window.location.href = 'http://localhost:8080/auth/facebook'
+    },
+    getUser: function () {
+      return user
+    },
+    getId: function () {
+      return user.id
+    },
+    isLoggedIn: function () {
+      return isLoggedIn
+    },
+    logout: function () {
+      $localStorage.isLoggedIn = false
+      $window.location.href = 'http://localhost:8080/logout'
+    }
+  }
+}])
+
+app.factory('streamService', ['$http', 'authService', function ($http, authService) {
+  var partyId
+
+  return {
+    start: function () {
+      return new Promise(function (resolve, reject) {
+        $http
+          .get('/api/start')
+          .then(function (response) {
+            partyId = response.data
+            resolve(response.data)
+          }, function () {
+            reject()
+          })
+      })
+    },
+    join: function (partyId) {
+
+    },
+    getPartyId: function () {
+      return partyId
+    }
+  }
+}])
+
+app.controller('homeController', ['$scope', 'authService', function ($scope, authService) {
+  $scope.pageName = 'Home'
+  $scope.login = authService.login
+}])
+
+app.controller('partyController', ['$scope', 'streamService', function ($scope, streamService) {
+  $scope.partyId = streamService.getPartyId()
+}])
+
+app.controller('profileController', ['$scope', '$state', 'authService', 'streamService', function($scope, $state, authService, streamService) {
+  $scope.user = authService.getUser()
+  $scope.logout = authService.logout
+  $scope.start = function () {
+    streamService
+      .start()
+      .then(function (partyId) {
+        $state.transitionTo('party', {
+          id: partyId
+        })
+      })
+  }
+  $scope.join = streamService.join
+
+
+}])

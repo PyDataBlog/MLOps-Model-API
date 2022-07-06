@@ -1,0 +1,148 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"log"
+	"net/http"
+	"os"
+	"path"
+	"strconv"
+	"strings"
+	"time"
+)
+
+const (
+	COURSE_BASEURL     = "http://www.pluralsight.com/courses/"
+	COURSEDATA_BASEURL = "http://www.pluralsight.com/data/course/content/%s"
+)
+
+/* Individual course modules */
+type CourseModule struct {
+	ModuleRef   string `json: "moduleRef"`
+	Title       string `json: "title"`
+	Description string `json: "description"`
+	Duration    string `json: "duration"`
+	FragmentId  string `json: "fragmentIdentifier"`
+}
+
+type DurationParts struct {
+	Hours   uint64
+	Minutes uint64
+	Seconds uint64
+}
+
+func SaveCourseChapters(url string, verbose bool) {
+
+	//	Parse the course name from the url
+	courseName := strings.Replace(url, COURSE_BASEURL, "", 1)
+	courseName = strings.TrimSpace(courseName)
+
+	//	Set the output name
+	outputName := path.Join(*basePath, fmt.Sprintf("%s.txt", courseName))
+
+	//	For a given course name, get the chapter information
+	chapters, err := getCourseChapters(courseName)
+	if err != nil {
+		log.Panicf("Error getting course chapters: %v", err)
+	}
+
+	//	If we have chapters ...
+	if len(chapters) > 0 {
+		//	Write them to the output file
+		fmt.Printf("Writing %d chapters to %s\n", len(chapters), outputName)
+		f, err := os.Create(outputName)
+		if err != nil {
+			log.Panicf("There was a problem opening the output file %s: %v", outputName, err)
+		}
+		defer f.Close()
+
+		//	For our cumulative duration calculations:
+		now := time.Now()
+		marker := now
+
+		for _, chapter := range chapters {
+			//	Example of what this needs to look like:
+			//	00:00:00.000 Introduction to Puppet
+			//	00:24:54.000 Installing and Configuring the Puppet Master
+			//	01:26:09.000 Installing and Configuring the Puppet Agent
+			//	02:13:19.000 Creating Manifests
+
+			//	Chapter time marker starts at 00:00:00 and is cumulative for each
+			//	module after the first.
+
+			//	Get the difference between the start
+			//	and the current marker position
+			markerinfo := marker.Sub(now)
+			durparts := toDurationParts(markerinfo)
+
+			line := fmt.Sprintf("%#02d:%#02d:%#02d.000 %s\r\n", durparts.Hours, durparts.Minutes, durparts.Seconds, chapter.Title)
+			f.WriteString(line)
+			if verbose {
+				fmt.Print(line)
+			}
+
+			//	Parse the current chapter duration and
+			//	move the marker position forward
+			durationInfo := strings.Split(chapter.Duration, ":")
+			secondsToAdd, _ := strconv.Atoi(durationInfo[2])
+			newmarkerinfo, err := time.ParseDuration(fmt.Sprintf("%sh%sm%ds", durationInfo[0], durationInfo[1], secondsToAdd+1))
+			if err != nil {
+				log.Panicf("What a nightmare.  Bad things happened while parsing duration: %v", err)
+			}
+
+			marker = marker.Add(newmarkerinfo)
+		}
+
+		//	Make sure all writes are sync'd
+		f.Sync()
+	} else {
+		//	Otherwise, indicate that something might be wrong
+		fmt.Println("It looks like we didn't find any chapters.  Are you sure your url is correct?")
+	}
+
+}
+
+func getCourseChapters(courseName string) ([]CourseModule, error) {
+
+	//	Construct the complete url
+	// url := COURSEDATA_BASEURL + courseName
+	coursedata_url := fmt.Sprintf(COURSEDATA_BASEURL, courseName)
+
+	//	Go fetch the response from the server:
+	res, err := http.Get(coursedata_url)
+	if err != nil {
+		return []CourseModule{}, err
+	}
+	defer res.Body.Close()
+
+	//	Read the body of the response if we have one:
+	body, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return []CourseModule{}, err
+	}
+
+	//	Unmarshall from JSON into our struct:
+	courseinfo := &[]CourseModule{}
+	if err := json.Unmarshal(body, &courseinfo); err != nil {
+		return []CourseModule{}, err
+	}
+
+	//	Return the slice of course modules
+	return *courseinfo, nil
+}
+
+// ToDurationParts returns a DurationParts
+func toDurationParts(d time.Duration) DurationParts {
+
+	retval := DurationParts{}
+
+	seconds := d.Seconds()
+	seconds -= float64(d / time.Minute * 60)
+	retval.Hours = uint64(d / time.Hour)
+	retval.Minutes = uint64(d / time.Minute % 60)
+	retval.Seconds = uint64(seconds)
+
+	return retval
+}

@@ -1,0 +1,231 @@
+{-# LANGUAGE TemplateHaskell, DeriveDataTypeable, BangPatterns #-}
+
+module Valkyria.Type where
+
+import Air.Data.Default
+import Air.TH
+import Air.Env
+import Prelude ()
+
+import Air.Data.Record.SimpleLabel
+import Control.Concurrent.STM
+import Data.ByteString.Char8 (ByteString)
+import Data.Map (Map)
+import Data.StateVar
+import Text.JSON.Generic
+
+data Code = Code
+  {
+    path :: String
+  , parent :: String
+  , depth :: Integer
+  , filesize :: Integer
+  , content :: String
+  , is_directory :: Integer
+  }
+  deriving (Show, Eq)
+
+mkDefault ''Code
+
+data UnpackStatus = 
+    Unpacking 
+  | UnpackComplete
+  deriving (Show, Eq, Data, Typeable)
+
+data DBJobStatus = 
+    DBInit
+  | DBAnalysing
+  | DBImporting Int
+  | DBIndexing
+  | DBComplete
+  deriving (Show, Eq, Data, Typeable)
+
+data JobError =
+    FailedToFetchRepo
+  | Exception String
+  deriving (Show, Eq, Data, Typeable)
+
+data JobStatus =
+    Initialized
+  | UnpackStage UnpackStatus
+  | DBStage DBJobStatus
+  | Bouncing
+  | Cleanup
+  | Completed Project
+  | Failed JobError
+  deriving (Show, Eq, Data, Typeable)
+
+instance Default JobStatus where
+  def = Initialized
+
+data FetchStatus =
+    FetchInQueue Integer
+  | Fetching JobStatus
+  | FetchFailed String
+
+type StatusCallback = JobStatus -> IO ()
+type FetchCallback = FetchStatus -> IO ()
+type FetchMonitorCallback = IO () -> IO ()
+
+data Repo = Git | Darcs | SVN | Hg | Archive | Raw
+  deriving (Show, Eq, Data, Typeable, Read)
+
+instance Default Repo where
+  def = Git
+
+data Project = Project
+  {
+    project_id :: Integer
+  , project_name :: String
+  , repo :: Repo
+  , project_url :: String
+  }
+  deriving (Show, Eq, Data, Typeable)
+
+mkDefault ''Project
+
+data RepoState = RepoState
+  {
+    states_map :: Map Integer (TVar JobStatus)
+  }
+
+instance Default RepoState where
+  def = RepoState
+    {
+      states_map = def
+    }
+
+-- Datatypes
+
+data JobQueryResponse =
+    JobQueryFailed String
+  | JobQuerySuccess JobStatus
+  deriving (Eq, Show, Data, Typeable)
+
+data JobCreateResponse = 
+    JobCreateFailed String
+  | JobCreateSuccess Integer
+  deriving (Eq, Show, Data, Typeable)
+
+instance HasGetter TVar where
+  get = atomically < readTVar
+
+instance HasSetter TVar where
+  ($=) x = atomically < writeTVar x
+
+data SourceCode = SourceCode
+  {
+    project_ref :: Project
+  , fetch_status :: FetchStatus
+  }
+
+data ClientState = ClientState
+  {
+    source_codes :: [SourceCode]
+  }
+
+data LocalRepoStatus =
+    LocalInQueue
+  | LocalUnpacking
+  | LocalAnalysing
+  | LocalImporting Double
+  | LocalBouncing
+  | LocalDownloading Double
+  | LocalDone
+  | LocalError String
+  | LocalRefreshReachMaximumNumber
+  deriving (Show, Eq, Data, Typeable)
+
+instance Default LocalRepoStatus where
+  def = LocalInQueue
+  
+data RepoControlHandle = RepoControlHandle
+  {
+    set_ui_repo_status :: Integer -> LocalRepoStatus -> IO ()
+  , set_global_error :: String -> IO ()
+  }
+
+data RepoControlInput = RepoControlInput
+  {
+    create_repo :: TaskID -> Repo -> String-> IO ()
+  }
+
+{-
+instance Default (Event a) where
+  def = NoEvent
+-}
+
+type TaskID = Int
+type CallbackMap = Map Int RepoControlHandle
+
+data FetchTask =
+    CreateRepo !Repo !ByteString
+  | MonitorRepo !Integer !Integer
+  | DownloadRepo !Integer
+  | NoTask
+  deriving (Show, Eq)
+
+instance Default FetchTask where
+  def = NoTask
+
+data ReactInput = ReactInput
+  {
+    input_id :: !TaskID
+  , fetch_task :: !FetchTask
+  }
+  deriving (Show, Eq)
+
+mkDefault ''ReactInput
+
+data FetchUpdate =
+    PerformCreateRepo !Repo !ByteString
+  | PerformMonitorRepo !Integer !Integer
+  | PerformDownloadRepo !Integer
+  | SetRepoInQueue
+  | NoUpdate
+  deriving (Show, Eq)
+
+instance Default FetchUpdate where
+  def = NoUpdate
+  
+data ReactState = ReactState
+  {
+    update_id :: !TaskID
+  , fetch_update :: !FetchUpdate
+  }
+  deriving (Show, Eq)
+
+mkDefault ''ReactState
+
+
+
+data LocalRepo = LocalRepo
+  {
+    repo_id :: Integer
+  , repo_url :: String
+  , repo_type :: Repo
+  , repo_name :: String
+  , repo_status :: LocalRepoStatus
+  }
+  deriving (Show, Eq, Data, Typeable)
+
+mkDefault ''LocalRepo
+
+
+
+type LocalRepoIndex = Integer
+
+
+{-}
+type FetchIn = Event ReactInput
+type FetchOut = Event ReactState
+type SenseRef = TVar [ReactInput]
+type TaskRef = TVar CallbackMap
+type LocalState = Map LocalRepoIndex LocalRepo
+type LocalStateRef = TVar LocalState
+-}
+
+mkLabels 
+  [ 
+    ''RepoState
+  ]

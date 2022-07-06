@@ -1,0 +1,254 @@
+<?php
+namespace MultisiteMigrationFramework\modules;
+
+use MultisiteMigrationFramework\classes\MultisiteMigration;
+use MultisiteMigrationFramework\classes\MultisiteMigrationSystemAuthorization;
+
+if (! defined('ABSPATH')) {
+    exit;
+}
+/**
+ * This module allows a new site to be created in the network with a specified blog ID
+ *
+ * @class 		CreateBlogSpecificID
+ * @version		1.0
+ * @package		MULTISITE-Migration/Modules
+ * @category	Class
+ * @author 		Emerson Maningo
+ */
+final class CreateBlogSpecificID
+{
+
+    /**
+     * Multisite migration property
+     */
+    private $multisite_migration;
+    
+    /**
+     * System authorization
+     */
+    private $system_authorization;
+    
+    /**
+     * Constructor
+     * @param MultisiteMigration $MultisiteMigration
+     */
+    public function __construct(MultisiteMigration $MultisiteMigration, MultisiteMigrationSystemAuthorization $system_authorization)
+    {
+        $this->multisite_migration = $MultisiteMigration;
+        $this->system_authorization = $system_authorization;
+    }
+    
+    /**
+     * Get multisite migration
+     * @return \MultisiteMigrationFramework\classes\MultisiteMigration
+     * @compatible 5.6
+     */
+    public function getMultisiteMigration()
+    {
+        return $this->multisite_migration;
+    }
+    
+    /**
+     * Get system authorization
+     * @return \MultisiteMigrationFramework\classes\MultisiteMigrationSystemAuthorization
+     * @compatible 5.6
+     */
+    public function getSystemAuthorization()
+    {
+        return $this->system_authorization;
+    }
+    
+    /**
+     * Init hooks
+     * @compatible 5.6
+     */
+    final public function initHooks()
+    {
+        if (! $this->getSystemAuthorization()->isUserAuthorized()) {
+            return;
+        }
+        
+        add_filter('query', array( $this, 'filterBlogIdToTargetBlogIdInQuery'), 0, 1);
+        add_action('network_site_new_form', array( $this, 'addNewBlogIdForm'));
+    }
+    
+    /**
+     * Filter passed blog ID to target ID when conditions are meet
+     * Hooked to `query`
+     * @param string $query
+     * @return void|string
+     * @compatible 5.6
+     */
+    public function filterBlogIdToTargetBlogIdInQuery($query = '')
+    {
+        if (! $this->getSystemAuthorization()->isUserAuthorized()) {
+            return $query;
+        }
+        if ($this->isInsertQueryForWpBlogs($query) && $this->validateChangeBlogIdRequest()) {
+            $target_blogid = $this->validateChangeBlogIdRequest();
+            $dissected_query_array = $this->dissectQuery($query);
+            
+            if (! is_array($dissected_query_array) || empty($dissected_query_array)) {
+                return $query;
+            }
+            
+            $replaceables = array();
+            foreach ($dissected_query_array as $k => $v) {
+                if (strpos($v, "(") !== false) {
+                    $replaceables[] = $k;
+                }
+            }
+            $count = count($replaceables);
+            if (2 !== $count) {
+                return $query;
+            }
+            foreach ($replaceables as $key_count => $key_to_update) {
+                if (0 === $key_count && isset($dissected_query_array[ $key_to_update ])) {
+                    //Inject `blog_id` field
+                    $value_to_update = $dissected_query_array[ $key_to_update ];
+                    $blogid_field_injected = str_replace("(", "(`blog_id`,", $value_to_update);
+                    $dissected_query_array[ $key_to_update ] = $blogid_field_injected;
+                } elseif (1 === $key_count && isset($dissected_query_array[ $key_to_update ])) {
+                    //Inject `blog_id` value
+                    $value_to_update = $dissected_query_array[ $key_to_update ];
+                    $blogid_value_injected = str_replace("(", "($target_blogid,", $value_to_update);
+                    $dissected_query_array[ $key_to_update ] = $blogid_value_injected;
+                }
+            }
+            $query = implode(" ", $dissected_query_array);
+        }
+        return $query;
+    }
+    
+    /**
+     * Add new blog ID form in create site form
+     * @compatible 5.6
+     */
+    public function addNewBlogIdForm()
+    {
+        ?>
+	    <h3><?php echo sprintf(
+            '%s ( %s )',
+            __('Multisite Migration Target Blog ID', $this->getMultisiteMigration()->getSystemInitialization()->getTranslationDomain()),
+            __('Optional', $this->getMultisiteMigration()->getSystemInitialization()->getTranslationDomain())
+        ); ?></h3>
+	        
+	    <p><?php _e('You can assign a specific blog ID for this newly created site. This is optional.
+        Make sure the target blog ID is available and not used with any site.', $this->getMultisiteMigration()->getSystemInitialization()->getTranslationDomain()); ?></p>
+ 
+ 	    <p><?php _e('If target blog ID provided is already used with existing sites; 
+        WordPress will generate a new blog ID. Then the target blog ID is ignored.', $this->getMultisiteMigration()->getSystemInitialization()->getTranslationDomain()); ?></p>       
+	    <input type="number" name="multisite_migration_target_blog_id" min="1">
+	    <input type="hidden" name="multisite_migration_changeblogid_nonce" value="<?php echo wp_create_nonce('multisite_migration_changeblogid_nonce')?>" />
+	    <?php
+    }
+    
+    /**
+     * Validate change blog ID request
+     * @return number
+     * @compatible 5.6
+     */
+    protected function validateChangeBlogIdRequest()
+    {
+        $valid = 0;
+        /**
+         * Get posted request
+         */
+        $post = $this->getPostedRequest();
+        if (! $post) {
+            return $valid;
+        }
+        if (! isset($post['add-site'])) {
+            return $valid;
+        }
+        if (! isset($post['multisite_migration_changeblogid_nonce'])  ||
+        ! isset($post['multisite_migration_target_blog_id'])) {
+            return $valid;
+        }
+        $nonce = $post['multisite_migration_changeblogid_nonce'];
+        $blog_id = (int) $post['multisite_migration_target_blog_id'];
+        
+        /**
+         * Validate nonce
+         */
+        if (! wp_verify_nonce($nonce, 'multisite_migration_changeblogid_nonce') || ! $blog_id) {
+            return $valid;
+        }
+        
+        /**
+         * Validate if blog is available
+         */
+        $blogdetails = get_blog_details($blog_id);
+        if (! $blogdetails) {
+            //Blog is available
+            $valid = $blog_id;
+        }
+        
+        return $valid;
+    }
+    
+    /**
+     * Get posted request
+     * @return mixed
+     * @compatible 5.6
+     */
+    protected function getPostedRequest()
+    {
+        return filter_input_array(INPUT_POST, FILTER_SANITIZE_STRING);
+    }
+    /**
+     * Dissect query
+     * @param string $query
+     * @return array
+     * @compatible 5.6
+     */
+    protected function dissectQuery($query = '')
+    {
+        $dissected_query_array = array();
+        if (! empty($query)) {
+            $dissected_query_array = explode(" ", $query);
+        }
+        return $dissected_query_array;
+    }
+    /**
+     * Analyze if the query is an INSERT statement to the `wp_blogs` table
+     * @param string $query
+     * @return boolean
+     * @compatible 5.6
+     */
+    protected function isInsertQueryForWpBlogs($query = '')
+    {
+        $ret = false;
+        $dissected_query_array = $this->dissectQuery($query);
+        if (! isset($dissected_query_array[0])) {
+            return $ret;
+        }
+        $test = strtolower($dissected_query_array[0]);
+        if ('insert' !== $test) {
+            return $ret;
+        }
+        $into_key = (int) array_search(strtolower('INTO'), array_map('strtolower', $dissected_query_array));
+        if (! $into_key) {
+            return $ret;
+        }
+        
+        global $wpdb;
+        if (! isset($wpdb->blogs)) {
+            return $ret;
+        }
+        $wpblog_table = $wpdb->blogs;
+        $table_key = $into_key + 1;
+        if (! isset($dissected_query_array[ $table_key ])) {
+            return $ret;
+        }
+        $given = $dissected_query_array[ $table_key ];
+        $given = str_replace(array( '`', "'", '"' ), array( '','','' ), $given);
+        if (strpos($wpblog_table, $given) !== false) {
+            //Found
+            $ret = true;
+        }
+        
+        return $ret;
+    }
+}

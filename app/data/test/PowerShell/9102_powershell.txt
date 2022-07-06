@@ -1,0 +1,26 @@
+﻿workflow CaptureImage
+{
+    param (
+        [Object]$RecoveryPlanContext
+    ) 
+    $cred = Get-AutomationPSCredential -Name "SubOwner"
+    Add-AzureAccount -Credential $cred
+    Set-AzureSubscription -SubscriptionName "Microsoft Azure Internal Consumption" -CurrentStorageAccountName "portalvhdsb1knryl743722"
+    $today = get-date
+    $month = $today.month
+    $year = $today.year
+    $vmguid = Get-AutomationVariable -Name vmguid
+    $cloudservicename = $RecoveryPlanContext.vmmap.$vmguid.cloudservicename
+    
+    #shutdown the running test failover instances
+    get-azurevm -servicename $cloudservicename | stop-azurevm -force
+    #get a list of the VM's and capture an image of them
+    $vms = get-azurevm -servicename $cloudservicename 
+    $images = @()
+    $vms | % {$imagename = $_.InstanceName + $year + $month; Save-AzureVMImage -servicename $cloudservicename -OSState "Specialized" -ImageName $imagename -Name $_.InstanceName;$images+=$imagename} 
+    checkpoint-workflow
+    # deploy new instances
+    foreach ($image in $images) { $vm = New-AzureVMConfig -Name $image -InstanceSize Small -imagename $image | Add-AzureProvisioningConfig -Windows | Set-AzureSubnet -SubnetNames "Subnet-1";new-azurevm -servicename "bpcasrdemo" -Vms $vm -waitforboot -vnetname "failovertestnetwork" -location "Southeast Asia"}
+    
+    
+}

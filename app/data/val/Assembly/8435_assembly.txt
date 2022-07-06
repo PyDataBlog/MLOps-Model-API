@@ -1,0 +1,228 @@
+
+
+Object	code
+
+_v#v(HERE)_COMP_SETuw_wByteIn;(byte W/void)
+	mObject_sel	THIS
+	movwf	Newbyte_In  ; ? ñîõðàíÿåì â ÎÇÓ
+	movf	TooOldbyte_In,w		; äåòåêòèðîâàíèå ïðàâäîïîäîáèÿ ïðåàìáóëû
+	xorlw	0xAA
+	bnz		_Non_header  ; åñëè íå ðàâíî
+	movf	Oldbyte_In,w
+	xorlw	0x55
+	bnz		_Non_header
+
+_Header:
+	movlw	MAXNUMBERBYTE  ; ìàêñèìàëüíûé ðàçìåð áóôôåðà?
+	cpfslt	Newbyte_In  
+	mSlideTo	_COMP_ByteError		
+	movf	Newbyte_In,w
+	movwf	Number_In
+	movwf	Number_In_Max	;îïðåäåëåíèå äëèíû
+	clrf	Checksum_In	; ñáðîñ êîíòðîëüíîé ñóììû?
+	
+_Non_header:
+	movf	Number_In,f		;äèàãíîñòèêà íåîáõîäèìîñòè ïðèåìà
+	bz		_cash_In_IRQ		
+	
+_NextByte:
+	movf	Oldbyte_In,w	;äåòåêòèðîâàíèå ïðàâäîïîäîáèÿ ïðåàìáóëû
+	xorlw	0xAA
+	bnz		_ordin
+	movf	Newbyte_In,w
+	bz		_cash_In_IRQ
+	cpfseq xxx	;!!!
+	mSlideTo	_COMP_ByteError
+	
+_ordin:
+	decfsz	Number_In,f		;óæå ïðèíÿòûé áàéò â áóôåð
+	bra		_Cash_In		;äåêðåìåíò ñ÷åò÷èêà ïðèíèìàåìûõ äàííûõ
+
+_EOFbyte:	
+	movf	Newbyte_In,w
+	cpfseq	Checksum_In
+	bra		_cash_In_IRQ
+	;mS lideTo	_COMP_Com_Process  ; g oto ê îáðàáîòêå?
+	mSlideTo	_COMP_Com_Process  ; g oto ê îáðàáîòêå?
+	
+_Cash_In:	
+	lfsr	1,Buffer_In_00-1
+	movf	Number_In,w
+	subwf	Number_In_Max,w
+	movff	Newbyte_In,PLUSW1
+	movf	Newbyte_In,w
+	addwf	Checksum_In,f
+	
+_cash_In_IRQ:
+	movff	Oldbyte_In,TooOldbyte_In
+	movff	Newbyte_In,Oldbyte_In	; ïåðåâîä ïðèíÿòîãî áàéòà èç ðàçðÿäà íîâîãî â ñòàðûå
+	retlw	VOID
+
+; ! Ñ çàãîëîâêîì ïîõîæå ðàçîáðàëèñü
+; ìåòêà áûëà îòäåëåíà
+_COMP_Com_Process	; ? ýòî ìåòêà èëè ÷òî, ! ñóäÿ ïî âñåìó äà èëè ôóíêöèÿ
+	mObject_sel	THIS
+
+	movlw	0x1F	; ìàãè÷åñêîå ÷èñëî èç ïðîòîêîëà îáìåíà
+	xorwf	Buffer_In_00+1,w	; Buffer_In_00 - óêàçàòåëü?
+	btfss	STATUS,Z	; âåòâëåíèå, âåðíåå îáõîä
+	retlw	VOID
+
+	lfsr	0,Buffer_In_00+2	; ïåðåìåùåíèÿ óêàçàòåëÿ ÷òåíèÿ?
+		;// Buffer_In_00+2 - óêàçûâàåò íà òèï ñîîáùåíèÿ
+		;// Buffer_In_00+3 - óêàçûâàåò íà äàííûå â ñîîáùåíèè
+
+;// Îáðàáîòêà òèïîâ ñîîáùåíèé 01, 02, 04, 05, 06(ATT_NFO), 03(CMD)
+; îòâåòû íà çàïðîñû. Èç çàäà÷
+; ïðèõîäÿò äîâîëüíî áîëüøå áëîêè, êðîìå îäíîé êîììàíäû
+	movlw	0x01	; !ïîñûëàåò åñëè íåò ñâÿçè
+	xorwf	INDF0,w	; ïðîâåðêà êîììàíäû, switch
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Req1;(void/void) *
+
+	;// ïðèøëà êîììàíäà ïîëó÷åíèé èíôîðìàöèè î ìèï
+	movlw	TYPE_MSG_GET_NFO_ABOUT_MIP
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Req2;(void/void) *
+		
+	movlw	0x04
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Req3;(void/void) *
+	
+	movlw	TYPE_MSG_CPUX_LOG 	;//0x05
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Req4;(void/void) *
+; îòâåòû íà çàïðîñû
+
+	movlw 	TYPE_MSG_VALUE_ATT_GAIN
+	xorwf 	INDF0, 	w
+	bnz 	_bypass2  ;// Åñëè íå îíî, îáõîäèì îáðàáîòêó 
+	
+	;// Ïðîâåðÿåì ñîñòîÿíèå àâòîìàòà 
+	movf 	State_setGainAtt, w	
+	
+	;// Êîììàíäà íå áûëà ïîëó÷åíî - ñîñòîÿíèå íóëåâîå. Îáõîäèì.
+	;//  Ñòðàííî åñëè ýòî ïðîèçîéäåò, íî ïóñòü áóäåò. 
+	bz _skipOut  
+
+	;// Íà÷èíàåì ïîñûëêó îñëàáëåíèÿ íà àòòåíþàòîð
+	;// Óñòàíîâêà îñëàáëåíèÿ àòòåíþàòîðà, õîðîøî áû îòñþäà âûíåñòè êóäà ëèáî!
+	;// i2c send
+	call    _v#v(DOWN)_PIO_SETdw_I2CMIntStart	; 150811 èíèöèàëèçàöèÿ àòòåíþàòîðà
+	movlw 	ADD_ATT
+	call	_v#v(DOWN)_PIO_SETdw_I2CMIntPut 
+	movlw 	OUT_TO_PORT1  ;//OUT_TO_PORT0?	;// âûäàåì íà PORT 1 äàííûå? ïî÷åìó ýòà êîììàíäà à íå 0x02?
+	call	_v#v(DOWN)_PIO_SETdw_I2CMIntPut 
+
+	;// Ïåðåìåùàåì óêàçàòåëü ÷òåíèÿ âõîäíîãî áóôôåðà íà øàã âïåðåä
+	;// Áåðåì çíà÷åíèå îñëàáëåíèÿ ïî ýòîìó óêàçàòåëþ
+	;//   è îòïðàâëÿåì åãî â àêêàìóëÿòîð, à çàòåì ê ðàñïðåäåëèòåëþ
+	lfsr	0, Buffer_In_00+3
+	movf	INDF0, 	w
+	call	_v#v(DOWN)_PIO_SETdw_I2CMIntPut 
+
+	;// Ïîñûëêà çàâåðøåíà
+	call   _v#v(DOWN)_PIO_SETdw_I2CMIntStop 
+	;/// i2c send
+
+	;// Çàïèñü â EEPROM ïîëó÷åííîãî îñëàáëåíèÿ
+	lfsr	0, Buffer_In_00+3	;// ìîæåò èçëèøíå, íî ïóñòü áóäåò
+	movf	INDF0, 	w
+	call 	_v#v(HERE)_EC_SaveValAtt
+	
+	;// Ñîñòîÿíèå <- íå ïîëó÷àëè
+	movlw 	NO_OBTAINED
+	movwf	State_setGainAtt
+	
+	;// Âîçâðàùàåì óêàçàòåëü ÷òåíèÿ îáðàòíî, ÷òî âîçìîæíî è íå íóæíî
+	;//   íî ïóñòü ïîêà áóäåò
+	lfsr	0,	Buffer_In_00+2
+
+_skipOut:	;// Â ëþáîì ñëó÷àå âûõîäèì. Äàëüøå èäòè ñìûñëà íåò
+	return  
+	
+_bypass2:  ;// ïðîäîëæàåì àíàëèçèðîâàòü òèï ñîîáùåíèÿ
+;///
+;///
+;/// /// ///
+
+;/// Òèï ñîîáùåíèÿ - êîììàíäà
+	movlw	TYPE_MSG_CMD	
+	xorwf	INDF0,w
+	btfss	STATUS,Z
+	retlw	VOID
+	lfsr	0,Buffer_In_00+3
+
+;// igor 170412
+;// Ïðèøëà ëè êîììàíäà ïîäãîòîâêè ê çàïèñè îñëàáëåíèÿ â àòò.?
+;// Åñëè äà :
+;//   æäåì ñîîáùåíèÿ ñî çíà÷åíèå îñëàáëåíèÿ
+;// 0x03 0x40 wait.. 0x03 value
+;// Càìà êîììàíäà õðàíèòñÿ ïî INDF0
+	movlw	TYPE_MSG_CMD_SET_ATT_STAGE1	
+	xorwf	INDF0,w
+	;// åñëè íîëü (Z = 1), òî ýòî îíà
+	;// Z=0, ðåçóëüòàò íå íóëåâîé - çíà÷èò íåò è âûõîäèì
+	bnz 	_bypassSetState
+	;// Äåéñòâèÿ ïî ïðèõîäó êîììàíäû îæèäàíèÿ ñìåíû îñëàáëåíèÿ
+	;// Ñîñòîÿíèå <- Ïîëó÷åíà
+	;// Ìîæíî è èíêðåìåíò, íî òîãäà íóæíî èíèöèàëèçèðîâàòü ïåðåìåííóþ
+	movlw 	OBTAINED 
+	movwf	State_setGainAtt
+	return
+_bypassSetState:	;// ïðîäîëæàåì
+;// igor 170412
+	
+;// Îáðàáîòêà óæå êîíêðåòíîé êîììàíäû (íå ïðèçíàêà)
+	; ïîëó÷èëè êîììàíäó âêëþ÷èòñÿ?
+	movlw	0xA0  
+	xorwf	INDF0,w		; ñðàâíèâàþòñÿ äàííûå ïî êîñâåííîìó àäðåñó è àêêàìóëÿòîð
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_On;(void/void) * 
+
+	; ïîëó÷èëè êîììàíäó âÛêëþ÷èòñÿ?
+	movlw	0xA1
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Off;(void/void) *
+
+	;// çàïåðåòü ÌÈÏ
+	movlw	0x1F
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Lock;(void/void) *
+
+	;// Îòïåðåòü ÌÈÏ
+	movlw	OPEN_MIP
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_UnLock;(void/void) *
+
+	;// ñáðîñèòü ïàðàìåòðû
+	movlw	RST_PARAMETERS
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Reset;(void/void) *
+	
+
+; Çäåñü áóäåò âûÿâëåíèå êîìàíäû íîìåðà êàíàë
+;// â íîâîé âåðñèè ÷àñòîòà?
+	movlw	0x6B-1
+	cpfsgt	INDF0
+	bra		_Tune
+	movf	INDF0,w
+	addlw	d'21'-0x6B
+	mSlideTo	_v#v(UP)_TASK_SETuw_wChannelCom;(byte/void) 			
+
+
+_Tune:	;// îáðàáîòêà ïðî÷èõ ñîäåðæàíèé êîììàíä
+	movf	INDF0,w
+	mSlideTo	_v#v(UP)_TASK_SETuw_wTuneCom;(byte/void) *
+;/// Àíàëèçàòîð ïðèíÿòîãî áàéòà
+;///
+;/// /// ///
+
+end

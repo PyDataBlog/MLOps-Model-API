@@ -1,0 +1,647 @@
+--[[
+  Construction de P
+  Soit l'input tenseur d'ordre 4 : {nBatch*samplesPerDraw, channel, height, width}.
+
+  P est l'opérateur linéaire qui lui associe 1 tenseur d'ordre 6 {4, nBatch*samplesPerDraw, nOutputPlane, height, width, depth} de valeurs de corrélations.
+  P:view({nBatch*samplesPerDraw, nOutputPlane, height, width, depth},
+         {nBatch*samplesPerDraw, nOutputPlane, height, width, depth},
+         {nBatch*samplesPerDraw, nOutputPlane, height, width, depth},
+         {nBatch*samplesPerDraw, nOutputPlane, height, width, depth}),
+  or just {P1,P2,P3,P4}, w/ :
+  - P1 : corrélations le long de l'horizontale ;
+  - P2 : corrélations le long de la verticale ;
+  - P3 : corrélations le long de la diagonale droite ;
+  - P4 : corrélations le long de la diagonale gauche.
+
+  Etant donné que P1, P2, P3 et P4 ne sont pas de memes dimensions, on ne pourra pas concaténer en sortie de P les 4
+  tenseurs d'ordre 3 selon n'importe quelle dimension.
+  Il en sort donc un tenseur d'ordre 5, tranché en 4 tenseurs d'ordre 5 P1, P2, P3 et P4, entrant dans un container
+  parallèle nn.Parallel(2,2) - qui applique son 1er-4ème module fils à la 1ère-4ème tranche du tenseur d'entrée en
+  sélectionnant sur la 2ème dimension, puis concatène les résultats des modules qu'il contient ensemble le long de la
+  2ème dimension.
+  
+  Le noyau de corrélation, kernel, est un tenseur d'ordre 1 ou 2, qui sert à ré-initialiser l'apprentissage.
+--]]
+
+-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+local SpatialCorrelation, parent = torch.class('nn.SpatialCorrelation', 'nn.Module')
+
+
+function SpatialCorrelation:__init(nInputPlane, nOutputPlane, kernel)
+  parent.__init(self)
+  
+  -- get args
+  self.nInputPlane = nInputPlane or 3
+  self.nOutputPlane = nOutputPlane or 3
+  self.kernel = kernel or torch.Tensor(9,9):fill(1)
+  local kdim = self.kernel:nDimension()
+  
+  -- check args
+  assert(kdim == 2, '<SpatialCorrelation> averaging kernel must be 2D')
+  assert(self.kernel:size(1) % 2) ~= 0 and (self.kernel:size(2) % 2) ~= 0, '<SpatialCorrelation> averaging kernel must have ODD dimensions')
+  
+  -- normalize kernel
+  self.kernel:div(self.kernel:sum() * self.nInputPlane)
+  
+  -- padding values
+  local padH = math.floor(self.kernel:size(1)/2)
+  local padW = math.floor(self.kernel:size(2)/2)
+  
+  -- create convolutional mean estimator
+  self.mean = nn.Sequential()
+  self.mean:add(nn.SpatialZeroPadding(padW, padW, padH, padH))
+  self.mean:add(nn.SpatialConvolutionMM(self.nInputPlane, self.nOutputPlane, self.kernel:size(2), self.kernel:size(1)))
+  self.mean:add(nn.Replicate(self.nInputPlane))
+  
+  -- create convolutional standard estimator
+  self.std = nn.Sequential()
+  self.std:add(nn.Square())
+  self.std:add(nn.SpatialConvolutionMM(self.nOutputPlane, self.nOutputPlane, self.kernel:size(2), self.kernel:size(1)))
+  self.std:add(nn.Replicate(self.nOutputPlane))
+  self.std:add(nn.Sqrt())
+  
+  -- create convolutional dot product estimator
+  self.dot = nn.Sequential()
+  self.dot:add(nn.CMulTable())
+  self.dot:add(nn.SpatialConvolutionMM(self.nOutputPlane, self.nOutputPlane, self.kernel:size(2), self.kernel:size(1)))
+  self.dot:add(nn.Replicate(self.nOutputPlane))
+  
+  -- set kernel and bias
+  for j = 1, self.nOutputPlane do
+    for i = 1, self.nInputPlane do
+      self.mean.modules[2].weight[j][i] = torch.Tensor():resizeAs(self.kernel)
+      self.mean.modules[2].gradWeight[j][i] = torch.Tensor():resizeAs(self.kernel)
+    end
+    for i = 1, self.nOutputPlane do
+      self.std.modules[2].weight[j][i] = torch.Tensor():resizeAs(self.kernel)
+      self.dot.modules[2].weight[j][i] = torch.Tensor():resizeAs(self.kernel)
+      self.std.modules[2].gradWeight[j][i] = torch.Tensor():resizeAs(self.kernel)
+      self.dot.modules[2].gradWeight[j][i] = torch.Tensor():resizeAs(self.kernel)
+    end
+  end
+  self.mean.modules[2].bias = torch.Tensor(self.nInputPlane)
+  self.std.modules[2].bias = torch.Tensor(self.nOutputPlane)
+  self.dot.modules[2].bias = torch.Tensor(self.nOutputPlane)
+  self.mean.modules[2].gradBias = torch.Tensor(self.nInputPlane)
+  self.std.modules[2].gradBias = torch.Tensor(self.nOutputPlane)
+  self.dot.modules[2].gradBias = torch.Tensor(self.nOutputPlane)
+  
+  self:reset()
+  
+  -- other operations
+  self.subtractor = nn.CSubTable()
+  self.multiplicator = nn.CMulTable()
+  self.normalizer = nn.CDivTable()
+  self.divider = nn.CDivTable()
+  
+  -- coefficient array, to adjust side effects
+  self.coef = torch.Tensor(1,1,1)
+end
+
+
+function SpatialCorrelation:reset()
+  for j = 1, self.nOutputPlane do
+    for i = 1, self.nInputPlane do
+      self.mean.modules[2].weight[j][i]:copy(self.kernel)
+    end
+    for i = 1, self.nOutputPlane do
+      self.std.modules[2].weight[j][i]:copy(self.kernel)
+      self.dot.modules[2].weight[j][i]:copy(self.kernel)
+    end
+  end
+  self.mean.modules[2].bias:zero()
+  self.std.modules[2].bias:zero()
+  self.dot.modules[2].bias:zero()
+end
+
+
+function SpatialCorrelation:zeroGradParameters()
+  self.mean.modules[2].gradWeight:zero()
+  self.std.modules[2].gradWeight:zero()
+  self.dot.modules[2].gradWeight:zero()
+  self.mean.modules[2].gradBias:zero()
+  self.std.modules[2].gradBias:zero()
+  self.dot.modules[2].gradBias:zero()
+end
+
+
+function SpatialCorrelation:updateOutput(input)
+  -- local args
+  local N = input:size(1)  -- nBatchSize*SamplesPerDraw
+  local C = self.nOutputPlane
+  local H = input:size(3)
+  local W = input:size(4)
+  
+  local kW = self.kernel:size(1)
+  local kH = self.kernel:size(2)
+  
+  self.buffer = {}
+  self.buffer1 = {}
+  
+  -- compute side coefficients
+  if (W ~= self.coef:size(3)) or (H ~= self.coef:size(2)) then
+    local ones = input.new():resizeAs(input):fill(1)
+    self.coef = self.mean:updateOutput(ones)
+    self.coef = self.coef:clone()
+  end
+  
+  -- compute mean
+  self.localmeans = self.mean:updateOutput(input)
+  self.adjustedmeans = self.divider:updateOutput{self.localmeans, self.coef}
+  self.Centered = self.subtractor:updateOutput{input, self.adjustedmeans}
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P1 qui associe les corrélations des éléments de I avec ceux situés sur la meme horizontale.
+  -- P1 : (HxW,HxW) -> HxWxW
+  --      I(i,k),I(i,j) -> I'1(i,j,k)
+  ---------------------------------------------------------------------------------------------------------------------
+  -- local args
+  self.CCrop_1 = {} 
+  self.CCrop1_1 = {}
+  self.coef1_1 = {}
+  self.localstds1_1 = {}
+  self.adjustedstds1_1 = {}
+  self.CCrop2_1 = {}
+  self.localdots_1 = {}
+  self.coef2_1 = {}
+  self.localstds2_1 = {}
+  self.adjustedstds2_1 = {}
+  self.norm_1 = {}
+  
+  self.P1 = {}  -- torch.Tensor(N,C,W,W,H)
+  
+  for i = 1,H do
+    self.buffer:copy(self.Centered)  -- just according to memory storage
+    self.CCrop_1[i] = nn.Narrow(3,i,kH):updateOutput(self.buffer)
+    
+    for k = 1,W do
+      self.buffer1:copy(self.CCrop)
+      self.CCrop1_1[i][k] = nn.Narrow(4,k,kW):updateOutput(self.buffer1)
+      
+      -- normalize std dev
+      self.localstds1_1[i][k] = self.std:updateOutput(self.CCrop1_1[i][k])
+      
+      for j = 1,W do
+        self.buffer1:copy(self.CCrop_1[i])
+        self.CCrop2_1[i][j] = nn.Narrow(4,j,kW):updateOutput(self.buffer1)
+        
+        -- compute dot product of standard deviations
+        self.localdots_1[k][j][i] = self.dot:updateOutput{self.CCrop1_1[i][k], self.CCrop2_1[i][j]}
+        
+        -- normalize std dev
+        self.localstds2_1[i][j] = self.std:updateOutput(self.CCrop2_1[i][j])
+        
+        self.norm_1[k][j][i] = self.multiplicator:updateOutput{self.localstds1_1[i][k], self.localstds2_1[i][j]}
+        self.P1[k][j][i] = self.normalizer:updateOutput{self.localdots_1[k][j][i], self.norm_1[k][j][i]}
+      end
+    end
+  end
+  
+  self.P1:view(N,C,W,W,H)
+  self.P1 = self.P1:permute(1,2,5,4,3)  -- projection:permute(3,2,1)
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P2 qui associe les corrélations des éléments de I avec ceux situés sur la meme verticale.
+  -- P2 : (HxW,HxW) -> WxHxH
+  --      I(k,i),I(j,i) -> I'2(i,j,k)
+  ---------------------------------------------------------------------------------------------------------------------
+  -- local args
+  self.CCrop_2 = {}
+  self.CCrop1_2 = {}
+  self.localstds1_2 = {}
+  self.CCrop2_2 = {}
+  self.localdots_2 = {}
+  self.localstds2_2 = {}
+  self.norm_2 = {}
+  
+  self.P2 = {}  -- torch.Tensor(N,C,H,H,W)
+  
+  for i = 1,W do
+    self.buffer:copy(self.Centered)
+    self.CCrop_2[i] = nn.Narrow(4,i,kW):updateOutput(self.buffer)
+    
+    for j = 1,H do
+      self.buffer1:copy(self.CCrop_2[i])
+      self.CCrop1_2[i][j] = nn.Narrow(3,j,kH):updateOutput(self.buffer1)
+      
+      -- normalize std dev
+      self.localstds1_2[i][j] = self.std:updateOutput(self.CCrop1_2[i][j])
+      
+      for k = 1,H do
+        self.buffer1:copy(self.CCrop_2[i])
+        self.CCrop2_2[i][k] = nn.Narrow(3,k,kH):updateOutput(self.buffer1)
+        
+        -- compute dot product of standard deviations
+        self.localdots_2[j][k][i] = self.dot:updateOutput{self.CCrop1_2[i][j], self.CCrop2_2[i][k]}
+        
+        -- normalize std dev
+        self.localstds2_2[i][k] = self.std:updateOutput(self.CCrop2_2[i][k])
+        
+        self.norm_2[j][k][i] = self.multiplicator:updateOutput{self.localstds1_2[i][j], self.localstds2_2[i][k]}
+        self.P2[j][k][i] = self.normalizer:updateOutput{self.localdots_2[j][k][i], self.norm_2[j][k][i]}
+      end
+    end
+  end
+  
+  self.P2:view(N,C,H,H,W)
+  self.P2 = self.P2:permute(1,2,5,3,4)  -- projection:permute(3,1,2)
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P3 qui associe les corrélations des éléments de I avec ceux situés sur la diagonale droite.
+  -- P3 : (HxW,HxW) -> WxHxH
+  --      I(k,i),I(j,i+j-k) -> I'3(i,j,k)
+  --      w/ condition : 1<=i+j-k<=W
+  ---------------------------------------------------------------------------------------------------------------------
+  -- local args
+  self.CCrop_3 = {}
+  self.CCrop1_3 = {}
+  self.localstds1_3 = {}
+  self.CCrop2_3 = {}
+  self.localdots_3 = {}
+  self.localstds2_3 = {}
+  self.norm_3 = {}
+  
+  self.P3 = {}  -- torch.Tensor(N,C,W,H,H)
+  
+  for k = 1,H do
+    self.buffer:copy(self.Centered)
+    self.CCrop_3[k] = nn.Narrow(3,k,kH):updateOutput(self.buffer)
+    
+    for i = 1,W do
+      self.buffer1:copy(self.CCrop_3[k])
+      self.CCrop1_3[k][i] = nn.Narrow(4,i,kW):updateOutput(self.buffer1)
+      
+      -- normalize std dev
+      self.localstds1_3[k][i] = self.std:updateOutput(self.CCrop1_3[k][i])
+      
+      for j = 1,H do
+        self.buffer:copy(self.Centered)
+        self.CCrop_3[j] = nn.Narrow(3,j,kH):updateOutput(self.buffer)
+        
+        
+        if i+j-k >= 1 and i+j-k <= W then
+          self.buffer1:copy(self.CCrop_3[j])
+          self.CCrop2_3[j][i+j-k] = nn.Narrow(4, i+j-k, kW):updateOutput(self.buffer1)
+          
+          -- compute dot product of standard deviations
+          self.localdots_3[i][j][k] = self.dot:updateOutput{self.CCrop1_3[k][i], self.CCrop2_3[j][i+j-k]}
+          
+          -- normalize std dev
+          self.localstds2_3[j][i+j-k] = self.std:updateOutput(self.CCrop2_3[j][i+j-k])
+          
+          self.norm_3[i][j][k] = self.multiplicator:updateOutput{self.localstds1_3[k][i], self.localstds2_3[j][i+j-k]}
+          self.P3[i][j][k] = self.normalizer:updateOutput{self.localdots_3[i][j][k], self.norm_3[i][j][k]}
+          
+        else
+          self.P3[i][j][k]:zero()
+        end
+      end
+    end
+  end
+  self.P3:view(N,C,W,H,H)
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P4 qui associe les corrélations des éléments de I avec ceux situés sur la diagonale gauche.
+  -- P4 : (HxW,HxW) -> WxHxH
+  --      I(k,i),I(j,i+j-k) -> I'4(i,j,k)
+  --      w/ condition : 1<=i+k-j<=W
+  ---------------------------------------------------------------------------------------------------------------------
+  -- local args
+  self.CCrop_4 = {}
+  self.CCrop1_4 = {}
+  self.localstds1_4 = {}
+  self.CCrop2_4 = {}
+  self.localdots_4 = {}
+  self.localstds2_4 = {}
+  self.norm_4 = {}
+  
+  self.P4 = {}  --  torch.Tensor(N,C,W,H,H)
+  
+  for k = 1,H do
+    self.buffer:copy(self.Centered)
+    self.CCrop_4[k] = nn.Narrow(3,k,kH):updateOutput(self.buffer)
+    
+    for i = 1,W do
+      self.buffer1:copy(self.CCrop_4[k])
+      self.CCrop1_4[k][i] = nn.Narrow(4,i,kW):updateOutput(self.buffer1)
+      
+      -- normalize std dev
+      self.localstds1_4[k][i] = self.std:updateOutput(self.CCrop1_4[k][i])
+      
+      for j = 1,H do
+        self.buffer:copy(self.Centered)
+        self.CCrop_4[j] = nn.Narrow(3,j,kH):updateOutput(self.buffer)
+        
+        
+        if i+k-j >= 1 and i+k-j <= W then
+          self.buffer1:copy(self.CCrop_4[j])
+          self.CCrop2_4[j][i+k-j] = nn.Narrow(4, i+k-j, kW):updateOutput(self.buffer1)
+          
+          -- compute dot product of standard deviations
+          self.localdots_4[i][j][k] = self.dot:updateOutput{self.CCrop1_4[k][i], self.CCrop2_4[j][i+k-j]}
+          
+          -- normalize std dev
+          self.localstds2_4[j][i+k-j] = self.std:updateOutput(self.CCrop2_4[j][i+k-j])
+          
+          self.norm_4[i][j][k] = self.multiplicator:updateOutput{self.localstds1_4[k][i], self.localstds2_4[j][i+k-j]}
+          self.P4[i][j][k] = self.normalizer:updateOutput{self.localdots_4[i][j][k], self.norm_4[i][j][k]}
+          
+        else
+          self.P4[i][j][k]:zero()
+        end
+      end
+    end
+  end
+  self.P4:view(N,C,W,H,H)
+  
+  -- sum up
+  self.output = {self.P1, self.P2, self.P3, self.P4}
+  
+  -- done
+  return self.output
+end
+
+
+function SpatialCorrelation:updateGradInput(input, gradOutput)
+  -- local args
+  local N = input:size(1)
+  local C = self.nOutputPlane
+  local H = input:size(3)
+  local W = input:size(4)
+  
+  local kW = self.kernel:size(1)
+  local kH = self.kernel:size(2)
+  
+  -- resize grad
+  self.gradInput:resizeAs(input):zero()
+  self.gradCentered = torch.Tensor:resizeAs(self.Centered):zero()
+  
+  local gradP1 = gradOutput[1]
+  local gradP2 = gradOutput[2]
+  local gradP3 = gradOutput[3]
+  local gradP4 = gradOutput[4]
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P1.
+  ---------------------------------------------------------------------------------------------------------------------
+  -- local args
+  self.gradCCrop_1 = torch.Tensor():resizeAs(self.CCrop_1):zero()
+  self.gradCCrop1_1 = torch.Tensor():resizeAs(self.CCrop1_1):zero()
+  self.gradCCrop2_1 = torch.Tensor():resizeAs(self.CCrop2_1):zero()
+  
+  -- backprop through all modules
+  local gradP1_00 = gradP1:permute(1,2,5,4,3)  -- (3,2,1)
+  local gradP1_0 = gradP1_00[N][C]
+  
+  for i = 1,H do
+    for k = 1,W do
+      for j = 1,W do
+        local gradnorm = self.normalizer:updateGradInput({self.localdots_1[k][j][i], self.norm_1[k][j][i]}, gradP1_0[k][j][i])
+        local gradmul = self.multiplicator:updateGradInput({self.localstds1_1[i][k], self.localstds2_1[i][j]}, gradnorm[2])
+        self.gradCCrop2_1[i][j]:add(self.std:updateGradInput(self.CCrop2_1[i][j], gradmul[2]))
+        local dot = self.dot:updateGradInput({self.CCrop1_1[i][k], self.CCrop2_1[i][j]}, gradnorm[1])
+        self.gradCCrop2_1[i][j]:add(dot[2])
+        self.gradCCrop1_1[i][k]:add(dot[1])
+        self.gradCCrop_1[i]:add(nn.Narrow(4,j,kW):updateGradInput(self.CCrop_1[i], self.gradCCrop2_1[i][j]))
+      end
+      self.gradCCrop1_1[i][k]:add(self.std:updateGradInput(self.CCrop1_1[i][k], gradmul[1]))
+      self.gradCCrop_1[i]:add(nn.Narrow(4,k,kW):updateGradInput(self.CCrop_1[i], self.gradCCrop1_1[i][k]))
+    end
+    self.gradCentered:add(nn.Narrow(3,i,kH):updateGradInput(self.Centered, self.gradCCrop_1[i]))
+  end
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P2.
+  ---------------------------------------------------------------------------------------------------------------------
+  -- local args
+  self.gradCCrop_2 = torch.Tensor():resizeAs(self.CCrop_2):zero()
+  self.gradCCrop1_2 = torch.Tensor():resizeAs(self.CCrop1_2):zero()
+  self.gradCCrop2_2 = torch.Tensor():resizeAs(self.CCrop2_2):zero()
+  
+  -- backprop through all modules
+  local gradP2_00 = gradP2:permute(1,2,5,3,4)  -- (3,1,2)
+  local gradP2_0 = gradP2_00[N][C]
+  
+  for i = 1,W do
+    for j = 1,H do
+      for k = 1,H do
+        local gradnorm = self.normalizer:updateGradInput({self.localdots_2[j][k][i], self.norm_2[j][k][i]}, gradP2_0[j][k][i])
+        local gradmul = self.multiplicator:updateGradInput({self.localstds1_2[i][j], self.localstds2_2[i][k]}, gradnorm[2])
+        self.gradCCrop2_2[i][k]:add(self.std:updateGradInput(self.CCrop2_2[i][k], gradmul[2]))
+        local dot = self.dot:updateGradInput({self.CCrop1_2[i][j], self.CCrop2_2[i][k]}, gradnorm[1]))
+        self.gradCCrop2_2[i][k]:add(dot[2])
+        self.gradCCrop1_2[i][j]:add(dot[1])
+        self.gradCCrop_2[i]:add(nn.Narrow(3,k,kH):updateGradInput(self.CCrop_2[i], gradCCrop2_2[i][k]))
+      end
+      self.gradCCrop1_2[i][j]:add(self.std:updateGradInput(self.CCrop1_2[i][j], gradmul[1]))
+      self.gradCCrop_2[i]:add(nn.Narrow(3,j,kH):updateGradInput(self.CCrop_2[i], gradCCrop1_2[i][j]))
+    end
+    self.gradCentered:add(nn.Narrow(4,i,kW):updateGradInput(self.Centered, self.gradCCrop_2[i]))
+  end
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P3.
+  ---------------------------------------------------------------------------------------------------------------------
+  -- local args
+  self.gradCCrop_3 = torch.Tensor():resizeAs(self.CCrop_3):zero()
+  self.gradCCrop1_3 = torch.Tensor():resizeAs(self.CCrop1_3):zero()
+  self.gradCCrop2_3 = torch.Tensor():resizeAs(self.CCrop2_3):zero()
+  
+  -- backprop through all modules
+  local gradP3_0 = gradP3[N][C]
+  
+  for k = 1,H do
+    for i = 1,W do
+      for j = 1,H do
+        if i+j-k >= 1+padW and i+j-k <= W+padW then
+          local gradnorm = self.normalizer:updateGradInput({self.localdots_3[i][j][k], self.norm_3[i][j][k]}, gradP3_0[i][j][k])
+          local gradmul = self.multiplicator:updateGradInput({self.localstds1_3[k][i], self.localstds2_3[j][i+j-k]}, gradnorm[2])
+          self.gradCCrop2_3[j][i+j-k]:add(self.std:updateGradInput(self.CCrop2_3[j][i+j-k], gradmul[2]))
+          local dot = self.dot:updateGradInput({self.CCrop1_3[k][i], self.CCrop2_3[j][i+j-k]}, gradnorm[1])
+          self.gradCCrop2_3[j][i+j-k]:add(dot[2])
+          self.gradCCrop1_3[k][i]:add(dot[1])
+          self.gradCCrop_3[k]:add(nn.Narrow(4, i+j-k, kW):updateGradInput(self.CCrop_3[k], gradCCrop2_3[j][i+j-k]))
+        else
+          local gradnorm = torch.Tensor(2):zero()
+          local gradmul = torch.Tensor(2):zero()
+          self.gradCCrop_3[k]:zero()
+        end
+        self.gradCentered:add(nn.Narrow(3,j,kH):updateGradInput(self.Centered, gradCCrop_3[j]))
+      end
+      self.gradCCrop1_3[k][i]:add(self.std:updateGradInput(self.CCrop1_3[k][i], gradmul[1]))
+      self.gradCCrop_3[k]:add(nn.Narrow(4,i,kW):updateGradInput(self.CCrop_3[k], gradCCrop1_3[k][i]))
+    end
+    self.gradCentered:add(nn.Narrow(3,k,kH):updateGradInput(self.Centered, gradCCrop_3[k]))
+  end
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P4.
+  ---------------------------------------------------------------------------------------------------------------------
+  -- local args
+  self.gradCCrop_4 = torch.Tensor():resizeAs(self.CCrop_4):zero()
+  self.gradCCrop1_4 = torch.Tensor():resizeAs(self.CCrop1_4):zero()
+  self.gradCCrop2_4 = torch.Tensor():resizeAs(self.CCrop2_4):zero()
+  
+  -- backprop through all modules
+  local gradP4_0 = gradP4[N][C]
+  
+  for k = 1,H do
+    for i = 1,W do
+      for j = 1,H do
+        if i+k-j >= 1+padW and i+k-j <= W+padW then
+          local gradnorm = self.normalizer:updateGradInput({self.localdots_4[i][j][k], self.norm_4[i][j][k]}, gradP4_0[i][j][k])
+          local gradmul = self.multiplicator:updateGradInput({self.localstds1_4[k][i], self.localstds2_4[j][i+k-j]}, gradnorm[2])
+          self.gradCCrop2_4[j][i+k-j]:add(self.std:updateGradInput(self.CCrop2_4[j][i+k-j], gradmul[2]))
+          local dot = self.dot:updateGradInput({self.CCrop1_4[k][i], self.CCrop2_4[j][i+k-j]}, gradnorm[1])
+          self.gradCCrop2_4[j][i+k-j]:add(dot[2])
+          self.gradCCrop1_4[k][i]:add(dot[1])
+          self.gradCCrop_4[k]:add(nn.Narrow(4, i+k-j, kW):updateGradInput(self.CCrop_4[k], gradCCrop2_4[j][i+k-j]))
+        else
+          local gradnorm = torch.Tensor(2):zero()
+          local gradmul = torch.Tensor(2):zero()
+          self.gradCCrop_4[k]:zero()
+        end
+        self.gradCentered:add(nn.Narrow(3,j,kH):updateGradInput(self.Centered, gradCCrop_4[j]))
+      end
+      self.gradCCrop1_4[k][i]:add(self.std:updateGradInput(self.CCrop1_4[k][i], gradmul[1]))
+      self.gradCCrop_4[k]:add(nn.Narrow(4,i,kW):updateGradInput(self.CCrop_4[k], gradCCrop1_4[k][i]))
+    end
+    self.gradCentered:add(nn.Narrow(3,k,kH):updateGradInput(self.Centered, gradCCrop_4[k]))
+  end
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  local gradsub = self.subtractor:updateGradInput({input, self.adjustedmeans}, self.gradCentered)
+  local graddiv = self.divider:updateGradInput({self.localmeans, self.coef}, gradsub[2])
+  self.gradInput:add(self.mean:updateGradInput(input, graddiv[1]))
+  self.gradInput:add(gradsub[1])
+  
+  -- done
+  return self.gradInput
+end
+
+
+function SpatialCorrelation:accGradParameters(input, gradOutput, scale)
+  -- local args
+  local N = input:size(1)
+  local C = self.nOutputPlane
+  local H = input:size(3)
+  local W = input:size(4)
+  
+  local gradP1 = gradOutput[1]
+  local gradP2 = gradOutput[2]
+  local gradP3 = gradOutput[3]
+  local gradP4 = gradOutput[4]
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P1.
+  ---------------------------------------------------------------------------------------------------------------------
+  -- backprop through all modules
+  local gradP1_00 = gradP1:permute(1,2,5,4,3)  -- (3,2,1)
+  local gradP1_0 = gradP1_00[N][C]
+  
+  for i = 1,H do
+    for k = 1,W do
+      for j = 1,W do
+        local gradnorm = self.normalizer:updateGradInput({self.localdots_1[k][j][i], self.norm_1[k][j][i]}, gradP1_0[k][j][i])
+        local gradmul = self.multiplicator:updateGradInput({self.localstds1_1[i][k], self.localstds2_1[i][j]}, gradnorm[2])
+        self.std.modules[2].gradWeight:add(self.std:accgradParameters(self.CCrop2_1[i][j], gradmul[2], scale))
+        self.dot.modules[2].gradWeight:add(self.dot:accgradParameters({self.CCrop1_1[i][k],self.CCrop2_1[i][j]}, gradnorm[1], scale))
+      end
+      self.std.modules[2].gradWeight:add(self.std:accgradParameters(self.CCrop1_1[i][k], gradmul[1], scale))
+    end
+  end
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P2.
+  ---------------------------------------------------------------------------------------------------------------------
+  -- backprop through all modules
+  local gradP2_00 = gradP2:permute(1,2,5,3,4)  -- (3,1,2)
+  local gradP2_0 = gradP2_00[N][C]
+  
+  for i = 1,W do
+    for j = 1,H do
+      for k = 1,H do
+        local gradnorm = self.normalizer:updateGradInput({self.localdots_2[j][k][i], self.norm_2[j][k][i]}, gradP2_0[j][k][i])
+        local gradmul = self.multiplicator:updateGradInput({self.localstds1_2[i][j], self.localstds2_2[i][k]}, gradnorm[2])
+        self.std.modules[2].gradweight:add(self.std:accgradParameters(self.CCrop2_2[i][k], gradmul[2], scale))
+        self.dot.modules[2].gradWeight:add(self.dot:accgradParameters({self.CCrop1_2[i][j],self.CCrop2_2[i][k]}, gradnorm[1], scale))
+      end
+      self.std.modules[2].gradWeight:add(self.std:accgradParameters(self.CCrop1_2[i][j], gradmul[1], scale))
+    end
+  end
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P3.
+  ---------------------------------------------------------------------------------------------------------------------
+  -- backprop through all modules
+  local gradP3_0 = gradP3[N][C]
+  
+  for k = 1,H do
+    for i = 1,W do
+      for j = 1,H do
+        if i+j-k >= 1+padW and i+j-k <= W+padW then
+          local gradnorm = self.normalizer:updateGradInput({self.localdots_3[i][j][k], self.norm_3[i][j][k]}, gradP3_0[i][j][k])
+          local gradmul = self.multiplicator:updateGradInput({self.localstds1_3[k][i], self.localstds2_3[j][i+j-k]}, gradnorm[2])
+          self.std.modules[2].gradweight:add(self.std:accgradParameters(self.CCrop2_3[j][i+j-k], gradmul[2], scale))
+          self.dot.modules[2].gradWeight:add(self.dot:accgradParameters({self.CCrop1_3[k][i],self.CCrop2_3[j][i+j-k]}, gradnorm[1], scale))
+        end
+      end
+      self.std.modules[2].gradWeight:add(self.std:accgradParameters(self.CCrop1_3[k][i], gradmul[1], scale))
+    end
+  end
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  -- Considérons P4.
+  ---------------------------------------------------------------------------------------------------------------------
+  -- backprop through all modules
+  local gradP4_0 = gradP4[N][C]
+  
+  for k = 1,H do
+    for i = 1,W do
+      for j = 1,H do
+        if i+k-j >= 1+padW and i+k-j <= W+padW then
+          local gradnorm = self.normalizer:updateGradInput({self.localdots_4[i][j][k], self.norm_4[i][j][k]}, gradP4_0[i][j][k])
+          local gradmul = self.multiplicator:updateGradInput({self.localstds1_4[k][i], self.localstds2_4[j][i+k-j]}, gradnorm[2])
+          self.std.modules[2].gradweight:add(self.std:accgradParameters(self.CCrop2_4[j][i+k-j], gradmul[2], scale))
+          self.dot.modules[2].gradWeight:add(self.dot:accgradParameters({self.CCrop1_4[k][i],self.CCrop2_4[j][i+k-j]}, gradnorm[1], scale))
+        end
+      end
+      self.std.modules[2].gradWeight:add(self.std:accgradParameters(self.CCrop1_4[k][i], gradmul[1], scale))
+    end
+  end
+  
+  ---------------------------------------------------------------------------------------------------------------------
+  local gradsub = self.subtractor:updateGradInput({input, self.adjustedmeans}, self.gradCentered)
+  local graddiv = self.divider:updateGradInput({self.localmeans, self.coef}, gradsub[2])
+  self.mean.modules[2].gradWeight:add(self.mean:accgradParameters(input, graddiv[1], scale))
+  self.mean.modules[2].gradBias:zero()
+  self.std.modules[2].gradBias:zero()
+  self.dot.modules[2].gradBias:zero()
+  
+  -- done
+  return self.gradParameters
+end
+
+
+function SpatialCorrelation:updateParameters(learningRate) 
+  self.mean.modules[2].weight = torch.add(self.mean.modules[2].weight, - self.learningRate, self.mean.modules[2].gradWeight)
+  self.std.modules[2].weight = torch.add(self.std.modules[2].weight, - self.learningRate, self.std.modules[2].gradWeight)
+  self.dot.modules[2].weight = torch.add(self.dot.modules[2].weight, - self.learningRate, self.dot.modules[2].gradWeight)
+  self.mean.modules[2].bias:zero()
+  self.std.modules[2].bias:zero()
+  self.dot.modules[2].bias:zero()
+end
+
+
+function SpatialCorrelation:type(type)
+  parent.type(self,type)
+  self.mean:type(type)
+  self.std:type(type)
+  self.dot:type(type)
+  self.subtractor:type(type)
+  self.multiplicator:type(type)
+  self.normalizer:type(type)
+  self.divider:type(type)
+  return self
+end

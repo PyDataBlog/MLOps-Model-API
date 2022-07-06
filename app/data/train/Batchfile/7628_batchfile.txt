@@ -1,0 +1,1 @@
+cmd_sound/core/oss/snd-mixer-oss.o := /home/jashaswee/vibex2/X2_ROW_L_OpenSource/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-ld -EL    -r -o sound/core/oss/snd-mixer-oss.o sound/core/oss/mixer_oss.o 

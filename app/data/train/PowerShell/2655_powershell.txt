@@ -1,0 +1,56 @@
+﻿$server = "server.domain.com"
+
+$currentpassword = "password"
+
+Connect-VIServer $server -User root -Password $currentpassword -WarningAction SilentlyContinue
+$myhost = get-vmhost $server
+$myhost.ConnectionState
+$myhost | Get-VMHostAuthentication
+Get-VMHostService -VMHost $myhost | where {$_.Key -eq "lwsmd"} | Restart-VMHostService -Confirm:$false
+
+try{
+    Get-VMHostAuthentication -VMHost $myhost | Set-VMHostAuthentication -Domain $domain -user "svcaccount" -Password "svcpassword" -JoinDomain -Confirm:$false -ErrorAction Stop
+}
+catch{
+    Start-Sleep -Seconds 5
+    $myhost | Get-VMHostAuthentication
+}
+
+
+$hostconnection= Connect-VIServer $myhost -username root -password $currentpassword -WarningAction SilentlyContinue
+##Get aa-esxadmin group from VIhost and NOT vCenter
+$principal=$null
+Write-Output "Trying to find AA-ESXAdmin"
+try
+{
+    $principal = (Get-VIAccount -ErrorAction Stop -server $hostconnection -Domain 'HO' -Group "aa-esxAdmin")
+}
+catch
+{
+Write-Warning "Could not find AA-ESXAdmin, waiting for 15 seconds and trying again"
+}
+if([string]::IsNullOrEmpty($principal))
+{
+    Write-Output "Prinicipal was null, trying again..."
+    try
+    {
+        $principal = (Get-VIAccount -ErrorAction Stop -server $hostconnection -Domain 'HO' -Group "aa-esxAdmin")
+    }
+    catch
+    {
+        Write-Warning "AA-ESXAdmin was not found!"
+        $_
+        Write-Warning "Please manually remediate and rerun this script"
+        Write-Verbose "Breaking script"
+        return
+    }
+}
+
+#Need to get-vmhost again
+$esxserver=Get-VMHost $myhost -Server $hostconnection -WarningAction SilentlyContinue
+
+#Add  aa-esxadmin to Administrator Role on host
+# ALL PARAMATERS MUST BE FROM $HOSTCONNECTION AND NOT VCENTER AHHHHHHHHHHHHHHHHHHH!!!!
+New-VIPermission -Principal $principal -Role 'Admin' -Server $hostconnection -Entity $esxserver
+
+Disconnect-VIServer * -Force -Confirm:$false

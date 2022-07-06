@@ -1,0 +1,380 @@
+﻿Public Class NewScanForm
+    Public SurveyObjectController As SurveyObjectController
+    Private _scanNumber As Integer
+    Private _totalScans As Integer
+    Public TmpScan As ScanObject
+    Public Analyzer As AnalyzerObject
+    Public AzrTraceForm As AnalyzerTraceForm
+    Public MaxCoaxialSwicthGroupBoxes As Integer = 5
+    Public NumCoaxialGroupBoxesDefined As Integer = 0
+    Public CoaxialSwicthGroupBoxArray(maxCoaxialSwicthGroupBoxes) As System.Windows.Forms.GroupBox
+    Public EditSurveyForm As EditSurveyForm
+    Private _testScanThread = New Threading.Thread(AddressOf scanTest)
+
+    Public Sub New(ByRef aSurveyObjectController As SurveyObjectController, ByVal aScanIdx As Integer, ByVal totalScans As Integer, Optional ByRef edit As EditSurveyForm = Nothing)
+        Me.SurveyObjectController = aSurveyObjectController
+        Me.EditSurveyForm = edit
+
+        If aScanIdx > totalScans Then
+            Me.SurveyObjectController.aMain.MissionController.serializeMissionObject()
+            If Me.EditSurveyForm Is Nothing Then
+                Return
+            Else
+                Try
+                    Me.EditSurveyForm.updateSurvey()
+                Catch ex As Exception
+                    MsgBox("unable to call updateSurvey() from NewScanForm")
+                End Try
+            End If
+            Return
+        End If
+
+        Me._scanNumber = aScanIdx - 1
+        Me._totalScans = totalScans
+
+        Me.tmpScan = New ScanObject
+        'define just a single analyzer per scan object at this point
+        Me.tmpScan.getAnalyzer = New AnalyzerObject
+        'redim the array that holds the total amount of swicthes assigned to this survey
+        ReDim Me.tmpScan.getSwitchPosArry(Me.SurveyObjectController.surveyObj.getNumOfSwitches - 1)
+
+        ' This call is required by the designer.
+        InitializeComponent()
+
+        'call the function to set up the correct boxes and assign a enumeration to them
+        Me.setUpSwitchGroupBoxes()
+
+        'populate the  combo boxs from the enum defined
+        Me.cmbBxCoupling.DataSource = System.Enum.GetValues(GetType(Enumerations.Coupling))
+        Me.cmbBxPolarization.DataSource = System.Enum.GetNames(GetType(Enumerations.Polarizations))
+
+        'populate the number of traces combo box from the max detectors defined
+        For jj As Integer = 1 To Me.tmpScan.getAnalyzer.getMaxTraces
+            Me.cmbBxNumberTraces.Items.Add(jj)
+        Next
+
+        'put a default unique scan name in
+        Me.txtBxScanName.Text = Me.txtBxScanName.Text & "_" & aScanIdx
+
+        ' Add any initialization after the InitializeComponent() call.
+        Me.Text = "Scan " & aScanIdx & " Configuration Set-Up"
+        Me.StartPosition = FormStartPosition.Manual
+        Me.Left = 100
+        Me.Top = 100
+        Me.Visible = True
+    End Sub
+
+    Private Sub cmbBxNumberTraces_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cmbBxNumberTraces.SelectedIndexChanged
+        Me.tmpScan.getAnalyzer.getnumberTracesDefined = CInt(Me.cmbBxNumberTraces.Text)
+        Me.azrTraceForm = New AnalyzerTraceForm(Me.tmpScan.getAnalyzer, 1, Me.tmpScan.getAnalyzer.getnumberTracesDefined)
+
+    End Sub
+
+    Private Sub btnFinished_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnFinished.Click
+
+        If (cmbBxNumberTraces.Text = "") Then
+            If (MessageBox.Show("You have not entered any traces.  Are you sure you are finished?", "No Traces", MessageBoxButtons.YesNo) = Windows.Forms.DialogResult.Yes) Then
+                With Me.tmpScan.getAnalyzer
+                    .getRefLevel = Me.numUpDwnRefLevel.Value
+                    .getCoupling = Me.cmbBxCoupling.Text
+                    .getAtten = Me.numUpDwnAtten.Value
+                    .getSweepPoints = Me.numUpDwnSweepPoints.Value
+                    .getSingleSweepMode = Me.chkBsSingleSweep.CheckState
+                    .getNumberOfSweeps = Me.numUpDwnNumSweeps.Value
+                    .getDwellTime = Me.numUpDwnDwellTime.Value
+                    .getStartFreq = (Me.numUpDwnStartFreq.Value & Me.cmbBxStartFreqUnits.Text)
+                    .getStopFreq = (Me.numUpDwnStopFreq.Value & Me.cmbBxStopfreqUnits.Text)
+                    .getRBW = (Me.numUpDwnRBW.Value & Me.cmbBxRBWfreqUnits.Text)
+                    .getVBW = (Me.numUpDwnVBW.Value & Me.cmbBxVBWFreqUnits.Text)
+                    If Me.cmbBxPreAmpDefaultState.Text.ToUpper = "ON" Then
+                        .getPreAmpOn = True
+                    Else
+                        .getPreAmpOn = False
+                    End If
+                    If Me.chkBxAuto.Checked = True Then
+                        .getAutoAtten = True
+                    Else
+                        .getAtten = False
+                    End If
+                    If Me.chkBxAutoSwpTime.Checked = True Then
+                        .getAutoSweep = True
+                    Else
+                        .getAutoSweep = False
+                    End If
+                    .getSweepTimeMS = Me.numUpDwnSweepTimeMS.Value
+                End With
+
+                With Me.tmpScan
+                    .getAntenna = Me.txtBxAntennaModel.Text
+                    .getPolarization = Me.cmbBxPolarization.SelectedIndex
+                    .getAzimuthOffset = Me.numUpDwnAntOffset.Value
+                    .getName = Me.txtBxScanName.Text
+                    .getAntennaFactorFile = Me.txtBxAntFactorFile.Text
+                    .getPathLossFile = Me.txtBxCableCalFile.Text
+                    .getSigGenPowerLvlDbm = Me.sigGenPowerLevel.Value
+                    .getSigGenFreqStepMHz = Me.sigGenFreqStep.Value
+                    .getScreenShot = Me.cmbBxScreenShot.SelectedItem
+                    .getseparatePlot = Me.cmbBxSeparatePlot.SelectedItem
+
+                    Me.assignSwitchPositionsToArray()
+
+                End With
+                Me.SurveyObjectController.surveyObj.getScanObject(Me._scanNumber) = Me.tmpScan
+                Me.Close()
+                Me._scanNumber += 1
+                Me.SurveyObjectController.newScanForm = New NewScanForm(Me.SurveyObjectController, Me._scanNumber + 1, Me._totalScans, Me.EditSurveyForm)
+            End If
+        Else
+            With Me.tmpScan.getAnalyzer
+                .getRefLevel = Me.numUpDwnRefLevel.Value
+                .getCoupling = Me.cmbBxCoupling.Text
+                .getAtten = Me.numUpDwnAtten.Value
+                .getSweepPoints = Me.numUpDwnSweepPoints.Value
+                .getSingleSweepMode = Me.chkBsSingleSweep.CheckState
+                .getNumberOfSweeps = Me.numUpDwnNumSweeps.Value
+                .getDwellTime = Me.numUpDwnDwellTime.Value
+                .getStartFreq = (Me.numUpDwnStartFreq.Value & Me.cmbBxStartFreqUnits.Text)
+                .getStopFreq = (Me.numUpDwnStopFreq.Value & Me.cmbBxStopfreqUnits.Text)
+                .getRBW = (Me.numUpDwnRBW.Value & Me.cmbBxRBWfreqUnits.Text)
+                .getVBW = (Me.numUpDwnVBW.Value & Me.cmbBxVBWFreqUnits.Text)
+                If Me.cmbBxPreAmpDefaultState.Text.ToUpper = "ON" Then
+                    .getPreAmpOn = True
+                Else
+                    .getPreAmpOn = False
+                End If
+                If Me.chkBxAuto.Checked = True Then
+                    .getAutoAtten = True
+                Else
+                    .getAtten = False
+                End If
+                If Me.chkBxAutoSwpTime.Checked = True Then
+                    .getAutoSweep = True
+                Else
+                    .getAutoSweep = False
+                End If
+                .getSweepTimeMS = Me.numUpDwnSweepTimeMS.Value
+            End With
+
+            With Me.tmpScan
+                .getAntenna = Me.txtBxAntennaModel.Text
+                .getPolarization = Me.cmbBxPolarization.SelectedIndex
+                .getAzimuthOffset = Me.numUpDwnAntOffset.Value
+                .getName = Me.txtBxScanName.Text
+                .getAntennaFactorFile = Me.txtBxAntFactorFile.Text
+                .getPathLossFile = Me.txtBxCableCalFile.Text
+                .getSigGenPowerLvlDbm = Me.sigGenPowerLevel.Value
+                .getSigGenFreqStepMHz = Me.sigGenFreqStep.Value
+                .getScreenShot = Me.cmbBxScreenShot.SelectedItem
+                .getseparatePlot = Me.cmbBxSeparatePlot.SelectedItem
+
+                Me.assignSwitchPositionsToArray()
+
+            End With
+            Me.SurveyObjectController.surveyObj.getScanObject(Me._scanNumber) = Me.tmpScan
+            Me.Close()
+            Me._scanNumber += 1
+            Me.SurveyObjectController.newScanForm = New NewScanForm(Me.SurveyObjectController, Me._scanNumber + 1, Me._totalScans, Me.EditSurveyForm)
+
+        End If
+
+        
+    End Sub
+
+    Private Sub BtnantFactorFileBrowse_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles BtnantFactorFileBrowse.Click
+        'Me.OpenAntFactorFileDialog.InitialDirectory = "C:"
+        Me.OpenAntFactorFileDialog.FileName = Me.tmpScan.getAntennaFactorFile
+
+        If Me.OpenAntFactorFileDialog.ShowDialog = Windows.Forms.DialogResult.Cancel Then
+            Return
+        Else
+            Me.tmpScan.getAntennaFactorFile = Me.OpenAntFactorFileDialog.FileName
+            Me.txtBxAntFactorFile.Text = Me.tmpScan.getAntennaFactorFile
+
+        End If
+    End Sub
+
+    Private Sub btnCableCalFileBrowse_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnCableCalFileBrowse.Click
+        'Me.OpenCableCalFileDialog.InitialDirectory = "C:"
+        Me.OpenCableCalFileDialog.FileName = Me.tmpScan.getPathLossFile
+
+        If Me.OpenCableCalFileDialog.ShowDialog = Windows.Forms.DialogResult.Cancel Then
+            Return
+        Else
+            Me.tmpScan.getPathLossFile = Me.OpenCableCalFileDialog.FileName
+            Me.txtBxCableCalFile.Text = Me.tmpScan.getPathLossFile
+
+        End If
+    End Sub
+
+    Private Sub SetUpSwitchGroupBoxes()
+
+        With Me.SurveyObjectController.surveyObj
+            'make visible the proper coaxial switch group boxes
+            For ii As Integer = 1 To .getNumOfSwitches
+
+                Select Case ii
+                    Case 1
+                        Me.GroupBoxSwitch1Pos.Visible = True
+                        For Each path In .getSwitches(ii - 1).getpathNames
+                            Me.ComboBox1.Items.Add(path)
+                        Next
+                        Me.ComboBox1.Items.Add(System.Enum.GetName(GetType(Enumerations.SwitchPathAliases), Enumerations.SwitchPathAliases.DontCare))
+                        Me.ComboBox1.SelectedItem = Me.ComboBox1.Items(Me.ComboBox1.Items.Count - 1)
+                    Case 2
+                        Me.GroupBoxSwitch2Pos.Visible = True
+                        For Each path In .getSwitches(ii - 1).getpathNames
+                            Me.ComboBox2.Items.Add(path)
+                        Next
+                        Me.ComboBox2.Items.Add(System.Enum.GetName(GetType(Enumerations.SwitchPathAliases), Enumerations.SwitchPathAliases.DontCare))
+                        Me.ComboBox2.SelectedItem = Me.ComboBox2.Items(Me.ComboBox2.Items.Count - 1)
+                    Case 3
+                        Me.GroupBoxSwitch3Pos.Visible = True
+                        For Each path In .getSwitches(ii - 1).getpathNames
+                            Me.ComboBox3.Items.Add(path)
+                        Next
+                        Me.ComboBox3.Items.Add(System.Enum.GetName(GetType(Enumerations.SwitchPathAliases), Enumerations.SwitchPathAliases.DontCare))
+                        Me.ComboBox3.SelectedItem = Me.ComboBox3.Items(Me.ComboBox3.Items.Count - 1)
+                    Case 4
+                        Me.GroupBoxSwitch4Pos.Visible = True
+                        For Each path In .getSwitches(ii - 1).getpathNames
+                            Me.ComboBox4.Items.Add(path)
+                        Next
+                        Me.ComboBox4.Items.Add(System.Enum.GetName(GetType(Enumerations.SwitchPathAliases), Enumerations.SwitchPathAliases.DontCare))
+                        Me.ComboBox4.SelectedItem = Me.ComboBox4.Items(Me.ComboBox4.Items.Count - 1)
+                    Case 5
+                        Me.GroupBoxSwitch5Pos.Visible = True
+                        For Each path In .getSwitches(ii - 1).getpathNames
+                            Me.ComboBox5.Items.Add(path)
+                        Next
+                        Me.ComboBox5.Items.Add(System.Enum.GetName(GetType(Enumerations.SwitchPathAliases), Enumerations.SwitchPathAliases.DontCare))
+                        Me.ComboBox5.SelectedItem = Me.ComboBox5.Items(Me.ComboBox5.Items.Count - 1)
+
+                    Case 6
+                        Me.GroupBoxSwitch6Pos.Visible = True
+                        For Each path In .getSwitches(ii - 1).getpathNames
+                            Me.CoaxBox6.Items.Add(path)
+                        Next
+                        Me.CoaxBox6.Items.Add(System.Enum.GetName(GetType(Enumerations.SwitchPathAliases), Enumerations.SwitchPathAliases.DontCare))
+                        Me.CoaxBox6.SelectedItem = Me.CoaxBox6.Items(Me.CoaxBox6.Items.Count - 1)
+
+                    Case 7
+                        Me.GroupBoxSwitch7Pos.Visible = True
+                        For Each path In .getSwitches(ii - 1).getpathNames
+                            Me.CoaxBox7.Items.Add(path)
+                        Next
+                        Me.CoaxBox7.Items.Add(System.Enum.GetName(GetType(Enumerations.SwitchPathAliases), Enumerations.SwitchPathAliases.DontCare))
+                        Me.CoaxBox7.SelectedItem = Me.CoaxBox7.Items(Me.CoaxBox7.Items.Count - 1)
+
+
+                End Select
+
+            Next
+
+        End With
+    End Sub
+
+    Public Sub AssignSwitchPositionsToArray()
+        With Me.tmpScan
+            'make visible the proper coaxial switch group boxes
+            For ii As Integer = 1 To Me.SurveyObjectController.surveyObj.getNumOfSwitches
+
+                Select Case ii
+                    Case 1
+                        .getSwitchPosArry(ii - 1) = Me.ComboBox1.SelectedIndex
+                    Case 2
+                        .getSwitchPosArry(ii - 1) = Me.ComboBox2.SelectedIndex
+                    Case 3
+                        .getSwitchPosArry(ii - 1) = Me.ComboBox3.SelectedIndex
+                    Case 4
+                        .getSwitchPosArry(ii - 1) = Me.ComboBox4.SelectedIndex
+                    Case 5
+                        .getSwitchPosArry(ii - 1) = Me.ComboBox5.SelectedIndex
+                    Case 6
+                        .getSwitchPosArry(ii - 1) = Me.ComboBox6.SelectedIndex
+                    Case 7
+                        .getSwitchPosArry(ii - 1) = Me.CoaxBox6.SelectedIndex
+                End Select
+
+            Next
+
+        End With
+
+    End Sub
+
+    Private Sub chkBsSingleSweep_CheckedChanged(sender As System.Object, e As System.EventArgs) Handles chkBsSingleSweep.CheckedChanged
+        If Me.chkBsSingleSweep.Checked = True Then
+            Me.grpBoxNumSweeps.Visible = True
+            Me.grpBxContSweep.Visible = False
+        Else
+            Me.grpBoxNumSweeps.Visible = False
+            Me.grpBxContSweep.Visible = True
+        End If
+    End Sub
+
+    Private Sub btnTest_Click(sender As System.Object, e As System.EventArgs) Handles btnTest.Click
+        Try
+            With Me.tmpScan.getAnalyzer
+                .getRefLevel = Me.numUpDwnRefLevel.Value
+                .getCoupling = Me.cmbBxCoupling.Text
+                .getAtten = Me.numUpDwnAtten.Value
+                .getSweepPoints = Me.numUpDwnSweepPoints.Value
+                .getSingleSweepMode = Me.chkBsSingleSweep.CheckState
+                .getNumberOfSweeps = Me.numUpDwnNumSweeps.Value
+                .getDwellTime = Me.numUpDwnDwellTime.Value
+                .getStartFreq = (Me.numUpDwnStartFreq.Value & Me.cmbBxStartFreqUnits.Text)
+                .getStopFreq = (Me.numUpDwnStopFreq.Value & Me.cmbBxStopfreqUnits.Text)
+                .getRBW = (Me.numUpDwnRBW.Value & Me.cmbBxRBWfreqUnits.Text)
+                .getVBW = (Me.numUpDwnVBW.Value & Me.cmbBxVBWFreqUnits.Text)
+                If Me.cmbBxPreAmpDefaultState.Text.ToUpper = "ON" Then
+                    .getPreAmpOn = True
+                Else
+                    .getPreAmpOn = False
+                End If
+                If Me.chkBxAuto.Checked = True Then
+                    .getAutoAtten = True
+                Else
+                    .getAtten = False
+                End If
+                If Me.chkBxAutoSwpTime.Checked = True Then
+                    .getAutoSweep = True
+                Else
+                    .getAutoSweep = False
+                End If
+                .getSweepTimeMS = Me.numUpDwnSweepTimeMS.Value
+            End With
+
+            With Me.tmpScan
+                .getAntenna = Me.txtBxAntennaModel.Text
+                .getPolarization = Me.cmbBxPolarization.SelectedIndex
+                .getAzimuthOffset = Me.numUpDwnAntOffset.Value
+                .getName = Me.txtBxScanName.Text
+                .getAntennaFactorFile = Me.txtBxAntFactorFile.Text
+                .getPathLossFile = Me.txtBxCableCalFile.Text
+                .getSigGenPowerLvlDbm = Me.sigGenPowerLevel.Value
+                .getSigGenFreqStepMHz = Me.sigGenFreqStep.Value
+                .getScreenShot = Me.cmbBxScreenShot.SelectedItem
+                .getseparatePlot = Me.cmbBxSeparatePlot.SelectedItem
+
+                Me.assignSwitchPositionsToArray()
+
+            End With
+
+            Me.SurveyObjectController.surveyObj.getScanObject(Me._scanNumber) = Me.tmpScan
+
+            Me._testScanThread = New Threading.Thread(AddressOf scanTest)
+            Me._testScanThread.Start()
+        Catch ex As Exception
+            MsgBox("error testing analyzer parameters: " & ex.Message)
+        End Try
+    End Sub
+
+    Private Sub ScanTest()
+        Try
+
+            Me.SurveyObjectController.aMain.testScan(Me.SurveyObjectController.surveyObj, Me.tmpScan, Me.SurveyObjectController.surveyObj.getAnalyzerAssignmentIdx)
+
+        Catch ex As Exception
+            MsgBox("error testing analyzer parameters: " & ex.Message)
+        End Try
+    End Sub
+End Class

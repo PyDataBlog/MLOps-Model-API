@@ -1,0 +1,267 @@
+module RingBuffers
+
+using DistributedArrays
+
+export AbstractRingBuffer, RingBuffer, SharedRingBuffer, DistributedRingBuffer
+export fwd, rev
+
+
+abstract AbstractRingBuffer
+
+type RingBuffer <: AbstractRingBuffer
+    buffer::Array
+    position::Int
+    entry_indexes::Vector{Int}
+end
+
+RingBuffer(dtype::Type, entry_size::AbstractVector, nentries::Integer) = RingBuffer(
+Array(dtype, nentries, entry_size...), 0, [-1 for i in 1:nentries])
+
+
+type SharedRingBuffer <: AbstractRingBuffer
+    buffer::SharedArray
+    position::Int
+    entry_indexes::Vector{Int}
+    pids::Vector{Int}
+end
+
+SharedRingBuffer(dtype::Type, entry_size::AbstractVector, nentries::Integer; pids::Vector{Int}=Base.workers()) = SharedRingBuffer(
+SharedArray(dtype, nentries, entry_size..., pids=pids), 0, [-1 for i in 1:nentries], pids)
+
+
+type DistributedRingBuffer <: AbstractRingBuffer
+    buffer::DArray
+    position::Int
+    entry_indexes::Vector{Int}
+    pids::Vector{Int}
+end
+
+DistributedRingBuffer(dtype::Type, entry_size::AbstractVector, nentries::Integer; pids::Vector{Int}=Base.workers()) = DistributedRingBuffer(
+dzeros(dtype, (nentries, entry_size...), pids, [i == length(entry_size)+1 ? length(pids) : 1 for i in 1:length(entry_size)+1]), 0, [-1 for i in 1:nentries], pids)
+
+
+Base.eltype( buffer::AbstractRingBuffer ) = eltype(buffer.buffer)
+Base.length( buffer::AbstractRingBuffer ) = size(buffer.buffer, 1)
+Base.size( buffer::AbstractRingBuffer ) = size(buffer.buffer)
+Base.size( buffer::AbstractRingBuffer, i::Int ) = size(buffer.buffer, i)
+Base.getindex( buffer::AbstractRingBuffer, i::Int ) = buffer.buffer[i, :,:,:]
+Base.setindex!( buffer::RingBuffer, A::Array, i::Int ) = setindex!(buffer.buffer, A, i)
+Base.setindex!( buffer::SharedRingBuffer, A::Array, i::Int ) = setindex!(buffer.buffer, A, i)
+
+entryindex( buffer::AbstractRingBuffer, bufferindex::Int ) = buffer.entry_indexes[bufferindex]
+bufferindex( buffer::AbstractRingBuffer, entryindex::Int ) = findfirst(buffer.entry_indexes, entryindex)
+
+
+function Base.setindex!(
+    buffer::DistributedRingBuffer,
+    A::AbstractArray,
+    i::Int
+    )
+    @sync @async for pid in buffer.pids
+        @spawnat pid begin
+            idxs = localindexes(buffer.buffer)
+            localpart(buffer.buffer)[i, :,:,:] = A[idxs[2][1]:idxs[2][end], idxs[3][1]:idxs[3][end], idxs[4][1]:idxs[4][end]]
+        end
+    end
+end
+
+
+function fwd( buffer::AbstractRingBuffer )
+    buffer.position += 1
+    if buffer.position > length(buffer)
+        buffer.position = 1
+    end
+    buffer[buffer.position]
+end
+
+
+function rev( buffer::AbstractRingBuffer )
+    buffer.position -= 1
+    if buffer.position < 1
+        buffer.position = length(buffer)
+    end
+    buffer[buffer.position]
+end
+
+
+function Base.slice(
+    buffer::AbstractRingBuffer,
+    entryindex::Integer
+    )
+    idx = bufferindex(buffer, entryindex)
+    idx <= 0 ? nothing : buffer[idx]
+end
+
+
+function Base.push!(
+    buffer::AbstractRingBuffer,
+    A::AbstractArray,
+    index::Int = -1
+    )
+    buffer.position += 1
+    if buffer.position > length(buffer)
+        buffer.position = 1
+    end
+	buffer.entry_indexes[buffer.position] = index
+    buffer.buffer[buffer.position, :,:,:] = A
+end
+
+
+function Base.push!(
+    buffer::SharedRingBuffer,
+    A::AbstractArray,
+    index::Int = -1
+    )
+    buffer.position += 1
+    if buffer.position > length(buffer)
+        buffer.position = 1
+    end
+	buffer.entry_indexes[buffer.position] = index
+    buffer.buffer[buffer.position, :,:,:] = A
+end
+
+
+function Base.push!(
+    buffer::DistributedRingBuffer,
+    A::AbstractArray,
+    index::Int = -1
+    )
+    buffer.position += 1
+    if buffer.position > length(buffer)
+        buffer.position = 1
+    end
+    buffer.entry_indexes[buffer.position] = index
+    buffer[buffer.position] = A
+end
+
+
+function variable(
+    T::Type,
+    buffer::RingBuffer
+    )
+    Array(T, size(buffer)[2:end]...)
+end
+
+
+function variable(
+    T::Type,
+    buffer::SharedRingBuffer
+    )
+    SharedArray(T, size(buffer)[2:end]..., pids=workers())
+end
+
+
+function variable(
+    T::Type,
+    buffer::DistributedRingBuffer
+    )
+    dzeros(T, (size(buffer)[2:end]...), workers(), [1,1, nworkers()])
+end
+
+
+function Base.quantile!(
+    out::Array,
+    buffer::RingBuffer,
+    q
+    )
+    for I in CartesianRange(size(out))
+        out[I] = quantile(buffer.buffer[:, I[1], I[2], I[3]], q)
+    end
+end
+
+
+# function Base.get!(
+#     out::Array,
+#     buffer::RingBuffer,
+#     fun::Function
+#     )
+#     @sync @parallel for z in 1:size(buffer.buffer, 4)
+#         for y in 1:size(buffer.buffer, 3)
+#             for x in 1:size(buffer.buffer, 2)
+#                 out[x,y,z] = fun(buffer.buffer[:,x,y,z]);
+#             end
+#         end
+#     end
+# end
+
+
+function Base.quantile!(
+    out::SharedArray,
+    buffer::SharedRingBuffer,
+    q
+    )
+    @sync @parallel for z in 1:size(buffer.buffer, 4)
+        for y in 1:size(buffer.buffer, 3)
+            for x in 1:size(buffer.buffer, 2)
+                out[x,y,z] = quantile(buffer.buffer[:,x,y,z], q);
+            end
+        end
+    end
+end
+
+
+function Base.quantile!(
+    out::DArray,
+    buffer::DistributedRingBuffer,
+    q
+    )
+    @sync for pid in buffer.pids
+        @spawnat pid begin
+            inchunk = localpart(buffer.buffer)
+            outchunk = localpart(out)
+            for I in CartesianRange(size(outchunk))
+                outchunk[I] = quantile(inchunk[:, I[1], I[2], I[3]], q)
+            end
+        end
+    end
+end
+
+
+function Base.get!(
+    out::SharedArray{Real},
+    buffer::DistributedRingBuffer,
+    fun::Function
+    )
+    @sync for pid in buffer.pids
+        @spawnat pid begin
+            chunk = localpart(buffer.buffer)
+            indexes = localindexes(buffer.buffer)
+            for z in 1:size(chunk, 4)
+                outz = indexes[4][z]
+                for y in 1:size(chunk, 3)
+                    outy = indexes[3][y]
+                    for x in 1:size(chunk, 2)
+                        outx = indexes[2][x]
+                        out[outx,outy,outz] = fun(chunk[:, x,y,z])
+                    end
+                end
+            end
+        end
+    end
+end
+
+
+function Base.get!(
+    out::SharedArray{UInt16},
+    buffer::DistributedRingBuffer,
+    fun::Function
+    )
+    @sync for pid in buffer.pids
+        @spawnat pid begin
+            chunk = localpart(buffer.buffer)
+            indexes = localindexes(buffer.buffer)
+            for z in 1:size(chunk, 4)
+                outz = indexes[4][z]
+                for y in 1:size(chunk, 3)
+                    outy = indexes[3][y]
+                    for x in 1:size(chunk, 2)
+                        outx = indexes[2][x]
+                        out[outx,outy,outz] = round(UInt16, fun(chunk[:, x,y,z]))
+                    end
+                end
+            end
+        end
+    end
+end
+
+end # module

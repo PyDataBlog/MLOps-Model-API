@@ -1,0 +1,374 @@
+import * as fs from 'fs';
+import * as path from 'path';
+import * as npm from './npm';
+import * as node from './node';
+import * as typings from './typings';
+import { rmrfSync, walk, exists, symlink, readJsonFile, readFile, flatSymlinkDirectoryIgnore, writeJsonFile, copyFile, copyDirectory, existsCopyDirectory, mkdirp } from './fs';
+import { exec } from './sh';
+import { renderTemplateDir } from './render';
+import * as Mustache from 'mustache';
+const { merge } = require('ramda');
+
+export type ProjectType = 'javascript' | 'typescript';
+
+interface IProject {
+    init: (componentName: string, projectType: ProjectType) => Promise<{}>;
+    startDevelopment: (projectType: ProjectType, mountPath: string) => Promise<{}>;
+}
+
+interface IPackageJson {
+    name: string;
+    repository: {
+        type: string;
+        url: string;
+    };
+    jest?: {};
+}
+
+export default class Project implements IProject {
+
+    /**
+     * Sapling works within existing project code. The
+     * current working directory points to where the
+     * component project lives.
+     */
+    private cwd: string;
+
+    /**
+     * Path to the mounted projects package.json
+     */
+    private packagePath: string;
+
+    constructor(cwd: string) {
+        this.cwd = cwd;
+        this.packagePath = path.join(this.cwd, 'package.json');
+    }
+
+    /**
+     * Install modules (npm / typings) if they are not present
+     */
+    private installModules(projectType: ProjectType): Promise<{}> {
+        let tasks: Promise<boolean>[] = [];
+
+        tasks.push(exists(path.join(this.cwd, 'node_modules')).then((present: boolean) => {
+            return !present ? npm.install(this.cwd) : Promise.resolve(true);
+        }));
+
+        if (projectType === 'typescript') {
+            tasks.push(exists(path.join(this.cwd, 'typings')).then((present: boolean) => {
+                return !present ? typings.install(this.cwd) : Promise.resolve(true);
+            }));
+        }
+
+        return Promise.all(tasks);
+    }
+
+    /**
+     * The goal here is to mount the node_modules in our mounted project
+     * in a way that melds the modules from react-sapling, and those
+     * modules that the user has included in their own project.
+     */
+    private mountNodeModules(projectType: ProjectType, mountPath: string): Promise<{}> {
+        // The new path where we will put our melded modules
+        const mountModulesPath = path.join(mountPath, 'node_modules');
+        const mountModulesPathBin = path.join(mountModulesPath, '.bin');
+
+        /*
+           Path to modules that exist in the current working directory.
+           i.e. our component project
+         */
+        const prodModules = path.join(this.cwd, 'node_modules');
+
+        /*
+           Path to modules that exist in development
+
+           i.e. modules that are usually in our project, but are nested under
+           the react-sapling project (caused by running `npm link react-sapling`
+           during development)
+        */
+        const devModules = path.join(__dirname, '..', 'node_modules');
+
+        return mkdirp(mountModulesPathBin)
+            .then(() => flatSymlinkDirectoryIgnore(path.join(prodModules, '.bin'), mountModulesPathBin))
+            .then(() => flatSymlinkDirectoryIgnore(path.join(devModules, '.bin'), mountModulesPathBin))
+            .then(() => flatSymlinkDirectoryIgnore(prodModules, mountModulesPath))
+            .then(() => flatSymlinkDirectoryIgnore(devModules, mountModulesPath));
+    }
+
+    /**
+     * Symlink files into the mounted project so that they appear local
+     * during builds & development.
+     */
+    private mountSymlinks(projectType: ProjectType, mountPath: string): Promise<{}> {
+        let symlinkPromises: Promise<{}>[] = [];
+
+        // Side effect central!
+        const addSymlink = (srcPath: string, destPath: string, type: 'file' | 'dir') =>  {
+            symlinkPromises.push(symlink(path.join(this.cwd, srcPath),
+                                         path.join(mountPath, destPath),
+                                         type));
+        };
+
+        addSymlink('src', 'src', 'dir');
+        addSymlink('package.json', 'package.json', 'file');
+        addSymlink('README.md', 'README.md', 'file');
+
+        if (projectType === 'typescript') {
+            addSymlink('typings', 'typings', 'dir');
+            addSymlink('tsconfig.json', 'tsconfig.json', 'file');
+        }
+
+        if (projectType === 'javascript') {
+            addSymlink('.eslintrc', '.eslintrc', 'file');
+        }
+
+        return Promise.all(symlinkPromises);
+    }
+
+    private mountCopies(projectType: ProjectType, mountPath: string): Promise<{}> {
+        let copyPromises: Promise<{}>[] = [];
+
+        // NOTE: This is done to support Jest tests which does now allow
+        // for symlinked tests for some reason.
+        copyPromises.push(
+            mkdirp(path.join(mountPath, 'src-copy')).then(_ =>
+                existsCopyDirectory(path.join(this.cwd, 'src'),
+                                    path.join(mountPath, 'src-copy')))); // #lisp
+
+        return Promise.all(copyPromises);
+    }
+
+    /**
+     * Copy over the build dir files from this project into the mount-path.
+     */
+    private mountBuildDir(projectType: ProjectType, mountPath: string): Promise<{}> {
+        const buildDir = path.join(__dirname, 'build', 'shared');
+
+        return copyDirectory(buildDir, mountPath);
+    }
+
+    private mountProject(projectType: ProjectType, mountPath: string): Promise<{}> {
+        // Ensure that this project is unmounted.
+        this.unmountProject(mountPath);
+
+        // Always ensure that this project is unmounted on exit.
+        process.on('exit', () => this.unmountProject(mountPath));
+        process.on('SIGINT', () => this.unmountProject(mountPath));
+        process.on('uncaughtException', () => this.unmountProject(mountPath));
+
+        return this.installModules(projectType).then(() => {
+            // Make the mount path, then shove stuff into it (basically).
+            return mkdirp(mountPath);
+        }).then(() => Promise.all([
+            this.mountSymlinks(projectType, mountPath),
+            this.mountCopies(projectType, mountPath),
+            this.mountNodeModules(projectType, mountPath),
+            this.mountBuildDir(projectType, mountPath)
+        ]));
+    }
+
+    private unmountProject(mountPath: string): void {
+        return rmrfSync(mountPath);
+    }
+
+    private getPackageData(): Promise<IPackageJson> {
+        return readJsonFile<IPackageJson>(this.packagePath);
+    }
+
+    private generateFiles(projectType: ProjectType, componentName: string): Promise<{}> {
+        const sharedTemplateDir = path.join(__dirname, 'scaffold', 'templates', 'shared');
+        const templateDir = path.join(__dirname, 'scaffold', 'templates', projectType);
+
+        return this.getPackageData().then((packageData) => {
+            const templateVars = {
+                componentName,
+                projectName: packageData.name
+            };
+
+            return Promise.all([
+                renderTemplateDir(templateDir, this.cwd, templateVars),
+                renderTemplateDir(sharedTemplateDir, this.cwd, templateVars)
+            ]);
+        });
+    }
+
+    private initNpmPackage(projectType: string): Promise<{}> {
+        // Get the current project data
+        return this.getPackageData().then((packageData) => {
+            const repo = packageData.repository;
+            let projectGitUrl = '';
+            let isGitHubRepo = false;
+
+            if (repo && repo.type === 'git') {
+                const url = packageData.repository.url;
+                isGitHubRepo = /github\.com/.test(url);
+                projectGitUrl = url.replace('git+', '');
+            }
+
+            const isTypescript = projectType === 'typescript';
+            const isJavascript = !isTypescript;
+
+            // Get the path to our template package.json
+            const packageTemplatePath = path.join(__dirname, 'scaffold', 'config', 'packageData.mu.json');
+
+            // Read file contents, render it with variables,
+            // and merge it with the existing package data
+            return readFile(packageTemplatePath).then((packageTemplate) => {
+                const renderedPackageTemplate = Mustache.render(packageTemplate, {
+                    projectGitUrl,
+                    isGitHubRepo,
+                    isTypescript,
+                    isJavascript
+                });
+
+                const ourPackageData = JSON.parse(renderedPackageTemplate);
+                return Object.assign({}, packageData, ourPackageData);
+            });
+        }).then((newPackageData) => {
+            return writeJsonFile(this.packagePath, newPackageData);
+        });
+    }
+
+    private copyStaticFiles(projectType: string): Promise<{}> {
+        const sharedSrcDir = path.join(__dirname, 'scaffold', 'static', 'shared');
+        const srcDir = path.join(__dirname, 'scaffold', 'static', projectType);
+
+        return Promise.all([
+            existsCopyDirectory(sharedSrcDir, this.cwd),
+            existsCopyDirectory(srcDir, this.cwd),
+        ]);
+    }
+
+    public init(projectType: ProjectType, componentName: string): Promise<{}> {
+        return this.generateFiles(projectType, componentName)
+                   .then(() => this.initNpmPackage(projectType))
+                   .then(() => this.copyStaticFiles(projectType))
+                   .then(() => this.installModules(projectType));
+    }
+
+    public startDevelopment(projectType: ProjectType, mountPath: string): Promise<{}> {
+        return this.mountProject(projectType, mountPath).then(() => {
+            const serverPath = path.join(mountPath, 'server.js');
+
+            return node.runScript(serverPath, [], mountPath, { PROJECT_TYPE: projectType });
+        });
+    }
+
+    private buildDefinitions(projectType: ProjectType, mountPath: string): Promise<{}> {
+        if (projectType !== 'typescript') { return Promise.resolve({}); }
+
+        const tmpOutDir = `${mountPath}/TMP_TSC_TYPINGS`;
+        const cmd = `tsc --rootDir ${mountPath} --outDir ${tmpOutDir} --target ES6 --jsx React --experimentalDecorators --allowSyntheticDefaultImports --declaration`;
+
+        return exec(cmd, { cwd: mountPath }).then(() => {
+            return walk(tmpOutDir);
+        }).then((files) => {
+            const destDir = path.join(mountPath, '..', 'dist', 'typings');
+            // make the typings dir
+            return mkdirp(destDir).then(() => {
+                // copy over *.d.ts files from the `tmpOutDir` to our `destDir`
+                return Promise.all([files.filter((file) => {
+                    return /\.d\.ts$/.test(file);
+                }).map((file) => {
+                    const basename = path.basename(file);
+                    const dest = path.join(destDir, basename);
+                    return copyFile(file, dest);
+                })]);
+            });
+        });
+    }
+
+    public buildLibProd(projectType: ProjectType, mountPath: string): Promise<void> {
+        return this.mountProject(projectType, mountPath).then(() => {
+            const buildScriptPath = path.join(mountPath, 'build-lib-prod.js');
+
+            return node.runScript(buildScriptPath, [], mountPath, { PROJECT_TYPE: projectType });
+        }).then(() => this.buildDefinitions(projectType, mountPath))
+          .then(() => this.unmountProject(mountPath))
+          .catch(() => this.unmountProject(mountPath));
+    }
+
+    public buildLibDocs(projectType: ProjectType, mountPath: string): Promise<void> {
+        return this.mountProject(projectType, mountPath).then(() => {
+            const buildScriptPath = path.join(mountPath, 'build-lib-docs.js');
+
+            return node.runScript(buildScriptPath, [], mountPath, { PROJECT_TYPE: projectType });
+        }).then(() => this.buildDefinitions(projectType, mountPath))
+          .then(() => this.unmountProject(mountPath))
+          .catch(() => this.unmountProject(mountPath));
+    }
+
+    public buildBundleDocs(projectType: ProjectType, mountPath: string): Promise<void> {
+        return this.mountProject(projectType, mountPath).then(() => {
+            return mkdirp(path.join(mountPath, '..', 'dist', 'docs', 'src'));
+        }).then(() => {
+            return copyFile(path.join(mountPath, 'index.html'),
+                            path.join(mountPath, '..', 'dist', 'docs', 'index.html'));
+        }).then(() => {
+            const buildScriptPath = path.join(mountPath, 'build-bundle-docs.js');
+
+            return node.runScript(buildScriptPath, [], mountPath, { PROJECT_TYPE: projectType });
+        }).then(() => this.unmountProject(mountPath))
+          .catch(() => this.unmountProject(mountPath));
+    }
+
+    /* tslint:disable */
+    private fileList(dir: any): any {
+        return fs.readdirSync(dir).reduce(function(list: any, file: any): any {
+            const name: any = path.join(dir, file);
+            const isDir: any = fs.statSync(name).isDirectory();
+            return list.concat(isDir ? this.fileList(name) : [name]);
+        }, []);
+    }
+
+    public runTests(projectType: ProjectType, mountPath: string): Promise<void> {
+        return this.mountProject(projectType, mountPath).then(() => {
+            return this.getPackageData();
+        }).then((packageData) => {
+            // Path to the jest executable
+            const jestBin = path.join(mountPath, 'node_modules', '.bin', 'jest');
+
+            // The directory that we wish to test with Jest.
+            // Currently, jest ignores the symlinked `src` dir, so it should only
+            // look into the `src-copy`.
+            const jestTestDir = path.join(mountPath);
+
+            // Our base jest configuration
+            const jestConfigPath = path.join(mountPath, 'jest-config.json');
+
+            // Fetch the data from that configuration file
+            return readJsonFile(jestConfigPath).then(jestConfig => {
+
+                // Our jest configuration path that we are generating on the fly
+                const finalJestConfigPath = path.join(mountPath, 'jest-final-config.json');
+
+                // Create an object that represents our final Jest configuration. This
+                // will be stringified and stored in the finalJestConfigPath file.
+                let finalJestConfig = jestConfig;
+
+                // Options that we are going to pass to Jest
+                let jestOptions = ['--no-cache', '--config', finalJestConfigPath];
+
+                // If the user has defined their own Jest configuration, go ahead and
+                // merge it in with our finalJestConfiguration
+                if (typeof packageData.jest !== 'undefined') {
+                    finalJestConfig = merge(finalJestConfig, packageData.jest);
+                }
+
+                // Write our new configuration & run Jest with it.
+                return writeJsonFile(finalJestConfigPath, finalJestConfig).then(() => {
+                    return node.runScript(jestBin,
+                                          jestOptions,
+                                          jestTestDir,
+                                          { PROJECT_TYPE: projectType });
+                });
+            });
+
+        }).then(() => {
+            return this.unmountProject(mountPath);
+        }).catch(error => {
+            this.unmountProject(mountPath);
+            throw new Error('react-sapling: tests faild to run\n' + error.stack);
+        });
+    }
+}

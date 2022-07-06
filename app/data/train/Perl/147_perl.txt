@@ -1,0 +1,187 @@
+package PicLib;
+
+use strict;
+use warnings;
+
+use Carp;
+use Image::Imlib2;
+
+sub edge_simple ($$) { # input image (Imlib2), treshold
+    my $self = shift;
+    my $in_img = shift;
+    my $treshold = shift // 70;
+    my $tresh_sq = $treshold ** 2;
+    my $width = $in_img->width ();
+    my $height = $in_img->height ();
+    my $out_img = Image::Imlib2->new ($width, $height);
+
+    for ( my $h = 0; $h < $height - 1; $h++) {
+        for ( my $w = 0; $w < $width - 1; $w++) {
+            my ($r, $g, $b, $a) = $in_img->query_pixel ($w, $h);
+            my ($r1, $g1, $b1, $a1) = $in_img->query_pixel ($w + 1, $h);
+            my ($r2, $g2, $b2, $a2) = $in_img->query_pixel ($w, $h + 1);
+            my $res = ($r - $r1)**2 + ($g - $g1)**2 + ($b - $b1)** 2;
+            my $res2 = ($r - $r2)**2 + ($g - $g2)**2 + ($b - $b2)** 2;
+            if ( $res >= $tresh_sq || $res2 >= $tresh_sq) {
+                $out_img->set_color (255, 255, 255, 255);
+            } else {
+                $out_img->set_color (0, 0, 0, 255);
+            }
+            $out_img->draw_point ($w, $h);
+        }
+    }
+    return $out_img;
+}
+
+sub color_simple ($$\%) { # input image (Imlib2), r, g, b, treshold
+    my $self = shift;
+    my $in_img = shift;
+    my $treshold = shift // 70;
+    my $color_ref = shift;
+    my %color = %{$color_ref};
+    my $r0 = $color{'red'};
+    my $g0 = $color{'green'};
+    my $b0 = $color{'blue'};
+    my $tresh_sq = $treshold ** 2;
+    my $width = $in_img->width ();
+    my $height = $in_img->height ();
+    my $out_img = Image::Imlib2->new ($width, $height);
+
+    for ( my $h = 0; $h < $height - 1; $h++) {
+        for ( my $w = 0; $w < $width - 1; $w++) {
+            my ($r, $g, $b, $a) = $in_img->query_pixel ($w, $h);
+            my $res = ($r - $r0)**2 + ($g - $g0)**2 + ($b - $b0)**2;
+            if ( $res <= $tresh_sq) {
+                $out_img->set_color ($r, $g, $b, 255);
+            } else {
+                $out_img->set_color (255, 255, 255, 255);
+            }
+            $out_img->draw_point ($w, $h);
+        }
+    }
+    return $out_img;
+}
+
+sub convolution ($\@) { # input image (Imlib2), convolution matrix ref
+    my $self = shift;
+    my $in_img = shift;
+    my $kernel_ref = shift;
+    my @kernel = @{$kernel_ref};
+
+    my $w_in = $in_img->width ();
+    my $h_in = $in_img->height ();
+    my $out_img = Image::Imlib2->new ($w_in, $h_in);
+    my $k_width = scalar @kernel;
+    my $k_height = scalar @{$kernel[0]};
+    my $k_sum = 0;
+
+    for ( my $x = 0; $x < $k_height; $x++ ) {
+        for ( my $y = 0; $y < $k_width; $y++ ) {
+            $k_sum += $kernel[$x][$y];
+        }
+    }
+
+    if ( $k_sum <= 0) {
+        $k_sum = 1;
+    }
+
+    for ( my $h = 1; $h < $h_in - 1; $h++ ) {
+        for ( my $w = 1; $w < $w_in - 1; $w++ ) {
+            my $r_sum = 0;
+            my $g_sum = 0;
+            my $b_sum = 0;
+            for ( my $kh = 0; $kh < $k_height; $kh++ ) {
+                my $pih = $h - (($k_height - 1) >> 1) + $kh;
+                for ( my $kw = 0; $kw < $k_width; $kw++ ) {
+                    my $piw = $w - (($k_width - 1) >> 1) + $kw;
+                    my ($r, $g, $b, $a) = $in_img->query_pixel ($piw, $pih);
+                    $r_sum += $r * $kernel[$kw][$kh];
+                    $g_sum += $g * $kernel[$kw][$kh];
+                    $b_sum += $b * $kernel[$kw][$kh];
+                }
+            }
+            $r_sum = 0 if $r_sum < 0;
+            $g_sum = 0 if $g_sum < 0;
+            $b_sum = 0 if $b_sum < 0;
+            $r_sum = 255 if $r_sum > 255;
+            $g_sum = 255 if $g_sum > 255;
+            $b_sum = 255 if $b_sum > 255;
+
+            if ( $r_sum < 0 || $b_sum < 0 || $g_sum < 0
+                     || $r_sum > 255 || $b_sum > 255 || $g_sum > 255) {
+                printf STDERR "PIXEL: [%d, %d]\n", $h, $w;
+                printf STDERR "ERR OUTPUT: r = %d, g = %d, b = %d\n", $r_sum, $g_sum, $b_sum;
+            }
+            $out_img->set_color ($r_sum, $g_sum, $b_sum, 255);
+            $out_img->draw_point ($w, $h);
+        }
+    }
+    return $out_img;
+}
+
+# Returns an array of arrays (kernel)
+sub load_file_kernel ($) { # path to file
+    my $self = shift;
+    my $file_name = shift;
+    open my $fh, '<', $file_name or die "Unable to open file '${file_name}': $!";
+    my @arr;
+    while ( <$fh> ) {
+        my $line = $_;
+        my @numbers = split /\s+/, $line;
+        push @arr, \@numbers;
+    }
+    close $fh;
+    return @arr;
+}
+
+1;
+
+__END__
+
+=head1 NAME
+
+PicLib - Perl extension for blah blah blah
+
+=head1 SYNOPSIS
+
+   use PicLib;
+   blah blah blah
+
+=head1 DESCRIPTION
+
+Stub documentation for PicLib,
+
+Blah blah blah.
+
+=head2 EXPORT
+
+None by default.
+
+=head1 SEE ALSO
+
+Mention other useful documentation such as the documentation of
+related modules or operating system documentation (such as man pages
+in UNIX), or any relevant external documentation such as RFCs or
+standards.
+
+If you have a mailing list set up for your module, mention it here.
+
+If you have a web site set up for your module, mention it here.
+
+=head1 AUTHOR
+
+Pavel Kačer, E<lt>pavel@draculus.deE<gt>
+
+=head1 COPYRIGHT AND LICENSE
+
+Copyright (C) 2013 by Pavel Kačer
+
+This program is free software; you can redistribute it and/or modify
+it under the same terms as Perl itself, either Perl version 5.8.2 or,
+at your option, any later version of Perl 5 you may have available.
+
+=head1 BUGS
+
+None reported... yet.
+
+=cut

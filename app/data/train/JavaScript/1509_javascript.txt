@@ -1,0 +1,249 @@
+'use strict';
+
+/**
+ * @ngdoc function
+ * @name lubriApp.controller:MembersCtrl
+ * @description
+ * # MembersCtrl
+ * Controller of the lubriApp
+ */
+angular.module('lubriApp')
+
+  .config(function($stateProvider) {
+    $stateProvider.state('app.members', {
+      abstract: true,
+      url: '/members',
+      templateUrl: 'views/members/main.html',
+      controller: 'MembersCtrl'
+    })
+    .state('app.members.list', {
+      url: '',
+      templateUrl: 'views/members/list.html',
+      controller: 'MembersCtrl'
+    })
+    .state('app.members.add', {
+      url: '/add',
+      templateUrl: 'views/members/form.html',
+      controller: 'MembersCtrl'
+    })
+    .state('app.members.import', {
+      url: '/import',
+      templateUrl: 'views/members/import.html',
+      controller: 'MembersCtrl'
+    })
+    .state('app.members.edit', {
+      url: '/:id/edit',
+      templateUrl: 'views/members/form.html',
+      controller: 'MembersCtrl'
+    })
+    .state('app.members.view', {
+      url: '/:id',
+      templateUrl: 'views/members/view.html',
+      controller: 'MembersCtrl'
+    });
+  })
+
+  .controller('MembersCtrl', function($scope, $state, $stateParams, $q, $interval, toasty, Member, SweetAlert, i18nService) {
+
+  var memberId = $stateParams.id;
+
+  i18nService.setCurrentLang('zh-cn');
+
+  $scope.importData = [];
+
+  $scope.gridImportOptions = {
+    enableGridMenu: true,
+    importerDataAddCallback: function( grid, newObjects ) {
+      $scope.importData = $scope.importData.concat( newObjects );
+    },
+    onRegisterApi: function(gridApi){
+      $scope.gridImportApi = gridApi;
+      gridApi.rowEdit.on.saveRow($scope, $scope.saveRow);
+    },
+    data: 'importData'
+  };
+
+  $scope.saveRow = function( rowEntity ) {
+    // create a fake promise - normally you'd use the promise returned by $http or $resource
+    var promise = $q.defer();
+    $scope.gridImportApi.rowEdit.setSavePromise( $scope.gridImportApi.grid, rowEntity, promise.promise );
+
+    $interval( function() {
+
+        promise.resolve();
+
+    }, 1000, 1);
+  };
+
+  $scope.saveImport = function () {
+    if ($scope.importData.length > 0) {
+      var members = $scope.importData;
+      for (var i=0;i<members.length;i++) {
+        var member = members[i];
+        member.created = new Date();
+        delete member.$$hashKey;
+        Member.upsert(member, function() {
+
+        }, function(err) {
+          console.log(err);
+        });
+      };
+      toasty.pop.success({title: '组员导入成功', msg: members.length + '个组员成功导入到系统中！', sound: false});
+      loadItems();
+      $state.go('^.list');
+    };
+  };
+
+  if (memberId) {
+    $scope.member = Member.findById({
+      id: memberId
+    }, function() {}, function(err) {
+      console.log(err);
+    });
+  } else {
+    $scope.member = {};
+  }
+
+  $scope.gridOptions = {
+    data: 'members',
+    enableFiltering: true,
+    paginationPageSizes: [5, 10, 15],
+    paginationPageSize: 10,
+    headerRowHeight: 39,
+    rowHeight: 39,
+    columnFooterHeight: 39,
+    gridFooterHeight: 39,
+    selectionRowHeaderWidth: 39,
+    columnDefs: [
+  {
+    name: 'Edit', width: 80, displayName: '编辑', enableSorting: false, enableFiltering: false, cellTemplate: '<a href="" class="ui-state-hover" ui-sref="^.edit({id: row.entity.id})">  <i class="fa fa-pencil fa-lg blue"></i></a> <a href="" class="ui-state-hover" style="margin-left:5px;" ng-click="getExternalScopes().delete({id: row.entity.id})"><i class="fa fa-trash-o fa-lg red"></i></a>'
+  },
+    {
+      name: 'name', displayName: '全称', cellTemplate: '<div class="ui-grid-cell-contents"><a href="" ui-sref="^.view({id: row.entity.id})"> {{ COL_FIELD }} </a></div>'}
+    ,{
+      name: 'firstName', displayName: '姓'
+    }
+    ,{
+      name: 'lastName', displayName: '名'
+    }
+    ,{
+      name: 'displayName', displayName: '显示名'
+    }
+    ,{
+      name: 'position', displayName: '职位'
+    }
+    , {
+      name: 'priority', displayName: '排序号'
+    }
+    ],
+    enableGridMenu: true,
+    enableSelectAll: true,
+    exporterCsvFilename: 'members.csv',
+    exporterSuppressColumns: ['Edit'],
+    exporterPdfDefaultStyle: {fontSize: 9},
+    exporterPdfTableStyle: {margin: [30, 30, 30, 30]},
+    exporterPdfTableHeaderStyle: {fontSize: 10, bold: true, italics: true, color: 'red'},
+    exporterPdfHeader: { text: "Meeting Member Information", style: 'headerStyle' },
+    exporterPdfFooter: function ( currentPage, pageCount ) {
+      return { text: currentPage.toString() + ' of ' + pageCount.toString(), style: 'footerStyle' };
+    },
+    exporterPdfCustomFormatter: function ( docDefinition ) {
+      docDefinition.styles.headerStyle = { fontSize: 22, bold: true };
+      docDefinition.styles.footerStyle = { fontSize: 10, bold: true };
+      return docDefinition;
+    },
+    exporterPdfOrientation: 'portrait',
+    exporterPdfPageSize: 'LETTER',
+    exporterPdfMaxGridWidth: 500,
+    exporterCsvLinkElement: angular.element(document.querySelectorAll(".custom-csv-link-location"))
+  };
+
+
+  $scope.gridOptions.onRegisterApi = function (gridApi) {
+    $scope.gridApi = gridApi;
+  };
+
+  function loadItems() {
+    $scope.members = Member.find();
+  }
+
+  loadItems();
+
+  $scope.viewActions = {
+    delete : $scope.delete
+  };
+
+  $scope.delete = function(id) {
+    SweetAlert.swal({
+      title: '您确定要删除吗?',
+      type: 'warning',
+      showCancelButton: true,
+      confirmButtonColor: '#DD6B55'
+    }, function(isConfirm){
+      if (isConfirm) {
+        Member.deleteById(id, function() {
+          toasty.pop.success({title: '组员被删除', msg: '您成功删除了组员!', sound: false});
+          loadItems();
+          $state.go($state.current, {}, {reload: true});
+          //$state.go('app.members.list');
+        }, function(err) {
+          toasty.pop.error({title: '删除组员出错', msg: '删除组员发生错误：' + err, sound: false});
+        });
+      } else {
+        return false;
+      }
+    });
+  };
+
+  $scope.formFields = [{
+    key: 'name',
+    type: 'text',
+    label: '全名',
+    required: true
+  }, {
+    key: 'firstName',
+    type: 'text',
+    label: '姓',
+    required: true
+  }, {
+    key: 'lastName',
+    type: 'text',
+    label: '名',
+    required: true
+  }, {
+    key: 'displayName',
+    type: 'text',
+    label: '显示名',
+    required: true
+  }, {
+    key: 'position',
+    type: 'text',
+    label: '职位',
+    required: true
+  }, {
+    key: 'priority',
+    type: 'number',
+    label: '排序号',
+    required: true
+  }];
+
+  $scope.formOptions = {
+      uniqueFormId: true,
+      hideSubmit: false,
+      submitCopy: '保存'
+  };
+
+  $scope.onSubmit = function() {
+    if (($scope.member.created === null) || ($scope.member.created === undefined)){
+      $scope.member.created = new Date();
+    };
+    Member.upsert($scope.member, function() {
+      toasty.pop.success({title: '组员保存成功', msg: '组员已成功保存到系统中！', sound: false});
+      loadItems();
+      $state.go('^.list');
+    }, function(err) {
+      console.log(err);
+    });
+  };
+
+  });

@@ -1,0 +1,2 @@
+DROP TABLE IF EXISTS StudentTable
+CREATE TABLE StudentTable (StudentID INT  NOT NULL PRIMARY KEY, StatusID INT, )

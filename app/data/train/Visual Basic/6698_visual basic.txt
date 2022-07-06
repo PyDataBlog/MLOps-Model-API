@@ -1,0 +1,462 @@
+﻿Public Class CourseListUI
+
+	Private courseLevel As CourseLevel
+
+	' Form Load
+	Private Sub Course_List_Load(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles MyBase.Shown
+		renderTree()
+		'If TreeViewCourse.Nodes.Count <> 0 Then
+		'	TreeViewCourse.SelectedNode = TreeViewCourse.Nodes(0)
+		'End If
+
+		If TreeViewCourse.Nodes.Count <> 0 Then
+			TreeViewCourse.SelectedNode = TreeViewCourse.Nodes(0)
+		End If
+
+	End Sub
+
+	' Render Tree (All Course show)
+	Private Sub renderTree()
+		renderTree("")
+	End Sub
+
+	' Render Tree (Price Range)
+	Private Sub renderTreePriceRange()
+		Cursor = Cursors.WaitCursor
+		If Not IsNumeric(TextBoxPrice1.Text) And Not IsNumeric(TextBoxPrice2.Text) Then
+			MsgBox("Invalid search")
+			Return
+		End If
+
+		If CInt(TextBoxPrice2.Text) < CInt(TextBoxPrice1.Text) Then
+			MsgBox("Invalid search")
+			Return
+		End If
+
+		TreeViewCourse.Nodes.Clear()
+
+		Dim sql = "SELECT * FROM Course WHERE Enable = true"
+		sql = sql + " ORDER BY CName"
+
+		Dim result = db.query(sql)
+
+		While result.nextRow()
+			Dim hasLevel As Boolean = False
+
+			' Add Course Category to Tree
+			Dim cateName As String = result.readAttr("CName")
+			Dim id = result.readAttr("ID")
+			Dim currentNode As TreeNode = TreeViewCourse.Nodes.Add(cateName)
+
+			Dim result2 = db.query("SELECT * FROM Course_Level, Course WHERE Course_Level.Enable = true AND Course.ID = CourseID AND CourseID = " & id)
+
+			While result2.nextRow()
+				Dim price = courseLevel.getFee(result2.read("CName"), result2.read("Level"))
+
+				If Not IsNumeric(price) Then
+					Continue While
+				End If
+
+				If price >= CInt(TextBoxPrice1.Text) And price <= CInt(TextBoxPrice2.Text) Then
+					Dim courName As String = result2.readAttr("Level")
+					currentNode.Nodes.Add(courName)
+					hasLevel = True
+				End If
+			End While
+
+			If Not hasLevel Then
+				currentNode.Remove()
+			End If
+
+		End While
+
+		If TreeViewCourse.Nodes.Count = 0 Then
+			TreeViewCourse.Nodes.Add("<No Level>")
+		End If
+		Cursor = Cursors.Default
+	End Sub
+
+	' Render Tree (Place )
+	Private Sub renderTreeAvailPlace()
+		Cursor = Cursors.WaitCursor
+		TreeViewCourse.Nodes.Clear()
+
+		Dim sql = "SELECT * FROM Course WHERE Enable = true"
+		sql = sql + " ORDER BY CName"
+
+		Dim result = db.query(sql)
+
+		While result.nextRow()
+			' Add Course Category to Tree
+			Dim cateName As String = result.readAttr("CName")
+			Dim id = result.readAttr("ID")
+			Dim currentNode As TreeNode = TreeViewCourse.Nodes.Add(cateName)
+
+			Dim result2 = db.query("SELECT * FROM Course_Level WHERE Enable = true AND MaxAmount - (SELECT COUNT(*) FROM Course_Student WHERE CLID = ID) >= " & SearchBox.Text & " AND CourseID = " & id)
+
+			If Not result2.hasRows Then
+				currentNode.Remove()
+				Continue While
+			End If
+
+			While result2.nextRow()
+				Dim courName As String = result2.readAttr("Level")
+				currentNode.Nodes.Add(courName)
+			End While
+		End While
+
+		If TreeViewCourse.Nodes.Count = 0 Then
+			TreeViewCourse.Nodes.Add("<No Level>")
+		End If
+		Cursor = Cursors.Default
+	End Sub
+
+	' Render Tree
+	Private Sub renderTree(ByVal sqlBack As String)
+		TreeViewCourse.Nodes.Clear()
+		Me.Cursor = Cursors.WaitCursor
+		Dim sql = "SELECT * FROM Course WHERE Enable = true " + sqlBack
+		sql = sql + " ORDER BY CName"
+		'MsgBox(sql)
+		Dim result = db.query(sql)
+
+		While result.nextRow()
+			' Add Course Category to Tree
+			Dim cateName As String = result.readAttr("CName")
+			Dim id = result.readAttr("ID")
+			Dim currentNode As TreeNode = TreeViewCourse.Nodes.Add(cateName)
+
+			Dim result2 = db.query("SELECT * FROM Course_Level WHERE Enable = true AND CourseID = " & id)
+
+			If Not result2.hasRows Then
+				currentNode.Nodes.Add("<No Level>")
+			End If
+
+			While result2.nextRow()
+				Dim courName As String = result2.readAttr("Level")
+				currentNode.Nodes.Add(courName)
+			End While
+		End While
+		Me.Cursor = Cursors.Default
+	End Sub
+
+	' Click the tree node / Render View
+	Private Sub treeNodeClicked() Handles TreeViewCourse.AfterSelect
+		Cursor = Cursors.WaitCursor
+		If TreeViewCourse.SelectedNode.Text = "<No Level>" Then
+			ButtonAddLevel.Enabled = False
+			ButtonDelete.Enabled = False
+			Cursor = Cursors.Default
+			Return
+		End If
+
+		If TreeViewCourse.SelectedNode.Parent Is Nothing Then
+			ButtonAddLevel.Enabled = True
+			ButtonDelete.Enabled = True
+			CoursePanel.Visible = True
+			renderCourseFee()
+			disableButton()
+			Cursor = Cursors.Default
+			Return
+		Else
+			enableButton()
+			CoursePanel.Visible = False
+			ButtonAddLevel.Enabled = False
+		End If
+
+		enableButton()
+
+		Dim courName = TreeViewCourse.SelectedNode.Parent.Text
+		Dim levelName = TreeViewCourse.SelectedNode.Text
+
+		Dim result = db.query("SELECT *, Course_level.ID AS CLID FROM Course, Course_Level, Lecturer WHERE Lecturer.ID = LecturerID AND Course_Level.Enable = true AND CourseID = Course.ID AND CName ='" & esc(courName) & "' AND Level = '" & esc(levelName) & "'")
+
+		'If Not result.hasRows() Then
+		'	Cursor = Cursors.Default
+		'	Return
+		'End If
+
+		result.nextRow()
+
+		' Create CourseLevel object
+		courseLevel = New CourseLevel()
+		courseLevel.ID = result.readAttr("CLID")
+		courseLevel.timeData = TimetableData.getTimeTableData(result.readAttr("CLID"))
+
+		If Not courseLevel.timeData Is Nothing Then
+			courseLevel.timeData.CLID = courseLevel.ID
+		End If
+
+		' Add detail to textbox
+
+		TextBoxName.Text = result.readAttr("cname") & " (" & result.readAttr("Level") & ")"
+		'TextBoxLectCost.Text = result.readAttr("MonthlyLecturerCost")
+		TextBoxMaterials.Text = result.readAttr("MaterialsFee")
+		TextBoxOpera.Text = result.readAttr("MonthlyOperatingCost")
+		ComboBoxLect.Text = result.readAttr("Salary")
+		LabelFee.Text = courseLevel.calcFee(result.readAttr("MonthlyOperatingCost"), result.readAttr("Salary"), result.readAttr("MaxAmount"))
+
+		TextBoxPlace6.Text = result.readAttr("MaxAmount") - courseLevel.getStudentAmount(result.readAttr("cname"), result.readAttr("Level"), 6)
+		TextBoxPlace7.Text = result.readAttr("MaxAmount") - courseLevel.getStudentAmount(result.readAttr("cname"), result.readAttr("Level"), 7)
+		TextBoxPlace8.Text = result.readAttr("MaxAmount") - courseLevel.getStudentAmount(result.readAttr("cname"), result.readAttr("Level"), 8)
+		TextBoxAmount6.Text = result.readAttr("MaxAmount")
+		TextBoxAmount7.Text = result.readAttr("MaxAmount")
+		TextBoxAmount8.Text = result.readAttr("MaxAmount")
+		Dim lectID As String = result.readAttr("LecturerID")
+
+		loadLecturer()
+
+		For Each item As Lecturer In ComboBoxLect.Items
+			If item.id = lectID Then
+				ComboBoxLect.SelectedItem = item
+			End If
+		Next
+
+		ComboBox1.Items.Clear()
+		Dim dateList As List(Of String) = courseLevel.getDates(result.readAttr("cname"), result.readAttr("Level"))
+
+		If Not dateList Is Nothing Then
+			For Each item As String In dateList
+				ComboBox1.Items.Add(item)
+			Next
+
+			ComboBox1.SelectedIndex = 0
+		End If
+		Cursor = Cursors.Default
+	End Sub
+
+	' Render a list of Course Fee with image
+	Private Sub renderCourseFee()
+		LabelB.Text = courseLevel.getFee(TreeViewCourse.SelectedNode.Text, "Beginner")
+		LabelI.Text = courseLevel.getFee(TreeViewCourse.SelectedNode.Text, "Intermediate")
+		LabelA.Text = courseLevel.getFee(TreeViewCourse.SelectedNode.Text, "Advanced")
+
+		Dim desc As String = courseLevel.getCourseDesc(TreeViewCourse.SelectedNode.Text)
+
+		If desc = "" Then
+			TextBoxDesc.Text = "<No desciption>"
+		Else
+			TextBoxDesc.Text = desc
+		End If
+
+		Dim id = courseLevel.getCourseID(TreeViewCourse.SelectedNode.Text)
+		Dim location = ("images/course/" & id)
+
+		If My.Computer.FileSystem.FileExists(location) Then
+			PictureBox1.ImageLocation = location
+		Else
+			PictureBox1.ImageLocation = "images/course/unknown.gif"
+		End If
+	End Sub
+
+	' Load Lecturer
+	Private Sub loadLecturer()
+		Dim result = db.query("SELECT * FROM Lecturer WHERE ID <> -1 ORDER BY LName")
+		ComboBoxLect.Items.Clear()
+		While result.nextRow()
+			Dim lect As Lecturer = New Lecturer(result.readAttr("ID"), result.readAttr("LName"))
+			ComboBoxLect.Items.Add(lect)
+		End While
+
+	End Sub
+
+	' Apply Button
+	Private Sub ButtonApply_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ButtonApply.Click
+		' Checking
+
+		If courseLevel.timeData Is Nothing Then
+			MsgBox("Please select a time")
+			Return
+		End If
+
+		If TextBoxAmount6.Text = "" Or TextBoxMaterials.Text = "" Or TextBoxOpera.Text = "" Then
+			MsgBox("Please fill in all fields.")
+			Return
+		End If
+
+		If IsNumeric(TextBoxAmount6.Text) = False Or IsNumeric(TextBoxMaterials.Text) = False Or IsNumeric(TextBoxOpera.Text) = False Then
+			MsgBox("Some fields must be a number.")
+			Return
+		End If
+
+		If CInt(TextBoxAmount6.Text) > 10 Then
+			MsgBox("Student Amount must equals or smaller then 10.")
+			Return
+		End If
+
+		If ComboBoxLect.SelectedItem.ToString = "" Then
+			MsgBox("Please select a lecturer")
+			Return
+		End If
+
+		' Clear Timetable from database
+		db.query("DELETE FROM Timetable WHERE CLID = " & courseLevel.ID)
+
+		' Add to Timetable
+		For Each time As Integer In courseLevel.timeData.time
+			db.query("insert into timetable values(" & time & ",'" & courseLevel.timeData.day & "'," & courseLevel.ID & ")").dispose()
+		Next
+
+		Dim sql = "UPDATE course_level SET MaxAmount=" & TextBoxAmount6.Text & ",LecturerID=" & ComboBoxLect.SelectedItem.id & ", MonthlyOperatingCost=" & TextBoxOpera.Text & ", MaterialsFee=" & TextBoxMaterials.Text & " WHERE ID = " & courseLevel.ID
+		Dim result = db.query(sql)
+
+		If result.rowAffected Then
+			MsgBox("Update Successfully!")
+		End If
+	End Sub
+
+	' Delete
+	Private Sub delete() Handles ButtonDelete.Click
+
+		If TreeViewCourse.SelectedNode Is Nothing Then
+			MsgBox("Select a course/level first")
+			Return
+		End If
+
+		Dim dialogResult = MsgBox("Are you sure  to delete the selected course?", MsgBoxStyle.YesNo, "Delete Course")
+
+		If dialogResult = MsgBoxResult.No Then
+			Return
+		End If
+
+		' Nothing = Course 
+		' Not nothing = Level
+		If TreeViewCourse.SelectedNode.Parent Is Nothing Then
+			deleteCourse()
+		Else
+			deleteLevel()
+		End If
+
+		disableButton()
+		Threading.Thread.Sleep(500)
+		renderTree()
+	End Sub
+	Private Sub deleteCourse()
+		' Disable Course
+		db.query("UPDATE Course SET Enable=false WHERE CName = '" & TreeViewCourse.SelectedNode.Text & "'")
+
+		' Disable all levels of the course
+		db.query("UPDATE Course_Level as cl, Course SET cl.Enable=false WHERE CourseID = Course.ID AND CName = '" & TreeViewCourse.SelectedNode.Text & "'").dispose()
+
+		Dim IDs = courseLevel.getLevelIDs(TreeViewCourse.SelectedNode.Text)
+
+		' Delete from timetable
+		For Each id In IDs
+			db.query("DELETE FROM Timetable WHERE CLID = " & id)
+		Next
+
+	End Sub
+	Private Sub deleteLevel()
+		db.query("UPDATE Course_level SET Enable=false WHERE ID = " & courseLevel.ID).dispose()
+		db.query("DELETE FROM Timetable WHERE CLID = " & courseLevel.ID).dispose()
+	End Sub
+
+	' Click Select time
+	Private Sub ButtonSelectTime_Click() Handles ButtonSelectTime.Click
+		courseLevel.timeData = SelectTimeUI.getTime(Me, courseLevel.timeData, True)
+	End Sub
+
+	' Enable/Disable elements.
+	Private Sub enableButton()
+		TextBoxAmount6.Enabled = True
+		'TextBoxLectCost.Enabled = True
+		TextBoxMaterials.Enabled = True
+		TextBoxOpera.Enabled = True
+		ButtonApply.Enabled = True
+		ButtonSelectTime.Enabled = True
+		ComboBoxLect.Enabled = True
+		ComboBox1.Enabled = True
+	End Sub
+	Private Sub disableButton()
+		TextBoxAmount6.Enabled = False
+		'TextBoxLectCost.Enabled = False
+		TextBoxMaterials.Enabled = False
+		TextBoxOpera.Enabled = False
+		ButtonApply.Enabled = False
+		ButtonSelectTime.Enabled = False
+		ComboBoxLect.Enabled = False
+		ComboBox1.Enabled = False
+	End Sub
+
+	' Add New Course Button
+	Private Sub addClick() Handles Button1.Click
+		CreateCourseUI.ShowDialog(Me)
+		renderTree()
+	End Sub
+
+	' Add New Level
+	Private Sub ButtonAddLevel_Click() Handles ButtonAddLevel.Click
+
+		If TreeViewCourse.SelectedNode Is Nothing Then
+			MsgBox("Please selecte a course from the list first")
+			Return
+		End If
+
+		CreateLevelUI.addCourse(Me, TreeViewCourse.SelectedNode.Text)
+
+		Threading.Thread.Sleep(500)
+		renderTree()
+	End Sub
+
+	' Key Handler
+	Private Sub placeKeyHandle(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyEventArgs) Handles SearchBox.KeyDown
+
+
+		If e.KeyValue = Keys.Enter Then
+			If SearchBox.Text = "" Or Not IsNumeric(SearchBox.Text) Then
+				MsgBox("Invalid input value")
+				Return
+			End If
+			renderTreeAvailPlace()
+			disableButton()
+		End If
+	End Sub
+	Private Sub pricekeyHandle(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyEventArgs) Handles TextBoxPrice1.KeyDown, TextBoxPrice2.KeyDown
+		If e.KeyValue = Keys.Enter Then
+			If TextBoxPrice1.Text = "" Or TextBoxPrice2.Text = "" Or Not IsNumeric(TextBoxPrice2.Text) Or Not IsNumeric(TextBoxPrice1.Text) Then
+				MsgBox("Invalid input value")
+				Return
+			End If
+			renderTreePriceRange()
+			disableButton()
+		End If
+	End Sub
+
+	' Drag and drop update image
+	Private Sub updatePic_DragEnter(ByVal sender As Object, ByVal e As System.Windows.Forms.DragEventArgs) Handles PanelUpdatePicture.DragEnter
+		If (e.Data.GetDataPresent(DataFormats.FileDrop)) Then
+			e.Effect = DragDropEffects.Move
+		End If
+	End Sub
+	Private Sub updatePic_DragDrop(ByVal sender As Object, ByVal e As System.Windows.Forms.DragEventArgs) Handles PanelUpdatePicture.DragDrop
+
+		Dim theFiles() As String = CType(e.Data.GetData("FileDrop", True), String())
+
+		If theFiles.Length > 1 Then
+			MsgBox("Accept one file only")
+			Return
+		End If
+
+		Dim id = courseLevel.getCourseID(TreeViewCourse.SelectedNode.Text)
+		Dim dotIndex As Integer = theFiles(0).IndexOf(".")
+
+		' Delete the exist
+		'Dim files = My.Computer.FileSystem.GetFiles("images/course/")
+		'For Each file In files
+		'	Dim str As String = file.Replace(Application.StartupPath & "/", "")
+		'	MsgBox(Str)
+		'Next
+
+		' Copy
+		Dim ext As String = theFiles(0).Substring(dotIndex + 1)
+		Dim dest As String = "images/course/" & id
+		My.Computer.FileSystem.CopyFile(theFiles(0), dest, True)
+		PictureBox1.ImageLocation = dest
+		MsgBox("Update Successfully")
+
+	End Sub
+
+	Private Sub LinkLabelAll_LinkClicked(ByVal sender As System.Object, ByVal e As System.Windows.Forms.LinkLabelLinkClickedEventArgs) Handles LinkLabelAll.LinkClicked
+		renderTree()
+	End Sub
+End Class

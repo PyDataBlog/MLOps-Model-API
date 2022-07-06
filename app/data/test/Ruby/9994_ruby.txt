@@ -1,0 +1,50 @@
+class SessionsController < ApplicationController
+
+  def create
+    session[:access_token] = request.env['omniauth.auth']['credentials']['token']
+    session[:access_secret] = request.env['omniauth.auth']['credentials']['secret']
+    twitter_initialise
+
+    if Auth.exists?(access_token: session[:access_token])
+      # If the Auth exists, update secret if necessary
+      auth = Auth.find_by_access_token(session[:access_token])
+
+      if auth.access_secret != session[:access_secret]
+        auth.update_attributes(access_secret: session[:access_secret])
+      end
+    else
+      # If the Auth doesn't exist, query Twitter and create it
+      api_user = Twitter.user()
+      auth = Auth.create(user_id: api_user.id, access_token: session[:access_token], access_secret: session[:access_secret])
+    end
+
+    auth.update_attributes(name: session[:name])
+
+    if !User.exists?(auth.user_id)
+      user = User.new
+      user.id = auth.user_id
+
+      api_user ||= Twitter.user()
+    else
+      user = User.find(auth.user_id)
+    end
+
+    if !api_user.nil?
+      User.api_save(api_user)
+    end
+
+    u = Twitter.user()
+
+    if u.protected?
+      User.find(u.id).destroy
+      Auth.find_by_access_token(session[:access_token]).destroy
+      session.delete :access_token
+      session.delete :access_secret
+      redirect_to :root, flash: { error: 'tweetrankr does not work with protected accounts. Please unprotect your account to use tweetrankr.' }
+      return
+    end
+
+    redirect_to recommendations_generate_path, flash: { success: 'You have successfully signed in!' }
+  end
+
+end

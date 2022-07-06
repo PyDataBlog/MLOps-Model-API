@@ -1,0 +1,183 @@
+//=============================================================================
+// Darken Region
+// LAX_DarkenRegion.js
+// v0.02
+//=============================================================================
+
+//=============================================================================
+ /*:
+ * @plugindesc v0.02 Use regions to black out areas.
+ * @author LuciusAxelrod
+ *
+ *
+ * @help
+ * Place regions on the map in the editor, then either add them to the default
+ * list or add them to the dark region list using the add command listed below.
+ * Note: Tiles without a region are in region 0. Adding region 0 to the dark
+ * region list will black out every tile 
+ *
+ * Plugin Commands:
+ * DarkenRegion add [region list]      # Adds the listed regions to the dark 
+ *                                       region list. The list is space
+ *                                       separated. For example:
+ *                                       DarkenRegion add 1 3 5 78
+ * DarkenRegion remove [region list]   # Removes the listed regions from the
+ *                                       dark region list. The list is space
+ *                                       separated. For example:
+ *                                       DarkenRegion remove 4 7 200 2
+ * DarkenRegion toggle [region list]   # Toggle on/off each of the listed
+ *                                       regions. For example:
+ *                                       DarkenRegion toggle 1 5 7 112 250
+ * DarkenRegion clear                  # Clears the dark region list.
+ */
+//=============================================================================
+
+//=============================================================================
+// Parameter Variables
+//=============================================================================
+
+(function() {
+	var _Game_Interpreter_pluginCommand = Game_Interpreter.prototype.pluginCommand;
+	Game_Interpreter.prototype.pluginCommand = function(command, args) {
+		_Game_Interpreter_pluginCommand.call(this, command, args);
+		if (command === 'DarkenRegion') {
+			if(args[0] === 'add') {
+				for(var i = 1; i < args.length; i++) {
+					$gameSystem.addToDarkList(args[i]);
+				}
+			} else if(args[0] === 'remove') {
+				for(var i = 1; i < args.length; i++) {
+					$gameSystem.removeFromDarkList(args[i]);
+				}
+			} else if(args[0] === 'toggle') {
+				for(var i = 1; i < args.length; i++) {
+					if($gameSystem.isDarkRegion(args[i])) {
+						$gameSystem.removeFromDarkList(args[i]);
+					} else {
+						$gameSystem.addToDarkList(args[i]);
+					}
+				}
+			} else if(args[0] === 'clear') {
+				$gameSystem.clearDarkList();
+			}
+		}
+	};
+
+	Game_System.prototype.isDarkRegion = function(regionId) {
+		if(this._darkList) {
+			return !!this._darkList[regionId];
+		}
+	}
+
+	Game_System.prototype.addToDarkList = function(regionId) {
+		if(!this._darkList) {
+			this.clearDarkList();
+		}
+		this._darkList[Number(regionId)] = true;
+	}
+
+	Game_System.prototype.removeFromDarkList = function(regionId) {
+		if(this._darkList) {
+			this._darkList[Number(regionId)] = false;
+		}
+	}
+
+	Game_System.prototype.clearDarkList = function() {
+		this._darkList = [];
+	}
+
+	Tilemap.prototype._paintTiles = function(startX, startY, x, y) {
+		var tableEdgeVirtualId = 10000;
+		var darkRegionVirtualId = 10000;
+		var mx = startX + x;
+		var my = startY + y;
+		var dx = (mx * this._tileWidth).mod(this._layerWidth);
+		var dy = (my * this._tileHeight).mod(this._layerHeight);
+		var lx = dx / this._tileWidth;
+		var ly = dy / this._tileHeight;
+		var tileId0 = this._readMapData(mx, my, 0);
+		var tileId1 = this._readMapData(mx, my, 1);
+		var tileId2 = this._readMapData(mx, my, 2);
+		var tileId3 = this._readMapData(mx, my, 3);
+		var tileId5 = this._readMapData(mx, my, 5);
+		var shadowBits = this._readMapData(mx, my, 4);
+		var upperTileId1 = this._readMapData(mx, my - 1, 1);
+		var lowerTiles = [];
+		var upperTiles = [];
+
+		if (this._isHigherTile(tileId0)) {
+			upperTiles.push(tileId0);
+		} else {
+			lowerTiles.push(tileId0);
+		}
+		if (this._isHigherTile(tileId1)) {
+			upperTiles.push(tileId1);
+		} else {
+			lowerTiles.push(tileId1);
+		}
+
+		lowerTiles.push(-shadowBits);
+
+		if (this._isTableTile(upperTileId1) && !this._isTableTile(tileId1)) {
+			if (!Tilemap.isShadowingTile(tileId0)) {
+				lowerTiles.push(tableEdgeVirtualId + upperTileId1);
+			}
+		}
+
+		if (this._isOverpassPosition(mx, my)) {
+			upperTiles.push(tileId2);
+			upperTiles.push(tileId3);
+		} else {
+			if (this._isHigherTile(tileId2)) {
+				upperTiles.push(tileId2);
+			} else {
+				lowerTiles.push(tileId2);
+			}
+			if (this._isHigherTile(tileId3)) {
+				upperTiles.push(tileId3);
+			} else {
+				lowerTiles.push(tileId3);
+			}
+			
+			if($gameSystem.isDarkRegion(tileId5)){
+				upperTiles.push(darkRegionVirtualId + tileId5);
+			}
+		}
+
+		var lastLowerTiles = this._readLastTiles(0, lx, ly);
+		if (!lowerTiles.equals(lastLowerTiles) ||
+				(Tilemap.isTileA1(tileId0) && this._frameUpdated)) {
+			this._lowerBitmap.clearRect(dx, dy, this._tileWidth, this._tileHeight);
+			for (var i = 0; i < lowerTiles.length; i++) {
+				var lowerTileId = lowerTiles[i];
+				if (lowerTileId < 0) {
+					this._drawShadow(this._lowerBitmap, shadowBits, dx, dy);
+				} else if (lowerTileId >= tableEdgeVirtualId) {
+					this._drawTableEdge(this._lowerBitmap, upperTileId1, dx, dy);
+				} else {
+					this._drawTile(this._lowerBitmap, lowerTileId, dx, dy);
+				}
+			}
+			this._writeLastTiles(0, lx, ly, lowerTiles);
+		}
+		var lastUpperTiles = this._readLastTiles(1, lx, ly);
+		if (!upperTiles.equals(lastUpperTiles)) {
+			this._upperBitmap.clearRect(dx, dy, this._tileWidth, this._tileHeight);
+			for (var j = 0; j < upperTiles.length; j++) {
+				if(upperTiles[j] >= darkRegionVirtualId) {
+					this._drawDarkness(this._upperBitmap, dx, dy);
+				} else {
+					this._drawTile(this._upperBitmap, upperTiles[j], dx, dy);
+				}
+			}
+			this._writeLastTiles(1, lx, ly, upperTiles);
+		}
+	};
+	
+	Tilemap.prototype._drawDarkness = function(bitmap, dx, dy) {
+		var w = this._tileWidth;
+		var h = this._tileHeight;
+		var color = 'rgba(0,0,0,1)';
+		bitmap.fillRect(dx, dy, w, h, color);
+	};
+})();

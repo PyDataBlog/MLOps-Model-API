@@ -1,0 +1,57 @@
+package one.lockstep.monolock.protocol
+
+import scodec._
+import scodec.codecs._
+import one.lockstep.util._
+import one.lockstep.util.codec._
+import one.lockstep.util.crypto._
+import one.lockstep.util.protocol._
+
+trait UnlockResponse extends MonolockResponse {
+  override def failure(error: MonolockResponse.Error): MonolockResponse = UnlockResponse.Failure(error)
+}
+
+object UnlockResponse {
+
+  case class Success(ekm: EncryptedKeyMaterial) extends UnlockResponse
+
+  case class Failure(error: MonolockResponse.Error) extends UnlockResponse
+
+  implicit lazy val codec: Codec[UnlockResponse] = discriminated[UnlockResponse].by(uint8)
+    .typecase(1, (Codec[Ciphertext] :: Codec[Iv] :: Codec[MacTag]).as[EncryptedKeyMaterial].as[Success])
+    .typecase(2, Codec[MonolockResponse.Error].as[Failure])
+
+  implicit lazy val protocol = Protocol[UnlockResponse](Label("unlock-response"), Versions.current, since = Versions.v1)
+
+  case class KeyMaterial(masterSecretPart2: Bytes, nextSealKey: PublicKey)
+  object KeyMaterial {
+    implicit lazy val codec: Codec[KeyMaterial] = (sized(byteLimit(), bytes) :: Codec[PublicKey]).as[KeyMaterial]
+    implicit lazy val protocol = Protocol[KeyMaterial](Label("unlock-response-key-material"), Versions.current, since = Versions.v1)
+  }
+
+  case class EncryptedKeyMaterial(ciphertext: Ciphertext, iv: Iv, tag: MacTag)
+  object EncryptedKeyMaterial {
+
+    def encrypt(km: KeyMaterial, kexSharedSecret: Bytes, clientVersion: Version)
+               (implicit ciphersuite: Ciphersuite): EncryptedKeyMaterial = {
+      import ciphersuite._
+      val key = deriveEncryptionKey(kexSharedSecret)
+      val plaintext = Protocol.encode[KeyMaterial](clientVersion, km)
+      val iv = authCipher.iv()
+      val (ciphertext, tag) = authCipher.encrypt(key)(Bytes.empty, iv, plaintext)
+      EncryptedKeyMaterial(ciphertext, iv, tag)
+    }
+
+    def decrypt(ekm: EncryptedKeyMaterial, kexSharedSecret: Bytes)
+               (implicit ciphersuite: Ciphersuite): KeyMaterial = {
+      val key = deriveEncryptionKey(kexSharedSecret)
+      val plaintext = ciphersuite.authCipher.decrypt(key)(Bytes.empty, ekm.iv, ekm.ciphertext, ekm.tag)
+      Protocol.decode[KeyMaterial](plaintext)
+    }
+
+    private def deriveEncryptionKey(kexSharedSecret: Bytes)(implicit ciphersuite: Ciphersuite): SecretKey =
+      SecretKey(kexSharedSecret.take(ciphersuite.bitStrength/8))
+
+  }
+
+}

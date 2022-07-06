@@ -1,0 +1,152 @@
+[org 0x7C00]
+
+%define SCREEN_WIDTH 40
+%define SCREEN_HEIGHT 25
+
+%define UP 0x11
+%define DOWN 0x1F
+%define LEFT 0x1E
+%define RIGHT 0x20
+
+%define COLOR_BLACK 0x00
+%define COLOR_WHITE 0xFF
+
+%define SLEEP_TIME 50000
+
+; set the base of the stack
+mov bp, 0x8000
+mov sp, bp
+
+; set the 40x25 text video mode
+xor ax, ax
+int 0x10
+
+; disable cursor blinking
+mov ah, 0x01
+mov ch, 0x3F
+int 0x10
+
+game_loop:
+
+  mov dx, word [head_position]
+
+  mov bl, COLOR_BLACK
+  call fill_point
+
+  call move_point
+  call normalize_point
+
+  mov bl, COLOR_WHITE
+  call fill_point
+
+  mov word [head_position], dx
+
+  ; sleep for number of microseconds defined in SLEEP_TIME
+  mov ah, 0x86
+  xor cx, cx
+  mov dx, SLEEP_TIME
+  int 0x15
+
+  jmp game_loop
+
+; @param bl background color
+; @param dh vertical position
+; @param dl horizontal position
+fill_point:
+  pusha
+
+  xor bh, bh ; page number
+
+  mov ah, 0x02 ; set cursor position
+  int 0x10
+
+  mov ah, 0x09 ; write character and attribute at cursor position
+  mov cx, 0x0001 ; number of times to print character
+  int 0x10
+
+  popa
+  ret
+
+; @param dh vertical position
+; @param dl horizontal position
+normalize_point:
+  test dh, dh
+  jge normalize_point_vertical_max
+  mov dh, SCREEN_HEIGHT - 1
+  jmp normalize_point_horizontal
+
+  normalize_point_vertical_max:
+  cmp dh, SCREEN_HEIGHT - 1
+  jle normalize_point_horizontal
+  xor dh, dh
+
+  normalize_point_horizontal:
+  test dl, dl
+  jge normalize_point_horizontal_max
+  mov dl, SCREEN_WIDTH - 1
+  jmp normalize_point_exit
+
+  normalize_point_horizontal_max:
+  cmp dl, SCREEN_WIDTH - 1
+  jle normalize_point_exit
+  xor dl, dl
+
+  normalize_point_exit:
+  ret
+
+; @param dh vertical position
+; @param dl horizontal position
+move_point:
+  push ax
+
+  in al, 0x60
+  cmp al, UP
+  je move_point_save
+  cmp al, DOWN
+  je move_point_save
+  cmp al, LEFT
+  je move_point_save
+  cmp al, RIGHT
+  je move_point_save
+  jmp move_point_next
+
+  move_point_save:
+  mov byte [head_direction], al
+
+  move_point_next:
+  mov al, byte [head_direction]
+
+  cmp al, UP
+  jne move_point_down
+  dec dh
+  jmp move_point_exit
+
+  move_point_down:
+  cmp al, DOWN
+  jne move_point_left
+  inc dh
+  jmp move_point_exit
+
+  move_point_left:
+  cmp al, LEFT
+  jne move_point_right
+  dec dl
+  jmp move_point_exit
+
+  move_point_right:
+  cmp al, RIGHT
+  jne move_point_exit
+  inc dl
+
+  move_point_exit:
+  pop ax
+  ret
+
+head_position:
+  dw 0x0C14
+
+head_direction:
+  db 0x00
+
+times 510 - ($ - $$) db 0
+dw 0xAA55

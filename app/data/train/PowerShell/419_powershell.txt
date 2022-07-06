@@ -1,0 +1,147 @@
+﻿The Powershell. 
+#requires -version 4 
+<# 
+.SYNOPSIS 
+Creates xml files for silent installs based on existing template 
+#> 
+
+$Template="C:\Windows\temp>"  #Location for template, you will need to copy template.xml to here 
+$dbaseinstance="DBSERVER\DBInstance"   #Database to use to create Orion instances 
+$User ="AdminOrion" # in this example, this user already exist as an sql admin account 
+$UserPassword ="<YourPasswordHere>" 
+$dbname ="<The Name of your new Database Here>" 
+$Account ="OrionUser" #the account that will be created 
+$AccountPassword="<what your orion password will be>" 
+$AccountType="NewSql" 
+$security="True" 
+$ProductsToInstall="NPM,NCM,NTA"      #list out all the products you want to install 
+
+#this loads the template.xml file to be altered 
+[xml]$file=get-content $Template\template.xml 
+$file.silentconfig.InstallerConfiguration.ProductsToInstall = "$ProductsToInstall"  
+
+#this configures the first part of the xml file 
+foreach ($element in $file.silentconfig.host.info.database) { 
+    $element.UseSQLSecurity="$security" 
+    $element.DatabaseName = "$dbname" 
+    $element.Servername ="$dbaseinstance" 
+    $element.User ="$user" 
+    $element.UserPassword ="$UserPassword" 
+    $element.Account ="$Account" 
+    $element.AccountPassword="$AccountPassword" 
+    $element.AccountType="AccountType" 
+} 
+
+# Will be the Plugin Property of the xml if neither NTA or OrionLogManger are installed. 
+$additionaltext='<Plugins/></SilentConfig>' 
+
+#This assumes that only either NTA or OrionLog manager are installed and does not handle if both are selected. 
+#based on that assumption, if one product is selected, we remove properties of the other.  If neither are selected 
+#we remove properties of both 
+
+Switch -wildcard ($ProductstoInstall) { 
+    '*NTA*' { 
+        foreach ($element in $file.silentconfig.host.info.NetflowConfiguration.FlowStorageConfig) { 
+            $element.UseSQLSecurity=$security 
+            $element.UseExistingSqlAccount="true" 
+            $element.AccountType="NewSql" 
+            $element.DatabaseName = "FlowStorage"  #name of database for NTA 
+            $element.Servername ="$dbaseinstance" 
+            $element.User ="$user" 
+            $element.UserPassword ="$UserPassword" 
+            $element.Account ="NTADBUser"  #account name for NTA. 
+            $element.AccountPassword="$AccountPassword" 
+        } 
+        #NTA requires the additional Plugin property to complete the file. 
+        $additionaltext='<Plugins>
+        <Plugin Assembly="SolarWinds.ConfigurationWizard.Plugin.NetFlow" FactoryType="SolarWinds.ConfigurationWizard.Plugin.NetFlow.SilentMode.NetFlowSilentConfigureFactory" /> 
+        </Plugins> 
+        </SilentConfig>' 
+        #if NTA was installed, we remove the OrionLogManager section from the XML file 
+        $file.silentconfig.host.info.OrionLogConfiguration | %{$_.ParentNode.RemoveChild($_)| out-null} 
+    } 
+
+    #if OrionLogManger is installed we use the following 
+    '*OrionLogManager*' { 
+        foreach ($element in $file.silentconfig.host.info.OrionLogConfiguration.StorageConfig) { 
+            $element.UseSQLSecurity=$security 
+            $element.UseExistingSqlAccount="true" 
+            $element.AccountType="NewSql" 
+            $element.DatabaseName = "ServerLog"    #databasename for ServerLog database 
+            $element.Servername ="$dbaseinstance" 
+            $element.User ="$user" 
+            $element.UserPassword ="$UserPassword" 
+            $element.Account ="LogDBUser"  #account to create for Server log database 
+            $element.AccountPassword="orion" 
+        } 
+ 
+        #OrionLog Manager requires the additional Plugin property to complete the file. 
+        $additionaltext='<Plugins> 
+        <Plugin FactoryType="SolarWinds.ConfigurationWizard.Plugin.LogMgmt.SilentConfigureFactory" Assembly="SolarWinds.ConfigurationWizard.Plugin.LogMgmt"/> 
+        </Plugins> 
+        </SilentConfig>' 
+ 
+        #if OrionLogManager was installed, we remove the NTA section from the XML file 
+    $file.silentconfig.host.info.NetflowConfiguration | %{$_.ParentNode.RemoveChild($_)| out-null} 
+    } 
+
+    #  If neither NTA or Log Manager are to be installed remove both properties from xml 
+    default { 
+        $file.silentconfig.host.info.NetflowConfiguration | %{$_.ParentNode.RemoveChild($_)| out-null} 
+        $file.silentconfig.host.info.OrionLogConfiguration | %{$_.ParentNode.RemoveChild($_)| out-null} 
+    } 
+}
+
+# After XML files have been set, we can now create the new xml file 
+$file.save("$Template\silent-install.xml")  #or any directory of your choice 
+ 
+#The final step to completing the xml file is to add in the additional Plugin property created from one of the above steps 
+(Get-Content -Path $Template\silent-install.xml) | 
+ForEach-Object {$_ -replace '</silentconfig>',$additionaltext} | 
+Set-Content -Path $Template\silent-install.xml 
+
+#The Final step (create installation script and run) 
+#You just need to run the silent install now with the xml that was just created.  You can run within the same   powershell, create a separate powershell script to run, or a create a simple command line bat file 
+ 
+#Powershell – add the following to your code 
+#Beginning of Powershell 
+$configfilePath = "$Template\silent-install.xml" 
+$installer_name  = "Solarwinds-Orion-NPM.exe"  
+ 
+#create installer file,  Make sure you have already copied the Orion installer.exe to the temp folder. 
+New-Item C:\Windows\Temp\installer.ps1 -ItemType file 
+Add-Content 'C:\Windows\Temp\installer.ps1' "start-process -filepath  ""C:\Windows\Temp\$installer_name""  -Argumentlist /s /ConfigFile=""$configfilepath"" -wait -verb runAS" 
+ 
+#Start installation 
+write-host ' starting installation ....'; [datetime]::Now 
+Set-Location "C:\Windows\Temp" 
+Invoke-expression -Command .\installer.ps1 
+write-host ' installation started ....'; [datetime]::Now 
+ 
+#check the installation status 
+$process_name = $installer_name.Substring(0,$installer_name.LastIndexOf('.')) 
+while(1) { 
+    $Solarwinds = Get-Process $process_name -ErrorAction SilentlyContinue 
+    if ($Solarwinds) { 
+        Start-Sleep 5 
+        Remove-Variable Solarwinds 
+        continue; 
+    } else { 
+        write-host "process completed"; [datetime]::Now 
+        Remove-Variable Solarwinds 
+        break; 
+    } 
+} 
+ 
+#delete files created in installation process, this code does not delete template.xml or Orion installer.exe  
+write-host ' Deleting the files created in installation process'; [datetime]::Now 
+ 
+$installer_file = "C:\Windows\Temp\installer.ps1" 
+if (Test-Path $installer_file) { 
+    Remove-Item $installer_file 
+    Remove-Item $Template\silent-install.xml 
+    write-host 'silent installer file deleted'; [datetime]::Now 
+} 
+
+write-host 'Files deleted which have been created in installation process'; [datetime]::Now  
+#End of Powershell 

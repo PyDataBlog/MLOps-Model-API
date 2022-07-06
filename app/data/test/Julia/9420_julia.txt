@@ -1,0 +1,88 @@
+const PNG_LIBPNG_VER_STRING = "1.2.50"
+const PNG_TRANSFORM_STRIP_16 = 1
+const PNG_TRANSFORM_STRIP_ALPHA = 2
+const PNG_TRANSFORM_PACKING = 4
+const PNG_TRANSFORM_EXPAND = 16
+const PNG_TRANSFORM_GRAY_TO_RGB = 8192
+
+function pngread(filename::AbstractString)
+    fp = ccall((:fopen, "libc"), Ptr{Void}, (Cstring, Cstring), filename, "rb")
+    fp == C_NULL && error("Failed to open $(filename).")
+
+    header = zeros(UInt8, 8)
+    header_size = ccall((:fread, "libc"), Csize_t,
+                        (Ptr{UInt8}, Cint, Cint, Ptr{Void}),
+                        header, 1, 8, fp)
+    header_size != 8 && error("Failed to read 8 byte header from $(filename).")
+
+    png_status = ccall((:png_sig_cmp, "libpng"), Cint,
+                       (Ptr{UInt8}, Csize_t, Csize_t), header, 0, 8)
+    png_status != 0 && error("File $(filename) not identified as png file.")
+
+    png_ptr = ccall((:png_create_read_struct, "libpng"), Ptr{Void},
+                    (Cstring, Ptr{Void}, Ptr{Void}, Ptr{Void}),
+                    PNG_LIBPNG_VER_STRING, C_NULL, C_NULL, C_NULL)
+    png_ptr == C_NULL && error("Failed to create png read struct.")
+
+    info_ptr = ccall((:png_create_info_struct, "libpng"), Ptr{Void},
+                     (Ptr{Void},), png_ptr)
+    info_ptr == C_NULL && error("Failed to create png info struct.")
+
+    ccall((:png_init_io, "libpng"), Void, (Ptr{Void}, Ptr{Void}),
+          png_ptr, fp)
+
+    ccall((:png_set_sig_bytes, "libpng"), Void, (Ptr{Void}, Cint),
+          png_ptr, 8)
+
+    transforms = (PNG_TRANSFORM_EXPAND | PNG_TRANSFORM_STRIP_16 |
+                  PNG_TRANSFORM_PACKING | PNG_TRANSFORM_STRIP_ALPHA |
+                  PNG_TRANSFORM_GRAY_TO_RGB)
+    ccall((:png_read_png, "libpng"), Void,
+          (Ptr{Void}, Ptr{Void}, Cint, Ptr{Void}),
+          png_ptr, info_ptr, transforms, C_NULL)
+
+    width = ccall((:png_get_image_width, "libpng"), UInt32,
+                  (Ptr{Void}, Ptr{Void}),
+                  png_ptr, info_ptr)
+    height = ccall((:png_get_image_height, "libpng"), UInt32,
+                  (Ptr{Void}, Ptr{Void}),
+                  png_ptr, info_ptr)
+    channels = ccall((:png_get_channels, "libpng"), UInt8,
+                  (Ptr{Void}, Ptr{Void}),
+                  png_ptr, info_ptr)
+
+    rows = ccall((:png_get_rows, "libpng"), Ptr{Ptr{UInt8}},
+                 (Ptr{Void}, Ptr{Void}), png_ptr, info_ptr)
+
+    image = zeros(UInt8, height,width,channels)
+    for i = 1:height
+        row = unsafe_load(rows, i)
+        for j = 1:width
+            for c = 1:channels
+                image[i,j,c] = unsafe_load(row, channels * (j - 1) + c)
+            end
+        end
+    end
+
+    png_ptr_ptr = Ref{Ptr{Void}}(png_ptr)
+    info_ptr_ptr = Ref{Ptr{Void}}(info_ptr)
+    ccall((:png_destroy_read_struct, "libpng"), Void,
+          (Ref{Ptr{Void}}, Ref{Ptr{Void}}, Ptr{Ptr{Void}}),
+          png_ptr_ptr, info_ptr_ptr, C_NULL)
+    ccall((:fclose, "libc"), Cint, (Ptr{Void},), fp)
+
+    return image
+end
+
+datasets_path="../datasets/"
+dataset_version="nr"
+dataset_stage="rgb_black_background"
+
+dataset_path="$datasets_path/lsa16h_$dataset_version/$dataset_stage/"
+
+image_names=filter(p -> endswith(p,".png"), readdir(dataset_path))
+image_paths=map( p -> joinpath(dataset_path,p),image_names)
+first_image=load(image_paths[1])
+h,w=size(first_image)
+
+a=pngread(image_paths[1])

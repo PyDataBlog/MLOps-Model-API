@@ -1,0 +1,58 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, InstanceSigs #-}
+
+module LinterUtility (linterSettings) where
+
+import Control.Applicative
+import Data.List.Utils
+import System.IO
+
+import Data.ConfigFile
+import CompilationUtility
+import qualified ConfigFile
+import Printer
+import Utility
+
+
+data LINTER_SETTINGS = LINTER_SETTINGS {
+  ls_executable :: FilePath,
+  ls_flags :: [String],
+  ls_files :: [FilePath],
+  ls_verbose :: Bool
+}
+
+
+linterSettings :: ConfigParser -> [FilePath] -> EitherT String IO LINTER_SETTINGS
+linterSettings cp files = LINTER_SETTINGS
+  <$> ConfigFile.getFile cp "DEFAULT" "utility.linter.executable"
+  <*> (fmap words $ hoistEither $ ConfigFile.get cp "DEFAULT" "utility.linter.flags")
+  <*> pure files
+  <*> (hoistEither $ ConfigFile.getBool cp "DEFAULT" "verbose")
+
+
+instance UtilitySettings LINTER_SETTINGS where
+  executable = ls_executable
+  toStringList ls = concat [ls_flags ls, ls_files ls]
+  utitle _ = Just "Linter"
+  verbose = ls_verbose
+
+
+instance CompilationUtility LINTER_SETTINGS () where
+  defaultValue :: LINTER_SETTINGS -> ()
+  defaultValue _ = ()
+
+
+  failure :: UtilityResult LINTER_SETTINGS -> EitherT String IO ()
+  failure r = do
+    dPut [Failure]
+    output <- catchIO $ hGetContents $ ur_stdout r
+    report <- if "" == output then catchIO $ hGetContents $ ur_stderr r else return $ cleanStdout output
+    dPut [Str report, Ln $ "Exit code: " ++ (show $ ur_exit_code r)]
+    throwT "LinterUtility failure"
+   where cleanStdout x = unlines $ (take $ (length $ lines x) - 6) $ lines x
+
+
+  success :: UtilityResult LINTER_SETTINGS -> EitherT String IO ()
+  success r = do
+    report <- catchIO $ hGetLine $ ur_stdout r
+    dPut [Str " ", Str report, Success]

@@ -1,0 +1,87 @@
+# Script to pull at the 2013 users and put them in a CSV
+# then pull all the DL that those users are managers of, or that they have 
+# readmember, or writemember right to those DL 
+# If all the above is true then update the DL to a 2013 object
+# then add anyone with readmember rights as a manager of that list
+
+
+# Get the current execution path
+
+$fullPathIncFileName = $MyInvocation.MyCommand.Definition 
+$currentScriptName = $MyInvocation.MyCommand.Name 
+$currentExecutingPath = $fullPathIncFileName.Replace($currentScriptName, "") 
+
+
+# setup my variables
+$error.clear()
+$erroractionpreference = SilentlyContinue
+$dlfile = $currentExecutingPath + "dllist.csv"
+$OFS = ','
+$readmember=@()
+ 
+# Import the CSV to use 
+$csv = Import-csv $dlfile 
+
+ foreach ($line in $csv) 
+
+
+{
+ # Need to check for no records, or end of records in DLfile
+ if ($line.Identity -eq "")
+  {
+  write-host "Blank Record in "$dlfile
+  }
+ # OK record exists, lets proceede 
+ else {
+ 
+ 
+ $readmember=@()
+ write-host "Getting Permissions AD for : "$line.Identity.trim()
+
+  # get the AD permissions for the DL to find out who has readmember , because they will be managedby, also filter out broken GUIDS
+ 
+  $readmember= Get-DistributionGroup $line.Identity.trim() | Get-ADPermission | ? {$_.Properties -like "member"}|? {$_.AccessRights -like "Read*"}|? {$_.User -notlike "S-1-5-21*"} 
+
+    $readmember |ForEach-Object{
+                      #
+                      # Take the alias that was returned from get-ADpermissions, and find the exchange identity of the user
+                      # We need the full Identity, to prevent the Duplicate alisas error when adding user to DL
+                      # We also need to check and see if the Identity retured was a user, or another DL
+                      # show the current readmember users to shell
+                      
+                      $userid = $_.User.split("|\")[-1]
+                      write-host $username
+
+                      # Check and see if the alias retured is a valid User
+                      if (get-user -filter "Name -eq '$userid'")  
+                      {
+                        write-host "Adding User" $_.User "to" $line.Identity.trim()
+                        $addmember = get-user $_.User | foreach {$_.tostring()}
+                      }
+
+
+                      # Alias returned was not a vaild user, lets assume its a DL
+                      else 
+                      { 
+                        write-host "Adding DL" $_.User "to" $line.Identity.trim()
+                       $addmember = get-DistributionGroup $_.User| foreach {$_.tostring()}
+                      }
+
+
+                      # add the users to the DL in the managedby role, don't forget to bypass security check , and force it
+                      Set-DistributionGroup -identity $line.Identity.trim() -ManagedBy @{Add=$addmember} -BypassSecurityGroupManagerCheck -force 
+                      
+                      
+                      }
+       
+        # Show the resulting managedby permissions to shell
+        get-distributiongroup $line.identity.trim() |fl Name,managedby               
+      }
+    }
+       
+
+ 
+
+ 
+ 
+ 

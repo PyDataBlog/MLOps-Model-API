@@ -1,0 +1,244 @@
+#!/bin/bash
+
+### Dependencies: mediainfo, lame, id3 or id3tool, [vorbis-tools (ogginfo,vorbiscomment)]?
+
+### Exit Status Table ###
+#-1 == Clean Up Action Interrupted
+# 0 == Success
+# 1 == Invalid Parameter Flag
+# 2 == Missing Directory
+
+### TODO:
+# Write/update ogg tags.
+# Edit other tag fields.
+# Log preferences: date format, log directory, clear log(s)
+# manpage
+
+usage() { echo "Usage: $0 [-vc] [-s <source directory>] [-t <target directory>]" 1>&2; exit 1; }
+nodir() { echo "ERROR: $1 does not exist or is not a directory." 1>&2; exit 2; }
+
+### Variables ###
+while getopts ":s:t:vc" o; do
+    case "${o}" in
+        s) srcdir=${OPTARG} ;;
+        t) dest=${OPTARG} ;;
+        v) verbose=true ;;
+        c) cleanup=true ;;
+        *) usage ;;
+    esac
+done
+shift $((OPTIND-1))
+workdir="${HOME}/.config/collect_music"
+actsh="${workdir}/actions.sh"
+if [ -z "${verbose}" ] ; then verbose=false ; fi
+
+### Clean Up Action ###
+# Stop and Resume at any moment. When ready to finalize,
+# run with cleanup option [-c] to execute queued actions.
+# If a mistake is made stop immedietly and remove the
+# corrosponding lines from actions.sh
+if [ ! -z $cleanup ] ; then
+    if ${verbose} ; then
+        echo "[CLEAN] Running \"${actsh}\" ..."
+    fi
+    bash "${actsh}"
+    status=$?
+    if [[ $status = -1 ]] ; then
+        #TODO: Echo explanation or instructions.
+        exit -1
+    else
+        mv "${actsh}" "${actsh}-`date +%Y%m%d`"
+        exit 0
+    fi
+fi
+
+### Default Values ###
+if [ ! -e "${actsh}" ] ; then
+    echo "#!/bin/bash" > "${actsh}"
+else
+    echo >> "${actsh}"
+    echo "### Remove duplicate or invalid actions. And then ..." >> "${actsh}"
+    echo "echo \"[WARNING] Edit actions file then continue.\"" >> "${actsh}"
+    echo "echo \"Actions File: $actsh\"" >> "${actsh}"
+    echo "exit -1" >> "${actsh}"
+    echo "### Resume from here:" >> "${actsh}"
+fi
+if [ -z "${srcdir}" ] ; then
+    srcdir="`pwd`" #TODO: make preference to change this behaviour
+elif [ ! -d "${srcdir}" ] ; then
+    nodir ${srcdir}
+fi
+if [ -z "${dest}" ] ; then
+    dest="${HOME}/Music"
+elif [ ! -d "${dest}" ] ; then
+    nodir ${dest} #Or should we mkdir?
+fi
+
+### Setup Directory Structure ###
+if ${verbose} ; then
+    echo "srcdir = ${srcdir}"
+    echo "dest = ${dest}"
+    echo "workdir = ${workdir}"
+fi
+if [ ! -d "${workdir}" ] ; then
+    mkdir -vp "${workdir}"
+fi
+
+# A temporary file is used to list all files in the source directory.
+find "${srcdir}" -type f > ${workdir}/origin.list && echo
+while read -r line || [[ -n ${line} ]]; do
+    echo "File: ${line}"
+
+    ### Get Basic File Data ###
+    filename=`basename "${line}"`
+    data=`mediainfo "${line}"`
+    format=`grep -m 1 "Format" <<<"${data}" | cut -d: -f 2- | sed 's/^ *//g'`
+        #"Wave""MPEG Audio""OGG"
+
+    ### Retrieve Media Tag Data ###
+    if [ "${format}" = "Wave" ] ; then
+        title=`basename "${line}" .wav`
+    elif [ "${format}" = "MPEG Audio" ] || [ "${format}" = "OGG" ] ; then
+        id3 -l "${line}" #XXX mediainfo doesn't show id3's tag changes XXX
+        title=`grep -m 1 "^Track name " <<<"${data}" | cut -d: -f 2- | sed 's/^ *//g'`
+        album=`grep -m 1 "^Album" <<<"${data}" | cut -d: -f 2- | sed 's/^ *//g'`
+        artist=`grep -m 1 "^Album/Performer" <<<"${data}" | cut -d: -f 2- | sed 's/^ *//g'`
+        echo "title = ${title}"
+        echo "album = ${album}"
+        echo "artist = ${artist}"
+    else
+        if ${verbose} ; then
+            echo "[SKIPPED NON-AUDIO FILE]"
+        fi
+        continue
+    fi
+
+    ### Prepare to Update Tags ###
+    read -s -n 1 -p "Do you trust this file to be tagged correctly (y/n)? " tagok < /dev/tty && echo
+    if [ "${tagok}" = 'y' ] || [ "${tagok}" = 'Y' ] ; then
+        verifytag=false
+    else
+        read -s -n 1 -p "Is the problem that the album artist should be \"Various Artists\" (y/n)? " quickfix < /dev/tty && echo
+        if [ "${quickfix}" = 'y' ] || [ "${quickfix}" = 'Y' ] ; then
+            artist="Various Artists"
+            verifytag=false
+        else
+            verifytag=true
+        fi
+    fi
+
+    ### Verify Title ###
+    if  [ -z "${title}" ] ; then
+        title=${filename}
+        pretagged=false
+    else
+        pretagged=true
+    fi
+    if [ ${verifytag} = true ] ; then
+        while true ; do
+            read -s -n 1 -p "Is \"${title}\" the correct song title (y/n)? " iscorrect < /dev/tty && echo
+            if [ "${iscorrect}" = 'y' ] || [ "${iscorrect}" = 'Y' ] ; then
+                break
+            else
+                if ${pretagged} ; then
+                    read -s -n 1 -p "Do you wish to overwrite the current tag infomration (y/n)? " retagging < /dev/tty && echo
+                    if [ "${retagging}" = 'y' ] || [ "${retagging}" = 'Y' ] ; then
+                        pretagged=false
+                    fi
+                fi
+                read -p "Enter the song title: " title < /dev/tty
+            fi
+        done
+    fi
+    if [ "${format}" = "MPEG Audio" ] && [ ${pretagged} = false ] ; then
+        echo "id3 -t \"${title}\" \"${line}\"" >> "${actsh}"
+    fi
+
+    ### Verify Album ###
+    if [ -z "${album}" ] ; then
+        album="Unknown Album"
+        pretagged=false
+    else
+        pretagged=true
+    fi
+    if [ ${verifytag} = true ] ; then
+        while true ; do
+            read -s -n 1 -p "Is \"${album}\" the correct album name (y/n)? " iscorrect < /dev/tty && echo
+            if [ "${iscorrect}" = 'y' ] || [ "${iscorrect}" = 'Y' ] ; then
+                break
+            else
+                if ${pretagged} ; then
+                    read -s -n 1 -p "Do you wish to overwrite the current tag infomration (y/n)? " retagging < /dev/tty && echo
+                    if [ "${retagging}" = 'y' ] || [ "${retagging}" = 'Y' ] ; then
+                        pretagged=false
+                    fi
+                fi
+                read -p "Enter the album name: " album < /dev/tty
+            fi
+        done
+    fi
+    if [ "${format}" = "MPEG Audio" ] && [ ${pretagged} = false ] ; then
+        echo "id3 -A \"${album}\" \"${line}\"" >> "${actsh}"
+    fi
+
+    ### Verify Artist ###
+#     pretagged=true
+    if [ -z "${artist}" ] ; then
+        if ${verbose} ; then
+            echo "[WARNING] Guessing artist based on path."
+        fi
+        artist=`echo ${line} | rev | cut -d/ -f 3 | rev`
+#         pretagged=false
+    fi
+    if [ -z "${artist}" ] || [ "${artist}" = "Various" ] ; then
+        artist="Various Artists"
+#         pretagged=false
+    fi
+    if [ ${verifytag} = true ] ; then
+        while true ; do
+            read -s -n 1 -p "Is \"${artist}\" the correct album artist (y/n)? " iscorrect < /dev/tty && echo
+            if [ "${iscorrect}" = 'y' ] || [ "${iscorrect}" = 'Y' ] ; then
+                break
+            else
+#                 if ${pretagged} ; then
+#                     read -s -n 1 -p "Do you wish to overwrite the current tag infomration (y/n)? " retagging < /dev/tty && echo
+#                     if [ "${retagging}" = 'y' ] || [ "${retagging}" = 'Y' ] ; then
+#                         pretagged=false
+#                     fi
+#                 fi
+                read -p "Enter the album artist: " artist < /dev/tty
+            fi
+        done
+    fi
+#     if [ "${format}" = "MPEG Audio" ] && [ ${pretagged} = false ] ; then
+#         echo "id3 -a \"${artist}\" \"${line}\"" >> "${actsh}"
+#     fi
+
+    ### Setup Destination Directory Structure ###
+    destdir="${dest}/${artist}/${album}" #Needs 2b Sanitized
+    if ${verbose} ; then
+        echo
+        echo "title = ${title}"
+        echo "album = ${album}"
+        echo "artist = ${artist}"
+        echo "destination = ${destdir}"
+    fi
+
+    ### Prepare Files to be Moved ###
+    if [ ! -d "${destdir}" ] ; then
+        mkdir -vp "${destdir}"
+    fi
+    if [ ! -e "${destdir}/${filename}" ] ; then
+        echo "mv \"${line}\" \"${destdir}/${filename}\"" >> "${actsh}"
+    else
+        # TODO: Untested
+        read -s -n 1 -p "Do you wish to overwrite the existing file (y/n)? " replace < /dev/tty && echo
+        if [ "${replace}" = 'y' ] || [ "${replace}" = 'Y' ] ; then
+            echo "mv \"${line}\" \"${destdir}/${filename}\"" >> "${actsh}"
+        fi
+    fi
+
+    echo
+done < ${workdir}/origin.list
+
+echo "find \"${srcdir}\" -depth -type d -empty -exec rmdir {} \;" >> "${actsh}" #EXPERIMENTAL

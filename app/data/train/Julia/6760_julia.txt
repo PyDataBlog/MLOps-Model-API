@@ -1,0 +1,507 @@
+export
+    parseTLE,
+    site,
+	julianDate,
+	JD2JDC,
+	LSTime,
+    convTime,
+    gregorianDate,
+    days2YMDHMS,
+    dms2rad,
+    precessionAngles,
+    delaunayElements,
+    nutationCorrections,
+    meanObliquity,
+    FK5Reduction,
+    ijkToLatLon
+
+
+"""
+    parseTLE(line1::String, line2::String)
+
+Parse two-line element sets (TLEs) into object parameters.
+
+### Arguments (Inputs):
+| Parameter | Description         |
+| --------: | :------------------ |
+| `line1`   | First line of TLE.  |
+| `line2`   | Second line of TLE. |
+
+### Values (Outputs):
+| Parameter  | Description                           | Units      |
+| ---------: | :------------------------------------ | :--------- |
+| `satnum1`  | Object number                         | -          |
+| `class`    | Classification (U=Unclassified)       | -          |
+| `intldesg` | International Designator              | -          |
+| `epoch`    | Object epoch                          | Julian day |
+| `ṅ`        | Mean motion 1st derivative ÷ 2        | rev/day²   |
+| `n̈`        | Mean motion 2nd derivative ÷ 6        | rev/day³   |
+| `b★`       | 'BSTAR' drag term                     | -          |
+| `TLEnum`   | Element set number.                   | -          |
+| `i`        | Inclination                           | rad        |
+| `Ω`        | Right ascension of the ascending node | rad        |
+| `e`        | Eccentricity                          | -          |
+| `ω`        | Argument of perigee                   | rad        |
+| `M`        | Mean Anomaly                          | rad        |
+| `n`        | Mean Motion                           | rev/day    |
+| `revnum`   | Revolution number at epoch            | rev        |
+
+Author: James Spicer (2016.10.30) <br/>
+Source: Vallado (2001), p.115
+"""
+function parseTLE(line1::String, line2::String)
+    (length(line1) ≠ 69 || length(line2) ≠ 69) && error("TLE input error: lines should both be 69 characters long.")
+
+    for j = 11:16
+        (line1[j] == ' ') && (line1 = line1[1:j-1] * "_" * line1[j+1:end])
+    end
+
+    (line1[45]  ≠ ' ') && (line1 = line1[1:43] * string(line1[45]) * line1[45:end])
+    line1 = line1[1:44] * "." * line1[46:end]
+
+    (line1[ 8] == ' ') && (line1 = line1[1:7] * "U" * line1[9:end])
+
+    (line1[10] == ' ') && (line1 = line1[1:9] * "." * line1[11:end])
+
+    for j = 46:50
+        (line1[j] == ' ') && (line1 = line1[1:j-1] * "0" * line1[j+1:end])
+    end
+
+    (line1[52] == ' ') && (line1 = line1[1:51] * "0" * line1[53:end])
+
+    (line1[54]  ≠ ' ') && (line1 = line1[1:52] * string(line1[54]) * line1[54:end])
+
+    line1 = line1[1:53] * "." * line1[55:end]
+    line2 = line2[1:25] * "." * line2[27:end]
+
+    for j = 27:33
+        (line2[j] == ' ') && (line2 = line2[1:j-1] * "0" * line2[j+1:end])
+    end
+
+    line1[63] == ' ' && (line1 = line1[1:62] * "0" * line1[64:end])
+
+    if length(line1) < 68 || line1[68] == ' '
+        line1 = line1[1:67] * "0" * line1[69:end]
+    end
+
+    # parse first line
+    linenum1    = parse(Int64,   line1[ 1: 1])
+    satnum1     = parse(Int64,   line1[ 3: 7])
+    class       = line1[8]
+    intldesg    = line1[10:17]
+    epochyr     = parse(Int64,   line1[19:20])
+    epochdays   = parse(Float64, line1[21:32])
+    ṅ           = parse(Float64, line1[34:43])
+    n̈           = parse(Float64, line1[45:50]) *
+             10.0^parse(Int64,   line1[51:52])
+    b★          = parse(Float64, line1[53:59]) *
+             10.0^parse(Int64,   line1[60:61])
+    zero        = parse(Int64,   line1[63:63])
+    TLEnum      = parse(Int64,   line1[65:68])
+
+    linenum2    = parse(Int64,   line2[ 1: 1])
+    satnum2     = parse(Int64,   line2[ 3: 7])
+    i           = parse(Float64, line2[ 8:16])
+    Ω           = parse(Float64, line2[17:25])
+    e           = parse(Float64, line2[26:33])
+    ω           = parse(Float64, line2[34:42])
+    M           = parse(Float64, line2[43:51])
+    n           = parse(Float64, line2[52:63])
+    revnum      = parse(Int64,   line2[64:68])
+
+    (linenum1 ≠ 1 || linenum2 ≠ 2) && error("Invalid TLE, line numbers not correct.")
+
+    (satnum1 ≠ satnum2) && error("Invalid TLE, satellite numbers on lines 1 and 2 are not identical.")
+
+    epochyr = (epochyr < 57) ? epochyr + 2000 : epochyr + 1900
+
+    mon, day, hr, minute, sec = days2YMDHMS(epochyr, epochdays)[2:6]
+
+    epoch = julianDate(epochyr, mon, day, hr, minute, sec)
+
+    return satnum1, class, intldesg, epoch, ṅ, n̈, b★, TLEnum, deg2rad(i), deg2rad(Ω), e, deg2rad(ω), deg2rad(M), n, revnum
+end
+
+
+"""
+    site(λ::Float64, ϕ_gd::Float64, h_ellp::Float64; R::Float64=R⨁, e2::Float64=e2⨁)
+
+Compute the body-fixed position and velocity of a site.
+
+### Arguments (Inputs):
+| Parameter | Description                      | Units  |
+| --------: | :------------------------------- | :----- |
+| `λ`       | Geodetic longitude of site       | rad    |
+| `ϕ_gd`    | Geodetic latitude of site        | rad    |
+| `h_ellp`  | Altitude of site above ellipsoid | DU     |
+
+#### Optional Keyword Arguments:
+| Parameter | Description                        | Units  |
+| --------: | :--------------------------------- | :----- |
+| `R=R⨁`    | Radius of site's body (e.g. Earth) | DU     |
+| `e2=e2⨁`  | Body's eccentricity squared        | -      |
+
+### Values (Outputs):
+| Parameter | Description                      | Units |
+| --------: | :------------------------------- | :---- |
+| `r⃗_site`  | Site's ecef position vector      | DU    |
+| `v⃗_site`  | Site's ecef velocity vector      | DU/TU |
+
+
+Author: James Spicer (2016.11.13) <br/>
+Source: Vallado (2001), Algorithm 48, p.408-9 (See errata)
+"""
+function site(λ::Float64, ϕ_gd::Float64, h_ellp::Float64; R::Float64=R⨁, e2::Float64=e2⨁)
+    C⨁  = R/√(1-e2*sin(ϕ_gd)^2)
+    S⨁  = C⨁*(1-e2)
+ 
+    r_δ = (C⨁ + h_ellp)*cos(ϕ_gd)
+    r_K = (S⨁ + h_ellp)*sin(ϕ_gd)
+
+    return [r_δ*cos(λ); r_δ*sin(λ); r_K], zeros(3)
+end
+
+
+"""
+	julianDate(yr::Int64, mon::Int64, day::Int64, hr::Int64, min::Int64, sec::Float64) → Float64
+
+Compute Julian date from a Gregorian date.
+
+Author: James Spicer (2016.11.10) <br/>
+Source: Vallado (2001), Algorithm 14, p.186
+"""
+function julianDate(yr::Int64, mon::Int64, day::Int64, hr::Int64, min::Int64, sec::Float64) # TODO: Check dates in 1900.
+    return 367yr -
+           trunc(1.75(yr + trunc((mon + 9)/12))) +
+           trunc(275mon/9) +
+           day + 1721013.5 +
+           ((sec/60 + min)/60 + hr)/24
+end
+
+julianDate(yr::Int64, mon::Int64, day::Int64, hr::Int64, min::Int64, sec::Int64) = julianDate(yr, mon, day, hr, min, Float64(sec))
+
+
+
+
+"""
+    JD2JDC(JD::Float64) → Float64
+
+Compute Julian centuries from a Julian date.
+
+Author: James Spicer (2016.11.10) <br/>  
+Source: Vallado (2001), Eq. 3-40, p.188
+"""
+JD2JDC(JD::Float64) = (JD - 2451545)/36525
+
+
+"""
+    LSTime(JD_UT1::Float64; λ::Float64=0.0) → Float64, Float64
+
+Compute Greenwich Meridian sideFloat64 time angle (`θ_GMST`, [rad]) and
+local sideFloat64 time angle at longitude `λ` (`θ_LST`, [rad]) at a UT1 Julian date.
+
+Author: James Spicer (2016.11.10) <br/> 
+Source: Vallado (2001), Algorithm 15, p.192
+"""
+function LSTime(JD_UT1::Float64; λ::Float64=0.0)
+    T_UT1  = JD2JDC(JD_UT1) # Centuries
+    θ_GMST =                        -6.2e-6T_UT1^3 +
+                                  9.3104e-2T_UT1^2 +
+             (876600*3600 + 8640184.812866)T_UT1   +
+             67310.54841 # [sec]
+
+    θ_GMST = mod2pi(2π*θ_GMST/solSecsEarth) # [rad]
+
+    return θ_GMST, θ_GMST + λ
+end
+
+
+"""
+    convTime(JD_UTC::Float64; ΔUT1::Float64=0, ΔAT::Float64=0)
+
+Convert Coordinated Universal Time (UTC) to other time standards.
+
+### Values (Outputs):
+| Parameter | Description                 | Units     |
+| --------: | :-------------------------- | :-------- |
+| `JD_UT1`  | Universal Time 1            | Days      |
+| `JD_TAI`  | International Atomic Time   | Days      |
+| `JD_TT`   | Terrestrial Time            | Days      |
+| `JD_TDB`  | Barycentric Dynamical Time  | Days      |
+| `T_UT1`   | Universal Time 1            | Centuries |
+| `T_TT`    | Terrestrial Time            | Centuries |
+| `T_TDB`   | Barycentric Dynamical Time  | Centuries |
+
+Author: James Spicer (2016.11.20) <br/> 
+Source: Vallado (2001), Algorithm 16, p.197
+"""
+function convTime(JD_UTC::Float64; ΔUT1::Float64=0.0, ΔAT::Float64=0.0)
+    JD_UT1 = JD_UTC + ΔUT1  /solSecsEarth
+    JD_TAI = JD_UTC + ΔAT   /solSecsEarth
+    JD_TT  = JD_TAI + 32.184/solSecsEarth
+    
+    T_UT1  = JD2JDC(JD_UT1)
+    T_TT   = JD2JDC(JD_TT)
+    M⨁     = mod2pi(deg2rad(357.5277233 + 35999.05034T_TT))
+    JD_TDB = JD_TT + (0.001658sin(M⨁) + 1.385e-5sin(2M⨁))/solSecsEarth
+    T_TDB  = JD2JDC(JD_TDB)
+    return JD_UT1, JD_TAI, JD_TT, JD_TDB, T_UT1, T_TT, T_TDB
+end
+
+
+"""
+    days2YMDHMS(Y::Int64, days::Float64)
+
+Compute year, month, day, hr, min, sec from day of year + fraction.
+Author: James Spicer (2016.11.23) <br/> 
+Source: Vallado (2001), p.201-3.
+"""
+function days2YMDHMS(Y::Int64, days::Float64)
+    # --------------- set up array of days in month  --------------
+    lmonths = [31, (rem(Y-1900, 4) == 0) ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    dayofyr = floor(days)
+
+    inttemp, M = 0, 1
+    while dayofyr > inttemp + lmonths[M] && M < 12
+        inttemp += lmonths[M]
+        M += 1
+    end
+
+    D   = dayofyr - inttemp
+    τ   = 24(days - dayofyr)
+    H   = trunc(τ)
+    τ   = 60(τ - H)
+    min = trunc(τ)
+    S   = 60(τ - min)
+    return Y, Int(M), Int(D), Int(H), Int(min), S
+end
+
+"""
+    gregorianDate(JD::Float64) -> Int64, Int64, Int64, Int64, Int64, Float64
+
+Compute a Gregorian date from a Julian date.
+
+Author: James Spicer (2016.11.24) <br/> 
+Source: Vallado (2001), Algorithm 22, p.204.
+"""
+function gregorianDate(JD::Float64) # TODO: Fails for dates in 1900.
+    T_1900 = (JD - 2415019.5)/365.25
+    Y = 1900 + trunc(Int64, T_1900)
+    leapYrs = trunc(0.25(Y - 1900 - 1))
+    days = JD - 2415019.5 - 365(Y - 1900) - leapYrs
+    if days < 1
+        Y -= 1
+        leapYrs = trunc(0.25(Y - 1900 - 1))
+        days = JD - 2415019.5 - 365(Y - 1900) - leapYrs
+    end
+    
+    return days2YMDHMS(Y, days)
+end
+
+
+"""
+    dms2rad(d::Float64, m::Float64, s::Float64) → Float64
+
+Convert an angle in degree, minute, second units to radians.
+
+Author: James Spicer (2016.11.10) <br/>  
+Source: Vallado (2001), Eq. 3-56, p.215
+"""
+function dms2rad(d::Float64, m::Float64, s::Float64)
+    all([d m s] .> 0) && return deg2rad(d + m/60 + s/3600)
+    return -deg2rad(abs(d) + abs(m)/60 + abs(s)/3600)
+end
+
+
+"""
+    precessionAngles(T_TDB::Float64) → (Float64, Float64, Float64)
+
+Compute precession angles `ζ`, `θ`, and `z` [rad] for the FK5 system.
+
+Author: James Spicer (2016.11.10) <br/>  
+Source: Vallado (2001), Eq. 3-56, p.215
+"""
+function precessionAngles(T_TDB::Float64)
+    T_TDB², T_TDB³ = T_TDB^2, T_TDB^3
+    ζ =  0.017998T_TDB³ + 0.30188T_TDB² + 2306.2181T_TDB # [arcsec]
+    θ = -0.041833T_TDB³ - 0.42665T_TDB² + 2004.3109T_TDB # [arcsec]
+    z =  0.018203T_TDB³ + 1.09468T_TDB² + 2306.2181T_TDB # [arcsec]
+    return deg2rad([ζ, θ, z]/3600)                       #    [rad]
+end
+
+
+"""
+    nutationAngles(T_TDB::Float64; δΔΨ::Float64=0.0, δΔε::Float64=0.0) → Float64, Float64, Float64
+
+Compute Earth's nutation corrections `ΔΨ`, `Δε` [rad] for the FK5 system. Also returns
+`Ω☾` [rad] for apparent sideFloat64 time correction.
+
+Author: James Spicer (2016.11.20) <br/>  
+Source: Vallado (2001), Eq. 3-58,59, p.217
+"""
+function nutationCorrections(T_TDB::Float64; δΔΨ::Float64=0.0, δΔε::Float64=0.0)
+    M☾, M☉, uM☾, D☉, Ω☾ = delaunayElements(T_TDB)
+
+    a_p = nut80["a₁"]*M☾ + nut80["a₂"]*M☉ + nut80["a₃"]*uM☾ + nut80["a₄"]*D☉ + nut80["a₅"]*Ω☾ # [rad]
+    ΔΨ  = sum(sin(a_p).*(nut80["A"] + nut80["B"]*T_TDB)) # 0.0001"
+    Δε  = sum(cos(a_p).*(nut80["C"] + nut80["D"]*T_TDB)) # 0.0001"
+
+    return deg2rad(ΔΨ*1e-4/3600) + δΔΨ, deg2rad(Δε*1e-4/3600) + δΔε, Ω☾ # [rad]
+end
+
+
+"""
+    meanObliquity(T_TDB::Float64; prec="h") → Float64
+
+Compute Earth's mean obliquity [rad] for the FK5 system.
+
+Author: James Spicer (2016.11.20) <br/>  
+Source: Vallado (2001), Eq. 3-52, p.209
+"""
+function meanObliquity(T_TDB::Float64; prec="h")
+    ɛ̄ = 23.439291 - 0.0130042T_TDB
+    (prec == "h") && (ɛ̄ += -1.64e-7T_TDB^2 + 5.04e-7T_TDB^3)
+    return mod2pi(deg2rad(ɛ̄))
+end
+
+
+"""
+    delaunayElements(T_TDB::Float64; r::Float64=2π) → Float64, Float64, Float64, Float64, Float64
+
+Compute Delaunay elements (`M☾`, `M☉`, `uM☾`, `D☉`, `Ω☾`) [rad] for the FK5 system.
+
+Author: James Spicer (2016.11.20) <br/>  
+Source: Vallado (2001), Eq. 3-54, p.210
+"""
+function delaunayElements(T_TDB::Float64; r::Float64=2π)
+    T_TDB², T_TDB³, T_TDB⁴ = T_TDB^2, T_TDB^3, T_TDB^4
+    r = rad2deg(r)
+
+    M☾  = 134.96340251 + (1325r + 198.8675605)T_TDB + 0.0088553T_TDB² + 1.4343e-5*T_TDB³ - 6.797e-6*T_TDB⁴        
+    M☉  = 357.52910918 + (  99r + 359.0502911)T_TDB - 0.0001537T_TDB² - 3.8e-8   *T_TDB³ - 3.19e-9 *T_TDB⁴
+    uM☾ =  93.27209062 + (1342r +  82.0174577)T_TDB - 0.0035420T_TDB² + 2.88e-7  *T_TDB³ + 1.16e-9 *T_TDB⁴
+    D☉  = 297.85019547 + (1236r + 307.1114469)T_TDB - 0.0017696T_TDB² + 1.831e-6 *T_TDB³ - 8.80e-9 *T_TDB⁴
+    Ω☾  = 125.04455501 - (   5r + 134.1361851)T_TDB + 0.0020756T_TDB² + 2.139e-6 *T_TDB³ - 1.65e-8 *T_TDB⁴
+
+    return mod2pi(deg2rad(M☾)), mod2pi(deg2rad(M☉)), mod2pi(deg2rad(uM☾)), mod2pi(deg2rad(D☉)), mod2pi(deg2rad(Ω☾))
+end
+
+
+"""
+    FK5Reduction(r⃗::Array{Float64}, v⃗::Array{Float64}, JD_UTC::Float64; xp::Float64=0, yp::Float64=0, LOD::Float64=0, ΔUT1::Float64=0, ΔAT::Float64=0, reverse::Bool=false)
+
+Perform a forward or reverse FK5 reduction (inertial ↔ fixed Earth frames).
+
+### Arguments (Inputs):
+| Parameter | Description                      | Units  |
+| --------: | :------------------------------- | :----- |
+| `r⃗`       | Position vector in initial frame | km     |
+| `v⃗`       | Velocity vector in initial frame | km/sec |
+| `JD_UTC`  | Julian date                      | Days   |
+
+#### Optional Keyword Arguments:
+| Parameter       | Description            | Units |
+| --------------: | :--------------------- | :---- |
+| `xp=0`          | x polar motion angle   | rad   |
+| `yp=0`          | y polar motion angle   | rad   |
+| `LOD=0`         | Length of day          | sec   |
+| `ΔUT1=0`        | UT1 - UTC              | sec   |
+| `ΔAT=0`         | Atomic time difference | sec   |
+| `reverse=false` | `true` if ICRF → FK5   | -     |
+
+
+### Values (Outputs):
+| Parameter | Description                    | Units  |
+| --------: | :----------------------------- | :----  |
+| `r⃗`       | Position vector in final frame | km     |
+| `v⃗`       | Velocity vector in final frame | km/sec |
+
+Author: James Spicer (2016.11.20) <br/>  
+Source: Vallado (2001), Algorithm 24, p.222
+"""
+function FK5Reduction(r⃗::Array{Float64}, v⃗::Array{Float64}, JD_UTC::Float64; xp::Float64=0.0, yp::Float64=0.0, LOD::Float64=0.0, ΔUT1::Float64=0.0, ΔAT::Float64=0.0, reverse::Bool=false)
+    JD_UT1, JD_TAI, JD_TT, JD_TDB, T_UT1, T_TT, T_TDB = convTime(JD_UTC, ΔUT1=ΔUT1, ΔAT=ΔAT)
+
+    (ζ, θ, z)  = precessionAngles(T_TT)
+
+    ɛ̄          = meanObliquity(T_TDB)
+    ΔΨ, Δɛ, Ω☾ = nutationCorrections(T_TDB)
+    ɛ          = ɛ̄ + Δɛ
+
+    θ_AST      = LSTime(JD_UT1)[1] + ΔΨ*cos(ɛ̄)
+    (JD_UTC > 2.4504495e6) && (θ_AST += deg2rad(2.64e-3sin(Ω☾) + 6.3e-5sin(2Ω☾))/3600)
+
+    ω⃗          = [0, 0, 7.29211514670698e-5(1 - LOD/86400)]   
+
+    prec       = rot3mat( ζ)*rot2mat(-θ)*rot3mat(z)
+    nut        = rot1mat(-ɛ̄)*rot3mat(ΔΨ)*rot1mat(ɛ)
+    st         = rot3mat(-θ_AST)
+    pm         = rot1mat(yp)*rot2mat(xp)
+
+    r⃗, v⃗       = r⃗[:], v⃗[:] # Convert to column vectors
+
+    if reverse
+        r⃗_pef = pm*r⃗
+        return prec*nut*st*r⃗_pef, prec*nut*st*(pm*v⃗ + ω⃗ × r⃗_pef)
+    else
+        r⃗_pef = st'*nut'*prec'*r⃗
+        return pm'*r⃗_pef, pm'*(st'*nut'*prec'*v⃗ - ω⃗ × r⃗_pef)
+    end
+end
+
+
+"""
+    ijkToLatLon(r⃗_ijk::Array{Float64}, θ_GMST::Float64; tol::Float64=1e-6, max_i::Int64=20, R::Float64=R⨁, e2::Float64=e2⨁) → Float64, Float64, Float64
+
+Compute a satellite's geodetic position from ijk position.
+
+### Arguments (Inputs):
+| Parameter | Description                      | Units |
+| --------: | :------------------------------- | :---- |
+| `r⃗_ijk`   | satellite's IJK position vector  | DU    |
+| `θ_GMST`  | Greenwich Meridian sideFloat64 time | rad   |
+
+#### Optional Keyword Arguments:
+| Parameter  | Description                       | Units |
+| ---------: | :-------------------------------- | :---- |
+| `tol=1e-6` | Tolerance of iteration            | DU    |
+| `max_i=20` | Maximum loops of interation       | -     |
+| `R=R⨁`     | Mean radius of ellipsoid          | DU    |
+| `e2=e2⨁`   | Squared eccentricity of ellipsoid | -     |
+
+### Values (Outputs):
+| Parameter | Description                 | Units |
+| --------: | :-------------------------- | :---- |
+| `ϕ_gd`    | Geodetic latitude           | rad   |
+| `λ`       | Longitude                   | rad   |
+| `h_ellp`  | Height above mean ellipsoid | DU    |
+
+Author: James Spicer (2016.11.13) <br/>  
+Source: Vallado (2001), Algorithm 12, p.177.
+"""
+function ijkToLatLon(r⃗_ijk::Array{Float64}, θ_GMST::Float64; tol::Float64=1e-6, max_i::Int64=20, R::Float64=R⨁, e2::Float64=e2⨁)
+    r_δsat = norm(r⃗_ijk[1:2])
+    α      = atan(r⃗_ijk[2]/r⃗_ijk[1])
+    λ      = α - θ_GMST
+    (λ < -π) && (λ += 2π)
+    (λ >  π) && (λ -= 2π)
+
+    r_Ksat = r⃗_ijk[3]
+    δ      = atan(r_Ksat/r_δsat)
+
+    ϕ_gd₀, ϕ_gd, r_δ, r_K = δ, 0.0, r_δsat, r_Ksat
+    C      = R/√(1-e2*sin(ϕ_gd₀)^2)
+
+    i = 1
+    while true
+        ϕ_gd  = atan((r_K + C*e2*sin(ϕ_gd₀))/r_δ)
+        (abs(ϕ_gd-ϕ_gd₀) < tol || i ≥ max_i) && break
+        ϕ_gd₀ = ϕ_gd
+        C     = R/√(1-e2*sin(ϕ_gd₀)^2)
+        i    += 1
+    end
+
+    h_ellp = r_δ/cos(ϕ_gd) - C
+
+    return ϕ_gd, λ, h_ellp # [rad, rad, DU]
+end

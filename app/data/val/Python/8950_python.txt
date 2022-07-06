@@ -1,0 +1,100 @@
+import sqlite3
+from typing import List
+
+from pyspatial.cs import CoordinatesSystem, Axis, CoordinatesSystemType, AxisOrientation, AxisType
+from pyspatial.uom import UnitOfMeasure
+from . import db, EPSGException, make_id, parse_id
+from .uom import get_unit
+
+
+def get_coordinates_system(uid: str) -> CoordinatesSystem:
+    """
+    Get the coordinates system with the given unique id.
+    :param uid: the unique id of the coordinates system
+    :return: the EPSG coordinates system with the given id.
+    """
+    authority, code = parse_id(uid)
+    if authority != "EPSG":
+        raise EPSGException(f"Unsupported authority. Expected 'EPSG'. Got '{authority}'.")
+    with sqlite3.connect(db, detect_types=sqlite3.PARSE_COLNAMES) as conn:
+        c = conn.execute('SELECT coord_sys_name, coord_sys_type AS "coord_sys_type [CoordinatesSystemType]" '
+                         'FROM main.epsg_coordinatesystem '
+                         'WHERE coord_sys_code = ?;', (code,))
+        row = c.fetchone()
+        if row:
+            name, cs_type = row
+            axes = _get_cs_axes(code, conn)
+            return EPSGCoordinatesSystem(code, name, cs_type, axes)
+        else:
+            raise EPSGException(f"No coordinates system with uid '{make_id(code)}'")
+
+
+def _get_cs_axes(cs_code: int, conn: sqlite3.Connection) -> List[Axis]:
+    c = conn.execute('SELECT a.coord_axis_order, '
+                     'a.coord_axis_code, '
+                     'n.coord_axis_name AS "axis_type [AxisType]", '
+                     'a.coord_axis_abbreviation, '
+                     'a.coord_axis_orientation AS "axis_orientation [AxisOrientation]", '
+                     'a.uom_code '
+                     'FROM epsg_coordinateaxis AS a JOIN epsg_coordinateaxisname AS n '
+                     'ON a.coord_axis_name_code = n.coord_axis_name_code '
+                     'WHERE a.coord_sys_code = ? '
+                     'ORDER BY a.coord_axis_order;', (cs_code,))
+    return [EPSGAxis(row[1], row[2], row[3], row[4], get_unit(make_id(row[5]))) for row in c.fetchall()]
+
+
+class EPSGAxis(Axis):
+    def __init__(self, code: int, axis_type: AxisType, abbreviation: str,
+                 orientation: AxisOrientation, unit: UnitOfMeasure):
+        self.__code = code
+        self.__axis_type = axis_type
+        self.__abbreviation = abbreviation
+        self.__orientation = orientation
+        self.__unit = unit
+
+    @property
+    def uid(self) -> str:
+        return make_id(self.__code)
+
+    @property
+    def axis_type(self) -> AxisType:
+        return self.__axis_type
+
+    @property
+    def abbreviation(self) -> str:
+        return self.__abbreviation
+
+    @property
+    def orientation(self) -> AxisOrientation:
+        return self.__orientation
+
+    @property
+    def unit(self) -> UnitOfMeasure:
+        return self.__unit
+
+
+class EPSGCoordinatesSystem(CoordinatesSystem):
+    def __init__(self, code: int, name: str, cs_type: CoordinatesSystemType, axes: List[Axis]):
+        self.__code = code
+        self.__name = name
+        self.__cs_type = cs_type
+        self.__axes = list(axes)
+
+    @property
+    def uid(self) -> str:
+        return make_id(self.__code)
+
+    @property
+    def name(self) -> str:
+        return self.__name
+
+    @property
+    def cs_type(self) -> CoordinatesSystemType:
+        return self.__cs_type
+
+    @property
+    def dimension(self) -> int:
+        return len(self.__axes)
+
+    def get_axis(self, dim: int) -> Axis:
+        return self.__axes[dim]

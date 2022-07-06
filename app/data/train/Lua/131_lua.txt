@@ -1,0 +1,142 @@
+DevID="2"
+DevType="Aircon"
+MQTT_Server="192.168.1.1"
+MQTT_Port="1883"
+WiFi_SSID="taihenkaku"
+WiFi_PSK="18577288034"
+Temp=0
+Humi=0
+function wait(t)
+    tmr.delay(t*1000)
+end
+function mseconds()
+    return tmr.now()/1000
+end
+
+function moto_duty(p)
+    pwm.setduty(2,p)
+end
+
+function led1_duty(p)
+    pwm.setduty(4,1023-p)
+end
+
+function moto_init()
+    pwm.setup(2,60,512)
+    pwm.start(2)
+end
+
+function led1_init()
+    pwm.setup(4,60,512)
+    pwm.start(4)
+end
+--m:publish("/topic","hello",0,0, function(conn) print("sent") end)
+--m:subscribe("/topic",0, function(conn) print("subscribe success") end)
+--m:connect("192.168.11.118", 1880, 0, function(conn) print("connected") end)
+--m:on("message", function(conn, topic, data) end)
+--m:lwt("/lwt", "offline", 0, 0)
+--m:on("connect", function(con) print ("connected") end)
+--m:on("offline", function(con) print ("offline") end
+cmd_head=-1
+mqtt_status=0
+cmd_stack={nil}
+cmd_buff={nil}
+function cmd_public(topic,msg)
+    cmd_head=cmd_head+1
+    cmd_buff[cmd_head]=topic
+    cmd_stack[cmd_head]=msg
+end
+function cmd_push(msg)
+    cmd_public(DevID.."OUTPUT",msg)
+end
+function cmd_dump()
+    if mqtt_status==0 then
+        for i=0,cmd_head do
+            mqtt_status=1
+            m:publish(cmd_buff[i],cmd_stack[i],0,0,function(conn)
+                mqtt_status=0
+            end)
+        end
+        cmd_stack={nil}
+        cmd_buff={nil}
+        cmd_head=-1
+    end
+end
+
+function mqtt_login()
+    tmr.alarm(0,10000,1,function()
+        if mqtt_status==0 then
+            mqtt_status=1
+            m:publish("Login",DevID,2,0,function()
+                mqtt_status=0
+                print("MQTT Client:Logined")
+            end)
+        end
+    end)
+end
+function mqtt_event()
+    m:on("message",function(conn,topic,data)
+        if topic==DevID.."INPUT" then
+            node.input(data)
+            print("MQTT Message:"..data)
+        end
+    end)
+end
+function mqtt_cmd_init()
+    m:subscribe(DevID.."INPUT",2,function(conn)
+        print("MQTT Client:Subcribe success")
+        node.output(cmd_push,1)
+        tmr.alarm(1,502,1,cmd_dump)
+    end)
+end
+function mqtt_init()
+    print("Init MQTT Client...")
+    m=mqtt.Client(DevID,120,"user","password")
+    m:connect(MQTT_Server,MQTT_Port,0,function(conn)
+        print("MQTT Client:Connected")
+        mqtt_login()
+        mqtt_event()
+        mqtt_cmd_init()
+        led1_init()
+        led1_duty(0)
+    end)
+end
+--tmr.alarm(id, interval, repeat, function do())
+function wifi_init()
+    print("Init Wi-Fi")
+    wifi.setmode(wifi.STATION)
+    wifi.sta.config(WiFi_SSID,WiFi_PSK)
+    tmr.alarm(0,1000,1,function()
+        if wifi.sta.getip()==nil then
+            print("Wi-Fi:Connecting...")
+        else
+            print("Wi-Fi:Connected!")
+            print("IP:"..wifi.sta.getip())
+            tmr.stop(0)
+            mqtt_init()
+        end
+    end)
+end
+
+function gpiotest(pin)
+    gpio.mode(pin,gpio.OUTPUT)
+    gpio.write(pin,gpio.LOW)
+end
+function tmr_stop()
+    tmr.stop(0)
+    tmr.stop(1)
+    tmr.stop(2)
+    tmr.stop(3)
+    tmr.stop(4)
+    tmr.stop(5)
+    tmr.stop(6)
+end
+function init()
+    print("Project taiHENkaku Ver.Beta")
+    print("DevID: "..DevID.." DevType:"..DevType)
+    tmr_stop()
+    moto_init()
+    moto_duty(0)
+    wifi_init()
+end
+init()

@@ -1,0 +1,72 @@
+FROM qixtand/debian-wheezy-buildpack as compile-phase
+
+ENV PGBOUNCER_RELEASE_TAG master
+ENV PGBOUNCER_RR_RELEASE_TAG master
+ENV PGBOUNCER_CONFIG_OPTIONS ""
+ENV DEBIAN_FRONTEND noninteractive
+
+RUN set -x \
+    && apt-get -qq update \
+    && apt-get upgrade -yq \
+    && apt-get install -yq --no-install-recommends python-docutils docutils-common python-dev \
+    && apt-get purge -y --auto-remove \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN set -x \
+    && git clone https://github.com/pgbouncer/pgbouncer.git \
+    && cd pgbouncer \
+    && git checkout ${PGBOUNCER_RELEASE_TAG} \
+    && git submodule init \
+    && git submodule update \
+    && cd .. \
+    && git clone https://github.com/awslabs/pgbouncer-rr-patch.git \
+    && cd pgbouncer-rr-patch \
+    && git checkout ${PGBOUNCER_RR_RELEASE_TAG} \
+    && ./install-pgbouncer-rr-patch.sh ../pgbouncer \
+    && cd ../pgbouncer \
+    && ./autogen.sh \
+    && ./configure ${PGBOUNCER_CONFIG_OPTIONS} \
+    && make -j \
+    && make install \
+    && mkdir -p /etc/pgbouncer
+
+FROM qixtand/debian-wheezy-curl
+
+RUN set -x \
+    && apt-get -qq update \
+    && apt-get upgrade -yq \
+    && apt-get install -yq --no-install-recommends libevent-2.0 python-dev \
+    && apt-get purge -y --auto-remove \
+    && rm -rf /var/lib/apt/lists/* \
+    \
+    && useradd --comment "PostgreSQL administrator" \
+        --home-dir /var/lib/postgresql \
+        --create-home \
+        --system \
+        --shell /bin/bash \
+        --user-group \
+        postgres \
+    \
+    && mkdir -p /etc/pgbouncer \
+    && mkdir -p /var/log/postgresql \
+    && chown postgres:postgres /var/log/postgresql \
+    && mkdir -p /var/run/postgresql \
+    && chown postgres:postgres /var/run/postgresql
+
+COPY --from=compile-phase /usr/local/bin/pgbouncer /usr/local/bin/pgbouncer
+COPY ./pgbouncer.ini /etc/pgbouncer/pgbouncer.ini
+COPY ./userlist.txt /etc/pgbouncer/userlist.txt
+COPY ./rewrite_query.py /etc/pgbouncer/rewrite_query.py
+COPY ./routing_rules.py /etc/pgbouncer/routing_rules.py
+
+RUN set -x \
+  && chmod 0640 /etc/pgbouncer/pgbouncer.ini \
+    /etc/pgbouncer/userlist.txt \
+    /etc/pgbouncer/rewrite_query.py \
+    /etc/pgbouncer/routing_rules.py
+
+ADD entrypoint.sh ./
+
+EXPOSE 6432
+
+ENTRYPOINT  ["./entrypoint.sh"]

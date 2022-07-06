@@ -1,0 +1,142 @@
+#
+# V.0.3 (27.10.2016) No ROC yet
+#
+# ROC curve for artificial signal.
+# Simulation - generate changes and detect them. 
+# Obtain ROC curve.  
+
+include("./lib/metadata.jl")
+include("./lib/pccf.jl")
+include("./1naive_update.jl")
+include("./2bayes_detector_replica.jl")
+include("./lib/SignalGenerator.jl") 
+include("./lib/roc.jl")
+
+using SignalGenerator, BayesChpOrig, Roc, Metadata, Pccf
+
+
+"""
+In this simulation we variate the lambda parameter
+of the Bayesian detector and plot ROC curve.  
+"""
+function run_sim1(outputfolder)
+    println("... sim1.jl.run_sim1 > save results into ", outputfolder)
+    s = Dict()
+    #--- START SIMULATION SETTINGS
+    max_delay        = 10  # 30 
+    n_sim_for_each_h = 200 # 10 
+    h_from           = 50  # 40
+    h_to             = 300 # 300
+    h_by             = 15  # 25  # 15
+    #--- end SIMULATION SETTINGS
+
+    avg_tp_rates_for_h = []
+    avg_fa_rates_for_h = []
+    avg_ppv_for_h      = []
+
+    pccf_avg_tp_rates_for_h = []
+    pccf_avg_fa_rates_for_h = []
+    pccf_avg_ppv_for_h      = []    
+
+    mu0        = 100.0
+    sd0        = 10.0
+    n_chps     = 10
+    chpStep    = 1.3
+    threshold  = 0.3
+    max_d      = 500 # 400
+    
+    n_pccf = round(Int64, mu0 * (n_chps + 5)) # Length of the prediction using PCCF (so that to not recalc on eachj iteration) 
+    probs  = scale01(pccf(n_pccf, mu0, sd0)) 
+
+    ##?? srand(1235) - we need a new data on every iteration
+    
+    # Variate lambda value
+  
+    for h in h_from : h_by : h_to
+        if mod(h, 10)==0 
+            @printf("%0.2f %s \n", h/h_to * 100, "%")
+        end 
+
+        l_common = h
+        
+        tp_rates_for_i = []
+        fa_rates_for_i = []
+        ppv_for_i      = []
+
+        pccf_tp_rates_for_i = []
+        pccf_fa_rates_for_i = []
+        pccf_ppv_for_i      = []        
+        
+        for i_signals = 1 : n_sim_for_each_h
+            # # genSig(n, mu, sigma, changeStep, sigStd)
+            # helped : variate changeStep
+            # ret = genSig(5, 100.0, 2.0, 1.5, 0.75, 1)
+            # ret = genSig(10, 100.0, 10.0, 1.2, 0.75, 1) # seeems interesting
+            ret          = genSig(n_chps, mu0, sd0, chpStep, 0.75)   # OK  
+            sig          = ret["sig"]
+            changes      = ret["changes"]
+            n_sig        = length(sig)
+
+            ADDNOISE = true 
+
+            if ADDNOISE
+                #: addNoise!(sig, changes, changeStep; width = 5)
+                noise_ids = addNoise!(sig, changes, chpStep, width = 10)
+                # -- stopped here (06 nov 2016)
+                # inc mu ? to add more noise 
+                #noise_ids = addNoiseRec!(sig, changes, chpStep, width = 7, min_len = 50)
+            end
+            
+            if n_sig > n_pccf
+                # Update PCCF if its length is less than signal's length 
+                n_pccf = n_sig 
+                probs  = scale01(pccf(n_pccf, mu0, sd0))
+            end
+            
+            maxes, mat   = bayes_detector(sig, lambda = h)
+            detections   = extract_changes(maxes)
+
+            # --- check max_d parameter value here 
+            pccf_maxes, pccf_mat = pccf_bayes_detector(sig, probs[1:n_sig], l_common + 100, l_common, threshold, h_common = l_common, max_d = max_d)
+            pccf_detections      = extract_changes(pccf_maxes)
+
+            frac = 0.1/1.0 # importance factor of TN's
+            
+            tpr          = tpRate(detections, changes, max_delay)
+            fpr          = faRateScaled(detections, changes, max_delay, n_sig, tn_price_scale = frac)
+            ppv_val      = ppv(detections, changes, max_delay)
+
+            pccf_tpr     = tpRate(pccf_detections, changes, max_delay)
+            pccf_fpr     = faRateScaled(pccf_detections, changes, max_delay, n_sig, tn_price_scale = frac)
+            pccf_ppv_val = ppv(pccf_detections, changes, max_delay)            
+
+            push!(ppv_for_i     , ppv_val)
+            push!(tp_rates_for_i, tpr)
+            push!(fa_rates_for_i, fpr)
+
+            push!(pccf_ppv_for_i     , pccf_ppv_val)
+            push!(pccf_tp_rates_for_i, pccf_tpr)
+            push!(pccf_fa_rates_for_i, pccf_fpr)            
+
+            
+        end 
+        push!(avg_tp_rates_for_h, mean(tp_rates_for_i))
+        push!(avg_fa_rates_for_h, mean(fa_rates_for_i))
+        push!(avg_ppv_for_h     , mean(ppv_for_i))
+
+        push!(pccf_avg_tp_rates_for_h, mean(pccf_tp_rates_for_i))
+        push!(pccf_avg_fa_rates_for_h, mean(pccf_fa_rates_for_i))
+        push!(pccf_avg_ppv_for_h     , mean(pccf_ppv_for_i))        
+    end 
+    ## OLD
+    # sim1_tp_rates.txt, sim1_fa_rates.txt,...
+    writedlm(outputfolder * "tp_rates.txt", avg_tp_rates_for_h)
+    writedlm(outputfolder * "fa_rates.txt", avg_fa_rates_for_h)
+    writedlm(outputfolder * "ppv.txt"     , avg_ppv_for_h)
+
+    writedlm(outputfolder * "pccf_tp_rates.txt", pccf_avg_tp_rates_for_h)
+    writedlm(outputfolder * "pccf_fa_rates.txt", pccf_avg_fa_rates_for_h)
+    writedlm(outputfolder * "pccf_ppv.txt"     , pccf_avg_ppv_for_h)    
+end 
+run_sim1(outdir * "sim1/")
+

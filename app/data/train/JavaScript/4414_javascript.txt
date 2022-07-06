@@ -1,0 +1,324 @@
+#!/usr/bin/env node
+
+'use strict';
+
+/**
+ * Documents RPC Prototype
+ *
+ * - TIU CREATE RECORD (MAKE^TIUSRVP)
+ * - TIU UPDATE RECORD (UPDATE^TIUSRVP)
+ * - TIU DELETE RECORD (DELETE^TIUSRVP)
+ * - TIU SIGN RECORD
+ * ... and locks
+ * ... key file, TIUSRVP
+ *
+ * REM: HMP set
+ *   "TIU AUTHORIZATION",
+ *   "TIU CREATE ADDENDUM RECORD",
+ *   "TIU CREATE RECORD",
+ *   "TIU DELETE RECORD",
+ *   "TIU DOCUMENTS BY CONTEXT",
+ *   "TIU GET DOCUMENT TITLE",
+ *   "TIU GET RECORD TEXT",
+ *   "TIU GET REQUEST",
+ *   "TIU IS THIS A CONSULT?", # manually added ?
+ *   "TIU IS THIS A SURGERY?", # manually added ?
+ *   "TIU ISPRF",
+ *   "TIU LOCK RECORD",
+ *   "TIU LONG LIST OF TITLES",
+ *   "TIU REQUIRES COSIGNATURE",
+ *   "TIU SET DOCUMENT TEXT",
+ *   "TIU SIGN RECORD",
+ *   "TIU UNLOCK RECORD",
+ *   "TIU UPDATE RECORD",
+ *
+ * but CPRS has more: http://vistadataproject.info/artifacts/cprsRPCs
+ *
+ * NOTE: year 1 (2016) has NO locking for TIU RPCs so this wasn't coded for dual pass (facade)
+ *
+ * Scope: initially for Allergy (Progress notes) generated automatically
+ * from Allergy code ...
+ *     GMRAGUI1 -> EN1^GMRAPET0 (for S and E cases) -> NEW^TIUPNAPI (turns text in TMP into pass by ref) -> MAKE^TIUSRVP (same as RPC)
+ * and note SPNJRPPN and other VISTA note makers.
+ *
+ * (c) 2016 VISTA Data Project
+ */
+
+/*
+ * Basic setup
+ */
+const util = require('util');
+const fs = require('fs');
+const nodem = require('nodem');
+const os = require('os');
+const _ = require('lodash');
+const fileman = require('../fileman');
+const RPCRunner = require('../rpcRunner').RPCRunner;
+const vdmUtils = require('../vdmUtils');
+const VDM = require('../vdm'); // using VDM read to test results
+
+const vdmModel = require('./vdmDocumentsModel').vdmModel; // for initial dump of required properties
+const testUtils = require('../testUtils');
+
+// Convenience function to form the text
+function formatTextLines(lines) {
+    const tlines = [];
+    lines.forEach((line) => {
+        tlines.push({ 0: line });
+    });
+    return tlines;
+}
+
+describe('testDocumentRPCs', () => {
+    let db; // for afterAll
+    let DUZ; // play with 55 to 56 ie/ different DUZ to see what defaults ...
+    let DUZSIG; // AUTHORSIG ie/ signature used for signing
+    let patientIEN;
+    let rpcRunner;
+
+   // "id": "8925_1-17", "label": "ADVERSE REACTION_ALLERGY"
+    const araDocTypeIEN = '17';
+
+    beforeAll(() => {
+        db = new nodem.Gtm();
+        db.open();
+
+        const userId = testUtils.lookupUserIdByName(db, 'ALEXANDER,ROBERT');
+        DUZ = parseInt(userId.split('-')[1], 10);
+        DUZSIG = 'ROBA123'; // Robert's e sig
+
+        patientIEN = testUtils.lookupPatientIdByName(db, 'CARTER,DAVID').split('-')[1];
+
+        VDM.setDBAndModel(db, vdmModel);
+
+       // empty both TIU docs (8925) and VISITs (created by side effect)
+        ['8925', '9000010'].forEach((value) => { fileman.emptyFile(db, value); });
+
+        rpcRunner = new RPCRunner(db);
+        rpcRunner.initializeUser(DUZ);
+    });
+
+   // Leads to error (exception) if don't define patient properly
+   // NEW^TIUPNAPI used by Allergy Doc creation does stop bad Patient properly but MAKE, which is called directly by RPC, doesn't
+    it('Error - patient-less/bad Create S Progress Note', () => {
+        const rpcDefn = {
+
+            name: 'TIU CREATE RECORD',
+
+            args: [
+
+                '',
+                araDocTypeIEN,
+                '',
+                '',
+                '',
+                {
+                    1202: DUZ,
+                    TEXT: formatTextLines(['This patient has had the following reactions ', 'signed-off on Mar 05, 2016@01:16:21.', '', 'CHOCOLATE', '', "Author's comments:", '', 'unfortunate fellow ', '']),
+                },
+            ],
+        };
+
+        // errorMessage: 'EVENT+2^TIUSRVP1,%GTM-E-NULSUBSC, Null subscripts are not allowed for region: DEFAULT,%GTM-I-GVIS, \t\tGlobal variable: ^DPT("",.105)'
+        expect(() => { rpcRunner.run(rpcDefn.name, rpcDefn.args); }).toThrowError(/EVENT\+2\^TIUSRVP1,%GTM-E-NULSUBSC, Null subscripts/);
+
+        rpcDefn.args[0] = '111111111';
+        // errorMessage: 'PATVADPT+4^TIULV,%GTM-E-UNDEF, Undefined local variable: VA(BID)'
+        expect(() => { rpcRunner.run(rpcDefn.name, rpcDefn.args); }).toThrowError('PATVADPT+4^TIULV,%GTM-E-UNDEF, Undefined local variable: VA(BID)');
+    });
+
+   // Leads to error (0/msg) if don't define document_type properly
+   // NEW^TIUPNAPI used by Allergy doc creation stops this before the MAKE even sees it but RPC uses MAKE directly so MAKE check is needed
+    it('Error - document type-less/bad Create S Progress Note', () => {
+        // lot's missing
+        const rpcDefn = {
+
+            name: 'TIU CREATE RECORD',
+
+            args: [
+
+                patientIEN,
+                '',
+                '',
+                '',
+                '',
+                {
+                    1202: DUZ,
+                    TEXT: formatTextLines(['This patient has had the following reactions ', 'signed-off on Mar 05, 2016@01:16:21.', '', 'CHOCOLATE', '', "Author's comments:", '', 'unfortunate fellow ', '']),
+                },
+            ],
+        };
+
+        let res = rpcRunner.run(rpcDefn.name, rpcDefn.args);
+        // '0^Invalid TITLE Selected.',
+        expect(res.result).toMatch(/0\^Invalid TITLE Selected./);
+
+        rpcDefn.args[1] = '111111111'; // nonsense document type
+
+        res = rpcRunner.run(rpcDefn.name, rpcDefn.args);
+        // '0^Invalid TITLE Selected.' - expect same error
+        expect(res.result).toMatch(/0\^Invalid TITLE Selected./);
+    });
+
+   // Correct full note - that largely matches the input VDM
+   // ... only three explicit values needed
+   // - note doesn't show in VPR (as unsigned?)
+   // - does show (so does report_text-less note) in CPRS
+    it('Create S Progress Note', () => {
+        // explicitly removing division and (reference) date and even author (defaults to duz)
+        // SO ONLY THREE VALUES: patient, document title, report_text ... dates and duz defaulted elsewhere.
+        const rpcDefn = {
+
+            name: 'TIU CREATE RECORD',
+
+            args: [
+
+                patientIEN,
+                araDocTypeIEN,
+                '',
+                '',
+                '',
+                {
+                    1202: DUZ,
+                    TEXT: formatTextLines(['This patient has had the following reactions ', 'signed-off on Mar 05, 2016@01:16:21.', '', 'CHOCOLATE', '', "Author's comments:", '', 'unfortunate fellow ', '']),
+                },
+            ],
+        };
+        const res = rpcRunner.run(rpcDefn.name, rpcDefn.args);
+        expect(res.result).not.toEqual(0);
+
+        // get result
+        const tiuIEN = res.result;
+        const descr = VDM.describe(`8925-${tiuIEN}`);
+        descr.type = 'Tiu_Document-8925'; // TMP Fix til FMQL fills JLD type 'properly'
+        expect(descr.report_text).toBeDefined();
+    });
+
+   // Allowed a text-less note! Another short coming - shows in CPRS too.
+   //
+   // Note: path of create allergy note through NEW^TIUNAPI does stop text-less (I $D(^TMP("TIUP",$J))'>9 Q  ; If no text, quit)
+   // but RPC goes straight to MAKE which has no check (ditto for author which is explicit and not just DUZ!)
+    it('Not error but - text-less Create S Progress Note', () => {
+        const rpcDefn = {
+
+            name: 'TIU CREATE RECORD',
+
+            args: [
+
+                patientIEN,
+                araDocTypeIEN,
+                '',
+                '',
+                '',
+                '',
+
+            ],
+        };
+
+        const res = rpcRunner.run(rpcDefn.name, rpcDefn.args);
+        expect(res.result[0]).not.toEqual(0);
+
+        // get result
+        const tiuIEN = res.result;
+        const descr = VDM.describe(`8925-${tiuIEN}`);
+        expect(descr.report_text).toBeUndefined();
+        expect(parseInt(descr.line_count, 10)).toEqual(0);
+    });
+
+   // create bad explicit author (ie/ leave in but make bad) - leave invalid ref in Doc
+    it('Not error but - bad explicit author (not DUZ) Create S Progress Note', () => {
+        const bad200 = '200-111111';
+
+        const rpcDefn = {
+
+            name: 'TIU CREATE RECORD',
+
+            args: [
+
+                patientIEN,
+                araDocTypeIEN,
+                '',
+                '',
+                '',
+                {
+                    1202: bad200.split('-')[1], // bad author_dictator
+                    TEXT: formatTextLines(['This patient has had the following reactions ', 'signed-off on Mar 05, 2016@01:16:21.', '', 'CHOCOLATE', '', "Author's comments:", '', 'unfortunate fellow ', '']),
+                },
+            ],
+        };
+
+        const res = rpcRunner.run(rpcDefn.name, rpcDefn.args);
+        expect(res.result).not.toMatch(/0/);
+
+        // get result
+        const tiuIEN = res.result;
+        const descr = VDM.describe(`8925-${tiuIEN}`);
+        expect(descr.author_dictator.id).toEqual(bad200);
+    });
+
+   // RPC TIU SIGN RECORD (SIGN^TIUSRVP)
+    it('Sign/complete proper Progress Note', () => {
+       // must encrypt the sig!
+        const encryptedSig = db.function({ function: 'ENCRYP^XUSRB1', arguments: [DUZSIG] }).result;
+        const goodNoteIEN = '1'; // not the one with the bad Author but Robert so should work
+        const rpcArgs = [goodNoteIEN, encryptedSig];  // tried in clear too but also fails
+       // if fails: '89250005^You have entered an incorrect Electronic Signature Code...Try again!'
+        const res = rpcRunner.run('TIU SIGN RECORD', rpcArgs);
+       // but want 0!
+        expect(parseInt(res.result, 10)).toEqual(89250005);
+
+       // TODO: try TIU WHICH SIGNATURE ACTION
+       // TODO: try AUTHSIGN^TIUSRVA (TIU HAS AUTHOR SIGNED)
+
+       // TODO: ? need LOCK^TIUSRVP (TIU LOCK RECORD)
+    });
+
+   /*
+    * Automatic Visit Creation - note: it happens to be queued. Logic is
+    ...
+    */
+
+
+    it('Create E Progress Note', () => {
+
+       //  ..D EN1^GMRAPET0(GMRADFN,.GMRAIEN,"S",.GMRAOUT) ;21 File progress note ... update
+
+    });
+
+
+   // TIU UPDATE RECORD - UPDATE^TIUSRVP
+   // - updates the record named in the TIUDA parameter, with theinformation contained in the TIUX(Field #) array
+   // ... if can edit in place ...
+   // - err passed by reference
+   /*
+   NOTE: the ability to merge text ...
+
+        {
+          "id": "8994_02-2_92",
+          "type": "vs:Input_Parameter-8994_02",
+          "input_parameter-8994_02": "TIUDA",
+          "parameter_type-8994_02": "LITERAL",
+          "required-8994_02": true,
+          "description-8994_02": "This is the record # (IEN) of the TIU Document in file #8925."
+        },
+        {
+          "id": "8994_02-3_92",
+          "type": "vs:Input_Parameter-8994_02",
+          "input_parameter-8994_02": "TIUX",
+          "parameter_type-8994_02": "LIST",
+          "required-8994_02": true,
+          "description-8994_02": "This is the input array which contains the data to be filed in themodified document.  It should look something like this: TIUX(.02)=45678TIUX(1301)=2960703.104556TIUX(1302)=293764TIUX(\"TEXT\",1,0)=\"The patient is a 70 year old WHITE MALE, who presentedto the ONCOLOGY CLINIC\"TIUX(\"TEXT\",2,0)=\"On JULY 3, 1996@10:00 AM, with the chief complaint ofNECK PAIN...\""
+        },
+
+  and
+
+  This API updates the record named in the TIUDA parameter, with theinformation contained in the TIUX(Field #) array.  The body of themodified TIU document should be passed in the TIUX(\"TEXT\",i,0) subscript,where i is the line number (i.e., the \"TEXT\" node should be ready to MERGEwith a word processing field).  Any filing errors which may occur will bereturned in the single valued ERR parameter (which is passed byreference).
+
+   */
+
+   // Circumstances of DELETE RECORD (see CPRS) ... if EIE Allergy before signing? - really need clones.
+
+    afterAll(() => {
+        db.close();
+    });
+});

@@ -1,0 +1,66 @@
+#requires -version 3.0
+if ( (Get-PSSnapin | Where-Object { $_.Name -eq "iControlSnapIn"}) -eq $null ){
+	Add-PSSnapIn iControlSnapIn}
+Function Browse(){   
+    [System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms") |Out-Null
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+    $OpenFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+    $OpenFileDialog.initialDirectory = (get-location).path
+    $OpenFileDialog.filter = "CSV (*.csv)|*.csv|All files (*.*)|*.*"
+    $loop = $true
+    while($loop)
+    {
+        if ($OpenFileDialog.ShowDialog() -eq "OK")
+        {
+            $loop = $false
+        } 
+        else
+        {
+            $res = [System.Windows.Forms.MessageBox]::Show("You clicked Cancel. Try again or return to main form?", "Choose a directory", [System.Windows.Forms.MessageBoxButtons]::RetryCancel)
+            if($res -eq "Cancel")
+            {
+                #End script
+				return
+            }
+        }
+    }
+    $OpenFileDialog.filename
+}
+$BigIP = read-host "What is the IP of your F5 LTM"
+write-host "Select Node"
+$csv1 = Browse
+write-host "Select Pool"
+$csv2 = Browse
+write-host "Select VIP"
+$csv3 = Browse
+if (!$csv1){$cancel=$true}
+if (!$csv2){$cancel=$true}
+if (!$csv3){$cancel=$true}
+if ($cancel){write-host "Cancelled by User!" -ForegroundColor Yellow -BackgroundColor Red;return}
+#connect
+Initialize-F5.iControl -HostName $Bigip -Credentials (Get-Credential);
+$host.ui.RawUI.WindowTitle = "Will's LTM Cleanup"
+
+#import
+$nodeCSV = import-csv $csv1
+$poolCSV = import-csv $csv2
+$vipCSV = import-csv $csv3
+foreach ($vip in $vipcsv)
+{
+	(Get-F5.iControl).LocalLBVirtualServer.delete_virtual_server((, $vip.vipname))
+	write-host "Removed "$vip.vipname
+}
+foreach ($pool in $poolcsv)
+{
+	(Get-F5.iControl).LocalLBPool.delete_pool( (,$pool.poolname) )
+	write-host "Removed "$pool.poolname
+}
+foreach ($node in $nodecsv)
+{
+	(Get-F5.iControl).LocalLBNodeAddress.delete_node_address( (,$node.nodeip) )
+	write-host "Removed "$node.nodename
+}
+$saveyn = read-host "Do you wish to sync your configuration? (Y/N)"
+if($saveyn -eq "Y"){(Get-F5.iControl).SystemConfigSync.synchronize_configuration(1)}
+else{write-host "Completed";return;}
+write-host "clean-up completed"

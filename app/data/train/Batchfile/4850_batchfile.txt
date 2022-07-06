@@ -1,0 +1,1 @@
+cmd_drivers/video/tegra/built-in.o :=  /opt/toolchains/arm-eabi-4.4.3/bin/arm-eabi-ld -EL    -r -o drivers/video/tegra/built-in.o drivers/video/tegra/host/built-in.o drivers/video/tegra/dc/built-in.o drivers/video/tegra/fb.o drivers/video/tegra/nvmap/built-in.o 

@@ -1,0 +1,38 @@
+
+macro init(expr::Expr...)
+    isempty(expr) && error("@init format error")
+
+    esc(quote
+        global judi_config = Dict{Symbol, Array{Int, 1}}()
+
+        function init(judi_init_config, config)
+            merge!(judi_config, judi_init_config)
+            println("Init Module ", config[:name], "...")
+            $(expr[1])
+            println("Init Module ", config[:name], " OK")
+        end
+
+        function dispatch(mod::Symbol, func::Symbol, args...)
+            expr = Expr(:call, Expr(:(.), mod, QuoteNode(func)))
+            push!(expr.args, args...)
+            try
+                eval(expr)
+            catch err
+                println("### Exception ### : ", err)
+                Base.show_backtrace(STDOUT, catch_backtrace())
+            end
+        end
+    end)
+end
+
+macro call(mod::Symbol, func::Symbol, args...)
+    esc(quote
+        let mod = $(QuoteNode(mod))
+            !haskey(judi_config, mod) && error("invalid or unsupported module: ", mod)
+            procs = judi_config[mod]
+            proc_idx = if length(procs) == 1 1 else ceil(Int, rand() * length(procs)) end
+            remotecall_fetch(eval(mod).dispatch, procs[proc_idx], mod, $(QuoteNode(func)), $(args...))
+        end
+    end)
+end
+

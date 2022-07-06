@@ -1,0 +1,85 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+# File: test.py
+#
+# Copyright 2018 Costas Tyfoxylos
+#
+# Permission is hereby granted, free of charge, to any person obtaining a copy
+#  of this software and associated documentation files (the "Software"), to
+#  deal in the Software without restriction, including without limitation the
+#  rights to use, copy, modify, merge, publish, distribute, sublicense, and/or
+#  sell copies of the Software, and to permit persons to whom the Software is
+#  furnished to do so, subject to the following conditions:
+#
+# The above copyright notice and this permission notice shall be included in
+#  all copies or substantial portions of the Software.
+#
+# THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+#  IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+#  FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+#  AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+#  LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+#  FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+#  DEALINGS IN THE SOFTWARE.
+#
+
+
+import argparse
+import logging
+import json
+import os
+from bootstrap import bootstrap
+from library import execute_command, tempdir
+
+# This is the main prefix used for logging
+LOGGER_BASENAME = '''_CI.test'''
+LOGGER = logging.getLogger(LOGGER_BASENAME)
+LOGGER.addHandler(logging.NullHandler())
+
+
+def get_arguments():
+    parser = argparse.ArgumentParser(description='Accepts stages for testing')
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--lint', help='Test the lint stage of the template', action='store_true')
+    group.add_argument('--test', help='Test the test stage of the template', action='store_true')
+    group.add_argument('--build', help='Test the build stage of the template', action='store_true')
+    group.add_argument('--document', help='Test the document stage of the template', action='store_true')
+    args = parser.parse_args()
+    return args
+
+
+def _test(stage):
+    from cookiecutter.main import cookiecutter
+    template = os.path.abspath('.')
+    context = os.path.abspath('cookiecutter.json')
+    with tempdir():
+        cookiecutter(template,
+                     extra_context=json.loads(open(context).read()),
+                     no_input=True)
+        os.chdir(os.listdir('.')[0])
+        del os.environ['PIPENV_PIPFILE']
+        return execute_command(os.path.join('_CI', 'scripts', f'{stage}.py'))
+
+
+def test(stage):
+    emojize = bootstrap()
+    exit_code = _test(stage)
+    success = not exit_code
+    if success:
+        LOGGER.info('%s Tested stage "%s" successfully! %s',
+                    emojize(':white_heavy_check_mark:'),
+                    stage,
+                    emojize(':thumbs_up:'))
+    else:
+        LOGGER.error('%s Errors found testing stage "%s"! %s',
+                     emojize(':cross_mark:'),
+                     stage,
+                     emojize(':crying_face:'))
+    raise SystemExit(exit_code)
+
+
+if __name__ == '__main__':
+    args = get_arguments()
+    stage = next((argument for argument in ('lint', 'test', 'build', 'document')
+                  if getattr(args, argument)), None)
+    test(stage)

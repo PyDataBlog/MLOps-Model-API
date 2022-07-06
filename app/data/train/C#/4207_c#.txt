@@ -1,0 +1,270 @@
+﻿using NHibernate;
+using NHibernate.Cfg;
+using NHibernate.Context;
+using NHibernate.Dialect;
+using NHibernate.Mapping.ByCode;
+using NHibernate.Tool.hbm2ddl;
+using System;
+using System.Collections.Generic;
+using System.Data;
+using System.Linq;
+using System.Reflection;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace BookReviews.Common.DataSource.Nh
+{
+    public class NhDataSource<TConfiguration>
+       : INhDataSource<TConfiguration> where TConfiguration : INhDataSourceConfiguration
+    {
+        private IDictionary<string, ISessionFactory> sessionFactories = new Dictionary<string, ISessionFactory>();
+        private ISessionFactory sessionFactory = null;
+        private ISession session = null; // nie moze byc static
+        private ITransaction sessionTransaction = null;
+
+        private bool isConnectionOpen = false;
+        private IsolationLevel isolationLevel;
+        private bool isCustomIsolationLevelSet = false;
+
+        public NhDataSource(TConfiguration nhDataSourceConfig)
+        {
+            sessionFactory = GetDataSource(nhDataSourceConfig);
+        }
+
+        public ISessionFactory GetDataSource()
+        {
+            return sessionFactory;
+        }
+
+
+        public void OpenConnection()
+        {
+            if (!CurrentSessionContext.HasBind(sessionFactory))
+            {
+                session = sessionFactory.OpenSession(new UserGroupInterceptor());
+                CurrentSessionContext.Bind(session);
+            }
+            else
+            {
+                session = sessionFactory.GetCurrentSession();
+            }
+
+            isConnectionOpen = true;
+        }
+
+        public void CloseConnection()
+        {
+            if (session != null)
+            {
+                if (session.IsOpen)
+                {
+                    session.Close();
+                }
+
+                isConnectionOpen = false;
+
+                if (CurrentSessionContext.HasBind(sessionFactory))
+                {
+                    CurrentSessionContext.Unbind(sessionFactory);
+                }
+            }
+
+            isConnectionOpen = false;
+        }
+
+        public void BeginTransaction()
+        {
+            if (session != null)
+            {
+                if (isCustomIsolationLevelSet)
+                {
+                    sessionTransaction = session.BeginTransaction(isolationLevel);
+                }
+                else
+                {
+                    sessionTransaction = session.BeginTransaction();
+                }
+            }
+            else
+            {
+                throw new NhSessionIsNotOpenedException();
+            }
+        }
+
+        public void CommitTransaction()
+        {
+            if (sessionTransaction != null)
+            {
+                if (sessionTransaction.IsActive)
+                {
+                    //bool dirty = session.IsDirty();
+                    int i = session.GetHashCode();
+                    sessionTransaction.Commit();
+                }
+            }
+        }
+
+        public void RollbackTransaction()
+        {
+            if (sessionTransaction != null)
+            {
+                if (sessionTransaction.IsActive)
+                {
+                    sessionTransaction.Rollback();
+                }
+            }
+        }
+
+        //private ISessionFactory GetDataSource(INhDataSourceConfiguration nhDataSourceConfig = null)
+        private ISessionFactory GetDataSource(TConfiguration nhDataSourceConfig)
+        {
+            //INhDataSourceConfiguration dataSourceConfiguration
+            //    = nhDataSourceConfig == null ? new DefaultNhDataSourceConfiguration() : nhDataSourceConfig;
+            //string useProxyValidator = dataSourceConfiguration.UseProxyValidator ? "true" : "false";
+
+            if (!sessionFactories.Keys.Contains(nhDataSourceConfig.ConnectionString))
+            {
+                ModelMapper mapper = new ModelMapper();
+                mapper.AddMappings(Assembly.GetAssembly(nhDataSourceConfig.AssemblyType).GetExportedTypes());
+
+                Configuration configuration = new Configuration()
+                    .Proxy(p => p.ProxyFactoryFactory<NHibernate.Bytecode.DefaultProxyFactoryFactory>())
+                    .CurrentSessionContext<ThreadStaticSessionContext>()
+                    .DataBaseIntegration(d =>
+                    {
+                        d.LogSqlInConsole = true;
+                        d.ConnectionStringName = nhDataSourceConfig.ConnectionString;// "bookReviewsDB";
+                        d.Dialect<NHibernate.Dialect.MsSql2008Dialect>();
+                    });
+                configuration.AddMapping(mapper.CompileMappingForAllExplicitlyAddedEntities());
+
+                configuration.BuildMappings();
+
+                ISessionFactory sessionFactory = configuration.BuildSessionFactory();
+                sessionFactory.Statistics.IsStatisticsEnabled = true;
+                sessionFactories.Add(nhDataSourceConfig.ConnectionString, sessionFactory);
+            }
+
+            return sessionFactories[nhDataSourceConfig.ConnectionString];
+        }
+
+        public bool IsConnectionOpen()
+        {
+            return isConnectionOpen;
+        }
+
+
+        public void SetIsolationLevel(IsolationLevel isolationLevel)
+        {
+            this.isolationLevel = isolationLevel;
+            isCustomIsolationLevelSet = true;
+        }
+    }
+
+    //public class NhDataSource<T> : NhDataSourceHelper, INhDataSource<T> where T : INhDataSourceConfiguration
+    //{
+    //    private ISessionFactory sessionFactory = null;
+    //    private ISession session = null; // nie moze byc static
+    //    private ITransaction sessionTransaction = null;
+
+    //    public NhDataSource(T nhDataSourceConfig) 
+    //        : base()
+    //    {
+    //        sessionFactory = GetDataSource(nhDataSourceConfig);
+    //    }
+
+    //    public ISessionFactory GetSessionFactory()
+    //    {
+    //        return sessionFactory;
+    //    }
+
+
+    //    public ISession OpenSession()
+    //    {
+    //        if (!CurrentSessionContext.HasBind(sessionFactory))
+    //        {
+    //            session = sessionFactory.OpenSession();
+    //            CurrentSessionContext.Bind(session);
+    //        }
+    //        else
+    //        {
+    //            session = sessionFactory.GetCurrentSession();
+    //        }
+
+    //        int i = session.GetHashCode();
+    //        return session;
+    //    }
+
+    //    public void CloseSession()
+    //    {
+    //        if (session != null)
+    //        {
+    //            if (session.IsOpen)
+    //            {
+    //                int i = session.GetHashCode();
+    //                session.Close();
+    //            }
+
+    //            if (CurrentSessionContext.HasBind(sessionFactory))
+    //            {
+    //                CurrentSessionContext.Unbind(sessionFactory);
+    //            }
+    //        }
+    //    }
+
+    //    public ITransaction BeginTransaction()
+    //    {
+    //        if (session != null)
+    //        {
+    //            sessionTransaction = session.BeginTransaction();
+    //            return sessionTransaction;
+    //        }
+
+    //        throw new NhSessionIsNotOpenedException();
+    //    }
+
+    //    public void CommitTransaction()
+    //    {
+    //        if (sessionTransaction != null)
+    //        {
+    //            if (sessionTransaction.IsActive)
+    //            {
+    //                //bool dirty = session.IsDirty();
+    //                int i = session.GetHashCode();
+    //                sessionTransaction.Commit();
+    //            }
+    //        }
+    //    }
+
+    //    public void RollbackTransaction()
+    //    {
+    //        if (sessionTransaction != null)
+    //        {
+    //            if (sessionTransaction.IsActive)
+    //            {
+    //                sessionTransaction.Rollback();
+    //            }
+    //        }
+    //    }
+
+    //    public TSource GetDataSourceContext<TSource>()
+    //    {
+    //        throw new NotImplementedException();
+    //    }
+
+    //    public TConnection GetConnection<TConnection>()
+    //    {
+    //        throw new NotImplementedException();
+    //    }
+
+    //    public TTransaction BeginTransaction<TTransaction>()
+    //    {
+    //        throw new NotImplementedException();
+    //    }
+
+    //    public void CloseConnection()
+    //    {
+    //        throw new NotImplementedException();
+    //    }
+    //}
+}

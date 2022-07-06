@@ -1,0 +1,399 @@
+<?php
+/*
+ * This file is part of the Rakorium\Okapi Web Application Framework
+ * (c) 2016 GitHub/rakorium
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+namespace Rakorium\Okapi\Ref;
+
+
+/**
+ * TODO: Break the big functions into smaller pieces
+ *
+ */
+class Uri
+{
+    /* The URI parts */
+	protected $scheme;
+	protected $user;
+	protected $pass;
+	protected $host;
+	protected $port;
+	protected $path;
+	protected $query;
+	protected $fragment;
+
+
+	/**
+	 * Simple cast function
+	 * @param string|self $uri
+	 */
+	public static function cast($uri)
+	{
+		if (!($uri instanceof self)) {
+			$uri = new static($uri);
+		}
+        return $uri;
+	}
+
+    /**
+     * @param static|string $uri
+     * @return static
+     */
+	public static function fresh($uri)
+	{
+		if ($uri instanceof self) {
+			$uri = clone $uri;
+		} else {
+            $uri = new static($uri);
+        }
+        return $uri;
+	}
+
+    /**
+     *
+     * @param type $uri
+     */
+    public function __construct($uri = "")
+    {
+        if ($uri) {
+            $this->fromString($uri);
+        }
+    }
+
+    /**
+     * String-cast operator
+     * @return string
+     */
+    public function __toString()
+    {
+        return $this->toString();
+    }
+
+    /**
+     *
+     * @param string $uriString
+     * @return static
+     *
+     * @note Unfortunately, parse_url() does not work with non-standard URLs. So, we use REGEXPs
+     */
+    public function fromString($uriString)
+    {
+        $match = null;
+
+        // scheme
+        if (preg_match('/^([A-Za-z][A-Za-z0-9\.\+\-]*):/', $uriString, $match)) {
+            $scheme = $match[1];
+            $uriString = substr($uriString, strlen($scheme) + 1);
+            $this->setScheme($scheme);
+        }
+
+        // authority
+        if (preg_match('|^//([^/\?#]*)|', $uriString, $match)) {
+            $authority = $match[1];
+            $uriString = substr($uriString, strlen($match[0]));
+
+            // <user>:<pass>@...
+            $c1 = strrpos($authority, '@');
+            if ($c1 !== false) {
+                $credentials = substr($authority, 0, $c1);
+                $authority = substr($authority, $c1 + 1);
+                $c2 = strpos($credentials, ':');
+                if ($c2 !== false) {
+                    $this->setPass(substr($credentials, $c2 + 1));
+                    $credentials = substr($credentials, 0, $c2);
+                }
+                $this->setUser($credentials);
+            }
+
+            // port
+            if (preg_match('/:([\d]+)$/', $authority, $match)) {
+                $port = $match[1];
+                $this->setPort((int) $port);
+                $authority = substr($authority, 0, -strlen($match[0]));
+            }
+
+            // host
+            $this->setHost($authority);
+        }
+        if (!$uriString) {
+            return $this;
+        }
+
+        // path
+        if (preg_match('|^[^\?#]*|', $uriString, $match)) {
+            $this->setPath($match[0]);
+            $uriString = substr($uriString, strlen($match[0]));
+        }
+        if (!$uriString) {
+            return $this;
+        }
+
+        // query
+        if (preg_match('|^\?([^#]*)|', $uriString, $match)) {
+            $this->setQuery($match[1]);
+            $uriString = substr($uriString, strlen($match[0]));
+        }
+        if (!$uriString) {
+            return $this;
+        }
+
+        // fragment
+        if ($uriString && substr($uriString, 0, 1) == '#') {
+            $this->setFragment(substr($uriString, 1));
+        }
+
+        return $this;
+    }
+
+    /**
+     * Convert the components into an URI string
+     * @return string
+     */
+    public function toString()
+    {
+        $uri = "";
+        if ($this->scheme) {
+            $uri .= $this->scheme . ":";
+        }
+        if ($this->host !== null) {
+            $uri .= "//";
+            if ($this->user || $this->pass) {
+            	$uri .= $this->user;
+            	if ($this->pass) {
+            		$uri .= ":" . $this->pass;
+            	}
+            	$uri .= "@";
+            }
+            $uri .= $this->host;
+        }
+        if ($this->port) {
+            $uri .= ":" . $this->port;
+        }
+        if ($this->path) {
+            if ($this->host && substr($this->path, 0, 1) != '/') {
+                $uri .= "/";
+            }
+            $uri .= $this->path;
+        }
+        elseif ($this->host && ($this->query || $this->fragment)) {
+            $uri .= "/";
+        }
+        if ($this->query) {
+            $uri .= "?" . $this->query;
+        }
+        if ($this->fragment) {
+            $uri .= "#" . $this->fragment;
+        }
+        return $uri;
+    }
+
+    /**
+     *
+     * @param string|self $base
+     * @return self
+     */
+    public function complete($base)
+    {
+        if (!$this->isAbsolute()) {
+            $base = static::cast($base);
+            if ($this->getHost()) {
+                $this->setPath(static::shortPath($this->getPath()));
+            } else {
+                $this->completePath($base);
+            }
+            $this->setUser($base->getUser());
+            $this->setPass($base->getPass());
+            $this->setHost($base->getHost());
+            $this->setPort($base->getPort());
+            $this->setScheme($base->getScheme());
+        }
+        return $this;
+    }
+
+    /**
+     * Resolves '.' and '..' in the path
+     *
+     * @param string $path
+     * @return string
+     */
+    public static function shortPath($path)
+    {
+        $shortPath = array ();
+        $longPath  = explode("/", $path);
+        foreach ($longPath as $node) {
+             if ($node == '.') {
+                 continue;
+             }
+             if ($node == '..') {
+                 array_pop($shortPath);
+             }
+             else {
+                 $shortPath[] = $node;
+             }
+        }
+        return implode("/", $shortPath);
+    }
+
+    /**
+     * Check if the URI is an absolute or relative URI
+     * @return bool
+     */
+    public function isAbsolute()
+    {
+        return ($this->scheme !== null || $this->host);
+    }
+
+    /**
+     * Returns the starting $length bytes of the path
+     * @return string
+     */
+    public function pathHead($length)
+    {
+        return substr($this->path, 0, $length);
+    }
+
+    /**
+     * Removes the initial '/' from the path
+     * @return static
+     */
+    public function cropPath()
+    {
+        $this->path = ltrim($this->path, '/');
+        return $this;
+    }
+
+    public function getScheme()
+    {
+    	return $this->scheme;
+    }
+
+    public function setScheme($scheme)
+    {
+    	$this->scheme = $scheme;
+    	return $this;
+    }
+
+    public function getUser()
+    {
+    	return $this->user;
+    }
+
+    public function setUser($user)
+    {
+    	$this->user = $user;
+    	return $this;
+    }
+
+    public function getPass()
+    {
+    	return $this->pass;
+    }
+
+    public function setPass($pass)
+    {
+    	$this->pass = $pass;
+    	return $this;
+    }
+
+    public function getHost()
+    {
+    	return $this->host;
+    }
+
+    public function setHost($host)
+    {
+    	$this->host = $host;
+    	return $this;
+    }
+
+    public function getPort()
+    {
+    	return $this->port;
+    }
+
+    public function setPort($port)
+    {
+    	$this->port = $port;
+    	return $this;
+    }
+
+    public function getPath()
+    {
+    	return $this->path;
+    }
+
+    public function setPath($path)
+    {
+        $prefix = (substr($path, 0, 1) == '/' ? '/' : '');
+    	$this->path = $prefix . ltrim($path, '/');
+    	return $this;
+    }
+
+    public function getQuery()
+    {
+    	return $this->query;
+    }
+
+    public function setQuery($query)
+    {
+    	$this->query = $query;
+    	return $this;
+    }
+
+    public function getFragment()
+    {
+    	return $this->fragment;
+    }
+
+    public function setFragment($fragment)
+    {
+    	$this->fragment = $fragment;
+    	return $this;
+    }
+
+    public function getComponents()
+    {
+        $compo = array ();
+        ($this->scheme !== null) && $compo['scheme'] = $this->scheme;
+        ($this->user !== null) && $compo['user'] = $this->user;
+        ($this->pass !== null) && $compo['pass'] = $this->pass;
+        ($this->host !== null) && $compo['host'] = $this->host;
+        ($this->port !== null) && $compo['port'] = $this->port;
+        ($this->query !== null) && $compo['query'] = $this->query;
+        ($this->fragment !== null) && $compo['fragment'] = $this->fragment;
+        return $compo;
+    }
+
+    /**
+     * @param self $base
+     */
+    protected function completePath(self $base)
+    {
+        $basePath = $base->getPath();
+        $relPath  = $this->getPath();
+        //
+        if (!$relPath) {
+            $this->setPath($basePath);
+            if (!$this->getQuery()) {
+                $this->setQuery($base->getQuery());
+            }
+        } else {
+            if (substr($relPath, 0, 1) == '/') {
+                $this->setPath(static::shortPath($relPath));
+            } else {
+                if ($base->getHost() && !$basePath) {
+                    $mergedPath = "/";
+                } else {
+                    $cut = strrpos($basePath, '/');
+                    $mergedPath = ($cut !== false ? substr($basePath, 0, $cut + 1) : '');
+                }
+                $this->setPath(static::shortPath($mergedPath . $relPath));
+            }
+        }
+    }
+
+}
+

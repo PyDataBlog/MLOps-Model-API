@@ -1,0 +1,73 @@
+package history
+
+import (
+	"fmt"
+
+	"github.com/avatar29A/microchat/history/model"
+	"github.com/avatar29A/microchat/server/protocols"
+	"github.com/avatar29A/microchat/utils"
+
+	log "github.com/Sirupsen/logrus"
+)
+
+import "github.com/satori/go.uuid"
+
+// MessagesContext is object for simple work with a message table
+type MessagesContext struct {
+	ctx *DBContext
+}
+
+// NewMessagesContext makes a new MessagesContext
+func NewMessagesContext(context *DBContext) *MessagesContext {
+	c := &MessagesContext{context}
+
+	return c
+}
+
+// GetLastNMessages returns n last messages from DB
+func (c *MessagesContext) GetLastNMessages(n int) []*protocols.UserSay {
+	query := fmt.Sprintf("ORDER BY created_at DESC LIMIT %s", c.ctx.DB.Placeholder(0))
+
+	rows, err := c.ctx.DB.SelectAllFrom(model.MessageTable, query, n)
+	messages := make([]*protocols.UserSay, 0, len(rows))
+
+	if err != nil {
+		log.Error(err)
+		return messages
+	}
+
+	for _, row := range rows {
+		message := row.(*model.Message)
+		messages = append(messages, &protocols.UserSay{
+			Username:  message.UserName,
+			Message:   message.Message,
+			CreatedAt: utils.MakeTimeStampFromTime(message.CreatedAt),
+		})
+	}
+
+	return messages
+}
+
+// SaveMessage create new message from user to db
+func (c *MessagesContext) SaveMessage(message *protocols.UserSay) error {
+	channel := c.getDefaultChannel()
+
+	entity := &model.Message{
+		ID:        string(uuid.NewV4().Bytes()),
+		UserName:  message.Username,
+		ChannelID: channel.ID,
+		Message:   message.Message,
+		CreatedAt: utils.MakeTimeFromTimestamp(message.CreatedAt),
+	}
+
+	return c.ctx.DB.Save(entity)
+}
+
+func (c *MessagesContext) getDefaultChannel() *model.Channel {
+	entity, err := c.ctx.DB.FindOneFrom(model.ChannelTable, "name", "default")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	return entity.(*model.Channel)
+}

@@ -1,0 +1,439 @@
+;/**
+;  uart2 - yes
+;  ïîõîæå ñîäåðæèò êîä îáñëóæèâàíèÿ îáìåíà äàííûìè ñ ÏÊ (COMPuter)
+;  âûçûâàåòñÿ íà÷àëî ïåðåäà÷è. îòïðàâêà, è âûêëþ÷åíèå ïåðåäà÷è
+; ? ãäå àäðåñà áóôôåðîâ äëÿ ÷òåíèÿ è çàïèñè
+; _COMP - ïðèçíàê ðàçìåùåíèÿ â ýòîì ôàéëå
+;*/
+
+;************************************************************
+;	Ìîäóëü îáñëóæèâàíèÿ ÀÐÌ
+;************************************************************
+include "headers/comp.inc"
+
+mObject_var	_v3_COMP
+	Temp			res		1
+	
+	; ðåçåðâèðóåì áóôôåðû äëÿ ïðèåìà è ïåðåäà÷è, òàê?
+	Buffer_In_00	res		MAXNUMBERBYTE  ; áûëî 88 â user_modes
+	Buffer_Out_00	res		MAXNUMBERBYTE
+	
+	; states ïðèíèìàåìîãî ïîòîêà áàéòîâ
+	Newbyte_In		res		1
+	Oldbyte_In		res		1
+	TooOldbyte_In	res		1
+	; ñîñòîÿíèÿ äëÿ âûâîäà äàííûõ íà ÏÊ
+	Newbyte_Out		res		1
+	Oldbyte_Out		res		1
+	TooOldbyte_Out	res		1
+	; end states
+	
+	Number_In		res		1
+	Number_Out		res		1
+	Checksum_In		res		1
+	Checksum_Out	res		1
+	Tr_Temp			res		1
+	Command			res		1
+	Buffer_Temp		res		3
+	Number_Out_Max	res		1
+	Number_In_Max	res		1  ; ýòî æå ðåçåðâèðîâàíâèå, à ãäå ïðèñâîåíèå çíà÷åíèé?
+
+	;// States
+	; áûëà ëè êîììàíäà óñòàíîâêè óñèëåíèå àòòåíþàòîðà?
+	State_setGainAtt 	res 	1  
+
+Object	code
+
+;
+_v#v(HERE)_COMP_INI:
+;	mObject_sel	THIS
+	;// èíèöèàëèçàöèÿ ñîñòîÿíèé àâòîìàòîâ
+	movlw 	NO_OBTAINED  ;// êîììàíäó î óñòàíîâêå îñë. àòò. íå ïîëó÷àëè
+	movwf	State_setGainAtt
+	;//
+	retlw	VOID
+
+;/// /// /// Downward methodes
+;///
+;/// Äîëæíà âûçûâàòüñÿ! ãäå-òî õðàíèòñÿ àäðåñ áóôôåðà äàííûõ äëÿ îòïðàâêè
+_v#v(HERE)_COMP_SETdw_wfSendMessage1;(byte w,mass FSR0/void)
+	mObject_sel	THIS
+	movwf	Number_Out_Max	; ðàçìåð ñîîáùåíèÿ
+	
+	; debug point
+	;movlw	0x07
+	;movwf 	INDF0
+	
+	movlw	CMD_FROM_PC_GET_12
+	bra		_Mess_send
+
+;// Èíôîðìàöèÿ î ÌÈÏ?
+_v#v(HERE)_COMP_SETdw_wfSendMessage2;(byte w,mass FSR0/void)
+	mObject_sel	THIS
+	movwf	Number_Out_Max	
+	movlw	0x02
+	bra		_Mess_send
+
+	
+_v#v(HERE)_COMP_SETdw_wfSendMessage3;(byte w,mass FSR0/void)
+	mObject_sel	THIS
+	movwf	Number_Out_Max
+	movlw	0x04
+	bra		_Mess_send
+	
+;// Ïîëó÷èòü ëîã
+_v#v(HERE)_COMP_SETdw_wfSendMessage4;(byte w,mass FSR0/void)
+	mObject_sel	THIS
+	movwf	Number_Out_Max
+	movlw	0x05
+	bra		_Mess_send
+
+; Óïàêîâêà ñîîáùåíèé	
+; òî÷êà âõîäà äëÿ âñåõ ôóíêöèé îçíà÷åííûõ âûøå
+_Mess_send:	
+	movwf	Buffer_Out_00+2
+	clrf	Number_Out			;îïðåäåëåíèå äëèíû
+	lfsr	1,	Buffer_Out_00+3		;// åùå îäèí áóôôåð - Massn->Buffer_Out_00
+	;// +0 +1 +2 [+3 ...] 
+	
+	;// öèêë : çàãðóçêà ñ÷åò÷èêà
+	;// âñòàâëÿåì äàííûå
+	
+	movf	Number_Out_Max,w
+_Copy_Loop2:
+	movff	POSTINC0,POSTINC1 	; èñïîëüçóåò FSR ðåãèñòðû äëÿ àäðåñàöèè
+	addlw	-1
+	bnz		_Copy_Loop2  ;// ïåðåêà÷êà áóôôåðà
+	;// ïåðåìåùåíèå äàííûõ çàâåðøåíî
+	
+	movlw	4
+	addwf	Number_Out_Max,f
+	clrf	Number_Out
+	movff	Number_Out_Max,Buffer_Out_00
+	movlw	0x9F
+	movwf	Buffer_Out_00+1
+	clrf	Oldbyte_Out
+	clrf	TooOldbyte_Out
+	movlw	0xAA
+	movwf	Newbyte_Out
+	
+	;// îòïðàâëÿåì ñòàðòîâûé áàéò
+	;// çàòåì ìàõîì ïî ïðåðûâàíèÿì îòïðàâëÿþòñÿ âñå
+	mSlideTo	_v#v(DOWN)_PIO_SETdw_wUart2StartTx;(byte W/void)
+
+;/// 
+;///
+;/// /// ///
+
+
+;/// /// /// Upward methodes
+;///
+;/// 
+_v#v(HERE)_COMP_SETuw_ByteError;(void/void)
+			mObject_sel	THIS
+_COMP_ByteError:
+			clrf	Number_In_Max
+			clrf	Newbyte_In
+			clrf	Oldbyte_In
+			clrf	Number_In
+			retlw	VOID
+
+_v#v(HERE)_COMP_SETuw_BufFull;(void/void)		
+			mObject_sel	THIS
+			mSET	_v#v(DOWN)_PIO_SETdw_Uart2Antifreeze;(void/void)
+			mSlideTo	_COMP_ByteError
+			retlw	VOID
+
+;/// /// ///
+;///
+;/// ïðèåì è îïðåäåëåíèå êîììàíäû, à òàê æå ðåàêöèÿ íà íèõ
+;// Ðàñïðåäåëåíèå çàäà÷
+;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;	...	!	TooOldbyte_In	!	Oldbyte_In	!	Newbyte_In	!	...
+;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+; Newbyte_In - ÷èñëî áàéò â êîììàíäå
+; ! â àêêàìóëÿòîðå ïðèíÿòûé áàéò
+; AA 55 1F òèï_ñîîáùåíèÿ êîä_êîììàíäû CRC
+_v#v(HERE)_COMP_SETuw_wByteIn;(byte W/void)
+	mObject_sel	THIS
+	movwf	Newbyte_In  ; ? ñîõðàíÿåì â ÎÇÓ
+	movf	TooOldbyte_In,w		; äåòåêòèðîâàíèå ïðàâäîïîäîáèÿ ïðåàìáóëû
+	xorlw	0xAA
+	bnz		_Non_header  ; åñëè íå ðàâíî
+	movf	Oldbyte_In,w
+	xorlw	0x55
+	bnz		_Non_header
+			
+_Header:
+	movlw	MAXNUMBERBYTE  ; ìàêñèìàëüíûé ðàçìåð áóôôåðà?
+	cpfslt	Newbyte_In  
+	  ;(f)  (W),
+	  ; skip i f (f) < (W) (unsigned comparison)
+	mSlideTo	_COMP_ByteError		
+	movf	Newbyte_In,w
+	movwf	Number_In
+	movwf	Number_In_Max	;îïðåäåëåíèå äëèíû
+	clrf	Checksum_In	; ñáðîñ êîíòðîëüíîé ñóììû?
+	
+_Non_header:
+	movf	Number_In,f		;äèàãíîñòèêà íåîáõîäèìîñòè ïðèåìà
+	bz		_cash_In_IRQ		
+	
+_NextByte:
+	movf	Oldbyte_In,w	;äåòåêòèðîâàíèå ïðàâäîïîäîáèÿ ïðåàìáóëû
+	xorlw	0xAA
+	bnz		_ordin
+	movf	Newbyte_In,w
+	bz		_cash_In_IRQ
+	mSlideTo	_COMP_ByteError
+	
+_ordin:
+	decfsz	Number_In,f		;óæå ïðèíÿòûé áàéò â áóôåð
+	bra		_Cash_In		;äåêðåìåíò ñ÷åò÷èêà ïðèíèìàåìûõ äàííûõ
+
+_EOFbyte:	
+	movf	Newbyte_In,w
+	cpfseq	Checksum_In
+	bra		_cash_In_IRQ
+	mSlideTo	_COMP_Com_Process  ; goto ê îáðàáîòêå?
+	
+_Cash_In:	
+	lfsr	1,Buffer_In_00-1
+	movf	Number_In,w
+	subwf	Number_In_Max,w
+	movff	Newbyte_In,PLUSW1
+	movf	Newbyte_In,w
+	addwf	Checksum_In,f
+	
+_cash_In_IRQ:
+	movff	Oldbyte_In,TooOldbyte_In
+	movff	Newbyte_In,Oldbyte_In	; ïåðåâîä ïðèíÿòîãî áàéòà èç ðàçðÿäà íîâîãî â ñòàðûå
+	retlw	VOID
+
+; ! Ñ çàãîëîâêîì ïîõîæå ðàçîáðàëèñü
+; ìåòêà áûëà îòäåëåíà
+_COMP_Com_Process	; ? ýòî ìåòêà èëè ÷òî, ! ñóäÿ ïî âñåìó äà èëè ôóíêöèÿ
+	mObject_sel	THIS
+
+	movlw	0x1F	; ìàãè÷åñêîå ÷èñëî èç ïðîòîêîëà îáìåíà - ïîõîæå íà ÷àñòü ïðîòîêîëà
+	xorwf	Buffer_In_00+1,w	; Buffer_In_00 - óêàçàòåëü?
+	btfss	STATUS,Z	; âåòâëåíèå, âåðíåå îáõîä
+		retlw	VOID
+
+	lfsr	0,Buffer_In_00+2	; ïåðåìåùåíèÿ óêàçàòåëÿ ÷òåíèÿ?
+		; Buffer_In_00+2 - óêàçûâàåò íà òèï ñîîáùåíèÿ
+		; Buffer_In_00+3 - óêàçûâàåò íà äàííûå â ñîîáùåíèè
+
+;// Îáðàáîòêà òèïîâ ñîîáùåíèé 01, 02, 04, 05, 06(ATT_NFO), 03(CMD)
+; îòâåòû íà çàïðîñû. Èç çàäà÷
+; ïðèõîäÿò äîâîëüíî áîëüøå áëîêè, êðîìå îäíîé êîììàíäû
+	movlw	0x01	; !ïîñûëàåò åñëè íåò ñâÿçè
+	xorwf	INDF0,w	; ïðîâåðêà êîììàíäû, switch
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Req1;(void/void) *
+
+	;// ïðèøëà êîììàíäà ïîëó÷åíèé èíôîðìàöèè î ìèï
+	movlw	TYPE_MSG_GET_NFO_ABOUT_MIP
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Req2;(void/void) *
+		
+		;//mGET		_v#v(DOWN)_INFO_GETdw_ReqInfoForComp2WF;(void/byte,mass FSR0)
+		;	...movlw	31  ;// äëèíà ïîñûëêè!
+		;	lfsr	0,Mass2...  ;// FSR0
+		;// îòïðåâëÿåì ñîîáùåíèå íà ÏÊ
+		;//mSlideTo	_v#v(DOWN)_COMP_SETdw_wfSendMessage2;(byte,mass FSR0/void)
+		; 	movwf	Number_Out_Max
+		; 	movlw	0x02
+		; 	bra		_Mess_send  ;// lfsr	0,Mass2 - åùå ñîõðàíèëñÿ?
+		; 		mSlideTo	_v#v(DOWN)_PIO_SETdw_wUart2StartTx;(byte W/void)
+			
+	movlw	0x04
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Req3;(void/void) *
+	
+	movlw	TYPE_MSG_CPUX_LOG 	;//0x05
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+	mSlideTo	_v#v(UP)_TASK_SETuw_Req4;(void/void) *
+; îòâåòû íà çàïðîñû
+
+;/// /// ///
+;///
+;/// (igor 170412)
+	; Ââåäåí äîïîëíèòåëüíûé òèï ñîîáùåíèÿ, êîòîðîå 
+	;   íåñåò èíôîðìàöèþ îá îñëàáëåííè àòò.
+	movlw 	TYPE_MSG_VALUE_ATT_GAIN
+	xorwf 	INDF0, 	w
+	bnz 	_bypass  ;// Åñëè íå îíî, îáõîäèì îáðàáîòêó 
+	
+	;// Ïðîâåðÿåì ñîñòîÿíèå àâòîìàòà 
+	movf 	State_setGainAtt, w	
+	
+	; Êîììàíäà íå áûëà ïîëó÷åíî - ñîñòîÿíèå íóëåâîå. Îáõîäèì.
+	;  Ñòðàííî åñëè ýòî ïðîèçîéäåò, íî ïóñòü áóäåò. 
+	bz _skipOut  
+
+		; Íà÷èíàåì ïîñûëêó îñëàáëåíèÿ íà àòòåíþàòîð
+		lfsr	0, Buffer_In_00+3
+		movf	INDF0, 	w
+		
+		; Óñòàíîâêà îñëàáëåíèÿ àòòåíþàòîðà	; ìîæåò ìîæíî ñðàçó è ñîõð, õîòÿ åñëè èñï. îäíà ô, òî
+		mCall	pA_pub_setGainDigAtt;(W/void)
+			; âûçîâ çàùèùåííûé, ïîýòîì â àêê. äîëæíî îñòàòüñÿ ïîë. çí. îñëàáëåíèÿ
+		; Çàïèñü â EEPROM ïîëó÷åííîãî îñëàáëåíèÿ
+		movff	Buffer_In_00+3, WREG
+		mCall 	pA_pub_saveGain;(W/EEPROM[h01_00])
+		
+		;// Ñîñòîÿíèå <- íå ïîëó÷àëè
+		movlw 	NO_OBTAINED
+		movwf	State_setGainAtt
+		
+		; Âîçâðàùàåì óêàçàòåëü ÷òåíèÿ îáðàòíî, ÷òî âîçìîæíî è íå íóæíî
+		;   íî ïóñòü ïîêà áóäåò
+		lfsr	0,	Buffer_In_00+2
+
+_skipOut:	;// Â ëþáîì ñëó÷àå âûõîäèì. Äàëüøå èäòè ñìûñëà íåò
+	return  
+	
+_bypass:  ;// ïðîäîëæàåì àíàëèçèðîâàòü òèï ñîîáùåíèÿ
+
+; Òèï ñîîáùåíèÿ - êîììàíäà
+	movlw	TYPE_MSG_CMD
+	xorwf	INDF0,w
+	btfss	STATUS,Z
+		retlw	VOID
+	lfsr	0,Buffer_In_00+3	; +0 Äàííûå â ñîîáùåíèè!
+
+; igor 170412
+; Ïðèøëà ëè êîììàíäà ïîäãîòîâêè ê çàïèñè îñëàáëåíèÿ â àòò.?
+; Åñëè äà :
+;   æäåì ñîîáùåíèÿ ñî çíà÷åíèå îñëàáëåíèÿ
+; 0x03 0x40 wait.. 0x03 value
+; Càìà êîììàíäà õðàíèòñÿ ïî INDF0
+	movlw	TYPE_MSG_CMD_SET_ATT_STAGE1	
+	xorwf	INDF0,w
+	; åñëè íîëü (Z = 1), òî ýòî îíà
+	; Z=0, ðåçóëüòàò íå íóëåâîé - çíà÷èò íåò è âûõîäèì
+	bnz 	_bypassSetState
+		; Äåéñòâèÿ ïî ïðèõîäó êîììàíäû îæèäàíèÿ ñìåíû îñëàáëåíèÿ
+		; Ñîñòîÿíèå <- Ïîëó÷åíà
+		; Ìîæíî è èíêðåìåíò, íî òîãäà íóæíî èíèöèàëèçèðîâàòü ïåðåìåííóþ
+		movlw 	OBTAINED 
+		movwf	State_setGainAtt
+		return
+_bypassSetState:	;// ïðîäîëæàåì
+; igor 170412
+	
+; Îáðàáîòêà óæå êîíêðåòíîé êîììàíäû (íå ïðèçíàêà)
+	; ïîëó÷èëè êîììàíäó âêëþ÷èòñÿ?
+	movlw	0xA0  
+	xorwf	INDF0,w		; ñðàâíèâàþòñÿ äàííûå ïî êîñâåííîìó àäðåñó è àêêàìóëÿòîð
+	btfsc	STATUS,Z
+		mSlideTo	_v#v(UP)_TASK_SETuw_On;(void/void) * 
+
+	; ïîëó÷èëè êîììàíäó âÛêëþ÷èòñÿ?
+	movlw	0xA1
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+		mSlideTo	_v#v(UP)_TASK_SETuw_Off;(void/void) *
+
+	; "Çàïåðåòü"
+	movlw	0x1F
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+		mSlideTo	_v#v(UP)_TASK_SETuw_Lock;(void/void) *
+
+	; "Îòïåðåòü"
+	movlw	OPEN_MIP
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+		mSlideTo	_v#v(UP)_TASK_SETuw_UnLock;(void/void) *
+
+	; ñáðîñèòü ïàðàìåòðû - êàêèå åùå ïàðàìåòðû?
+	movlw	RST_PARAMETERS
+	xorwf	INDF0,w
+	btfsc	STATUS,Z
+		mSlideTo	_v#v(UP)_TASK_SETuw_Reset;(void/void) *
+
+	; Çäåñü áóäåò âûÿâëåíèå êîìàíäû íîìåðà êàíàë
+	; â íîâîé âåðñèè ÷àñòîòà?
+	movlw	0x6B-1	; 0x6A = 0110_1010
+	;skip if (f) > (W)
+	cpfsgt	INDF0	; ïðîâåðêà ãðàíèöû - çàùèòà îò ñëó÷àéíûõ äàííûõ
+		bra		_Tune	; value <= 0x6A
+	movf	INDF0,w
+	addlw	d'21'-0x6B
+	mSlideTo	_v#v(UP)_TASK_SETuw_wChannelCom;(byte/void) 
+
+; îáðàáîòêà ïðî÷èõ ñîäåðæàíèé êîììàíä
+_Tune:
+	movf	INDF0,w	; value <= 0x6A - ïåðåäàåòñÿ ñ ÷èñòîì âèäå!! íî âîò ÷òî ïðîèñõîäèò äàëüøå!! - âîïðîñ!
+	mSlideTo	_v#v(UP)_TASK_SETuw_wTuneCom;(w/void)
+;/// Àíàëèçàòîð ïðèíÿòîãî áàéòà
+
+;/// ïîõîæå íà ôóíêöèþ îòïðàâêà áàéòîâ íà êîìï. Î÷åíü âàæíàÿ
+;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+;	...	!	TooOldbyte_Out	!	Oldbyte_Out	!	Newbyte_Out	!	...
+;~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+_v#v(HERE)_COMP_SETuw_ByteOut;(void/void)
+	mObject_sel	THIS
+	movff	Oldbyte_Out, TooOldbyte_Out
+	movff	Newbyte_Out, Oldbyte_Out		; ïåðåâîä ïðèíÿòîãî áàéòà èç ðàçðÿäà íîâîãî â ñòàðûå
+	tstfsz	Number_Out_Max
+	bra		_transmit
+	tstfsz	Number_Out
+	bra		_DecandcCash
+	;// âíóòðè åñòü return! ñòîïîðèì, ïî ïðåðûâàíèþ
+	mSlideTo	_v#v(DOWN)_PIO_SETdw_Uart2StopTx;(void/void)	
+
+_transmit:
+	movf	TooOldbyte_Out,w	; äåòåêòèðîâàíèå ïðàâäîïîäîáèÿ ïðåàìáóëû
+	xorlw	0xAA
+	bnz		_Non_framer
+	movf	Oldbyte_Out,w
+	xorlw	0x55
+	bnz		_Non_framer
+	
+_framer:
+	movff	Number_Out_Max,Number_Out
+	clrf	Checksum_Out
+	bra		_Cash_Out
+	
+_Non_framer:
+	movf	Oldbyte_Out,w
+	xorlw	0xAA
+	bnz		_ordout
+	movlw	0x55
+	tstfsz	Number_Out
+	movlw	0x00
+	movwf	Newbyte_Out
+	bra		_cash_Out_IRQ
+	
+_ordout:
+	decf	Number_Out,w							
+	bnz		_Cash_Out
+	clrf	Number_Out_Max
+	movff	Checksum_Out,Newbyte_Out
+	bra		_cash_Out_IRQ
+	
+_Cash_Out:
+	lfsr	1,Buffer_Out_00
+	movf	Number_Out,w
+	subwf	Number_Out_Max,w
+	movf	PLUSW1,w
+	movwf	Newbyte_Out
+	addwf	Checksum_Out,f
+	
+_DecandcCash:
+	decf	Number_Out,f
+
+_cash_Out_IRQ:
+	movf	Newbyte_Out,w  ;// çàãðóæàåì â àêêàìóëÿòîð áàéò äëÿ ïåðåäà÷è
+			
+	;// Îòïðàâêà ñëåäóþùåãî áàéòà - return âíóòðè!
+	mSlideTo	_v#v(DOWN)_PIO_SETdw_wUart2NextTx;(byte W/void)
+
+
+	end

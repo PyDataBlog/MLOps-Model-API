@@ -1,0 +1,925 @@
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    convert::TryInto,
+};
+
+use anyhow::{anyhow, Context, Error, Result};
+use chrono::naive::NaiveDate;
+use mobc::Pool;
+use mobc_postgres::PgConnectionManager;
+use serde::Deserialize;
+use tokio_postgres::{types::Json, NoTls, Transaction};
+use tracing::debug;
+
+use crate::{
+    annotated::AnnotatedJourney,
+    filter::{FilterPattern, SegmentLocation},
+    reference::{LocationRef, Via},
+    route::Route,
+    timetable::{Journey, Tiploc},
+};
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Filter {
+    toc: String,
+    filters: HashMap<String, FilterPattern>,
+}
+
+#[derive(Clone)]
+pub struct AnnotatedJourneyStore {
+    pool: Pool<PgConnectionManager<NoTls>>,
+    routes: RouteStore,
+    journeys: JourneyStore,
+}
+
+#[derive(Clone)]
+struct RouteStore {
+    pool: Pool<PgConnectionManager<NoTls>>,
+}
+
+#[derive(Clone)]
+struct JourneyStore {
+    pool: Pool<PgConnectionManager<NoTls>>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Default)]
+pub(crate) struct StationOrdering {
+    ordering: Vec<SegmentLocation>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq, Default)]
+pub(crate) struct JourneyGroup {
+    forward: Vec<AnnotatedJourney>,
+}
+
+static SCAN_PREFIX: &str = "SELECT key, value FROM bigmapodata WHERE key like $1 || '%'";
+static LOAD_VALUE: &str = "SELECT value FROM bigmapodata WHERE key = $1";
+static INSERT: &str = "
+INSERT INTO bigmapodata (key, value) values ($1, $2)
+ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value
+";
+static SETUP_SQL: &str = include_str!("persistence.sql");
+
+impl Filter {
+    fn matches(&self, journey: &Journey) -> Vec<(String, Vec<SegmentLocation>)> {
+        if journey.toc != self.toc {
+            return Vec::new();
+        }
+        if !journey.is_passenger_svc {
+            return Vec::new();
+        }
+
+        self.filters
+            .iter()
+            .filter_map(|(line_id, filter)| {
+                filter
+                    .matches(&journey.points.iter().map(|p| p.tpl).collect::<Vec<_>>())
+                    .map(|ks| (line_id.clone(), ks))
+            })
+            .collect()
+    }
+
+    fn try_annotate(&self, j: &Journey) -> Result<Vec<AnnotatedJourney>> {
+        let mut res = Vec::new();
+
+        for (line_id, ks) in self.matches(j) {
+            if ks.len() != j.points.len() {
+                return Err(anyhow!(
+                    "Matched points for {} {} ({}) don't match calling points({})",
+                    j.ssd,
+                    j.rid,
+                    ks.len(),
+                    j.points.len()
+                ));
+            }
+
+            if ks
+                .iter()
+                .map(|l| l.location())
+                .ne(j.points.iter().map(|p| p.tpl))
+            {
+                debug!("Matched points: {:?}", ks);
+                debug!(
+                    "Route tiplocs: {:?}",
+                    j.points.iter().map(|p| p.tpl).collect::<Vec<_>>()
+                );
+                return Err(anyhow!(
+                    "Matched points for {} {} don't match calling points",
+                    j.ssd,
+                    j.rid,
+                ));
+            }
+
+            let public_stops = j
+                .points
+                .iter()
+                .filter(|p| p.public_time().is_some())
+                .map(|p| p.tpl);
+            if !self.filters[&line_id].contains_all_stops(public_stops) {
+                continue;
+            }
+
+            let aj = AnnotatedJourney::from_journey_and_segments(j, &line_id, ks)?;
+            res.push(aj)
+        }
+
+        Ok(res)
+    }
+}
+
+impl AnnotatedJourneyStore {
+    pub fn new(pool: Pool<PgConnectionManager<NoTls>>) -> Result<Self> {
+        let routes = RouteStore::new(pool.clone());
+        let journeys = JourneyStore::new(pool.clone());
+        Ok(Self {
+            pool,
+            routes,
+            journeys,
+        })
+    }
+
+    pub async fn setup(pool: &Pool<PgConnectionManager<NoTls>>) -> Result<()> {
+        let conn = pool.get().await?;
+        conn.batch_execute(SETUP_SQL).await?;
+
+        Ok(())
+    }
+
+    pub async fn observe_journey(&self, config: &Filter, j: &Journey) -> Result<(), Error> {
+        for annotated in config.try_annotate(j)? {
+            let mut conn = self.pool.get().await?;
+            let t = conn.transaction().await?;
+            self.journeys.insert(&annotated, &t).await?;
+            self.routes
+                .add_journey(&annotated, &t)
+                .await
+                .context(format!("Adding journey: {}/{}", j.ssd, j.rid))?;
+            t.commit().await?;
+        }
+
+        Ok(())
+    }
+
+    pub async fn observe_raw(&self, j: &Journey) -> Result<(), Error> {
+        let mut conn = self.pool.get().await?;
+        let t = conn.transaction().await?;
+
+        self.save_raw_journey(j, &t).await?;
+
+        t.commit().await?;
+
+        Ok(())
+    }
+
+    pub async fn observe_via(&self, via: &Via) -> Result<(), Error> {
+        let mut conn = self.pool.get().await?;
+        let t = conn.transaction().await?;
+
+        let ins = r#"
+        INSERT INTO reference_via (at, dest, locs, via_text) values ($1, $2, $3, $4)
+        ON CONFLICT (at, dest, locs) DO UPDATE SET via_text = EXCLUDED.via_text
+        "#;
+
+        t.execute(
+            ins,
+            &[
+                &via.at.to_string(),
+                &via.dest.to_string(),
+                &via.locs.iter().map(|t| t.to_string()).collect::<Vec<_>>(),
+                &via.via_text,
+            ],
+        )
+        .await?;
+
+        t.commit().await?;
+
+        Ok(())
+    }
+
+    pub async fn observe_location(&self, location: &LocationRef) -> Result<(), Error> {
+        let mut conn = self.pool.get().await?;
+        let t = conn.transaction().await?;
+
+        let ins = r#"
+        INSERT INTO reference_location (tpl, crs, toc, locname) values ($1, $2, $3, $4)
+        ON CONFLICT (tpl) DO UPDATE
+        SET crs = EXCLUDED.crs,
+            toc = EXCLUDED.toc,
+            locname = EXCLUDED.locname
+        "#;
+
+        t.execute(
+            ins,
+            &[
+                &location.tpl.to_string(),
+                &location.crs.as_ref().map(|c| &**c),
+                &location.toc.as_ref().map(|c| &*c),
+                &location.locname,
+            ],
+        )
+        .await?;
+
+        t.commit().await?;
+
+        Ok(())
+    }
+
+    async fn save_raw_journey(&self, j: &Journey, t: &Transaction<'_>) -> Result<(), Error> {
+        let start = std::time::Instant::now();
+        let key = format!("raw-journey/{}", j.rid);
+        let insert_raw = "
+        INSERT INTO raw_journeys (key, value) values ($1, $2)
+        ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value";
+        t.execute(insert_raw, &[&key, &Json(&j)]).await?;
+        let elapsed = start.elapsed();
+        debug!("Inserted {} in {}s", key, elapsed.as_secs_f64());
+        Ok(())
+    }
+
+    async fn public_stops(&self) -> Result<HashSet<Tiploc>> {
+        self.journeys.public_stops().await
+    }
+
+    pub(crate) async fn public_call_order(
+        &self,
+        line_id: &str,
+        date: NaiveDate,
+    ) -> Result<StationOrdering> {
+        let public_stops = self.public_stops().await?;
+        if let Some(route) = self.routes.lookup(line_id, date).await? {
+            let ordering = route
+                .location_order()
+                .into_iter()
+                .filter(|l| public_stops.contains(&l.location()))
+                .collect::<Vec<_>>();
+            Ok(StationOrdering { ordering })
+        } else {
+            Ok(StationOrdering::default())
+        }
+    }
+
+    pub(crate) async fn journeys_on(&self, line_id: &str, date: NaiveDate) -> Result<JourneyGroup> {
+        self.journeys.journeys_on(line_id, date).await
+    }
+
+    pub(crate) async fn dates_by_line(&self) -> Result<BTreeMap<String, BTreeSet<NaiveDate>>> {
+        self.journeys.dates_by_line().await
+    }
+}
+
+impl RouteStore {
+    fn new(pool: Pool<PgConnectionManager<NoTls>>) -> Self {
+        Self { pool }
+    }
+
+    async fn add_journey(&self, aj: &AnnotatedJourney, t: &Transaction<'_>) -> Result<()> {
+        let key = format!("route/{}/{}", aj.line_id, aj.start_date);
+        let mut route = if let Some(row) = t.query_opt(LOAD_VALUE, &[&key]).await? {
+            let Json(route): Json<Route> = row.try_get(0)?;
+            route.validate().context("Loaded journey")?;
+            route
+        } else {
+            Route::new()
+        };
+
+        let locations = aj
+            .passenger_calls()
+            .map(|c| c.segment_location())
+            .collect::<Vec<_>>();
+        tracing::trace!("Route: {:#?}", route);
+        tracing::trace!("Adding locations: {:#?}", locations);
+        route.add_journey(&locations).context("Adding journey")?;
+
+        t.execute(INSERT, &[&key, &Json(&route)]).await?;
+        Ok(())
+    }
+
+    async fn lookup(&self, line_id: &str, date: NaiveDate) -> Result<Option<Route>> {
+        let key = format!("route/{}/{}", line_id, date);
+        let conn = self.pool.get().await?;
+
+        if let Some(row) = conn.query_opt(LOAD_VALUE, &[&key]).await? {
+            let Json(route) = row.try_get(0)?;
+            Ok(Some(route))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+impl JourneyStore {
+    fn new(pool: Pool<PgConnectionManager<NoTls>>) -> Self {
+        Self { pool }
+    }
+
+    async fn insert(&self, j: &AnnotatedJourney, t: &Transaction<'_>) -> Result<()> {
+        let key = Self::journey_key(&j);
+
+        let insert = t.prepare(INSERT).await.context("prepare insert")?;
+
+        for stop in j.passenger_calls() {
+            let key = format!("public_stop/{}", stop.tiploc());
+            t.execute(&insert, &[&key, &Json(())]).await?;
+        }
+
+        t.execute(
+            &insert,
+            &[&format!("dates/{}/{}", j.line_id, j.start_date), &Json(())],
+        )
+        .await?;
+
+        t.execute(&insert, &[&key, &Json(j)]).await?;
+
+        Ok(())
+    }
+
+    fn journey_key(j: &AnnotatedJourney) -> String {
+        format!("journey/{}/{}/{}", j.line_id, j.start_date, j.uid)
+    }
+
+    async fn public_stops(&self) -> Result<HashSet<Tiploc>> {
+        let mut stops = HashSet::new();
+        let prefix = "public_stop/";
+
+        let conn = self.pool.get().await?;
+        for row in conn.query(SCAN_PREFIX, &[&prefix]).await? {
+            let key: String = row.try_get(0)?;
+            let mut parts = key.split('/');
+            let _prefix = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing prefix in key: {}", key))?;
+            debug_assert_eq!(_prefix, "public_stop");
+
+            let tiploc_str = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing tiploc in key: {}", key))?;
+
+            let tiploc = tiploc_str.try_into()?;
+            stops.insert(tiploc);
+        }
+
+        Ok(stops)
+    }
+
+    async fn journeys_on(&self, line_id: &str, date: NaiveDate) -> Result<JourneyGroup> {
+        let mut forward = Vec::new();
+        let prefix = format!("journey/{}/{}/", line_id, date);
+
+        let conn = self.pool.get().await?;
+        for row in conn.query(SCAN_PREFIX, &[&prefix]).await? {
+            let key: String = row.try_get(0)?;
+            debug_assert!(
+                key.starts_with("journey/"),
+                "Key {:?} has prefix {:?}",
+                &key,
+                "journey/"
+            );
+
+            let Json(j): Json<AnnotatedJourney> = row.try_get(1)?;
+            forward.push(j);
+        }
+
+        forward.sort_unstable_by(|a, b| a.cmp_by_times(b));
+        Ok(JourneyGroup { forward })
+    }
+
+    async fn dates_by_line(&self) -> Result<BTreeMap<String, BTreeSet<NaiveDate>>> {
+        let mut result: BTreeMap<String, BTreeSet<NaiveDate>> = BTreeMap::new();
+        let prefix = "dates/";
+
+        // We don't use `prefix_iterator_cf` as that only works as you might
+        // expect, if you have a prefix extractor setup.
+        let conn = self.pool.get().await?;
+        for row in conn.query(SCAN_PREFIX, &[&prefix]).await? {
+            let key: String = row.try_get(0)?;
+            let mut parts = key.split('/');
+            let _prefix = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing prefix in key: {}", key))?;
+            debug_assert_eq!(_prefix, "dates");
+            let line_str = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing line-id in key: {}", key))?;
+
+            let dt_str = parts
+                .next()
+                .ok_or_else(|| anyhow!("Missing date in key: {}", key))?;
+            let dt = dt_str.parse::<NaiveDate>()?;
+            result.entry(line_str.to_owned()).or_default().insert(dt);
+        }
+
+        Ok(result)
+    }
+}
+
+impl StationOrdering {
+    pub(crate) fn ordering<'a>(&'a self) -> impl Iterator<Item = &'a SegmentLocation> + 'a {
+        self.ordering.iter()
+    }
+}
+
+impl JourneyGroup {
+    pub(crate) fn forward<'a>(&'a self) -> impl Iterator<Item = &'a AnnotatedJourney> + 'a {
+        self.forward.iter()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::TryInto;
+
+    use anyhow::{Context, Error, Result};
+    use chrono::NaiveDate;
+    use fallible_iterator::FallibleIterator;
+    use maplit::{btreeset, hashmap};
+    use mobc::Pool;
+    use mobc_postgres::PgConnectionManager;
+    use once_cell::sync::{Lazy, OnceCell};
+    use quick_xml::Reader;
+    use tokio_postgres::{Config, NoTls};
+    use tracing_log::LogTracer;
+    use tracing_subscriber::EnvFilter;
+
+    use crate::{
+        ingest::{AnnotatedJourneyStore, Filter, FilterPattern},
+        reference::{LocationRef, Via},
+        timetable::{TimetableItem, TimetableParser, Tiploc},
+    };
+
+    static LADYWELL: Lazy<Tiploc> = Lazy::new(|| "LDYW".try_into().unwrap());
+    static EDEN_PARK: Lazy<Tiploc> = Lazy::new(|| "EDPK".try_into().unwrap());
+    static GRVPK: Lazy<Tiploc> = Lazy::new(|| "GRVPK".try_into().unwrap());
+    static ORPNGTN: Lazy<Tiploc> = Lazy::new(|| "ORPNGTN".try_into().unwrap());
+
+    fn setup_logging() -> Result<()> {
+        static SETUP: OnceCell<()> = OnceCell::new();
+        SETUP.get_or_try_init::<_, Error>(|| {
+            LogTracer::init()?;
+            tracing::subscriber::set_global_default(
+                tracing_subscriber::FmtSubscriber::builder()
+                    .with_env_filter(EnvFilter::from_default_env())
+                    .with_ansi(false)
+                    .with_timer(tracing_subscriber::fmt::time::ChronoUtc::rfc3339())
+                    .finish(),
+            )?;
+            Ok(())
+        })?;
+
+        Ok(())
+    }
+
+    async fn setup_and_ingest(schema: &str) -> Result<AnnotatedJourneyStore> {
+        let store = setup(schema).await?;
+        ingest_example(&store).await?;
+
+        Ok(store)
+    }
+
+    async fn setup(schema: &str) -> Result<AnnotatedJourneyStore> {
+        let mut config = std::env::var("POSTGRES_URL")
+            .with_context(|| "$POSTGRES_URL")?
+            .parse::<Config>()?;
+        config.options(&format!("-csearch_path={}", schema));
+
+        let manager = PgConnectionManager::new(config, NoTls);
+        let pool = Pool::builder().max_open(20).build(manager);
+
+        let setup = format!(
+            "DROP SCHEMA IF EXISTS {schema} CASCADE;
+                    CREATE SCHEMA {schema};",
+            schema = schema
+        );
+        pool.get().await?.batch_execute(&*setup).await?;
+
+        AnnotatedJourneyStore::setup(&pool).await?;
+        let store = AnnotatedJourneyStore::new(pool.clone())?;
+
+        Ok(store)
+    }
+
+    async fn ingest_example(store: &AnnotatedJourneyStore) -> Result<()> {
+        static DATA: &[u8] = include_bytes!("../test-data/darwin/20200307-subset.xml");
+        let filter = Filter {
+            toc: "SE".into(),
+            filters: hashmap! {
+                "hayes-line".into() =>  FilterPattern::new(&[*LADYWELL, *EDEN_PARK])?,
+                "orpington-line".into() =>  FilterPattern::new(&[*GRVPK, *ORPNGTN])?,
+            },
+        };
+
+        // When we ingest a sample file
+        let mut parser = TimetableParser::from(Reader::from_reader(DATA));
+        while let Some(it) = parser.next()? {
+            match it {
+                TimetableItem::Journey(j) => {
+                    store.observe_journey(&filter, &j).await?;
+                    store.observe_raw(&j).await?;
+                }
+                _ => {}
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_import_with_station_ordering() -> Result<()> {
+        setup_logging()?;
+        let store = setup_and_ingest("should_import_with_station_ordering").await?;
+
+        // Then when we query for a sample route
+        let dt = NaiveDate::from_ymd(2020, 3, 8);
+        let stations = store.public_call_order("hayes-line", dt).await?;
+
+        println!("Station ordering: {:#?}", stations);
+
+        let journeys = store.journeys_on("hayes-line", dt).await?;
+
+        // A journey from London to Kent
+        let ajourney = journeys
+            .forward()
+            .find(|it| it.uid == "W52830")
+            .expect("Should contain journey uid:W52830");
+        println!("W52830: {:#?}", ajourney);
+
+        // Verify that a given journey ends up with the times in a monotonic order
+
+        let times = stations
+            .ordering()
+            .filter_map(|k| ajourney.public_time_at(k))
+            .collect::<Vec<_>>();
+
+        assert!(
+            times.iter().zip(times.iter().skip(1)).all(|(a, b)| a < b),
+            "Journey times should be in monotonic order: {:?}",
+            times,
+        );
+
+        Ok::<_, anyhow::Error>(())
+    }
+
+    #[tokio::test]
+    async fn should_import_reverse_ordering() -> Result<()> {
+        setup_logging()?;
+        let store = setup_and_ingest("should_import_reverse_ordering").await?;
+
+        // Then when we query for a sample route
+        let dt = NaiveDate::from_ymd(2020, 3, 8);
+        let stations = store.public_call_order("hayes-line", dt).await?;
+
+        println!("Station ordering: {:#?}", stations);
+
+        let journeys = store.journeys_on("hayes-line", dt).await?;
+        // A journey from London to Kent
+        let ajourney = journeys
+            .forward()
+            .find(|it| it.uid == "W45444")
+            .expect("Should contain journey uid:W45444");
+        println!("W45444: {:#?}", ajourney);
+
+        // Verify that a given journey ends up with the times in a monotonic order
+
+        let times = stations
+            .ordering()
+            .filter_map(|k| ajourney.public_time_at(k))
+            .collect::<Vec<_>>();
+
+        assert!(
+            times.iter().zip(times.iter().skip(1)).all(|(a, b)| a < b),
+            "Journey times should be in monotonic order: {:?}",
+            times,
+        );
+
+        Ok::<_, anyhow::Error>(())
+    }
+
+    #[tokio::test]
+    async fn should_import_and_yield_hayes_line_journeys() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup_and_ingest("should_import_and_yield_hayes_line_journeys").await?;
+
+        // Then when we query for a sample route
+        let dt = NaiveDate::from_ymd(2020, 3, 8);
+        let journeys = store.journeys_on("hayes-line", dt).await?;
+        let stations = store.public_call_order("hayes-line", dt).await?;
+
+        let ladywell_keys = stations
+            .ordering()
+            .filter(|l| l.location() == *LADYWELL)
+            .collect::<Vec<_>>();
+
+        assert!(!ladywell_keys.is_empty(), "Has location for Grove Park");
+
+        let ajourney = journeys
+            .forward()
+            .find(|it| it.uid == "W52830")
+            .expect("Should contain journey uid:W52830");
+        println!("W52830: {:#?}", ajourney);
+
+        assert_eq!(
+            ladywell_keys
+                .iter()
+                .filter_map(|k| ajourney.public_time_at(k))
+                .next(),
+            Some(dt.and_hms(7, 52, 0)),
+            "Has public time at one of: {:?}",
+            ladywell_keys,
+        );
+
+        Ok::<_, anyhow::Error>(())
+    }
+
+    #[tokio::test]
+    async fn should_import_and_yield_orpington_line() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup_and_ingest("should_import_and_yield_orpington_line").await?;
+
+        // Then when we query for a sample route
+        let dt = NaiveDate::from_ymd(2020, 3, 8);
+        let journeys = store.journeys_on("orpington-line", dt).await?;
+        assert!(!journeys.forward.is_empty(), "has some forward journeys");
+        let stations = store.public_call_order("orpington-line", dt).await?;
+        assert!(stations.ordering().count() > 0, "Has a station ordering");
+
+        let ajourney = journeys
+            .forward()
+            .find(|it| it.uid == "W52610")
+            .expect("Should contain journey uid:W52610");
+        println!("W52830: {:#?}", ajourney);
+
+        let grove_park_keys = stations
+            .ordering()
+            .filter(|l| l.location() == *GRVPK)
+            .collect::<Vec<_>>();
+
+        assert!(!grove_park_keys.is_empty(), "Has location for Grove Park");
+
+        assert_eq!(
+            grove_park_keys
+                .iter()
+                .filter_map(|k| ajourney.public_time_at(k))
+                .next(),
+            Some(dt.and_hms(0, 43, 0)),
+            "Has public time at one of: {:?}",
+            grove_park_keys,
+        );
+
+        Ok::<_, anyhow::Error>(())
+    }
+
+    #[tokio::test]
+    async fn should_not_match_journeys_passing_anchors() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup_and_ingest("should_not_match_journeys_passing_anchors").await?;
+
+        // Then when we query for a sample route
+        let dt = NaiveDate::from_ymd(2020, 3, 8);
+        let journeys = store.journeys_on("hayes-line", dt).await?;
+
+        let journeyp = journeys.forward().find(|it| it.uid == "X01234");
+        println!("W52830: {:#?}", journeyp);
+        assert_eq!(None, journeyp);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_import_reversed_journeys() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup_and_ingest("should_import_reversed_journeys").await?;
+
+        // Then when we query for a sample route
+        let dt = NaiveDate::from_ymd(2020, 3, 8);
+        let journeys = store.journeys_on("hayes-line", dt).await?;
+        let stations = store.public_call_order("hayes-line", dt).await?;
+
+        let ladywell_keys = stations
+            .ordering()
+            .filter(|l| l.location() == *LADYWELL)
+            .collect::<Vec<_>>();
+
+        assert!(!ladywell_keys.is_empty(), "Has location for Grove Park");
+
+        let ajourney = journeys
+            .forward()
+            .find(|it| it.uid == "W45451")
+            .expect("Should contain journey uid:W45451");
+        println!("W52830: {:#?}", ajourney);
+
+        assert_eq!(
+            ladywell_keys
+                .iter()
+                .filter_map(|k| ajourney.public_time_at(k))
+                .next(),
+            Some(dt.and_hms(8, 53, 0)),
+            "Has public time at {:?}",
+            ladywell_keys,
+        );
+
+        Ok::<_, anyhow::Error>(())
+    }
+
+    #[tokio::test]
+    async fn should_stash_the_parsed_raw_journeys_there_for_later() -> Result<()> {
+        setup_logging()?;
+
+        let store =
+            setup_and_ingest("should_stash_the_parsed_raw_journeys_there_for_later").await?;
+
+        // I'm sorry.
+        let conn = store.pool.get().await?;
+        // Load a Cannon Street → Orpington service
+        let row = conn
+            .query_one(
+                "SELECT value FROM raw_journeys WHERE key = $1",
+                &[&"raw-journey/202003088752610"],
+            )
+            .await?;
+        assert_eq!(row.len(), 1, "Should return one row");
+
+        let content: serde_json::Value = row.get("value");
+        let strval = serde_json::to_string_pretty(&content)?;
+
+        assert!(
+            strval.contains("00:39"),
+            "Stored value should include times (eg: 00:39)"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn should_load_example_config() {
+        static CONFIG: &[u8] = include_bytes!("../test-data/config-se.toml");
+        let _: Filter = toml::from_slice(&CONFIG).expect("should load config");
+    }
+
+    #[tokio::test]
+    async fn should_list_dates_by_line() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup_and_ingest("should_list_dates_by_line").await?;
+
+        // Then when we query for a sample route
+
+        let lines = store.dates_by_line().await?;
+        assert!(!lines.is_empty(), "Has some lines");
+
+        let orpington_dates = lines.get("orpington-line").expect("orpington line dates");
+
+        assert_eq!(
+            orpington_dates,
+            &btreeset! {
+                NaiveDate::from_ymd(2020,3,8),
+            }
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_import_vias() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup("should_import_vias").await?;
+
+        store
+            .observe_via(&Via {
+                at: "ABD".parse().unwrap(),
+                dest: "BHAMNWS".parse().unwrap(),
+                locs: vec!["MNCRPIC".parse().unwrap(), "WLMSL".parse().unwrap()],
+                via_text: "via Manchester Piccadilly & Wilmslow".into(),
+            })
+            .await?;
+
+        let conn = store.pool.get().await?;
+        let row = conn
+            .query_one(
+                r#"SELECT via_text FROM reference_via WHERE at = $1 AND dest = $2 AND locs = $3"#,
+                &[&"ABD", &"BHAMNWS", &{ &["MNCRPIC", "WLMSL"] as &[&str] }],
+            )
+            .await?;
+
+        let content: String = row.get("via_text");
+
+        assert_eq!(content, "via Manchester Piccadilly & Wilmslow",);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_update_text_on_duplicate() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup("should_update_text_on_duplicate").await?;
+
+        store
+            .observe_via(&Via {
+                at: "ABD".parse().unwrap(),
+                dest: "BHAMNWS".parse().unwrap(),
+                locs: vec!["MNCRPIC".parse().unwrap(), "WLMSL".parse().unwrap()],
+                via_text: "via Manchester Piccadilly & Wilmslow".into(),
+            })
+            .await?;
+        store
+            .observe_via(&Via {
+                at: "ABD".parse().unwrap(),
+                dest: "BHAMNWS".parse().unwrap(),
+                locs: vec!["MNCRPIC".parse().unwrap(), "WLMSL".parse().unwrap()],
+                via_text: "New Text".into(),
+            })
+            .await?;
+
+        let conn = store.pool.get().await?;
+        let row = conn
+            .query_one(
+                r#"SELECT via_text FROM reference_via WHERE at = $1 AND dest = $2 AND locs = $3"#,
+                &[&"ABD", &"BHAMNWS", &{ &["MNCRPIC", "WLMSL"] as &[&str] }],
+            )
+            .await?;
+
+        let content: String = row.get("via_text");
+
+        assert_eq!(content, "New Text",);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn should_import_station_location() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup("should_import_station_location").await?;
+
+        // LocationRef {
+        //     tpl: "KGMRDD1".parse().unwrap(),
+        //     crs: None,
+        //     toc: None,
+        //     locname: "KGMRDD1".into(),
+        // },
+
+        let loc = LocationRef {
+            tpl: "ADLC".parse().unwrap(),
+            crs: Some("ADC".parse().unwrap()),
+            toc: Some("NT".into()),
+            locname: "Adlington (Cheshire)".into(),
+        };
+        store.observe_location(&loc).await?;
+
+        let conn = store.pool.get().await?;
+        let row = conn
+            .query_one(
+                r#"SELECT crs, toc, locname FROM reference_location WHERE tpl = $1"#,
+                &[&"ADLC"],
+            )
+            .await?;
+
+        assert_eq!(
+            row.get::<_, Option<String>>("crs"),
+            Some(String::from("ADC"))
+        );
+        assert_eq!(
+            row.get::<_, Option<String>>("toc"),
+            Some(String::from("NT"))
+        );
+        assert_eq!(
+            row.get::<_, String>("locname"),
+            String::from("Adlington (Cheshire)")
+        );
+
+        Ok(())
+    }
+
+    #[ignore]
+    #[tokio::test]
+    async fn should_import_junction_location() -> Result<()> {
+        setup_logging()?;
+
+        let store = setup("should_import_junction_location").await?;
+
+        let loc = LocationRef {
+            tpl: "KGMRDD1".parse().unwrap(),
+            crs: None,
+            toc: None,
+            locname: "KGMRDD1".into(),
+        };
+        store.observe_location(&loc).await?;
+
+        let conn = store.pool.get().await?;
+        let row = conn
+            .query_one(
+                r#"SELECT crs, toc, locname FROM reference_location WHERE tpl = $1"#,
+                &[&"ADLC"],
+            )
+            .await?;
+
+        assert_eq!(row.get::<_, Option<String>>("crs"), None);
+        assert_eq!(row.get::<_, Option<String>>("toc"), None);
+        assert_eq!(row.get::<_, String>("locname"), String::from("KGMRDD1"));
+
+        Ok(())
+    }
+}

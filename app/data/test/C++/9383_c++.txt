@@ -1,0 +1,194 @@
+#include "GameObject.h"
+
+GameObject::GameObject(glm::vec3 initPosition, Model model, char* texturePath)
+{
+	shaderLocations = ShaderLocations();
+	position = initPosition;
+	scaler = glm::vec3(1.0f, 1.0f, 1.0f);
+	velocity = glm::vec3(0.0f, 0.0f, 0.0f);
+	direction = None;
+	boundingBoxOffset = glm::vec3(0.0f, 0.0f, 0.0f);
+	boundingBox = AABB(glm::vec3(0.0f, 0.0f, 0.0f), glm::vec3(0, 0, 0));
+	translationMatrix = glm::translate(translationMatrix, initPosition);
+	rotationMatrix = glm::mat4(1.0f);
+	scaleMatrix = glm::mat4(1.0f);
+	modelMatrix = translationMatrix * rotationMatrix * scaleMatrix;
+	this->model = model;
+	LoadTextures(texturePath);
+}
+GameObject::~GameObject()
+{
+
+}
+
+// Public Methods.
+// Main object methods.
+void GameObject::Update()
+{
+	Translate(position);
+	scaler = glm::vec3(scaleModifier, scaleModifier, scaleModifier);
+	Scale(scaler);
+	modelMatrix = translationMatrix * rotationMatrix * scaleMatrix;
+}
+void GameObject::Update(double simLength, std::vector<GameObject*> &objectList)
+{
+	Translate(position);
+	scaler = glm::vec3(scaleModifier, scaleModifier, scaleModifier);
+	Scale(scaler);
+	modelMatrix = translationMatrix * rotationMatrix * scaleMatrix;
+}
+void GameObject::Draw()
+{
+	for (int i = 0; i < model.meshes.size(); i++)
+	{
+		glBindVertexArray(model.meshes[i].vertexArrayObject);
+		glUniformMatrix4fv(shaderLocations.modelMatrixUniform, 1, GL_FALSE, glm::value_ptr(modelMatrix));
+		glUniform1i(shaderLocations.hasTextureUniform, model.meshes[i].hasTextures);
+		if (model.meshes[i].hasTextures)
+		{
+			glActiveTexture(GL_TEXTURE0);
+			glBindTexture(GL_TEXTURE_2D, textureID);
+			glUniform1i(shaderLocations.textureSamplerUniform, 0);
+		}
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, model.meshes[i].indicesBufferObject);
+		glDrawElements(GL_TRIANGLES, model.meshes[i].indices.size(), GL_UNSIGNED_INT, (void*)0);
+		glBindVertexArray(0);
+		if (model.meshes[i].hasTextures)
+		{
+			glBindTexture(GL_TEXTURE_2D, 0);
+		}
+		glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, 0);
+	}
+}
+
+// Transformation methods.
+void GameObject::Translate(glm::vec3 translation)
+{
+	translationMatrix = glm::translate(glm::mat4(1.0f), translation);
+}
+void GameObject::Rotate(float rotationAngle, glm::vec3 rotationAxis)
+{
+	rotationMatrix = glm::rotate(glm::mat4(1.0f), glm::radians(rotationAngle), rotationAxis);
+}
+void GameObject::Scale(glm::vec3 scale)
+{
+	scaleMatrix = glm::scale(glm::mat4(1.0f), scale);
+}
+
+// Load Assets.
+void GameObject::LoadTextures(char* texturePath)
+{
+	if (texturePath != "")
+	{
+		SDL_Surface* image = SDL_LoadBMP(texturePath);
+		if (image == NULL)
+		{
+			std::cout << "Image loading (for texture) failed." << std::endl;
+			SDL_Quit();
+			exit(1);
+		}
+
+		glGenTextures(1, &textureID); //generate a texture ID and store it
+		glBindTexture(GL_TEXTURE_2D, textureID);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_NEAREST);
+		glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_NEAREST);
+		glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, image->w, image->h, 0, GL_BGR, GL_UNSIGNED_BYTE, image->pixels);
+
+		glBindTexture(GL_TEXTURE_2D, 0);
+		SDL_FreeSurface(image);
+		std::cout << "Texture loaded: " << texturePath << std::endl;
+	}
+}
+
+// OpenGL Initialises.
+void GameObject::Init_ShaderObjects(ShaderLocations shaderLocations)
+{
+	this->shaderLocations = shaderLocations;
+	Init_Buffers();
+	Init_VertexArray();
+}
+void GameObject::Init_Buffers(void)
+{
+	for (int i = 0; i < model.meshes.size(); i++)
+	{
+		if (model.meshes[i].vertexPositions.size() > 0)
+		{
+			glGenBuffers(1, &model.meshes[i].vertexBufferObject);
+			glBindBuffer(GL_ARRAY_BUFFER, model.meshes[i].vertexBufferObject);
+			glBufferData(GL_ARRAY_BUFFER, model.meshes[i].vertexPositions.size() * sizeof(glm::vec3), &model.meshes[i].vertexPositions[0], GL_STATIC_DRAW);
+			glBindBuffer(GL_ARRAY_BUFFER, 0);
+
+		}
+		if (model.meshes[i].indices.size() > 0)
+		{
+			glGenBuffers(1, &model.meshes[i].indicesBufferObject);
+			glBindBuffer(GL_ELEMENT_ARRAY_BUFFER, model.meshes[i].indicesBufferObject);
+			glBufferData(GL_ELEMENT_ARRAY_BUFFER, model.meshes[i].indices.size() * sizeof(unsigned int), &model.meshes[i].indices[0], GL_STATIC_DRAW);
+			glBindBuffer(GL_ARRAY_BUFFER, 0);
+		}
+		if (model.meshes[i].colourData.size() > 0)
+		{
+			glGenBuffers(1, &model.meshes[i].colourBufferObject);
+			glBindBuffer(GL_ARRAY_BUFFER, model.meshes[i].colourBufferObject);
+			glBufferData(GL_ARRAY_BUFFER, model.meshes[i].colourData.size() * sizeof(glm::vec3), &model.meshes[i].colourData[0], GL_STATIC_DRAW);
+		}
+
+		if (model.meshes[i].uvs.size() > 0)
+		{
+			glGenBuffers(1, &model.meshes[i].uvBufferObject);
+			glBindBuffer(GL_ARRAY_BUFFER, model.meshes[i].uvBufferObject);
+			glBufferData(GL_ARRAY_BUFFER, model.meshes[i].uvs.size() * sizeof(glm::vec2), &model.meshes[i].uvs[0], GL_STATIC_DRAW);
+			glBindBuffer(GL_ARRAY_BUFFER, 0);
+		}
+		std::cout << "Buffers OK! VBO GLuint: " << model.meshes[i].vertexBufferObject << ", IBO GLuint: " << model.meshes[i].indicesBufferObject << ", UBO GLuint: "<< model.meshes[i].uvBufferObject <<std::endl;
+	}
+}
+void GameObject::Init_VertexArray()
+{
+	for (int i = 0; i < model.meshes.size(); i++)
+	{
+		glGenVertexArrays(1, &model.meshes[i].vertexArrayObject);			// Create a Vertex Array Object
+		std::cout << "Vertex Array OK! GLuint: " << model.meshes[i].vertexArrayObject << std::endl;
+		glBindVertexArray(model.meshes[i].vertexArrayObject);				// Make the just created VAO the active one.
+
+		glBindBuffer(GL_ARRAY_BUFFER, model.meshes[i].vertexBufferObject);	// Bind positionBufferObject.
+		glVertexAttribPointer(shaderLocations.vertexPositionAttrib, 3, GL_FLOAT, GL_FALSE, 0, 0);	// Specify that position data contains four floats per vertex, and goes into attribute index positionLocation
+
+		glBindBuffer(GL_ARRAY_BUFFER, model.meshes[i].colourBufferObject);
+		glVertexAttribPointer(shaderLocations.colourAttrib, 3, GL_FLOAT, GL_FALSE, 0, 0);
+
+		if (model.meshes[i].hasTextures)
+		{
+			glBindBuffer(GL_ARRAY_BUFFER, model.meshes[i].uvBufferObject);
+			glVertexAttribPointer(shaderLocations.uvAttrib, 2, GL_FLOAT, GL_FALSE, 0, 0);
+		}
+
+		glEnableVertexAttribArray(shaderLocations.vertexPositionAttrib);		// Enable attribute at index positionLocation.
+		glEnableVertexAttribArray(shaderLocations.colourAttrib);
+		if (model.meshes[i].hasTextures)
+		{
+			glEnableVertexAttribArray(shaderLocations.uvAttrib);
+		}
+
+		glBindVertexArray(0);	// Unbind the VAO so we can't change it.
+
+		// Clean up.
+		glDisableVertexAttribArray(shaderLocations.vertexPositionAttrib); //disable vertex attribute at index positionLocation.
+		glDisableVertexAttribArray(shaderLocations.colourAttrib);
+		if (model.meshes[i].hasTextures)
+		{
+			glDisableVertexAttribArray(shaderLocations.uvAttrib);
+		}
+		glBindBuffer(GL_ARRAY_BUFFER, 0); //unbind array buffer.
+	}
+}
+
+void GameObject::ChangeModel(Model newModel, float newScaleModifier, ShaderLocations shaderLocations, char* newTexture)
+{
+	this->model = newModel;
+	this->scaleModifier = newScaleModifier;
+	Init_ShaderObjects(shaderLocations);
+	LoadTextures(newTexture);
+}

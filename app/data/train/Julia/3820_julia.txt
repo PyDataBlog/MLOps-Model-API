@@ -1,0 +1,358 @@
+using Knet
+using AutoGrad
+
+type Network
+    dtype
+    encvsize
+    decvsize
+    endofseq_id
+    endofseq
+    sizes
+    state
+    nlayer
+    pdrop
+    maxpredlen
+    norevenc
+    noforcing
+    beamsize
+    penalize_length
+    bidirectional
+    init_uniform
+end
+
+function Network(dtype, encvsize, decvsize, endofseq_id, args)
+    sizes = Dict()
+    sizes["embed_src"] = args["embedsize_src"]
+    sizes["embed_trg"] = args["embedsize_trg"]
+    sizes["hidden"] = args["hiddensize"]
+    sizes["vocab_src"] = encvsize
+    sizes["vocab_trg"] = decvsize
+    sizes["batch"] = args["batchsize"]
+
+    endofseq = dtype(zeros(decvsize, sizes["batch"]))
+    endofseq[endofseq_id, :] = 1
+
+    return Network(dtype, encvsize, decvsize, endofseq_id, endofseq, sizes, nothing,
+                   args["nlayer"], args["pdrop"], args["maxpredlen"], args["norevenc"], args["noforcing"],
+                   args["beamsize"], args["penalize_length"], args["bidirectional"], args["init_uniform"])
+end
+
+function encode(parameters, network, source; drop=true)
+    forw_state = network.state["encoder"]
+    forw_annt = []
+    if network.bidirectional
+        back_state = network.state["encoder"]
+        back_annt = []
+    end
+    pdrop = (drop ? network.pdrop : 0)
+
+    for i = 1:length(source)
+        forw_embedding = parameters[1] * source[i]
+        forw_state = lstm_multi(parameters[2], forw_embedding, forw_state; pdrop=pdrop)
+        push!(forw_annt, forw_state[end][2])
+        if network.bidirectional
+            back_embedding = parameters[1] * source[end - i + 1]
+            back_state = lstm_multi(parameters[3], back_embedding, back_state; pdrop=pdrop)
+            unshift!(back_annt, back_state[end][2])
+        end
+    end
+
+    if network.bidirectional
+        state = back_state
+        annotation = map(x -> vcat(x[1], x[2]), zip(forw_annt, back_annt))
+    else
+        state = forw_state
+        annotation = forw_annt
+    end
+
+    return state, annotation
+end
+
+function decinit(parameters, annotation)
+    encstack = hcat(annotation...)
+    atth = parameters[2] * encstack
+
+    return encstack, atth
+end
+
+function decstep(parameters, network, state, encstack, atth, word; drop=true)
+    pdrop = (drop ? network.pdrop : 0)
+
+    embedding = parameters[1] * word
+    context = attention(parameters[3:4], state[end][2], atth, encstack)
+    state[1][2] = parameters[5] * vcat(state[1][2], context)
+    state = lstm_multi(parameters[6], embedding, state; pdrop=pdrop)
+    hidden = dropout(state[end][2], pdrop)
+    output = linear(parameters[7:8], hidden)
+
+    return state, output
+end
+
+function decode(parameters, network, state, annotation, target)
+    encstack, atth = decinit(parameters, annotation)
+    prediction = []
+
+    if network.noforcing
+        word = onehot(network.dtype, network.endofseq_id, network.decvsize)
+        for i = 1:network.maxpredlen
+            state, output = decstep(parameters, network, state, encstack, atth, word)
+            index = indmax(output)
+            push!(prediction, onehot(network.dtype, index, network.decvsize))
+            if index == network.endofseq_id
+                break
+            end
+        end
+    else
+        for word in [network.endofseq, target...]
+            state, output = decstep(parameters, network, state, encstack, atth, word)
+            push!(prediction, output)
+        end
+    end
+
+    return prediction
+end
+
+function attention(parameters, decstate, atth, encstack)
+    seqlen = size(atth, 2)
+
+    decstack = decstate
+    for i = 1:(seqlen - 1)
+        decstack = hcat(decstack, decstate)
+    end
+
+    energy = parameters[2] * tanh(parameters[1] * decstack + atth)
+    alpha = exp(energy)
+    alpha = energy ./ sum(energy)
+
+    context = sum(alpha .* encstack, 2)
+
+    return context
+end
+
+function loss(parameters, network, source, target)
+    state, annotation = encode(parameters["encoder"], network,
+                               network.norevenc ? source : reverse(source))
+    prediction = decode(parameters["decoder"], network, state, annotation, target)
+
+    z = 0
+    for (index, word) in enumerate([target..., network.endofseq])
+        z += sum(logp(prediction[index], 1) .* word)
+    end
+
+    return -z / network.sizes["batch"]
+end
+
+type BeamNode
+    hypothesis
+    state
+    logprob
+end
+
+function beamsearch(parameters, network, source)
+    p = parameters["decoder"]
+    state, annotation = encode(parameters["encoder"], network,
+                               network.norevenc ? source : reverse(source); drop=false)
+    encstack, atth = decinit(p, annotation)
+
+    mkword(index) = onehot(network.dtype, index, network.decvsize)
+
+    beam = []
+    root = BeamNode([network.endofseq_id], state, 0.0)
+    push!(beam, root)
+    beamsize = network.beamsize
+    maxscore = -Inf
+    prediction = nothing
+
+    for i = 1:network.maxpredlen
+        if isempty(beam)
+            break
+        end
+
+        probs = []
+
+        for node in beam
+            node.state, output = decstep(p, network, node.state, encstack, atth,
+                                         mkword(node.hypothesis[end]); drop=false)
+            probs = vcat(probs, squeeze(Array(node.logprob + logp(output, 1)), 2))
+        end
+
+        lp = (network.penalize_length ? i : 1)
+        scores = probs / lp
+        indices = sortperm(scores; rev=true)[1:beamsize]
+        nextbeam = []
+
+        for index in indices
+            decvindex = rem(index - 1, network.decvsize) + 1
+            parentindex = cld(index, network.decvsize)
+            node = deepcopy(beam[parentindex])
+
+            if decvindex == network.endofseq_id
+                if scores[index] > maxscore
+                    prediction = node.hypothesis[2:end]
+                    maxscore = scores[index]
+                end
+                beamsize -= 1
+            else
+                append!(node.hypothesis, decvindex)
+                node.logprob = probs[index]
+                push!(nextbeam, node)
+            end
+        end
+
+        beam = nextbeam
+    end
+
+    if prediction == nothing
+        prediction = sort(beam; by=(x -> x.logprob), rev=true)[1].hypothesis[2:end]
+    end
+
+    return map(mkword, prediction)
+end
+
+#=
+function predict(parameters, network, source)
+    p = parameters["decoder"]
+    state, annotation = encode(parameters["encoder"], network,
+                               network.norevenc ? source : reverse(source); drop=false)
+    encstack, atth = decinit(p, annotation)
+    prediction = []
+
+    word = onehot(network.dtype, network.endofseq_id, network.decvsize)
+    for i = 1:network.maxpredlen
+        state, output = decstep(p, network, state, encstack, atth, word; drop=false)
+        index = indmax(output)
+        if index == network.endofseq_id
+            break
+        end
+        word = onehot(network.dtype, index, network.decvsize)
+        push!(prediction, word)
+    end
+
+    return prediction
+end
+=#
+
+function init_network!(network, dist)
+    EV, EW, V, W, H, M = [network.sizes[p] for p in
+                          ["embed_src", "embed_trg", "vocab_src", "vocab_trg", "hidden", "batch"]]
+    _dist(args...) = network.dtype(dist(args...))
+    _zeros(args...) = network.dtype(zeros(args...))
+
+    function init_lstm(E, H)
+        p = []
+
+        for i = 1:network.nlayer
+            weight = _dist(4H, (i == 1 ? E : H) + H)
+            bias = _zeros(4H, 1)
+            bias[1:H, 1] = 1
+            push!(p, [weight, bias])
+        end
+
+        return p
+    end
+
+    function init_state(H)
+        s = []
+
+        for i = 1:network.nlayer
+            push!(s, [_zeros(H, M), _zeros(H, M)])
+        end
+
+        return s
+    end
+
+    anntsize = (network.bidirectional ? 2H : H)
+
+    parameters = Dict()
+
+    parameters["encoder"] = [_dist(EV, V), init_lstm(EV, H)]
+    if network.bidirectional
+        push!(parameters["encoder"], init_lstm(EV, H))
+    end
+
+    parameters["decoder"] = [_dist(EW, W), _dist(H, anntsize), _dist(H, H), _dist(1, H), _dist(H, anntsize + H),
+                             init_lstm(EW, H), _dist(W, H), _zeros(W, 1)]
+
+    state = Dict()
+    state["encoder"] = init_state(H)
+
+    network.state = state
+
+    return parameters
+end
+
+function init_optim(parameters, dtype, optim_algo; args...)
+    function _init_optim(parameters)
+        if isa(parameters, dtype)
+            return optim_algo(; args...)
+        elseif isa(parameters, Array)
+            return map(_init_optim, parameters)
+        elseif isa(parameters, Dict)
+            return Dict(k => _init_optim(v) for (k, v) in parameters)
+        end
+    end
+
+    return _init_optim(parameters)
+end
+
+function convert_parameters(parameters, from_dtype, to_dtype)
+    function _convert_parameters(parameters)
+        if isa(parameters, from_dtype)
+            return to_dtype(parameters)
+        elseif isa(parameters, Array)
+            return map(_convert_parameters, parameters)
+        elseif isa(parameters, Dict)
+            return Dict(k => _convert_parameters(v) for (k, v) in parameters)
+        end
+    end
+
+    return _convert_parameters(parameters)
+end
+
+function modify_lr!(optim, optim_algo, lr)
+    function _modify_lr!(optim)
+        if isa(optim, optim_algo)
+            optim.lr = lr
+        elseif isa(optim, Array)
+            for x in optim
+                _modify_lr!(x)
+            end
+        elseif isa(optim, Dict)
+            for (k, v) in optim
+                _modify_lr!(v)
+            end
+        end
+    end
+
+    return _modify_lr!(optim)
+end
+
+#=
+function init_state(network; decoder=false, context=nothing)
+    H, M = [network.sizes[p] for p in ["hidden", "batch"]]
+    _zeros(args...) = network.dtype(zeros(args...))
+    nlayer = length(H)
+
+    s = []
+
+    for i = 1:nlayer
+        h = H[i]
+
+        if decoder && i == 1
+            h += H[end]
+        end
+
+        cell = _zeros(h, M)
+
+        if context != nothing && i == nlayer
+            hidden = vcat(_zeros(H[end], M), context)
+        else
+            hidden = _zeros(h, M)
+        end
+
+        push!(s, [cell, hidden])
+    end
+
+    return s
+end
+=#

@@ -1,0 +1,348 @@
+USE [Veterinary]
+GO
+
+/*-----------------------------------------*/
+/* Ensure that we use the proper config/enc*/
+/*-----------------------------------------*/
+BEGIN TRANSACTION
+SET QUOTED_IDENTIFIER ON
+SET ARITHABORT ON
+SET NUMERIC_ROUNDABORT OFF
+SET CONCAT_NULL_YIELDS_NULL ON
+SET ANSI_NULLS ON
+SET ANSI_PADDING ON
+SET ANSI_WARNINGS ON
+COMMIT
+GO
+
+/* Unused rn, but this is the replacement for CREATE OR ALTER before MSSQL 2016
+IF OBJECT_ID('FixTrainingProduction') IS NULL
+    EXEC('CREATE PROCEDURE FixTrainingProduction AS SET NOCOUNT ON;')
+GO
+*/
+
+/*==================================================================*/
+/*                              SETUP                               */
+/*==================================================================*/
+IF EXISTS (SELECT * FROM sys.objects 
+WHERE object_id = OBJECT_ID(N'[dbo].[Migration]') AND type in (N'U'))
+BEGIN
+    SET NOEXEC ON; 
+END
+	BEGIN TRANSACTION
+		CREATE TABLE dbo.[Migration]
+		(
+			Id int NOT NULL IDENTITY (1, 1),
+			[Version] int NOT NULL,
+			CreationDate datetime DEFAULT GETDATE()
+		)  ON [PRIMARY]
+		GO
+
+		ALTER TABLE dbo.[Migration] ADD CONSTRAINT PK_Migration_I PRIMARY KEY CLUSTERED (Id) 
+		WITH(STATISTICS_NORECOMPUTE = OFF, IGNORE_DUP_KEY = OFF, ALLOW_ROW_LOCKS = ON, ALLOW_PAGE_LOCKS = ON) ON [PRIMARY]
+		GO
+
+		ALTER TABLE dbo.Migration SET (LOCK_ESCALATION = TABLE)
+		GO
+
+		/*CREATE TRIGGER dbo.MigrationAfterUpdate ON dbo.Migration
+		AFTER INSERT, UPDATE 
+		AS
+		  UPDATE dbo.Migration
+		  SET UpdateDate = GETDATE()
+		  FROM Inserted i
+		GO*/
+
+		INSERT INTO [dbo].[Migration] ([Version]) 
+		VALUES (0)
+		GO 
+	COMMIT
+SET NOEXEC OFF; 
+GO
+
+/*==================================================================*/
+/*                           PROCEDURES                             */
+/*==================================================================*/
+
+/*-----------------------------------------*/
+/* CREATE NEW FIELD IN ADDRESS             */
+/*-----------------------------------------*/
+/* V:0->1 */
+CREATE OR ALTER PROCEDURE [dbo].[ADD_APARTMENT_ROW]
+AS
+BEGIN
+	if exists(SELECT * FROM INFORMATION_SCHEMA.TABLES where TABLE_NAME='Address')
+		BEGIN
+			if exists(SELECT * FROM INFORMATION_SCHEMA.COLUMNS where COLUMN_NAME='ApartmentNo')
+				BEGIN
+					RAISERROR('Field ApartmentNo already found while upgrading, aborting', 15, 1);
+				END
+			else
+				BEGIN
+					ALTER TABLE [dbo].[Address] ADD ApartmentNo int NULL;
+					Print 'Added new field'
+				END
+		END
+	else
+		BEGIN
+			RAISERROR('Table Address not found while upgrading, aborting', 15, 1);
+		END
+END
+GO
+
+/*-----------------------------------------*/
+/* CREATE NEW DEFAULT CONTRAINT            */
+/*-----------------------------------------*/
+/* V:1->2 */
+CREATE OR ALTER PROCEDURE [dbo].[ADD_DEFAULT_APARTMENT]
+AS
+BEGIN
+	if exists(SELECT * FROM sys.default_constraints WHERE name = 'AddressDefaultApartment')
+		BEGIN
+			RAISERROR('Contraint AddressDefaultApartment already found while upgrading, aborting', 15, 1);
+		END
+	else
+		BEGIN
+			ALTER TABLE [dbo].[Address]
+			ADD CONSTRAINT AddressDefaultApartment DEFAULT 0 FOR ApartmentNo
+			Print 'Constraint created'
+		END
+END
+GO
+
+/*-----------------------------------------*/
+/* CREATE NEW TABLE                        */
+/*-----------------------------------------*/
+/* V:2->3 */
+CREATE OR ALTER PROCEDURE [dbo].[CREATE_TABLE_VET_REVIEW]
+AS
+BEGIN
+	if exists(SELECT * FROM INFORMATION_SCHEMA.TABLES where TABLE_NAME='VeterinarianReview')
+		BEGIN
+			RAISERROR('Table VeterinarianReview already found while upgrading, aborting', 15, 1);
+		END
+	else
+		BEGIN
+			CREATE TABLE VeterinarianReview(Id int NOT NULL PRIMARY KEY, 
+							VeterinarianId int NOT NULL, 
+							OwnerId int NOT NULL, 
+							Comment varchar(255) NOT NULL,
+							Score int CHECK (Score > 0 AND Score < 6)
+						);
+			Print 'Created table VeterinarianReview'
+		END
+END
+GO
+
+/*-----------------------------------------*/
+/* CREATE NEW FK                           */
+/*-----------------------------------------*/
+/* V:3->4 */
+CREATE OR ALTER PROCEDURE [dbo].[CREATE_REVIEW_FK]
+AS
+BEGIN
+	if EXISTS (SELECT  name FROM sys.foreign_keys WHERE name = 'FK_VeterinarianReview_Veterinarian')
+		BEGIN
+			RAISERROR('FK VeterinarianReview found while upgrading, aborting', 15, 1);
+		END
+	else
+		BEGIN
+			ALTER TABLE VeterinarianReview
+			ADD CONSTRAINT FK_VeterinarianReview_Veterinarian 
+			FOREIGN KEY (VeterinarianId) 
+			REFERENCES Veterinarian(VeterinarianId);
+
+			print 'FK_VeterinarianReview_Veterinarian added';
+		END
+END
+GO
+
+/*-----------------------------------------*/
+/* CHANGE TYPE                             */
+/*-----------------------------------------*/
+/* V:4->5 */
+CREATE OR ALTER PROCEDURE [dbo].[CHANGE_APARTMENT_TYPE]
+AS
+BEGIN
+	ALTER TABLE [Address]
+	ALTER COLUMN [Floor] smallint;
+	print 'Changed int to smollint';
+END
+GO
+
+/*==================================================================*/
+/*                   REVERSE PROCEDURES                             */
+/*==================================================================*/
+
+/*--------------------------------------------------*/
+/* REVERSE CHANGE TYPE                              */
+/*--------------------------------------------------*/
+/* V:5->4 */
+CREATE OR ALTER PROCEDURE [dbo].[REVERSE_CHANGE_APARTMENT_TYPE]
+AS
+BEGIN
+	ALTER TABLE [Address]
+	ALTER COLUMN [Floor] int;
+	print 'Changed smollint to int';
+END
+GO
+
+/*--------------------------------------------------*/
+/* REVERSE FK CREATION                              */
+/*--------------------------------------------------*/
+/* V:4->3 */
+CREATE OR ALTER PROCEDURE [dbo].[REVERSE_CREATE_REVIEW_FK]
+AS
+BEGIN
+	if NOT EXISTS (SELECT name FROM sys.foreign_keys WHERE name = 'FK_VeterinarianReview_Veterinarian') 
+		BEGIN
+			RAISERROR('FK VeterinarianReview not found while downgrading, aborting', 15, 1);
+		END
+	else
+		BEGIN
+			ALTER TABLE VeterinarianReview
+			DROP CONSTRAINT FK_VeterinarianReview_Veterinarian 
+			print 'FK_VeterinarianReview_Veterinarian deleted';
+		END
+END
+GO
+
+/*--------------------------------------------------*/
+/* REVERSE FK CREATION                              */
+/*--------------------------------------------------*/
+/* V:3->2 */
+CREATE OR ALTER PROCEDURE [dbo].[REVERSE_CREATE_TABLE_VET_REVIEW]
+AS
+BEGIN
+	if exists(SELECT * FROM INFORMATION_SCHEMA.TABLES where TABLE_NAME='VeterinarianReview')
+		BEGIN
+			DROP TABLE VeterinarianReview
+			Print 'Deleted VeterinarianReview'
+		END
+	else
+		BEGIN
+			RAISERROR('Table VeterinarianReview not found while downgrading, aborting', 15, 1);
+		END
+END
+GO
+
+/*--------------------------------------------------*/
+/* REVERSE CONTRAINT CREATION                       */
+/*--------------------------------------------------*/
+/* V:2->1 */
+CREATE OR ALTER PROCEDURE [dbo].[REVERSE_ADD_DEFAULT_APARTMENT] 
+AS
+BEGIN
+	if NOT exists(SELECT * FROM sys.default_constraints WHERE name = 'AddressDefaultApartment')
+		BEGIN
+			RAISERROR('DEFCONTRAINT AddressDefaultApartment not found while downgrading, aborting', 15, 1);
+		END
+	else
+		BEGIN
+			ALTER TABLE [Address]
+			DROP CONSTRAINT AddressDefaultApartment
+			print 'Deleted contraint AddressDefaultApartment'
+		END
+END
+GO
+
+/*--------------------------------------------------*/
+/* REVERSE CONTRAINT CREATION                       */
+/*--------------------------------------------------*/
+/* V:1->0 */
+CREATE OR ALTER PROCEDURE [dbo].[REVERSE_ADD_APARTMENT_ROW]
+AS
+BEGIN
+	if exists(SELECT * FROM INFORMATION_SCHEMA.TABLES where TABLE_NAME='Address')
+			BEGIN
+				if exists(SELECT * FROM INFORMATION_SCHEMA.COLUMNS where TABLE_NAME='Address' AND COLUMN_NAME='ApartmentNo')
+					BEGIN
+							ALTER TABLE dbo.[Address] DROP COLUMN [ApartmentNo];
+							Print 'Deleted ApartmentNo field'
+					 END
+				else
+					BEGIN
+						RAISERROR('Field ApartmentNo not found while downgrading, aborting', 15, 1);
+					END
+			END
+		else
+			BEGIN
+				RAISERROR('Table Address not found while downgrading, aborting', 15, 1);
+			END
+END
+GO
+
+/*==================================================================*/
+/*                       UPDATE SCRIPTS                             */
+/*==================================================================*/
+
+CREATE OR ALTER PROCEDURE [dbo].[MIGRATE] @new_version int
+AS
+DECLARE @current_version int
+BEGIN
+    SELECT TOP(1) @current_version = [dbo].[Migration].[Version] 
+	FROM [dbo].[Migration] ORDER BY [dbo].[Migration].[CreationDate] DESC;
+
+	if (@new_version > 5 OR @new_version < 0)
+	BEGIN
+		RAISERROR('Invalid version number received', 15, 1);
+		RETURN;
+	END
+
+	print 'Current version is ' + CAST(@current_version AS varchar(20));
+	if(@new_version > @current_version)
+	BEGIN
+		while(@new_version > @current_version)
+		BEGIN
+			if @current_version = 0
+				EXEC [dbo].[ADD_APARTMENT_ROW];
+			if @current_version = 1
+				EXEC [dbo].[ADD_DEFAULT_APARTMENT];
+			if @current_version = 2
+				EXEC [dbo].[CREATE_TABLE_VET_REVIEW];
+			if @current_version = 3
+				EXEC [dbo].[CREATE_REVIEW_FK];
+			if @current_version = 4
+				EXEC [dbo].[CHANGE_APARTMENT_TYPE];
+
+			SET @current_version = @current_version + 1;
+
+			Print 'Updated from ' + CAST((@current_version - 1) AS varchar(20)) + ' to ' + CAST(@current_version AS varchar(20));
+
+			INSERT [dbo].[Migration] ([Version])
+			VALUES (@current_version);
+		END
+
+		Print 'New version:' print @current_version
+	END
+
+	else if(@new_version < @current_version)
+	BEGIN
+		while(@new_version < @current_version)
+		BEGIN
+			if @current_version = 5
+				EXEC [dbo].[REVERSE_CHANGE_APARTMENT_TYPE];
+			if @current_version = 4
+				EXEC [dbo].[REVERSE_CREATE_REVIEW_FK];
+			if @current_version = 3
+				EXEC [dbo].[REVERSE_CREATE_TABLE_VET_REVIEW];
+			if @current_version = 2
+				EXEC [dbo].[REVERSE_ADD_DEFAULT_APARTMENT] ;
+			if @current_version = 1
+				EXEC [dbo].[REVERSE_ADD_APARTMENT_ROW];
+			SET @current_version = @current_version - 1;
+
+			Print 'Downgraded from ' + CAST((@current_version + 1) AS varchar(20)) + ' to ' + CAST(@current_version AS varchar(20));
+
+			INSERT [dbo].[Migration] ([Version])
+			VALUES (@current_version);
+		END
+	END 
+	else
+	BEGIN
+		Print 'Current version already at same version as requested version';
+	END
+END
+GO
+
+EXEC [MIGRATE] 2;

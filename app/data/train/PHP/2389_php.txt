@@ -1,0 +1,133 @@
+<?php
+
+namespace Metro;
+
+use Monolog\Handler\HandlerInterface;
+use Monolog\Handler\PsrHandler;
+use Monolog\Logger;
+use Psr\Log\LoggerInterface;
+
+class Worker
+{
+    /** @var ConsumableQueue */
+    private $metro;
+
+    /** @var JobExecutor */
+    private $jobExecutor;
+
+    /** @var string[] */
+    private $queues;
+
+    /** @var Logger */
+    private $logger;
+
+    /** @var int */
+    private $interval = 5000;
+
+    /** @var bool */
+    private $drainMode = false;
+
+    public function __construct(ConsumableQueue $metro, JobExecutor $jobExecutor, LoggerInterface $logger, ...$queueIds)
+    {
+        $this->metro = $metro;
+        $this->jobExecutor = $jobExecutor;
+        $this->setLogger($logger);
+        $this->queues = $queueIds;
+    }
+
+    public function setLogger(LoggerInterface $logger)
+    {
+        if ($logger instanceof \Monolog\Logger) {
+            $this->logger = $logger;
+        } else {
+            $this->logger = new Logger('metro', [new PsrHandler($logger)]);
+        }
+    }
+
+    public function identify()
+    {
+        return sprintf("%s@%s", getmypid(), gethostname());
+    }
+
+    /**
+     * @param int $timeInMilliseconds
+     * @return void
+     */
+    public function setInterval($timeInMilliseconds)
+    {
+        $this->interval = $timeInMilliseconds;
+    }
+
+    public function quitAsap()
+    {
+        $this->drainMode = true;
+    }
+
+    public function work()
+    {
+        $identity = $this->identify();
+        $this->logger->notice(sprintf(
+            '%s waiting for work on queue(s) [%s]',
+            $identity,
+            join(', ', $this->queues)
+        ));
+
+        for (;;) {
+            $job = $this->metro->pop($this->queues, $this);
+
+            if (null !== $job) {
+                $jobHandler = $this->metro->createTaskLogHander($job->getId());
+                $this->logger->pushHandler($jobHandler);
+                $this->logger->pushProcessor(function ($record) use ($job) {
+                    $record['extra']['job_id'] = $job->getId();
+                    return $record;
+                });
+
+                $this->workOn($job, $jobHandler);
+
+                $this->logger->popHandler();
+                $this->logger->popProcessor();
+            }
+
+            if ($this->interval <= 0) {
+                return;
+            }
+
+            if (null === $job) {
+                if ($this->drainMode) {
+                    $this->logger->notice(sprintf('%s exiting because all queues are empty', $identity));
+                    return;
+                }
+
+                usleep($this->interval * 1e3);
+            }
+        }
+    }
+
+    private function workOn(CommittedJob $job, HandlerInterface $jobHandler)
+    {
+        try {
+            $this->logger->notice("Starting work on {$job->getId()}");
+
+            $logProvider = new LogProvider($this->logger, $jobHandler);
+
+            $this->jobExecutor->execute($job, $logProvider);
+            $this->metro->succeed($job->getId());
+
+            $this->logger->notice("Finished work on {$job->getId()}");
+        } catch (\Exception $e) {
+            $this->logException($e, $job->getId());
+            $this->metro->fail($job->getId());
+        }
+    }
+
+    private function logException(\Exception $e, $jobId)
+    {
+        $trace = isset($e->traceString) ? $e->traceString : $e->getTraceAsString();
+
+        $this->logger->error("Job $jobId failed: " . $e->getMessage(), ['exception' => $e]);
+        foreach (explode(PHP_EOL, $trace) as $line) {
+            $this->logger->error($line);
+        }
+    }
+}

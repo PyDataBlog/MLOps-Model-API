@@ -1,0 +1,280 @@
+!> This module contains the procedures to run DFT calculations.
+module dft_m
+  use basis_m
+  use grid_m
+  use hartree_m
+  use input_m
+  use math_m
+  use operator_m
+  use xc_m
+
+  implicit none
+
+  private
+  public ::    &
+    dft_run,   &
+    dft_solve
+
+
+  contains
+
+
+  !> Solves Kohn-Sham's equation; it reads the external potential and the
+  !! electron-electron interaction from the input file.
+  subroutine dft_run
+    type(operator_t) :: kin, v
+    real(8), allocatable :: vvalues(:), gamma(:), density(:)
+    real(8) :: energy
+    logical :: converged
+    type(xc_t) :: xc
+
+
+    call operator_init_kinetic(kin)
+    call operator_write_info(kin, 'kinetic')
+
+    allocate(vvalues(grid%p))
+    allocate(gamma(0:grid%p-1))
+    allocate(density(grid%p))
+
+    vvalues = 0.0_8; call read_variable('extpot', avar = vvalues)
+    call operator_init_extpot(v, vvalues)
+
+    gamma = 0.0_8; call read_variable('gamma', avar = gamma(0:grid%p-1))
+
+    call xc_init(xc, gamma = gamma, mode = XC_EXX)
+
+    converged = .false.
+    call dft_solve(basis%N, kin, v, gamma, xc, energy, density, converged = converged)
+    write(*, *) 'converged = ', converged
+    write(*, *) 'Energy = ', energy
+
+    deallocate(vvalues)
+    deallocate(gamma)
+    deallocate(density)
+    call xc_end(xc)
+    call operator_end(v)
+  end subroutine dft_run
+
+
+  !> Solves KS equations, given an external potential, electron-electron interaction, and
+  !! exchange-and-correlation functional.
+  !!
+  !! The equations that it solves are:
+  !!
+  !! \f[
+  !!   \sum_m^P \left[ t_{mn} + \delta_{mn} v^{\rm KS}_n(n^0)
+  !!    \right] \varphi_{m\sigma} = \varepsilon^\alpha
+  !!    \varphi^\alpha_{n\sigma}\,
+  !! \f]
+  !! and the ground state density may then be retrieved from the KS orbitals:
+  !! \f[
+  !!   n^0_n = \sum_\sigma \sum_{\alpha=1}^{N} \vert \varphi^{\alpha}_{n\sigma}\vert^2\,.
+  !! \f]
+  !!
+  !! @param N Number of electrons
+  !! @param kin Kinetic energy operator
+  !! @param v External potential operator
+  !! @param gamma Parameters defining the electron-electron interaction
+  !! @param energy Upon convergence, ground state energy
+  !! @param density Upon convergence, ground state density
+  !! @param guess_density An initial guess for the ground state density
+  !! @param converged True if the equations are converged, false otherwise
+  subroutine dft_solve(N, kin, v, gamma, xc, energy, density, guess_density, converged)
+    integer, intent(in) :: N
+    type(operator_t), intent(in) :: kin, v
+    real(8), intent(in) :: gamma(0:)
+    type(xc_t), intent(in) :: xc
+    real(8), intent(inout) :: energy
+    real(8), intent(inout) :: density(:)
+    real(8), optional, intent(in) :: guess_density(:)
+    logical, optional, intent(out) :: converged
+
+    complex(8), allocatable :: ks(:, :)
+    real(8), allocatable :: nm(:), vh(:), vxc(:), nmin(:), nmout(:)
+    real(8) :: xcenergy, xcintegral, diff
+    integer :: i, iter
+    complex(8), allocatable :: ham(:, :), eigenvectors(:, :)
+    real(8), allocatable :: eigenvalues(:)
+    logical :: converged_
+
+    allocate(ks(one_basis%dim, N))
+    allocate(nm(one_basis%p))
+    allocate(nmin(one_basis%p))
+    allocate(nmout(one_basis%p))
+    allocate(vh(one_basis%p))
+    allocate(vxc(one_basis%p))
+    ks = (0.0_8, 0.0_8)
+
+    allocate(ham(1:one_basis%dim, 1:one_basis%dim))
+    allocate(eigenvectors(1:one_basis%dim, 1:one_basis%dim))
+    allocate(eigenvalues(1:one_basis%dim))
+
+    if(.not.present(guess_density)) then
+      ! First, we will get the interaction-free solution
+      ham = kin%mat1 + v%mat1
+      vh = 0.0_8
+      vxc = 0.0_8
+
+      eigenvectors = (0.0_8, 0.0_8)
+      eigenvalues = 0.0_8
+      call eigensolver( one_basis%dim, ham , eigenvalues , eigenvectors )
+
+      do i = 1, N
+        ks(1:one_basis%dim, i) = eigenvectors(1:one_basis%dim, i)
+      end do
+
+      call compute_ks_density(N, ks, nmout)
+
+      converged_ = .false.
+    else
+      ham = kin%mat1 + v%mat1
+      nmin = guess_density
+      call compute_vxc(guess_density, xc, vxc)
+      call compute_vh(guess_density, gamma, vh)
+      do i = 1, one_basis%dim
+        ham(i, i) = ham(i, i) + vxc(m_i(i)) + vh(m_i(i))
+      end do
+      eigenvectors = (0.0_8, 0.0_8)
+      eigenvalues = 0.0_8
+      call eigensolver( one_basis%dim, ham , eigenvalues , eigenvectors )
+
+      do i = 1, N
+        ks(1:one_basis%dim, i) = eigenvectors(1:one_basis%dim, i)
+      end do
+
+      call compute_ks_density(N, ks, nmout)
+
+      diff = dot_product(nmout-guess_density, nmout-guess_density)
+
+      if(diff < 1.0e-8) then
+        energy = dft_energy(N, xc, kin, v, gamma, guess_density, eigenvalues)
+        converged_ = .true.
+      else
+        converged_ = .false.
+     end if
+
+    end if
+
+    ! nmin = nmout
+    iter = 0
+    do while ( (.not.converged_) .and. iter < 10000)
+      iter = iter + 1
+
+      ham = kin%mat1 + v%mat1
+
+      call compute_vxc(nmin, xc, vxc)
+      call compute_vh(nmin, gamma, vh)
+
+      do i = 1, one_basis%dim
+        ham(i, i) = ham(i, i) + vxc(m_i(i)) + vh(m_i(i))
+      end do
+
+      eigenvectors = (0.0_8, 0.0_8)
+      eigenvalues = 0.0_8
+      call eigensolver( one_basis%dim, ham , eigenvalues , eigenvectors )
+
+      do i = 1, N
+        ks(1:one_basis%dim, i) = eigenvectors(1:one_basis%dim, i)
+      end do
+
+      ! Compute the density
+      call compute_ks_density(N, ks, nmout)
+
+      diff = dot_product(nmout-nmin, nmout-nmin)
+
+      !write(*, *) iter, diff
+
+      if(diff < 1.0e-8) then
+        energy = dft_energy(N, xc, kin, v, gamma, nmin, eigenvalues)
+        converged_ = .true.
+        exit
+      end if
+
+      ! We will do a simple linear mixing
+      nmin = 0.999_8 * nmin + 0.001_8 * nmout
+    end do
+
+    if(.not.converged_) then
+      energy = dft_energy(N, xc, kin, v, gamma, nmout, eigenvalues)
+      density = nmout
+    else
+      density = nmout
+      !write(*, *) 'Eigenvalues (no error)= ', eigenvalues(1:4)
+    end if
+
+    if(present(converged)) converged = converged_
+
+    deallocate(nm)
+    deallocate(nmin)
+    deallocate(nmout)
+    deallocate(ks)
+    deallocate(vh)
+    deallocate(vxc)
+  end subroutine dft_solve
+
+
+  !> Computes the KS energy given the eigenvalues and density.
+  !!
+  !! The formula that is used is:
+  !! \f[
+  !!   E = \sum_a^N \varepsilon^a - \sum_n v^{\rm xc}_n n_n - U(n) + E_{\rm xc}(n)\,.
+  !! \f]
+  !! The "xc integral" \f$\sum_n v^{\rm xc}_n n_n\f$ and the "xc energy"
+  !! \f$E_{\rm xc}(n)\f$ are computed by calling uxcenergy, in the xc module. The
+  !! Hartree energy \f$U(n)\f$ is computed calling the uenergy function in the hartree module.
+  !!
+  !! @param N Number of electrons
+  !! @param xc Exchange and correlation functional
+  !! @param kin Kinetic energy operator
+  !! @param v External potential
+  !! @param gamma Parameters defining the electron-electron interaction
+  !! @param dens Density
+  !! @param eigenvalues An array holding the eigenvalues of the KS spin-orbitals.
+  function dft_energy(N, xc, kin, v, gamma, dens, eigenvalues) result(energy)
+    integer(4), intent(in) :: N
+    type(xc_t), intent(in) :: xc
+    type(operator_t), intent(in) :: kin, v
+    real(8), intent(in) :: gamma(:), dens(:), eigenvalues(:)
+    real(8) :: energy
+
+    real(8) :: xcenergy, xcintegral
+
+    call uxcenergy(xc, dens, xcenergy, xcintegral)
+    energy = sum(eigenvalues(1:N)) - xcintegral - uenergy(gamma, dens) + xcenergy
+    !energy = ts + vn + uenergy(gamma, dens) + xcenergy
+  end function dft_energy
+
+
+  !> Computes the KS density from a set of KS orbitals
+  !!
+  !! The formula is given by:
+  !! \f[
+  !!   n_m = \sum_\sigma \sum_a \vert \varphi^a_{i(m,\sigma)}\vert^2\,.
+  !! \f]
+  !!
+  !! The KS orbitals \f$\varphi^a_i\f$ are given in the array ks(i,a).
+  !!
+  !! @param N Number of electrons
+  !! @param ks A complex array with the KS orbitals
+  !! @param nm The output density
+  subroutine compute_ks_density(N, ks, nm)
+    integer(4), intent(in) :: N
+    complex(8), intent(in) :: ks(:, :)
+    real(8), intent(inout) :: nm(:)
+
+    integer :: m, i, sigma, a
+
+     do m = 1, one_basis%p
+       nm(m) = 0.0_8
+       do a = 1, N
+         do sigma = 0, 1
+           i = i_msigma(m, sigma)
+           nm(m) = nm(m) + abs(ks(i, a))**2
+         end do
+       end do
+
+     end do
+
+  end subroutine compute_ks_density
+
+end module dft_m

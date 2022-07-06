@@ -1,0 +1,187 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE GADTs #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE QuasiQuotes #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE TypeFamilies #-}
+{-# OPTIONS_GHC -fno-warn-unused-binds #-}
+{-# OPTIONS_HADDOCK show-extensions #-}
+
+{-|
+Module      : $Header$
+Copyright   : (c) 2016 Deakin Software & Technology Innovation Lab
+License     : BSD3
+
+Maintainer  : Rhys Adams <rhys.adams@deakin.edu.au>
+Stability   : unstable
+Portability : portable
+
+Persistence for job states and yet-to-be-run 'ScheduleCommand's.
+-}
+
+module Eclogues.Persist (
+    -- * 'Action'
+      Action, Context
+    -- ** Running
+    , withPersistDir, atomically
+    -- * View
+    , allIntents, allEntities, allContainers
+    -- * Mutate
+    , insert, updateStage, casStage, updateSatis, updateSpec, delete
+    , scheduleIntent, deleteIntent
+    , insertBox, sealBox, deleteBox
+    , insertFile, deleteFilesAttachedTo
+    , insertContainer, deleteContainer
+    ) where
+
+import Eclogues.Prelude
+import Eclogues.Persist.Stage1 ()
+import Eclogues.Scheduling.Command (ScheduleCommand)
+import qualified Eclogues.Job as Job
+
+import Control.Monad.Base (MonadBase, liftBase)
+import Control.Monad.Logger (LoggingT, runStderrLoggingT)
+import Control.Monad.Reader (ReaderT)
+import qualified Data.HashMap.Strict as HM
+import Database.Persist.TH (mkPersist, sqlSettings, mkMigrate, share, persistLowerCase)
+import Database.Persist ((==.), (=.))
+import qualified Database.Persist as P
+import qualified Database.Persist.Sql as PSql
+import Database.Persist.Sqlite (withSqlitePool)
+import Path (toFilePath)
+
+-- Table definitions.
+share [mkPersist sqlSettings, mkMigrate "migrateAll"] [persistLowerCase|
+Job
+    name Job.Name
+    spec Job.Spec
+    stage Job.Stage
+    satis Job.Satisfiability
+    uuid UUID
+    UniqueName name
+Box
+    name Job.Name
+    stage Job.Sealed
+    UniqueBoxName name
+File
+    name Job.FileId
+    uuid UUID
+    entityName Job.Name
+    UniqueEntityFile name entityName
+    UniqueFileUUID uuid
+ScheduleIntent
+    command ScheduleCommand
+    UniqueCommand command
+Container
+    name Job.ContainerId
+    uuid UUID
+    UniqueContainerName name
+    UniqueContainerUUID uuid
+|]
+
+-- Hide away the implementation details.
+-- | All 'Action's run in a Context.
+newtype Context  = Context PSql.ConnectionPool
+-- | An interaction with the persistence backend.
+newtype Action r = Action (ReaderT PSql.SqlBackend IO r)
+                          deriving (Functor, Applicative, Monad)
+
+instance Show (Action ()) where
+    show _ = "Action"
+
+-- | You can join up Actions by running them sequentially.
+instance Semigroup (Action ()) where
+    (<>) = (*>)
+
+instance Monoid (Action ()) where
+    mempty = pure ()
+    mappend = (<>)
+
+-- | Run some action that might persist things inside the given directory.
+-- Logs to stderr.
+withPersistDir :: Path Abs Dir -> (Context -> LoggingT IO a) -> IO a
+withPersistDir path f = runStderrLoggingT $ withSqlitePool ("WAL=off " <> path' <> "/eclogues.db3") 1 act
+  where
+    act pool = do
+        PSql.runSqlPool (PSql.runMigration migrateAll) pool
+        f (Context pool)
+    path' = fromString $ toFilePath path
+
+-- | Apply some Action in a transaction.
+atomically :: (MonadBase IO m) => Context -> Action r -> m r
+atomically (Context pool) (Action a) = liftBase $ PSql.runSqlPool a pool
+
+-- | Does not insert files.
+insert :: Job.Status -> Action ()
+insert status = Action $ P.insert_ job where
+    job = Job { jobName        = status ^. Job.name
+              , jobSpec        = status ^. Job.spec
+              , jobStage       = status ^. Job.stage
+              , jobSatis       = status ^. Job.satis
+              , jobUuid        = status ^. Job.uuid }
+
+insertBox :: Job.BoxStatus -> Action ()
+insertBox status = Action . P.insert_ $ Box (status ^. Job.name) (status ^. Job.sealed)
+
+insertContainer :: Job.ContainerId -> UUID -> Action ()
+insertContainer n = Action . P.insert_ . Container n
+
+insertFile :: Job.Name -> Job.FileId -> UUID -> Action ()
+insertFile jn fn u = Action . P.insert_ $ File fn u jn
+
+updateStage :: Job.Name -> Job.Stage -> Action ()
+updateStage name st = Action $ P.updateWhere [JobName ==. name] [JobStage =. st]
+
+casStage :: Job.Name -> Job.Stage -> Job.Stage -> Action ()
+casStage name st st' = Action $ P.updateWhere [JobName ==. name, JobStage ==. st] [JobStage =. st']
+
+updateSatis :: Job.Name -> Job.Satisfiability -> Action ()
+updateSatis name st = Action $ P.updateWhere [JobName ==. name] [JobSatis =. st]
+
+updateSpec :: Job.Name -> Job.Spec -> Action ()
+updateSpec name st = Action $ P.updateWhere [JobName ==. name] [JobSpec =. st]
+
+sealBox :: Job.Name -> Action ()
+sealBox name = Action $ P.updateWhere [BoxName ==. name] [BoxStage =. Job.Sealed]
+
+delete :: Job.Name -> Action ()
+delete = Action . P.deleteBy . UniqueName
+
+deleteBox :: Job.Name -> Action ()
+deleteBox = Action . P.deleteBy . UniqueBoxName
+
+deleteContainer :: Job.ContainerId -> Action ()
+deleteContainer = Action . P.deleteBy . UniqueContainerName
+
+deleteFilesAttachedTo :: Job.Name -> Action ()
+deleteFilesAttachedTo name = Action $ P.deleteWhere [FileEntityName ==. name]
+
+scheduleIntent :: ScheduleCommand -> Action ()
+scheduleIntent = Action . P.insert_ . ScheduleIntent
+
+deleteIntent :: ScheduleCommand -> Action ()
+deleteIntent = Action . P.deleteBy . UniqueCommand
+
+getAll :: (PSql.SqlBackend ~ PSql.PersistEntityBackend a, PSql.PersistEntity a) => (a -> b) -> Action [b]
+getAll f = Action $ fmap (f . P.entityVal) <$> P.selectList [] []
+
+allIntents :: Action [ScheduleCommand]
+allIntents = getAll scheduleIntentCommand
+
+allEntities :: Action [Job.AnyStatus]
+allEntities = do
+    fs <- HM.fromListWith (++) <$> getAll toPair
+    js <- getAll toMkStatus
+    bs <- getAll toMkBoxStatus
+    pure $ toStatus fs <$> js ++ bs
+  where
+    toMkStatus (Job n spec st satis uuid) = (n, Job.AJob . Job.mkStatus spec st satis uuid)
+    toMkBoxStatus (Box n sealed) = (n, Job.ABox . Job.mkBoxStatus n sealed)
+    toPair (File n u jn) = (jn, [(n, u)])
+    toStatus m (n, mk) = mk . maybe mempty HM.fromList $ HM.lookup n m
+
+allContainers :: Action [(Job.ContainerId, UUID)]
+allContainers = getAll (\(Container n u) -> (n, u))

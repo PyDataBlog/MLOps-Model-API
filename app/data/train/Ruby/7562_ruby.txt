@@ -1,0 +1,161 @@
+class DataMapper::Adapters::DataObjectsAdapter
+  def create(resources)
+    resources.each do |resource|
+      model      = resource.model
+      serial     = model.serial(name)
+      attributes = resource.dirty_attributes
+
+      properties  = []
+      bind_values = []
+
+      # make the order of the properties consistent
+      model.properties(name).each do |property|
+        next unless attributes.key?(property)
+
+        bind_value = attributes[property]
+
+        # skip insering NULL for columns that are serial or without a default
+        next if bind_value.nil? && (property.serial? || !property.default?)
+
+        # if serial is being set explicitly, do not set it again
+        if property.equal?(serial)
+          serial = nil
+        end
+
+        properties  << property
+        bind_values << bind_value
+      end
+
+      statement = insert_statement(model, properties, serial) 
+      
+      #### BEGIN DataMapper::Cutie ####  
+      # @note: Need a Query object for the tracker or to rewrite what the tracker takes, it was easier to just
+      #   make a BS Query object to pass in since the other CRUD methods have a query object.
+      query = DataMapper::Query.new(resource.repository, resource.model)
+      
+      start_tracking_timer(query) 
+
+      result    = execute(statement, *bind_values)                                        
+
+      #### END DataMapper::Cutie ####
+      track_query(query, statement, bind_values)
+      
+      if result.to_i == 1 && serial
+        serial.set!(resource, result.insert_id)
+      end
+    end
+  end
+
+  # Constructs and executes SELECT query, then instantiates
+  # one or many object from result set.
+  #
+  # @param [Query] query
+  #   composition of the query to perform
+  #
+  # @return [Array]
+  #   result set of the query
+  #
+  # @api semipublic
+  def read(query)
+    fields = query.fields
+    types  = fields.map { |property| property.primitive }
+
+    statement, bind_values = select_statement(query)
+
+    records = []
+
+    with_connection do |connection|
+      command = connection.create_command(statement)
+      command.set_types(types)
+
+      #### BEGIN DataMapper::Cutie ####
+      start_tracking_timer(query)
+      
+      reader = command.execute_reader(*bind_values)
+
+      track_query(query, statement, bind_values)
+      #### END DataMapper::Cutie ####
+
+      begin
+        while reader.next!
+          records << fields.zip(reader.values).to_hash
+        end
+      ensure
+        reader.close
+      end
+    end
+
+    records
+  end
+
+  # Constructs and executes UPDATE statement for given
+  # attributes and a query
+  #
+  # @param [Hash(Property => Object)] attributes
+  #   hash of attribute values to set, keyed by Property
+  # @param [Collection] collection
+  #   collection of records to be updated
+  #
+  # @return [Integer]
+  #   the number of records updated
+  #
+  # @api semipublic
+  def update(attributes, collection)
+    query = collection.query
+
+    # TODO: if the query contains any links, a limit or an offset
+    # use a subselect to get the rows to be updated
+
+    properties  = []
+    bind_values = []
+
+    # make the order of the properties consistent
+    query.model.properties(name).each do |property|
+      next unless attributes.key?(property)
+      properties  << property
+      bind_values << attributes[property]
+    end
+
+    statement, conditions_bind_values = update_statement(properties, query)
+
+    bind_values.concat(conditions_bind_values)
+          
+    ####  BEGIN DataMapper::Cutie ####
+    start_tracking_timer(query)
+    
+    result = execute(statement, *bind_values).to_i
+    
+    ####  END DataMapper::Cutie ####
+    track_query(query, statement, bind_values)  
+    
+    result
+  end
+
+  # Constructs and executes DELETE statement for given query
+  #
+  # @param [Collection] collection
+  #   collection of records to be deleted
+  #
+  # @return [Integer]
+  #   the number of records deleted
+  #
+  # @api semipublic
+  def delete(collection)
+    query = collection.query
+
+    # TODO: if the query contains any links, a limit or an offset
+    # use a subselect to get the rows to be deleted
+
+    statement, bind_values = delete_statement(query)
+    
+    ####  BEGIN DataMapper::Cutie ####
+    start_tracking_timer(query)
+    
+    result = execute(statement, *bind_values).to_i
+    
+    ####  END DataMapper::Cutie ####
+    track_query(query, statement, bind_values)  
+    
+    result
+  end
+end

@@ -1,0 +1,405 @@
+With a better intuition of how type-directed synthesis works, let's examine the
+procedure in detail.  The formalism \synml{} that we develop for this purpose is
+a sound, yet highly non-deterministic synthesis procedure.  By using this
+formalism as a starting point, we are able to make explicit the connection
+between program synthesis and proof search.
+
+\subsection{\texorpdfstring{$λ_{syn}$}{λ}: A Type-Directed Synthesis Language}
+
+\autoref{fig:synthsyntax} gives the syntax of \thecalc{}.  As described in
+\autoref{sec:synthesis}, our target is a core ML-like language featuring
+algebraic data types and recursive functions. Consequently, types are
+user-defined algebraic data types $[[T]]$ and function types $[[t1 -> t2]]$. The
+syntax of expressions $[[e]]$ is standard: $[[C]]$ ranges over data type
+constructors, application is written $[[e1 e2]]$, and we use ML-style pattern
+$[[match]]$ expressions in which each pattern $[[p]]$ binds the subcomponents of
+the constructor $[[C]]$.  We require that every $[[match]]$ is complete; there
+exists one branch for each constructor of the data type being matched.  A
+recursive function $[[f]]$ is given by $[[fix f (x:t1) : t2 = e]]$, and we write
+$[[\x:t1.e]]$ instead when $[[f]]$ is not among the free variables of $[[e]]$.
+Signatures $[[S]]$ contain the set of declared constructors, and contexts
+$[[G]]$ contain information about the free variables of the program.
+
+The only new syntactic form is that of partial functions $[[pf]]$, written
+$\overline{[[vi => exi]]}^{i < m}$.  Here, and throughout the paper, the overbar
+notation $\overline{e_i}^{i < m}$ denotes a sequence of $m$ syntactic elements,
+$e_1 .. e_m$.  Thus, the notation for a partial function $\overline{[[vi =>
+exi]]}^{i < m}$ denotes a list of input--output examples $[[v1 => ex1 ;; .. ;;
+vm => exm]]$.   We interpret such partial functions to mean that if we supply
+the argument  $[[vi]]$ then the partial function produces the result $[[exi]]$.
+
+\input{pp/fig.synthsyntax}
+
+Synthesis problems are specified through example values $[[ex]]$ that are made
+up of constructor values (for data types) and partial functions (for arrow
+types).  Explicit use of $[[fix]]$ values as examples is not permitted because
+that would amount to supplying a definition for the function being synthesized.
+However, inputs to example partial functions are allowed to be values, which is
+useful when giving examples of higher-order functions.  The syntax of
+input--output examples reflects this restriction where the domain of a partial
+function is unrestricted values $[[v]]$ and the range is restricted to be
+example values $[[ex]]$.
+
+To keep track of the evolution of variable values during the synthesis process,
+we tie to each $[[ex]]$ an execution environment $[[s]]$ which maps variables to
+values.  We can think of $[[s]]$ as a \emph{substitution} where $[[s{e}]]$
+denotes the expression obtained by applying the substitution $[[s]]$ to $[[e]]$.
+A pair $[[s |-> ex]]$ constitutes an \emph{example world} we described
+in~\autoref{sec:synthesis}, and $[[X]]$ is a list of example worlds, shortened
+to just ``examples'' when we don't need to distinguish between individual
+environments and example values.  The goal of the synthesis procedure is to
+derive a program that satisfies each example world given in $[[X]]$.
+
+Because there are many list syntactic forms in the formalism, we use a
+metavariable convention for their lengths: $[[k]]$ for constructor arity,
+$[[n]]$ for the number of examples $|[[X]]|$, and $[[m]]$ for the number of
+cases in a $[[match]]$ expression or partial function.  We use $[[i]]$ and
+$[[j]]$ for generic indices.
+
+\subsection{Typechecking and Synthesis}
+
+\paragraph{Normal Forms} Rather than synthesizing $[[e]]$ terms directly, we
+instead restrict synthesized programs to $β$-normal form~\cite{byrnes-1999}.
+Such terms do not contain any $β$-redexes, ruling out redundant programs that
+pattern match against known constructors (and hence have dead branches) or that
+apply a known function.  To do this, we split the syntax of expressions into
+introduction forms $[[I]]$ and elimination forms $[[E]]$.  Note that every
+$[[E]]$ is of the form $[[x]]\;[[I1]]…[[Ik]]$, with a free variable $[[x]]$ at
+its head.
+
+This syntactic split carries through into the type system, where, as in
+bidirectional typechecking~\cite{pierce-toplas-2000}, the rules make explicit
+when we are checking types ($[[I]]$-forms) versus generating types
+($[[E]]$-forms), respectively.%
+\footnote{This fact is why $[[match]]$ is an $[[I]]$-form: when typechecking a
+$[[match]]$ we \emph{check} the types of the branches against a given type.}
+We can think of type information flowing \emph{into} $[[I]]$-forms whereas type
+informations flows \emph{out of} $[[E]]$-forms.  This analogy of information
+flow extends to synthesis: when synthesizing $[[I]]$-forms, we push
+type-and-example information \emph{inward}.  In contrast, we are not able to
+push this information into $[[E]]$-forms.
+
+\iftoggle{tr}
+  {\input{pp/fig.tr-tc}}
+  {\input{pp/fig.paper-tc}}
+
+Typechecking for \thecalc{} is divided among four judgments:
+\begin{align*}
+  [[S;G |- e : t]]  & \qquad \textrm{$[[e]]$ is well-typed.} \\
+  [[S;G |- E => t]] & \qquad \textrm{$[[E]]$ produces type $[[t]]$.} \\
+  [[S;G |- I <= t]] & \qquad \textrm{$[[I]]$ checks at type $[[t]]$.} \\
+  [[S;G |- X : t]]  & \qquad \textrm{$[[X]]$ checks at type $[[t]]$.}
+\end{align*}
+\autoref{fig:typechecking} gives the definition of the last three judgments.
+Because the typechecking judgment for regular expressions is both standard and
+immediately recoverable from the bidirectional typechecking system, we omit its
+rules here.  The only new rule typechecks partial functions:
+\begin{gather*}
+  \lsyndruletXXpf{premisenamelayout=right}
+\end{gather*}
+A partial function is well-typed at $[[t1 -> t2]]$ if its domain typechecks at
+$[[t1]]$ and its range typechecks at $[[t2]]$.
+
+The final judgment typechecks examples $[[X]]$ at some goal type $[[t]]$.
+This amounts to typechecking each example world $[[s |-> ex in X]]$ which
+ensures that:
+\begin{enumerate}
+  \item The environment is well-typed, written $[[S;G |- s]]$ and
+  \item The example value is well-typed at type $[[t]]$.
+\end{enumerate}
+
+\iftoggle{tr}
+  {\input{pp/fig.tr-synth}}
+  {\input{pp/fig.paper-synth}}
+
+\autoref{fig:synthrules} describes our synthesis system as a non-deterministic
+relation where complete derivations correspond to synthesized programs.  This
+relation is broken up into two judgments:
+
+\begin{itemize}
+  \item $[[S;G |- t ~E~> E]]$ (\rulename{eguess}): guess an $[[E]]$ of type
+    $[[t]]$.
+  \item $[[S;G |- t |> X ~I~> I]]$ (\rulename{irefine}): refine and synthesize
+    an $[[I]]$ of type $[[t]]$ that agrees with examples $[[X]]$.
+\end{itemize}
+
+Note that these two judgments are very similar to the bidrectional typechecking
+system for this language!  We have simply changed perspectives: rather than
+checking or producing types given a term, synthesis produces a term given a
+type.
+
+The \rulename{eguess} rules correspond to \emph{guessing} $[[E]]$-forms.
+``Guessing'' in this context amounts to well-typed \emph{term enumeration}.
+Because the ill-typed terms vastly outnumber the well-typed terms, restricting
+enumeration in this manner makes enumeration much more
+efficient~\cite{grygiel-jfp-2013}.  Enumeration proceeds by choosing a
+particular term shape and then recursively generating its components.
+Generating an application (\rulename{eguess\_app}) consists of generating a
+function that produces the desired goal type and then generating a compatible
+argument.  Generating a variable (\rulename{eguess\_var}) requires no recursive
+generation—we simply choose any variable from the context of the appropriate
+type.
+
+In order to enumerate $[[I]]$-forms, the \rulename{eguess} judgment calls into
+the \rulename{irefine} judgment with an empty example list (written
+$[[empty]]$).  In the absence of examples, the \rulename{irefine} judgment also
+performs well-typed term enumeration.  To see this, ignore all occurrences of
+examples $[[X]]$ in the \rulename{irefine} rules.  \rulename{irefine\_fix}
+generates a $[[fix]]$ by recursively generating its body, under the additional
+assumption of variables $[[f]]$ and $[[x]]$.  \rulename{irefine\_ctor} generates
+a constructor value by recursively generating arguments to that constructor, and
+\rulename{irefine\_match} generates a $[[match]]$ by recursively generating the
+different pieces of the $[[match]]$.  Because $[[E]]$s are also syntactically
+considered $[[I]]$s, \rulename{irefine\_guess} generates an $[[E]]$ by using the
+\rulename{eguess} judgment.
+
+\paragraph{Example Propagation}
+When $[[X]]$ is non-empty, the \rulename{irefine} judgment corresponds to
+\emph{refinement}, which is restricted to $[[I]]$-forms.  In addition to
+generating well-typed terms, the judgment also incorporates the list of examples
+$[[X]]$ given by the user.
+
+Recall that $[[X]]$ is a list of example worlds $[[s |-> ex]]$ where $[[ex]]$ is
+the goal example value and $[[s]]$ is the execution environment that gives
+values to each of the free variables in $[[G]]$.  For this to work, we enforce
+the following invariant in our system:
+
+\begin{invariant}{Example-Value Consistency.}
+  \label{inv:exampleconsistency}
+  $∀ [[x:t in G]].\  ∀ [[s |-> ex in X]].\ \exists v.\  [[S;empty |- v : t]]$
+  and $[[ [v/x] in s ]]$.
+\end{invariant}
+
+The invariant that says that each example world gives a value to each variable
+in $[[G]]$.
+
+Rules \rulename{irefine\_fix} and \rulename{irefine\_ctor} perform type-directed
+example refinement.  Typechecking ensures that $[[X]]$ only contains partial
+function values in the \rulename{irefine\_fix} case and constructor values in
+the \rulename{irefine\_ctor} case.  This refinement is delegated to helper
+functions $[[apply]]$ and $[[proj]]$, respectively, which are specified in
+\autoref{fig:synthrulesaux}.
+
+\input{pp/fig.synthaux}
+
+$[[proj]]$ assumes that the example values of $[[X]]$ consist of constructor
+values with a shared head $[[C]]$ that has arity $[[k]]$.  $[[proj]]$ creates
+$[[k]]$ new $[[X]]$s, corresponding to the $[[k]]$ arguments that must be
+synthesized for $[[C]]$.  The example values for $[[Xk]]$ which corresponds to
+the $[[k]]$th argument are drawn from the $[[k]]$th example values from each of
+the example values found in the original $[[X]]$.  The environment $[[si]]$ are
+copied, unchanged, to each of the new $[[Xk]]$.
+
+$[[apply]]$ assumes that the example values of $[[X]]$ consist of partial
+functions.  $[[apply]]$ operates over a single example world $[[s |-> pf in X]]$
+and produces a new $[[X']]$ that refines the examples for synthesizing the
+function body $[[I]]$.  If $[[pf]] = \overline{[[vi => exi]]}^{i < m}$, then
+$[[apply]]$ produces $[[m]]$ new example worlds, one for each such $[[vi =>
+exi]]$ pair.  The goal example value for each of these worlds is $[[exi]]$.  To
+fulfill our invariant that the $[[si]]$ has a value for each variable bound in
+$[[G]]$, we must provide values for $[[f]]$ and $[[x]]$.  $[[x]]$ is simply
+bound to $[[vi]]$.  $[[f]]$ is bound to the \emph{entire} partial function that
+generated the example world—this means that synthesis can use examples of
+$[[f]]$'s behavior on any of the given sample inputs when generating the
+function body.  In \rulename{irefine\_fix}, we append the results of
+$[[apply]]$ing each example world in $[[X]]$ together to form the final $[[X']]$
+used to synthesize $[[I]]$.
+
+\rulename{irefine\_match} does not refine examples like \rulename{irefine\_fix}
+and \rulename{irefine\_ctor}.  Instead, \rulename{irefine\_match}
+\emph{distributes} the example worlds in $[[X]]$ to each of the branches of the
+$[[match]]$.  This behavior is delegated to the $[[distribute]]$ function, which
+takes the signature $[[S]]$, the data type $[[T]]$ the match covers, the
+examples to refine $[[X]]$, and the scrutinee of the match $[[E]]$.
+$[[distribute]]$ generates an $[[Xm]]$ for each branch of the match by
+distributing the examples $[[X]]$ among the $[[m]]$ branches of the pattern
+match.  Intuitively, $[[distribute]]$ evaluates the scrutinee $E$ using each of
+the $[[sn]]$ drawn from the $[[n]]$ worlds.  Because $[[E]]$ must be a data type
+$[[T]]$, then it must evaluate to one of $[[T]]$'s constructors.
+$[[distribute]]$ then sends that example world to that constructor's branch in
+the $[[match]]$.
+
+Finally, we bridge the refinement and guessing judgments with
+\rulename{irefine\_guess}.  For $[[E]]$-forms, we are unable to push examples
+through term generation.  This is because the shape of an $[[E]]$ does not tell
+us anything about its type and correspondingly, how to refine its examples.
+However, after generating an $[[E]]$, we can check that it satisfies each
+example world.  This ``satisfies'' relation, written $[[E |= X]]$, ensures that
+for all example worlds $[[sn |-> exn]]$ in $[[X]]$ that $[[sn{E} -->* v]]$ and
+$[[v ~= exn]]$ where $[[sn{E}]]$ substitutes the environment $[[sn]]$ into
+$[[E]]$.
+
+\input{pp/fig.symevalrules}
+
+\subsection{Evaluation and Compatibility}
+\label{subsec:evaluation}
+
+The synthesis rules require that we evaluate terms and check them against the
+goal examples.  \autoref{fig:synthevalrules} shows just two of the small-step
+evaluation rules.  The omitted rules for $β$-reduction and pattern-matching are
+completely standard; they rely on the usual notion of capture-avoiding
+substitution.
+
+There are two ways that the interpreter can go wrong: it might diverge or it
+might try to use a partial function that is undefined at a particular input.  In
+the first case, our multi-step evaluation relation $[[e -->* v]]$ does not
+terminate which implies that the synthesis process itself could diverge.
+However, in practice, our synthesis algorithm imposes restrictions on recursion
+to guarantee termination which we discuss further
+in~\autoref{subsec:metatheory}.
+
+The rules governing partial functions are shown in \autoref{fig:synthevalrules}.
+In the case that the partial function is used at an undefined input, an
+exception value $[[NoMatch]]$ is raised. $[[NoMatch]]$ does not equal any value,
+so synthesis fails.  At first glance, this seems overly restrictive as the
+absence of a particular input in a partial function might seem to imply that we
+can synthesize \emph{anything} for that case, rather than nothing.  However, in
+the presence of recursive functions, doing so is \emph{unsound}.  Consider
+synthesizing the \cd{Cons} branch of the \cd{stutter} function from
+\autoref{sec:synthesis} but with the example set \cd{ \{[] => [], [1;0] =>
+[1;1;0;0]\} }.  If we synthesized the term \cd{f1 l2} rather than \cd{Cons(n1,
+Cons(n1, f1 l2))}, then we will encounter a $[[NoMatch]]$ exception because
+\cd{l2 = [0]}.  This is because our example set for \cd{f1} contains no example
+for \cd{[0]}.  If we simply accepted \cd{f1 l2}, then we would admit a term that
+contradicted our examples since \cd{f1 l2} actually evaluates to \cd{[]} once
+plugged into the overall recursive function.
+
+Value compatibility, written $[[v ~= u]]$, is also shown in
+\autoref{fig:synthevalrules}.  This relation, which is defined only on closed
+terms, is used to determine when a guessed $[[E]]$ is compatible with the
+examples.  Due to the presence of higher-order functions, its definition is a
+bit delicate.  As usual, two values that have the same head constructor applied
+to compatible arguments are compatible (rule \rulename{eq\_ctor}).  A specified
+function is compatible with a partial function example if running the function
+on each of the given inputs produces an output compatible with the corresponding
+example output, as shown in \rulename{eq\_pf\_f} (omitting the symmetric rule).
+Two partial functions are compatible if they specify equivalent sets of pairs of
+input/output examples.  However, a concrete function is compatible only with
+itself, via reflexivity.
+
+Compatibility is an approximation to extensional equality, which is undecidable
+in general.  Our approximation is conservative in that our use of $[[~=]]$
+rather than (unattainable) extensional equality only permits \emph{fewer}
+programs to be synthesized, in particular, when higher-order functions are
+involved.  For example, consider $[[E]]$-guessing a term (via the
+\rulename{irefine\_guess} rule) involving an function \lstinline!f! whose value
+is the partial function \lstinline!id => O!.  If \lstinline!f! is applied to
+some function value \lstinline!v! where \lstinline!v! is contextually
+equivalent, yet syntactically distinct, from \lstinline!id!, evaluation will
+produce $[[NoMatch]]$ rather than \lstinline!O!.
+
+\subsection{Metatheory}
+\label{subsec:metatheory}
+
+With the definition of \thecalc{} in hand, we give an overview of the properties
+of \thecalc{}.
+
+\paragraph{Termination}
+
+Because synthesis relies on evaluation (through the compatibility relation),
+termination of any synthesis algorithm based on \thecalc{} relies on the
+termination of evaluation.  In the presence of recursive functions and data
+types, we must enforce two restrictions to ensure termination of evaluation:
+\begin{enumerate}
+  \item A syntactic \emph{structural recursion} check that enforces that
+    recursive calls are only made on structurally decreasing arguments.
+  \item A positivity restriction on data types that prevents recursive
+    occurrences of a data type to the left of an arrow in the type of an
+    argument to a constructor.
+\end{enumerate}
+Both of these restrictions are present in languages that require totality, \eg,
+Agda~\cite{norell-thesis-2007} and the Coq theorem prover~\cite{coq-2012}.  We
+elide the details of the structural recursion check here to simplify the
+presentation of \thecalc{}.
+
+\paragraph{Example Consistency}
+
+Example consistency demands that the examples that the user provides do not
+contradict each other.  For example, if the goal type is \lstinline!nat!, then
+the two examples \lstinline!O! and \lstinline!S(O)! are contradictory because we
+cannot synthesize a single $[[I]]$ of type \lstinline!nat! that can both be
+\lstinline!O! and \lstinline!S(O)! (in the empty context).
+
+Checking for inconsistent examples proves to be difficult because of the
+undecidability of function equality in \thecalc{}.  For example, consider the
+partial function \lstinline!id1 => O | id2 => 1! where \lstinline!id1! and
+\lstinline!id2! are syntactically distinct implementations of the identity
+function.  This partial function has contradictory alternatives, however, we
+cannot determine that \lstinline!id1! $[[~=]]$ \lstinline!id2!.
+
+Therefore, in \thecalc{}, we simply assume that the set of examples that the
+user provides is not contradictory.  If \thecalc{} is supplied with an
+contradictory set of examples, then there will be no $[[I]]$ that fulfills the
+examples.  In an implementation of a synthesis algorithm based on \thecalc{}
+(such as the one we present in \autoref{sec:implementation}), this results in
+the algorithm not terminating because it can never find a program that
+satisfies the examples.
+
+\paragraph{Soundness}
+
+Soundness of \thecalc{} ensures that synthesized programs are correct.
+
+\begin{theorem}{Type Soundness.}
+  If $[[S;G |- X : t]]$ and $[[S;G |- t |> X ~I~> I]]$ then $[[S;G |- I <= t]]$.
+\end{theorem}
+
+\begin{theorem}{Example Soundness.}
+  If $[[S;G |- t |> X ~I~> I]]$ then $[[I |= X]]$.
+\end{theorem}
+
+Type soundness states that synthesized programs are well-typed, and example
+soundness states that synthesized programs agree with the examples that are
+given.
+
+Proving type soundness is straightforward: the synthesis rules erase to typing
+rules for the language, so we always produce well-typed programs. Proving
+example soundness amounts to showing that the \rulename{irefine} rules
+manipulate the examples soundly.  The example refinement performed by
+\rulename{irefine\_fix}, \rulename{irefine\_ctor}, and \rulename{irefine\_match}
+all correspond to single-step evaluation for $[[fix]]$, constructor, and
+$[[match]]$ expressions, respectively, over the examples.  The base case,
+\rulename{irefine\_guess}, ensures compatibility directly.
+
+\paragraph{Completeness}
+
+Completeness of \thecalc{} ensures that we are able to synthesize all programs.
+
+\begin{theorem}{Completeness of Term Enumeration.}
+  \label{thm:enumcompleteness}
+  \begin{enumerate}
+    \item If $[[S;G |- E => t]]$ then $[[S;G |- t ~E~> E]]$.
+    \item If $[[S;G |- I <= t]]$ then $[[S;G |- t |> empty ~I~> I]]$.
+  \end{enumerate}
+\end{theorem}
+
+In the absence of examples, \thecalc{} can synthesize any well-typed term.  This
+follows from the fact that the \thecalc{} is simply an inversion of the inputs
+and outputs of the standard typing judgment.
+
+\autoref{thm:enumcompleteness} implies that, for any well-typed $[[I]]$, there
+always exists an example set $[[X]]$ that allows us to synthesize $[[I]]$,
+namely the empty set.  Therefore, we would like to state that \thecalc{}
+satisfies the following property
+
+\begin{claim}{Completeness of Synthesis.}
+  If $[[S;G |- X : t]]$, $[[S;G |- I <= t]]$, $[[I |= X]]$, then $[[S;G |- t
+  |> X ~I~> I]]$.
+\end{claim}
+
+which says that if $[[X]]$ and $[[I]]$ are well-typed and $[[I]]$ satisfies
+$[[X]]$, then we can use $[[X]]$ to synthesize $[[I]]$.  However, it turns out
+that this claim does not hold for \thecalc{}.  The problem resides in our use of
+partial functions as the value for a recursive function during
+$[[I]]$-refinement.  In the \rulename{irefine\_fix} case, we end up needing to
+claim that a partial function can be substituted for the $[[fix]]$.  While the
+partial function agrees with the $[[fix]]$ on the values that the partial
+function is defined, it does not agree on the other, unspecified values (which
+all raise $[[NoMatch]]$ errors).  This makes such a substitution unsound in
+general and requires stronger assumptions about how the partial function and
+$[[fix]]$ are related.
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: "../main.tex"
+%%% TeX-PDF-mode: t
+%%% End:

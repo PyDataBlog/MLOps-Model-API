@@ -1,0 +1,108 @@
+#!/usr/bin/env perl 
+#===============================================================================
+#
+#         FILE: ipdesc.pl
+#
+#        USAGE: grep -B2 -P -h 'host \d+_\d+' {$DHCPD_CONFIG_FILE} | ./ipdesc.pl
+#
+#  DESCRIPTION: Parse dhcpd config file into SQLite database
+#
+#      OPTIONS: ---
+# REQUIREMENTS: ---
+#         BUGS: ---
+#        NOTES: ---
+#       AUTHOR: SHIE, Li-Yi (lyshie), lyshie@tn.edu.tw
+# ORGANIZATION:
+#      VERSION: 1.0
+#      CREATED: 2016-07-03 09:30:00
+#     REVISION: ---
+#===============================================================================
+
+use strict;
+use warnings;
+
+use DBI;
+use FindBin qw($Bin);
+
+sub main {
+
+    # prepare SQL statement
+    my $dbh = DBI->connect( "dbi:SQLite:dbname=$Bin/ipmac.db",
+        "", "", { AutoCommit => 0, RaiseError => 1, } )
+      or die $DBI::errstr;
+
+    my $sth = $dbh->prepare(
+        q{
+        INSERT OR REPLACE INTO ipdesc
+                               (
+                                   id
+                                   , ip
+                                   , desc1
+                                   , desc2
+                                   , desc3
+                               )
+                        VALUES (
+                                   (SELECT id FROM ipdesc WHERE ip = ?)
+                                   , ?
+                                   , ?
+                                   , ?
+                                   , ?
+                               )
+        }
+    );
+
+    # read input data
+    my $data;
+
+    # slurp
+    do {
+        local $/;
+        $data = <STDIN>;
+    };
+
+    # blocks
+    my @chunks = split( /\-\-[\n\r]+/, $data );
+
+    foreach my $line (@chunks) {
+        my $ip    = '';
+        my @descs = ();
+
+        # get ip
+        if ( $line =~ m/host\s+(\d+)_(\d+)\s+\{/ ) {
+            $ip = "163.26.$1.$2";
+        }
+
+        # get comments
+        my @lines = split( /[\n\r]+/, $line );
+
+        foreach my $l (@lines) {
+            #if ( $l =~ m/#([^#]+)/ ) {
+            if ( $l =~ m/#+(.+)/ ) {
+                my $t = $1;
+                $t =~ s/(^\s+|\s+$)//g;
+                push( @descs, $t );
+            }
+        }
+
+        # dump
+        print "=> [$ip]\n";
+        foreach my $d (@descs) {
+            print "   [$d]\n";
+        }
+
+        # insert into database
+        $sth->bind_param( 1, $ip );
+        $sth->bind_param( 2, $ip );
+        $sth->bind_param( 3, $descs[0] // '' );
+        $sth->bind_param( 4, $descs[1] // '' );
+        $sth->bind_param( 5, $descs[2] // '' );
+
+        $sth->execute();
+    }
+
+    $sth->finish();
+    $dbh->commit() or die $DBI::errstr;
+    $dbh->disconnect();
+}
+
+main;

@@ -1,0 +1,106 @@
+En ocasiones, cuando se busca mejorar el rendimiento de una Base de Datos, lo más práctico es agregar más copias de la data y dividir la carga de trabajo entre todas.
+
+\section{Replicación}
+
+Se pueden enumerar diversas razones por las cuáles replicar la data, pero en esencia son dos las más importantes: Disponibilidad y escalabilidad.\\
+
+Si el servidor principal se cae se espera que otro asuma  de inmediato su rol. Debido al gran tamaño de muchas bases de datos no se puede esperar copiar la data en el acto, en cambio se debe tener replicado el servidor.\\
+
+La escalabilidad significa que agregando servidores se pueda incrementar el número de accesos a la base de datos sin por eso perjudicar el rendimiento.
+
+\subsection{Conceptos de replicación}
+
+Para entender la replicación se deben comprender los conceptos utilizados.
+
+\begin{itemize}
+\item \textbf{Maestro}: Es el servidor fuente de la data replicada y donde todas las actualizaciones suceden. Solo se puede tener un solo maestro al utilizar las funcionalidades de replicación de PostgreSQL.
+\item \textbf{Esclavo}: Un servidor esclavo es aquel donde se copia la data. PostgreSQL solo soporta esclavos de solo lectura.
+\item \textbf{Write Ahead Log (WAL)}: Es el log que registra todas las transacciones. Es frecuentemente referido como el registro de transacciones en otras Bds. Para la replicación, PostgreSQL hace el registro disponible para los esclavos, una vez que los accceden solo necesitan ejecutar las transacciones en si mismos.
+\item \textbf{Síncrono}: Una transacción en el maestro no se considera completa hasta que todos los esclavos no se han actualizado.
+\item \textbf{Asíncrono}: Una transacción en el maestro se va a realizar así los esclavos no se hayan actualizado. Esto es útil en el caso de servidores distantes donde la latencia de la red es una dificultad. La desventaja es que la data en el esclavo puede quedar desactualizada.
+\item \textbf{Streaming}: El modelo de replicación por streaming fue introducido en la versión 9.0. No requiere acceso directo a los archivos entre maestro y esclavo y se basa en el protocolo de de conexión de PostgreSQL para transmitir los WALs.
+\item \textbf{Replicación en cascada}: Introducido en la versión 9.2, los esclavos pueden recibir logs de otros esclavos, lo cuál permite a un esclavo actuar como un maestro pero nada más que para consultas de solo lectura.
+\end{itemize}
+
+\subsection{Configurar una réplica}
+
+Para el ejemplo de replicación se utilizará la replicación por Streaming de manera tal que el maestro y el esclavo se conecten mediante el protocolo de conexión de PostgreSQL.
+
+\subsubsection{Configurar el maestro}
+
+Los pasos básicos para configurar el maestro son:
+
+\begin{enumerate}
+\item El parámetro \textit{listen\_addresses} de \textit{postgresql.conf} debe permitir conexiones del esclavo.
+
+\item Crear una cuenta de usuario para la réplica.\\
+
+\textit{CREATE ROLE pgrepuser REPLICATION LOGIN PASSWORD 'woohoo';}\\
+
+\item Alterar las siguientes configuraciones es \textit{postgresql.conf}.\\
+
+\textit{wal\_level = hot\_standby \\
+archive\_mode = on \\
+max\_wal\_senders = 10\\}
+
+\item Usar el parámetro archive\_command para indicar donde el WAL va a ser salvado. Con streaming se puede escoger cualquier directorio pero debe asegurarse de que el usuario postgres pueda escribir en este.\\
+
+En *nix el parámetro tendrá un aspecto como el siguiente:\\
+
+\textit{archive\_command = 'cp \%p ../archive/\%f'}\\
+
+Y en Windows:\\
+
+\textit{archive\_command = 'copy \%p ..{\tt\char`\\}{\tt\char`\\}archive{\tt\char`\\}{\tt\char`\\}\%f'}\\
+
+\item En \textit{pg\_hba.conf}, se coloca una regla para permitir que los esclavos sean agentes de replicación. Como ejemplo, la siguiente regla va a permitir a una cuenta de usuario llamada pgrepuser en la red privada con una IP en un rango entre 192.168.0.1 y 192.168.0.254 que utiliza una contraseña en md5.\\
+
+\textit{host replication pgrepuser 192.168.0.0/24 md5}\\
+
+\item Desactivar el servicio Postgresql y copiar del directorio de datos (se puede ver la ruta del directorio de la instalación específica en el parámetro \textit{data\_directory} de \textit{postgresql.conf}) todos los directorios al directorio de datos del esclavo EXCEPTO los directorios \textit{pg\_xlog} y \textit{pg\_log}.
+
+\end{enumerate}
+
+\subsubsection{Configurar el esclavo}
+
+Para minimizar problemas, el esclavo debe tener la misma configuración del maestro, especialmente si se va a utilizar como reemplazo en caso de una caída. Además de la configuración, para ser un esclavo necesita reproducir las transacciones en el WAL (journal de la BD) del maestro. Para lo cuál se necesitan las siguientes instrucciones en el postgresql.conf de la Bd.
+
+\begin{enumerate}
+\item Crear una nueva instancia de PostgreSQL con la misma versión que el maestro y además el mismo S.O. Esto no es un requerimiento estricto pero es recomendable.
+\item Desactivar PostgreSQL.
+\item Reescribir los archivos del directorio de datos con los archivos copiados del maestro.
+\item Establecer el siguiente parámetro en postgresql.conf.\\
+
+\textit{hot\_standby = on}\\
+
+\item Se puede utilizar el puerto por defecto o no, no es necesario que utilice el mismo del maestro.
+\item Crear un nuevo archivo en el folder de datos llamado recovery.conf que contenga las siguientes líneas.\\
+
+\textit{standby\_mode = 'on'\\
+primary\_conninfo = 'host=192.168.0.1 port=5432 user=pgrepuser password=woohoo'\\
+trigger\_file = 'failover.now'\\}
+
+El  nombre del Host, el IP y el puerto deben ser los del maestro.\\
+
+\item Agregar al archivo \textit{recovery.conf} la siguiente línea dependiendo del S.O,pero debe asegurarse de que el usuario postgres pueda escribir en este:\\
+ 
+En un *nix:\\
+
+\textit{restore\_command = 'cp \%p ../archive/\%f'}\\
+
+En Windows:\\
+
+\textit{restore\_command = 'copy \%p ..{\tt\char`\\}{\tt\char`\\}archive{\tt\char`\\}{\tt\char`\\}\%f}\\
+
+Estos comando solo son necesarios si el esclavo no puede reproducir el WAL del maestro con suficiente velocidad, por lo cuál necesita ponerlos en cache.
+\end{enumerate}
+
+\subsubsection{Iniciar el proceso de replicación}
+
+\begin{enumerate}
+\item Iniciar el esclavo primero, si da un error sobre la falta de maestro, ignorarlo.
+\item Iniciar el maestro.
+\end{enumerate}
+
+Cuando se desee liberar el esclavo, se crea un archivo en blanco llamado failover.now en el directorio de datos del esclavo. Luego de crear este archivo  PostgreSQL va a renombrar el archivo recover.conf  a recover.done y va a convertirse en un servidor independiente a partir de ese momento.
+

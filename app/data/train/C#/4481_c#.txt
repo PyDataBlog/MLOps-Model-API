@@ -1,0 +1,86 @@
+﻿namespace Dike.Core.Dependency
+{
+    using Autofac;
+    using Autofac.Builder;
+    using Autofac.Extras.DynamicProxy;
+    using Conditions;
+    using System;
+    using System.Collections.Generic;
+
+    /// <summary>
+    /// Defines extension methods for the <see cref="ContainerBuilder"/> class.
+    /// </summary>
+    public static class RegistrationExtensions
+    {
+        #region Methods
+
+        /// <summary>
+        /// Enable class interception on the target type. Interceptors will be determined
+        /// via Intercept attributes on the class or added with InterceptedBy(). Only virtual
+        /// methods can be intercepted this way.
+        /// </summary>
+        /// <typeparam name="TLimit">Registration limit type.</typeparam>
+        /// <typeparam name="TConcreteReflectionActivatorData">Activator data type.</typeparam>
+        /// <typeparam name="TRegistrationStyle">Registration style.</typeparam>
+        /// <param name="registration">Registration to apply interception to.</param>
+        /// <returns>Registration builder allowing the registration to be configured.</returns>
+        public static IRegistrationBuilder<TLimit, TConcreteReflectionActivatorData, TRegistrationStyle>
+            AddInterceptors<TLimit, TConcreteReflectionActivatorData, TRegistrationStyle>(this IRegistrationBuilder<TLimit, TConcreteReflectionActivatorData, TRegistrationStyle> registration)
+            where TConcreteReflectionActivatorData : ConcreteReflectionActivatorData
+        {
+            registration.Requires(nameof(registration)).IsNotNull();
+
+            List<Type> interceptorServices = new List<Type>();
+
+            Type implementationType = registration.ActivatorData.ImplementationType;
+
+            bool addInterception =
+                Domain.UnitOfWork.UnitOfWorkHelper.IsUnitOfWork(implementationType) ||
+                (!Configuration.Startup.StartupConfiguration.Instance.Dependency.DisableAllInterceptors &&
+                 Runtime.Validation.ValidationHelper.IsApplicationService(implementationType));
+
+            if (addInterception)
+            {
+                if (Domain.UnitOfWork.UnitOfWorkHelper.IsUnitOfWork(implementationType) &&
+                    !interceptorServices.Contains(typeof(Domain.UnitOfWork.Interception.UnitOfWorkInterceptor)))
+                {
+                    interceptorServices.Add(typeof(Domain.UnitOfWork.Interception.UnitOfWorkInterceptor));
+                }
+
+                if (!Configuration.Startup.StartupConfiguration.Instance.Dependency.DisableAllInterceptors &&
+                    Runtime.Validation.ValidationHelper.IsApplicationService(implementationType) &&
+                    !interceptorServices.Contains(typeof(Runtime.Validation.Interception.ValidationInterceptor)))
+                {
+                    interceptorServices.Add(typeof(Runtime.Validation.Interception.ValidationInterceptor));
+                }
+
+                if (!Configuration.Startup.StartupConfiguration.Instance.Dependency.DisableAllInterceptors &&
+                    Auditing.AuditingHelper.ShouldIntercept(implementationType) &&
+                    !interceptorServices.Contains(typeof(Auditing.Interception.AuditingInterceptor)))
+                {
+                    interceptorServices.Add(typeof(Auditing.Interception.AuditingInterceptor));
+                }
+
+                if (!Configuration.Startup.StartupConfiguration.Instance.Dependency.DisableAllInterceptors &&
+                    Authorization.AuthorizationHelper.ShouldIntercept(implementationType) &&
+                    !interceptorServices.Contains(typeof(Authorization.Interception.AuthorizationInterceptor)))
+                {
+                    interceptorServices.Add(typeof(Authorization.Interception.AuthorizationInterceptor));
+                }
+            }
+
+            if (interceptorServices.Count != 0)
+            {
+                return registration
+                    .EnableClassInterceptors()
+                    .InterceptedBy(interceptorServices.ToArray());
+            }
+            else
+            {
+                return registration;
+            }
+        }
+
+        #endregion Methods
+    }
+}

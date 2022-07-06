@@ -1,0 +1,210 @@
+\section{Negation}
+\label{sec:negation}
+
+\subsection{Negation as a Refinement}
+
+Union and base refinements were relatively straightforward extensions to the synthesis process,
+with standard rules and predictable properties.  In addition to providing a more expressive
+specification language, they serve another purpose as the foundation for a far more powerful 
+extension: negation.
+
+Intuitively, a negated refinement indicates that a predicate
+cannot hold on a type.  For example,
+\HasType[\Refines[\DExp][\TNot{\mathsf{Cons~(nat,~Nil)}}]][\textsf{natlist}] states
+that \DExp~is any list that does not have one element. One could also negate cases of
+a partial function: we might state that
+\HasType[\Refines[f][\TNot{\TFunc{1}{2}}]][\TFunc{\mathsf{nat}}{\mathsf{nat}}], requiring
+that $f$ does not map 1 to 2.
+
+Negation is essential for implementing
+counterexample-driven applications like CEGIS~\cite{combinatorial-sketching}, which rely entirely
+on negative examples as synthesis specifications.  By adding negation to the type-directed
+synthesis system, we enable CEGIS for higher-order programs rather than just those with
+integer holes.
+
+To integrate negation into the synthesis process, we add three new refinements (Figure \ref{fig:grammar3})
+whose denotations appear in Figure \ref{fig:denotation2}.
+The first is the \textsf{not} refinement.  Given a refinement \Refinement~on type \DType, applying
+the \textsf{not} refinement describes all values in \DType~except those in \Refines[\Refinement][\DType].  Denotationally, it corresponds to the set complement operator. 
+We can only determine the negation of a refinement if we know the universe \DType~in which it
+resides, so the denotation of a refinement is only defined in the context of the type that
+it refines.
+
+The second new refinement, bottom (\TBot), is a predicate that is always false.  Denotationally,
+it represents the empty set.  Bottom appears as the result of negating a refinement that is always
+true, such as \Refines[\TUnit][\TUnit].  The third new refinement, the existential arrow
+(\TFuncE{\Refinement_1}{\Refinement_2}), is described in the following section.
+
+\subsection{Normalization}
+
+The negative information provided by negation refinements is challenging to integrate
+into the synthesis process in its raw form.  To convert negation into positive information
+amenable to synthesis, we leverage logical and set-theoretic identities to normalize any input
+refinement into a negation-free output.  The normalization function $\mathcal{N}$ is
+defined in Figure \ref{fig:normalization}.
+
+On any input that lacks top-level negation, the normalization function merely recursively normalizes
+subexpressions (top section of Figure \ref{fig:normalization}).  On inputs with top-level negation,
+the normalization function applies special-purpose transformations depending on the structure that
+is being negated.  For example, negation of intersection and union refinements is normalized in
+accordance with DeMorgan's laws, creating negated subterms that themselves must be normalized.  Product
+refinements, another form of logical conjunction, receive similar treatment with a variation of
+DeMorgan's laws applicable to tuples.
+
+The negation of unit and base type refinements, which occupy the entire space of their respective
+type universes, is bottom, the empty set.  Likewise, the negation of bottom is the entirety of its
+type universe, which is a permissible refinement because the grammar of types is a subgrammar
+of the grammar of refinements.  Double negation of a refinement can be normalized away entirely.
+The negation of a constructor normalizes to either the original constructor containing a different
+refinement or another constructor entirely, which we can express as a union.
+
+All of the normalization rules discussed so far are sound and complete with respect to the
+denotational semantics of refinements in Figures \ref{fig:denotation1} and \ref{fig:denotation2}.
+At first glance, we are less fortunate with negating function refinements.  The denotation
+of a function refinement \TFunc{\Refinement_1}{\Refinement_2} of type \TFunc{\DType_1}{\DType_2}
+from Figure \ref{fig:denotation1} is reproduced below:
+
+\begin{adjustwidth}{.5em}{0em}
+\small
+$\{f \in \Denot[\TFunc{\DType_1}{\DType_2}] ~|~$
+     $\forall a \in \Denot[\Refines[\Refinement_1][\DType_1]],$
+     $\exists b \in \Denot[\Refines[\Refinement_2][\DType_2]],~(a, b) \in f\}$
+\end{adjustwidth}
+
+\noindent Note the universal quantifier over the domain followed by an existential quantifier
+over the range.  When we logically negate this refinement, we receive the following
+denotation, with the quantifier ordering reversed and a negative statement about set membership:
+
+\begin{adjustwidth}{.5em}{0em}
+\small
+$\{f \in \Denot[\TFunc{\DType_1}{\DType_2}] ~|~$
+     $\exists a \in \Denot[\Refines[\Refinement_1][\DType_1]],$
+     $\forall b \in \Denot[\Refines[\Refinement_2][\DType_2]],~(a, b) \not\in f\}$
+\end{adjustwidth}
+
+\noindent This statement is equivalent to one in which there exists some value in
+\Denot[\Refines[\Refinement_1][\DType_1]] that $f$ maps to some value in the complement
+of \Denot[\Refines[\Refinement_2][\DType_2]]:
+
+\begin{adjustwidth}{.5em}{0em}
+\small
+$\{f \in \Denot[\TFunc{\DType_1}{\DType_2}] ~|~$
+     $\exists a \in \Denot[\Refines[\Refinement_1][\DType_1]],$
+     $\exists b \in \Denot[\DType_2] \setminus \Denot[\Refines[\Refinement_2][\DType_2]],~(a, b) \in f\}$
+\end{adjustwidth}
+
+\noindent Unfortunately, the refinement language lacks syntax for expressing the double
+existential quantifiers in this statement, giving us no way to write a sound and complete
+normalization rule for the negation of a function refinement.  One naive solution would be to use an
+over-approximation, converting the first existential quantifier into a universal
+quanitifier.  This tactic, however, makes normalization unsound due to the
+contravariance of function arguments.
+
+An alternative approach --- the one we take in this paper --- is to introduce a new refinement
+whose denotation is a function with two existential quantifiers (\TFuncE{\Refinement_1}{\Refinement_2}).
+To clarify the semantics of this refinement, consider the difference between the statements
+\TFunc{\TOrs[1, 2]}{3} and 
+\TFuncE{\TOrs[1, 2]}{3}.  The former statement
+with a conventional arrow implies that any value in the set \TOrs[1, 2]
+maps to a value in the set 3.  In contrast, the latter statement with
+an \emph{existential} arrow implies that \emph{some} value in the set
+\TOrs[1, 2]
+maps to a value in the set 3.
+
+This new syntax enables a sound and complete negation normalization rule for function refinements.
+We can normalize the negation of \Refines[\TFunc{\Refinement_1}{\Refinement_2}][\TFunc{\DType_1}{\DType_2}] into \Refines[\TFuncE{\Refinement_1}{\TNot{\Refinement_2}}][\TFunc{\DType_1}{\DType_2}]
+and, similarly, the negation of \Refines[\TFuncE{\Refinement_1}{\Refinement_2}][\TFunc{\DType_1}{\DType_2}] into \Refines[\TFunc{\Refinement_1}{\TNot{\Refinement_2}}][\TFunc{\DType_1}{\DType_2}].
+The subsumption rules for existential implication are in Figure \ref{fig:subsumption2}.  Existential
+implication is covariant on both of its arguments.  Furthermore, standard implication is a subtype
+of existential implication when both operate on the same refinements.
+
+\subsection{Properties of Normalization}
+
+\textsc{Termination:} The normalization function terminates.
+
+\noindent \emph{Proof:} On refinements without top-level negation, normalization proceeds to smaller
+terms.  On refinements with top-level negation, normalization always proceeds on smaller terms or
+top-level negation of smaller terms. $\square$
+
+\vspace{.3cm}
+
+\noindent \textsc{Correctness:} The normalization function creates negation-free refinements.
+
+\noindent \emph{Proof:} There is a single normalization rule for every possible input.  Every
+normalization rule either has no negation in its result or has negation enclosed within another
+call to the normalization function which, inductively, will be normalized away.  $\square$
+
+\vspace{.3cm}
+
+\noindent \textsc{Soundness and Completeness:} If \Norm[\Refines[\Refinement_1][\DType]] =
+\Refines[\Refinement_2][\DType], then \Denot[\Refines[\Refinement_1][\DType]] =
+\Denot[\Refines[\Refinement_2][\DType]].
+
+\noindent \emph{Proof:} Using induction on the normalization rules and
+basic set-theoretic transformations.  $\square$
+
+\vspace{.3cm}
+
+\noindent \textsc{Justification of Double Negation Cancelation:}\\
+\Norm[\Refines[\TNot{\Norm[\Refines[\TNot{\Refinement}][\DType]]}][\DType]] =
+\Refines[\Refinement][\DType].
+
+\noindent \emph{Proof:} Using the normalization rules and
+basic set-theoretic transformations.  $\square$
+
+\subsection{Synthesis with Existential Implication}
+
+After normalizing an input refinement, we are ready to perform synthesis.  With the exception of
+existential function refinements, the synthesis system is identical to that from the previous
+section.
+
+Existential implication presents a unique challenge for synthesis.  With most other
+refinements, we can perform a step of evaluation in the context.  For example, if
+\Refines[f][\TFunc{\TOrs[1, 2]}{3}] and \Refines[x][1], then we can apply $f$ to $x$
+to create a new expression with refinement 3.  If, instead, \Refines[f][\TFuncE{\TOrs[1, 2]}{3}],
+then applying $f$ to $x$ could \emph{possibly} yield 3.  If we applied $f$ to \Refines[y][\TOrs[1, 2]],
+then the result is \emph{sometimes} 3.  In short, applying an expression refined by an existential
+function does not provide enough information to be useful for synthesis.
+
+Instead, we might re-characterize existential implication as an existential quanitifier applied
+to standard implication.  That is, we could rewrite every
+instance of existential implication \TFuncE{\Refinement_1}{\Refinement_2} as
+$\exists a \in \Refinement_1,~\TFunc{a}{\Refinement_2}$.  By separating the quantifier from
+the implication, we reuse existing theorem-proving techniques for managing existentially
+quantified terms.  An updated right implication rule appears in Figure \ref{fig:rules3}.
+
+The right rule for an existential quantifier replaces the quantified variable with some new term $t$
+that may take on any value chosen by the theorem-prover to complete the proof.  An existential
+quantifier serves as an infinite disjunction over its domain, so, as in the \textsc{Synth-Union-R}
+rule, when we have disjunction in the goal position we are free to prove any conclusion
+of our choosing.  Existentially, this choice manifests itself in the selection of $t$.
+
+The new \textsc{Synth-Impl-R} rule incorporates this behavior,
+replacing the refinement to the left of an existential arrow with
+a chosen, non-empty subtype and subsequently treating the existential arrow as a standard arrow.
+Intuitively, an existential arrow
+\TFuncE{\Refinement_1}{\Refinement_2} in goal position
+requires that we synthesize a program that maps at least
+\emph{some} inhabitant of $\Refinement_1$ to $\Refinement_2$; the choice of which one(s) is up to
+us. The synthesis algorithm decides which nonempty subtype $\Refinement_1'$ of $\Refinement_1$
+the eventual program will map to values in $\Refinement_2$.  After choosing the
+subtype, it can treat existential implication
+as a standard function refinement with the subtype replacing $\Refinement_1$ as the argument.
+
+A corollary of the right rule is that, when the argument refinement of an existential arrow is
+a singleton, there is only one nonempty subtype we can choose: the singleton itself.  That is,
+the updated right implication rule implicitly converts all existential arrows into standard
+arrows when the argument refinement is a singleton, obviating the nondeterministic step of
+choosing a subtype.
+
+The left rule for an existential quantifier states that we can only use an existentially
+quantified term to prove a conclusion if we can prove the same conclusion no matter which
+permissible value the term takes on.  In other words, we can only make use of an existential
+arrow \TFuncE{\Refinement_1}{\Refinement_2} in the context if we can do so regardless of which
+non-empty subtype $\Refinement_1'$ of $\Refinement_1$ that we place in the standard arrow
+\TFunc{\Refinement_1'}{\Refinement_2}.  This rule functions much like an infinite variant
+of the left disjunction rule, in which we have to consider all worlds where an expression
+refined by a union takes on each possible constituent of the disjunction.
+Unfortunately, using an existential quantifier in this way provides no useful way to
+apply a quantified function, so we are unable to make use of existential implication in
+the left implication rule.

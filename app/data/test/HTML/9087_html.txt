@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+    <meta charset="utf-8">
+    <meta http-equiv="X-UA-Compatible" content="IE=edge">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+
+    <title>给gdb写pretty printer碰到的问题</title>
+    <meta name="description" content="之前给libc++写过一个pretty printer插件, 当时还挺好用的, 最近在调试程序不好使了.首先是python版本发生了变化, 老版本python迭代器只需有next函数就可以了, 新版本的换成__next__函数.这个是一个小问题.">
+
+    <link rel="shortcut icon" href="/favicon.ico?" type="image/x-icon">
+    <link rel="icon" href="/favicon.ico?" type="image/x-icon">
+    <link rel="stylesheet" href=" /css/fontawesome/css/font-awesome.min.css ">
+    <link rel="stylesheet" href=" /css/main.css ">
+    <link rel="canonical" href="http://egmkang.github.io/2014/10/17/gdb-pretty-printer/">
+    <link rel="alternate" type="application/rss+xml" title="egmkang" href="http://egmkang.github.io /feed.xml ">
+
+
+
+</head>
+
+
+  <body>
+
+    <header id="top">
+    <div class="wrapper">
+        <a href="/" class="brand">egmkang</a>
+        <small>服务端开发工程师</small>
+        <button id="headerMenu" class="menu"><i class="fa fa-bars"></i></button>
+        <nav id="headerNav">
+            <ul>
+                <li>
+                    
+                    <a href="/">
+                    
+                        <i class="fa fa-home"></i>Home
+                    </a>
+                </li>
+
+                
+                    
+                    <li>
+                        
+                        <a href="/archive/">
+                        
+                            <i class="fa fa-archive"></i>Archives
+                        </a>
+                    </li>
+                    
+                
+                    
+                    <li>
+                        
+                        <a href="/category/">
+                        
+                            <i class="fa fa-th-list"></i>Categories
+                        </a>
+                    </li>
+                    
+                
+                    
+                    <li>
+                        
+                        <a href="/tag/">
+                        
+                            <i class="fa fa-tags"></i>Tags
+                        </a>
+                    </li>
+                    
+                
+                    
+                    <li>
+                        
+                        <a href="/about/">
+                        
+                            <i class="fa fa-"></i>About Me
+                        </a>
+                    </li>
+                    
+                
+                    
+                
+                    
+                
+                    
+                
+                    
+                
+                    
+                
+                    
+                
+            </ul>
+        </nav>
+    </div>
+</header>
+
+
+        <div class="page clearfix" post>
+    <div class="left">
+        <h1>给gdb写pretty printer碰到的问题</h1>
+        <div class="label">
+
+            <div class="label-card">
+                <i class="fa fa-calendar"></i>2014-10-17
+            </div>
+
+            <div class="label-card">
+                
+            </div>
+
+            <div class="label-card">
+                
+            </div>
+
+            <div class="label-card">
+            
+
+
+<!-- <span class="point">•</span> -->
+<span class="categories">
+  <i class="fa fa-th-list"></i>
+  
+    
+        <a href="/category/#gdb" title="Category: gdb" rel="category">gdb</a>
+    
+  
+
+  <!-- <span class="point">•</span> -->
+</span>
+
+
+            </div>
+
+            <div class="label-card">
+            
+<!-- <span class="point">•</span> -->
+<span class="pageTag">
+  <i class="fa fa-tags"></i>
+  
+    
+        <!--a href="/tag/#python" title="Tag: python" rel="tag">python</a-->
+        <a href="/tag/#python" title="Tag: python" rel="tag">python</a>&nbsp;
+    
+        <!--a href="/tag/#pretty+printer" title="Tag: pretty printer" rel="tag">pretty printer</a-->
+        <a href="/tag/#pretty printer" title="Tag: pretty printer" rel="tag">pretty printer</a>
+    
+  
+
+</span>
+
+            </div>
+
+        </div>
+        <hr>
+        <article itemscope itemtype="http://schema.org/BlogPosting">
+        <p>之前给libc++写过一个pretty printer插件, 当时还挺好用的, 最近在调试程序不好使了.
+首先是python版本发生了变化, 老版本python迭代器只需有<code class="highlighter-rouge">next</code>函数就可以了, 新版本的换成<code class="highlighter-rouge">__next__</code>函数.
+这个是一个小问题.</p>
+
+<p>碰到了一个大问题, 以前写代码的时候, 没有考虑<code class="highlighter-rouge">typedef</code>之后的类型:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="cp">#include &lt;vector&gt;
+</span><span class="kt">int</span> <span class="nf">main</span><span class="p">()</span>
+<span class="p">{</span>
+  <span class="k">typedef</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">int</span><span class="o">&gt;</span> <span class="n">IntVector</span><span class="p">;</span>
+  <span class="n">IntVector</span> <span class="n">aaa</span><span class="p">;</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>在这个实例程序中, 变量<code class="highlighter-rouge">aaa</code>的类型是<code class="highlighter-rouge">IntVector</code>, 导致我用正则表达式匹配<code class="highlighter-rouge">vector</code>时失败, 没有匹配到, 然后也就不会调用pretty printer.
+后来查阅资料才发现, gdb的python模块是支持获取typedef之前的<strong>类型</strong>的:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++">  <span class="k">typename</span> <span class="o">=</span> <span class="n">str</span><span class="p">(</span><span class="n">val</span><span class="p">.</span><span class="n">type</span><span class="p">.</span><span class="n">strip_typedefs</span><span class="p">())</span></code></pre></figure>
+
+<p>至此, 这个pretty printer终于算是写完了…
+之前都是半成品:(</p>
+
+
+        </article>
+        <hr>
+
+        
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+                
+                    
+                
+                    
+                
+            
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+                
+                    
+                
+                    
+                
+            
+                
+                    
+                
+                    
+                
+            
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+        
+            
+            
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+        
+            
+            
+                
+                    
+                
+                    
+                
+            
+        
+        
+
+        <div class="post-recent">
+    <div class="pre">
+        
+        <p><strong>上一篇</strong> <a href="/2014/09/10/vim-plugin/">vim-plugin</a></p>
+        
+    </div>
+    <div class="nex">
+
+        
+        <p><strong>下一篇</strong> <a href="/2014/10/21/cpp-constructors/">C++里面的构造函数</a></p>
+        
+    </div>
+</div>
+
+
+        <h2 id="comments">Comments</h2>
+        
+<div id="disqus_thread"></div>
+<script>
+    /**
+     * RECOMMENDED CONFIGURATION VARIABLES: EDIT AND UNCOMMENT THE SECTION BELOW TO INSERT DYNAMIC VALUES FROM YOUR PLATFORM OR CMS.
+     * LEARN WHY DEFINING THESE VARIABLES IS IMPORTANT: https://disqus.com/admin/universalcode/#configuration-variables
+     */
+
+    var disqus_config = function() {
+        this.page.url = 'http://egmkang.github.io/2014/10/17/gdb-pretty-printer/'; // Replace PAGE_URL with your page's canonical URL variable
+        this.page.identifier = 'http://egmkang.github.io/2014/10/17/gdb-pretty-printer/'; // Replace PAGE_IDENTIFIER with your page's unique identifier variable
+    };
+
+    (function() { // DON'T EDIT BELOW THIS LINE
+        var d = document,
+            s = d.createElement('script');
+
+        s.src = '//egmkang.disqus.com/embed.js';
+
+        s.setAttribute('data-timestamp', +new Date());
+        (d.head || d.body).appendChild(s);
+    })();
+</script>
+<noscript>Please enable JavaScript to view the <a href="https://disqus.com/?ref_noscript" rel="nofollow">comments powered by Disqus.</a></noscript>
+
+
+
+
+    </div>
+    <button class="anchor"><i class="fa fa-anchor"></i></button>
+    <div class="right">
+        <div class="wrap">
+
+            <!-- Content -->
+            <div class="side content">
+                <div>
+                    Content
+                </div>
+                <ul id="content-side" class="content-ul">
+                    <li><a href="#similar_posts">Similar Posts</a></li>
+                    <li><a href="#comments">Comments</a></li>
+                </ul>
+            </div>
+            <!-- 其他div框放到这里 -->
+            <!-- <div class="side">bbbb</div> -->
+        </div>
+    </div>
+</div>
+<script>
+/**
+ * target _blank
+ */
+(function() {
+    var aTags = document.querySelectorAll('article a:not([id])')
+    for (var i = 0; i < aTags.length; i++) {
+        aTags[i].setAttribute('target', '_blank')
+    }
+}());
+</script>
+<script src="/js/pageContent.js " charset="utf-8"></script>
+
+
+    <footer class="site-footer">
+
+
+    <div class="wrapper">
+
+        <p class="description">
+            
+        </p>
+        <p class="contact">
+            Contact me at: 
+            <a href="https://github.com/egmkang" title="GitHub"><i class="fa fa-github" aria-hidden="true"></i></a>    
+            <a href="https://www.zhihu.com/people/egmkang" title="Zhihu"><i class="iconfont">&#xe829;</i></a>      
+        </p>
+        <p class="power">
+            <span>
+                Site powered by <a href="https://jekyllrb.com/">Jekyll</a> & <a href="https://pages.github.com/">Github Pages</a>.
+            </span>
+            <span>
+                Theme designed by <a href="https://github.com/Gaohaoyang">HyG</a>.
+            </span>
+        </p>
+    </div>
+</footer>
+
+    <div class="back-to-top">
+    <a href="#top" class="scroll">
+        <i class="fa fa-arrow-up" aria-hidden="true"></i>
+    </a>
+</div>
+
+    <script src=" /js/main.js " charset="utf-8"></script>
+    <script src=" /js/scroll.min.js " charset="utf-8"></script>
+    <div style="margin-left:auto;margin-right:auto;text-align:center; ">
+    <script>
+var _hmt = _hmt || [];
+(function() {
+    var hm = document.createElement("script");
+      hm.src = "//hm.baidu.com/hm.js?69ada1917dfd044b166bb71e194ae8dd";
+        var s = document.getElementsByTagName("script")[0]; 
+          s.parentNode.insertBefore(hm, s);
+})();
+    </script>
+    </div>
+  </body>
+</html>

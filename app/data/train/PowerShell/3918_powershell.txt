@@ -1,0 +1,69 @@
+#Add Azure Account
+Add-AzureAccount
+
+#Get the subscription, and set the default subscription
+Get-AzureSubscription | Select SubscriptionName
+$SubscriptionName = Read-Host 'Which subscription would you like to use?'
+Select-AzureSubscription -SubscriptionName $SubscriptionName –Default
+
+#Switch to Azure Resource Manager
+Switch-AzureMode AzureResourceManager
+
+#Prompt for Username
+$name = Read-Host 'What is your username?'
+
+## Global
+$ResourceGroupName = $name + "DockerRG"
+$Location = "East US 2"
+
+## Storage
+$StorageName = "dockerstorage01"
+
+
+
+## Network
+$NICName = $name + "DockerNIC-01"
+$Subnet1Name = "Subnet1"
+$VNetName = $name + "DockerVNet1"
+$VNetAddressPrefix = "10.0.0.0/16"
+$VNetSubnetAddressPrefix = "10.0.0.0/24"
+
+## Compute
+$VMName = "DockerVM01"
+$ComputerName = "DockerVM01"
+$VMSize = "Standard_A2"
+$OSDiskName = $VMName + "osDisk"
+
+Write-Host
+Write-Host "Creating Resource Group..."
+New-AzureResourceGroup -Name $ResourceGroupName -Location $Location
+
+Write-Host
+Write-Host "Creating Storage Account..."
+$StorageAccount = New-AzureStorageAccount -ResourceGroupName $ResourceGroupName -Name $StorageName -Location $Location -Type Standard_GRS
+
+
+Write-Host
+Write-Host "Creating VNet & Subnet..."
+$SubnetConfig = New-AzureVirtualNetworkSubnetConfig -Name $Subnet1Name -AddressPrefix $VNetSubnetAddressPrefix 
+$VNet = New-AzureVirtualNetwork -Name $VNetName -ResourceGroupName $ResourceGroupName -Location $Location -AddressPrefix $VNetAddressPrefix -Subnet $SubnetConfig
+$pip = New-AzureRmPublicIpAddress -ResourceGroupName $ResourceGroupName -Name "DockerPIP" -Location $Location -AllocationMethod Dynamic
+$Interface = New-AzureNetworkInterface -Name $NICName -ResourceGroupName $ResourceGroupName -Location $Location -SubnetId $VNet.Subnets[0].Id -PublicIpAddressId $pip.Id
+
+Write-Host
+Write-Host "Configuring VM.."
+## Setup local VM object
+$Credential = Get-Credential
+$VirtualMachine = New-AzureVMConfig -VMName $VMName -VMSize $VMSize
+$VirtualMachine = Set-AzureVMOperatingSystem -VM $VirtualMachine -Linux -ComputerName $ComputerName -Credential $Credential -ProvisionVMAgent
+$VirtualMachine = Set-AzureVMSourceImage -VM $VirtualMachine -PublisherName Canonical -Offer UbuntuServer -Skus 15.04 -Version "latest" 
+$VirtualMachine = Add-AzureVMNetworkInterface -VM $VirtualMachine -Id $Interface.Id
+$OSDiskUri = $StorageAccount.PrimaryEndpoints.Blob.ToString() + $VMName.ToLower() + "/" + $OSDiskName + ".vhd"
+$VirtualMachine = Set-AzureVMOSDisk -VM $VirtualMachine -Name $OSDiskName -VhdUri $OSDiskUri -CreateOption FromImage
+
+Write-Host
+Write-Host "Creating VM..."
+## Create the VM in Azure
+New-AzureVM -ResourceGroupName $ResourceGroupName -Location $Location -VM $VirtualMachine
+
+Set-AzureVMExtension -ResourceGroupName $ResourceGroupName -Location $Location -VMName $VMName -Name "Docker" -Publisher "Microsoft.Azure.Extensions" -ExtensionType "DockerExtension" -TypeHandlerVersion "1.1" 

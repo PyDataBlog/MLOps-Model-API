@@ -1,0 +1,152 @@
+using Pkg, DataFrames, Statistics
+
+
+"""
+    recompile_all()
+Update and precompile all stale packages
+"""
+function recompile_all()
+    Pkg.update()
+    for pkg in Pkg.installed()
+        try
+            pkgsym = Symbol(pkg[1])
+            eval(:(using $pkgsym))
+        catch
+        end
+    end
+end
+
+
+"""
+    row_apply(func::Function, df::AbstractDataFrame)::Array{Real,1}
+
+Apply a function to each row of a `DataFrame`, ignoring `missing` and non-`Real` numbers
+
+If the function fails when applied across the row (e.g. no data), `missing` will be filled
+
+**Arguments**
+
+* `func` an aggregation function to apply to each row
+* `df` a `DataFrame`
+
+"""
+function row_apply(func::Function, df::AbstractDataFrame)::Array{Real,1}
+    nonmissing = Real[]
+    for row in eachrow(df)
+        current_row = Real[]
+        for i in 1:length(row)
+            res = row[i]
+            if !ismissing(res) && typeof(res) <: Real
+                append!(current_row, res)
+            end
+        end
+        res = 0.0
+        try
+            res = func(current_row)
+        catch
+            res = missing
+        end
+        append!(nonmissing, res)
+    end
+    return nonmissing
+end
+
+
+"""
+    sort_row(row::DataFrameRow, func::Function=argmax)
+
+Reorder the columns in a `DataFrameRow` with a function. Ignore `missing` values.
+By default sort from max to min using `argmax`.
+
+**Arguments**
+
+* `row` a `DataFrame` row
+* `func` a function to sort the row by
+
+"""
+function sort_row(row::DataFrameRow, func::Function=argmax)
+    row_names = copy(names(row))
+    row_vals = copy([row[val] for val in 1:length(row)])
+    # Missing data can't generate events, so remove it
+    missing_mask = map(x -> !ismissing(x), row_vals)
+    row_names = row_names[missing_mask]
+    row_vals = row_vals[missing_mask]
+    new_order = Symbol[]
+    while(length(row_vals)) > 0
+        selected_position = func(row_vals)
+        row_name = row_names[selected_position]
+        deleteat!(row_vals, selected_position)
+        deleteat!(row_names, selected_position)
+        push!(new_order, row_name)
+    end
+    # If all missing, return nothing
+    if length(new_order) == 0
+        return nothing
+    end
+
+    present_data = row[new_order]
+    return present_data
+end
+
+
+####################################################################################################
+# Tests
+####################################################################################################
+
+
+# Tests for row_apply()
+sample_df = DataFrame(Dict("a" => [1, 2, 3], "b" => [4, 5, 6], "c" => ['a', 'b', 'c']))
+row_output = row_apply(sum, sample_df)
+row_sum = [5, 7, 9]
+@assert row_sum == row_output
+mean_output = row_apply(mean, sample_df)
+expected_output = row_sum / 2
+@assert mean_output == expected_output
+max_output = row_apply(maximum, sample_df)
+@assert max_output == sample_df[:b]
+
+
+sample_df[:a] = repeat([missing], size(sample_df, 1))
+row_output = row_apply(sum, sample_df)
+expected_output = sample_df[:b]
+@assert row_output == expected_output
+
+sample_df[:b] = repeat([missing], size(sample_df, 1))
+row_output = row_apply(sum, sample_df)
+expected_output = [0, 0, 0]
+@assert row_output == expected_output
+
+# Tests with random DataFrame
+n_row = 100
+n_col = 10000
+rand_df = DataFrame(randn(n_row, n_col))
+row_sum = row_apply(sum, rand_df)
+row_max = row_apply(maximum, rand_df)
+row_min = row_apply(minimum, rand_df)
+#row_mean = row_apply(mean, rand_df)
+#row_var = row_apply(var, rand_df)
+#@assert all(row_mean .<= rand_df)
+row_length = row_apply(length, rand_df)
+@assert Set(row_length) == Set([n_col])
+
+
+# Tests for sort_row()
+data_dict= Dict("a" => [1, missing, missing],
+                "b" => [2, 2, missing],
+                "c" => [3, 1, missing])
+test_df = DataFrame(data_dict)
+rows = [row for row in eachrow(test_df)]
+max_sort = collect(pairs(sort_row(rows[1])))
+min_sort = collect(pairs(sort_row(rows[1], argmin)))
+@assert max_sort == reverse(min_sort)
+@assert max_sort == [:c => 3, :b => 2, :a => 1]
+
+max_sort = collect(pairs(sort_row(rows[2])))
+min_sort = collect(pairs(sort_row(rows[2], argmin)))
+@assert max_sort == reverse(min_sort)
+@assert max_sort == [:b => 2, :c => 1]
+
+max_sort = sort_row(rows[3])
+min_sort = sort_row(rows[3], argmin)
+@assert typeof(max_sort) <: Nothing
+@assert typeof(min_sort) <: Nothing

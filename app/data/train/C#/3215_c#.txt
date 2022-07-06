@@ -1,0 +1,1414 @@
+//------------------------------------------------------------------------------
+// Piece Manipulation Device (c) 2010 Robert MacGregor
+// Version: 3.0b
+// Comment: This file has went through much organization and it still isn't
+// very neat!
+//
+// ----------------------------- Description -----------------------------------
+// The Piece Manipulation Device is a special pack that enables
+// you to create special effects on your creations by directly modifying
+// any pieces found upon its list. When the device gains power, it scans
+// a list of its pieces and takes the appropiate action for each one.
+//
+// Supported Actions:
+//
+// 1. Cloaking
+// 2. Fading
+// 3. Hiding (Just like fade, except the object cannot by collided with)
+// 4. Scaling
+// 5. Naming
+// 6. Rotation (A special tool will be added to handle this)
+//
+// All of the above performance options are performed when the device gains
+// power. The action taken will be undone when the device loses power.
+//
+// ------------------------------- Agreement -----------------------------------
+//
+// You may use this pack as a part of any other mod as long as
+// you agree to the following terms:
+//
+// 1. You MAY NOT strip my name Robert MacGregor
+// from any part of the script. This includes the header you are reading now.
+//
+// 2. You must directly state that I, Robert MacGregor created this pack in a
+// clearly seen place in Tribes 2. This may include the debriefGui,
+// loadingGui or bottom & center print texts.
+//
+// 3. You MAY NOT modify any of the functioning code without my explicit
+// permission. You can however, modify the settings that are GLOBAL VARIABLES.
+//
+// If you cannot abide by those terms, then don't edit this file at all.
+//------------------------------------------------------------------------------
+
+// Settings
+$Editor::MaxScale["X"] = 20;
+$Editor::MaxScale["Y"] = 20;
+$Editor::MaxScale["Z"] = 20;
+$Editor::MinScale["X"] = -20;
+$Editor::MinScale["Y"] = -20;
+$Editor::MinScale["Z"] = -20;
+// Hidden Debris Option
+$Editor::Debris::Enabled = false;
+$Editor::Debris::MinMS = 100;
+$Editor::Debris::Max = 5;
+$Editor::Debris::Count = 0;
+
+// Datablocks (From here on out, you cannot modify)
+datablock StaticShapeData(DeployedEditorPack) : StaticShapeDamageProfile
+{
+    className = "EditorPack";
+    shapeFile = "stackable2s.dts";
+    maxDamage = 2.0;
+    destroyedLevel = 2.0;
+    disabledLevel = 2.0;
+    mass = 1.2;
+    elasticity = 0.1;
+    friction = 0.9;
+    collideable = 1;
+    pickupRadius = 1;
+    sticky = false;
+
+    explosion      = HandGrenadeExplosion;
+    expDmgRadius = 1.0;
+    expDamage = 0.1;
+    expImpulse = 200.0;
+    dynamicType = $TypeMasks::StaticShapeObjectType;
+    deployedObject = true;
+    cmdCategory = "DSupport";
+    cmdIcon = CMDSensorIcon;
+    cmdMiniIconName = "commander/MiniIcons/com_deploymotionsensor";
+
+    targetNameTag = 'Piece Manipulation';
+    targetTypeTag = 'Device';
+    deployAmbientThread = true;
+    debrisShapeName = "debris_generic_small.dts";
+    debris = DeployableDebris;
+    heatSignature = 0;
+   	needsPower = true;
+};
+
+datablock ShapeBaseImageData(EditorPackDeployableImage)
+{
+    mass = 10;
+    emap = true;
+    shapeFile = "stackable1s.dts";
+    item = EditorPackDeployable;
+    mountPoint = 1;
+    offset = "0 0 0";
+    deployed = DeployedEditorPack;
+    heatSignature = 0;
+    collideable = 1;
+    stateName[0] = "Idle";
+    stateTransitionOnTriggerDown[0] = "Activate";
+
+    stateName[1] = "Activate";
+    stateScript[1] = "onActivate";
+    stateTransitionOnTriggerUp[1] = "Idle";
+
+    isLarge = true;
+    maxDepSlope = 360;
+    deploySound = ItemPickupSound;
+
+    minDeployDis = 0.5;
+    maxDeployDis = 5.0;
+};
+
+datablock ItemData(EditorPackDeployable)
+{
+    className = Pack;
+    catagory = "Deployables";
+    shapeFile = "stackable1s.dts";
+    mass = 5.0;
+    elasticity = 0.2;
+    friction = 0.6;
+    pickupRadius = 1;
+    rotate = true;
+    image = "EditorPackDeployableImage";
+    pickUpName = "a Piece Manipulation Device";
+    heatSignature = 0;
+    emap = true;
+};
+
+// Code
+function EditorPackDeployableImage::onDeploy(%item, %plyr, %slot)
+{
+   %className = "StaticShape";
+
+   %playerVector = vectorNormalize(getWord(%plyr.getEyeVector(),1) SPC -1 * getWord(%plyr.getEyeVector(),0) SPC "0");
+   %item.surfaceNrm2 = %playerVector;
+
+   if (vAbs(floorVec(%item.surfaceNrm,100)) $= "0 0 1")
+   %item.surfaceNrm2 = %playerVector;
+   else
+   %item.surfaceNrm2 = vectorNormalize(vectorCross(%item.surfaceNrm,"0 0 -1"));
+
+   %rot = fullRot(%item.surfaceNrm,%item.surfaceNrm2);
+
+   %deplObj = new (%className)()
+   {
+   dataBlock = %item.deployed;
+   scale = "1 1 1";
+   };
+
+   // set orientation
+   %deplObj.setTransform(%item.surfacePt SPC %rot);
+   %deplObj.deploy();
+   // set team, owner, and handle
+   %deplObj.team = %plyr.client.Team;
+   %deplObj.setOwner(%plyr);
+   %deplObj.paded=1;
+   //Msg Client
+   messageclient(%plyr.client, 'MsgClient', "\c2Type /editor CMDs for a list of device CMD's.");
+   // set the sensor group if it needs one
+   if (%deplObj.getTarget() != -1)
+   setTargetSensorGroup(%deplObj.getTarget(), %plyr.client.team);
+
+   // place the deployable in the MissionCleanup/Deployables group (AI reasons)
+   addToDeployGroup(%deplObj);
+    
+   //Set the power frequency
+   %deplObj.powerFreq = %plyr.powerFreq;
+   checkPowerObject(%deplObj);
+
+   //let the AI know as well...
+   AIDeployObject(%plyr.client, %deplObj);
+
+   // play the deploy sound
+   serverPlay3D(%item.deploySound, %deplObj.getTransform());
+
+   // increment the team count for this deployed object
+   $TeamDeployedCount[%plyr.team, %item.item]++;
+
+   addDSurface(%item.surface,%deplObj);
+
+   %deplObj.playThread($PowerThread,"Power");
+   %deplObj.playThread($AmbientThread,"ambient");
+
+   // take the deployable off the player's back and out of inventory
+   %plyr.unmountImage(%slot);
+   %plyr.decInventory(%item.item, 1);
+   //Set the slot count
+   %deplobj.slotcount = 1; //For /editor addobj
+   
+   //Set the type
+   %type = addTaggedString("Device ("@%plyr.powerFreq@")");
+   setTargetType(%deplObj.target,%type);
+
+   return %deplObj;
+}
+
+function EditorPack::onCollision(%data,%obj,%col)
+{
+   // created to prevent console errors
+}
+
+function EditorPackDeployable::onPickup(%this, %obj, %shape, %amount)
+{
+   // created to prevent console errors
+}
+
+function EditorPackDeployableImage::onMount(%data, %obj, %node)
+{
+   displayPowerFreq(%obj);
+}
+
+function EditorPackDeployableImage::onUnmount(%data, %obj, %node) {
+   // created to prevent console errors
+}
+
+function DeployedEditorPack::gainPower(%data, %obj)
+{
+   if (%obj.IsPowered) //A source was turned off when multiple ones exist
+   return;
+
+   EditorPerform(%obj);
+}
+
+function DeployedEditorPack::losePower(%data, %obj)
+{
+
+   if (!%obj.IsPowered) //Already off.
+   return;
+   
+   %obj.RevertPieces(false);
+}
+
+function DeployedEditorPack::onDestroyed(%this, %obj, %prevState)
+{
+   %obj.RevertPieces(true);
+   if (%obj.isRemoved)
+   return;
+   %obj.isRemoved = true;
+   Parent::onDestroyed(%this, %obj, %prevState);
+   $TeamDeployedCount[%obj.team, bogypackDeployable]--;
+   remDSurface(%obj);
+   %obj.schedule(500, "delete");
+   fireBallExplode(%obj,1);
+}
+
+function DeployedEditorPack::Disassemble(%data,%plyr,%obj)
+{
+%obj.RevertPieces(true);
+Parent::Disassemble(%data,%plyr,%obj);
+}
+
+//*********************************************\\
+// Command Code                               *\\
+//*********************************************\\
+
+function ccEditor(%sender,%args)
+{
+   %f = getWord(%args,0);
+   %f = strLwr(%f); //Convert To LowerCase
+   %f = stripChars(%f," "); //Strip spaces.
+   %pos        = %sender.player.getMuzzlePoint($WeaponSlot);
+   %vec        = %sender.player.getMuzzleVector($WeaponSlot);
+   %targetpos  = vectoradd(%pos,vectorscale(%vec,100));
+   %obj        = containerraycast(%pos,%targetpos,$typemasks::staticshapeobjecttype,%sender.player);
+   %obj        = getword(%obj,0);
+   
+   if (%f $="")
+   {
+   messageclient(%sender,'msgclient',"\c2No command specified, please type '/Editor Help' for a list of commands.");
+   return 1;
+   }
+   else if (!EvaluateFunction(%f))
+   {
+   messageclient(%sender,'msgclient','\c2Unknown command: %1.', %f);
+   return 1;
+   }
+
+   else if (%f $="help" || %f $="cmds")
+   {
+   messageclient(%sender,'msgclient',"\c2/Editor Select - Selects the device you're looking at.");
+   messageclient(%sender,'msgclient',"\c2/Editor DelObj - Removes the object you're looking at from your currently selected device.");
+   messageclient(%sender,'msgclient',"\c2/Editor List - If you own the device you're looking at, this command will list all pieces assigned to it.");
+   messageclient(%sender,'msgclient',"\c2/Editor Cloak - Adds the object you're looking at to your device's currently selected cloak list.");
+   messageclient(%sender,'msgclient',"\c2/Editor Fade - Adds the object you're looking at to your device's currently selected fade list.");
+   messageclient(%sender,'msgclient',"\c2/Editor Name <New Name> - Adds the object you're looking at to your currently selected device's fade list.");
+   messageclient(%sender,'msgclient',"\c2/Editor Scale <New Scale> - Adds the object you're looking at to your currently selected device's scale list.");
+   messageclient(%sender,'msgclient',"\c2/Editor Hide - Adds the object you're looking at to your currently selected device's fade list.");
+   messageclient(%sender,'msgclient',"\c2/Editor Rotate <Rotation> - Adds the object you're looking at to your currently selected device's rotation list.");
+   
+   if ($Editor::Debris::Enabled)
+   messageclient(%sender,'msgclient',"\c2/Editor Debris <Human-Bioderm> <TimeMS> - Adds the object you're looking at to your currently selected device's debris list.");
+   return 1;
+   }
+
+   else if (!%obj)
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to find an object.");
+   return 1;
+   }
+   
+   else if (IsObject(%obj) && IsValidClass(%obj.getclassname()))
+   {
+   messageclient(%sender,'msgclient','\c2Invalid object. Error: Invalid Class - %1.', %obj.getclassname());
+   return 1;
+   }
+   
+   else if (%f $="delobj")
+   {
+   ProcessDelObj(%sender,%obj,%args);
+   return 1;
+   }
+   
+   else if (%f $="list")
+   {
+   ProcessList(%sender,%obj);
+   return 1;
+   }
+   
+   else if (%f $="size")
+   {
+   ProcessSize(%sender,%obj);
+   return 1;
+   }
+
+   else if (%f $="addobj")
+   {
+   ProcessAddObj(%sender,%obj);
+   return 1;
+   }
+   
+   else if (%f $="debris")
+   {
+   ProcessDebris(%sender,%obj,%args);
+   return 1;
+   }
+
+   else if (%f $="fade")
+   {
+   ProcessFade(%sender,%obj,%args);
+   return 1;
+   }
+   
+   else if (%f $="cloak")
+   {
+   ProcessCloak(%sender,%obj,%args);
+   return 1;
+   }
+   
+   else if (%f $="scale")
+   {
+   ProcessScale(%sender,%obj,%args);
+   return 1;
+   }
+   
+   else if (%f $="rotate")
+   {
+   ProcessRotate(%sender,%obj,%args);
+   return 1;
+   }
+   
+   else if (%f $="name")
+   {
+   ProcessName(%sender,%obj,%args);
+   return 1;
+   }
+   
+   else if (%f $="hide")
+   {
+   ProcessHide(%sender,%obj,%args);
+   return 1;
+   }
+   else
+   {
+   ProcessEditorRequest(%sender,%obj,%f);
+   return 1;
+   }
+   messageclient(%sender,'msgclient',"\c2Piece Editor: An unknown error has occurred. Code: 1"); //Shouldn't see this
+return 1;
+}
+   
+function ProcessList(%sender,%obj)
+{
+   if (IsObject(%obj))
+   {
+   %count = %obj.slotcount;
+   %count = %count - 1;
+   
+   if (%count > 1)
+   {
+   for (%i = 0; %i < %count; %i++)
+   {
+   %slotobj = %obj.slot[%i];
+   
+   if (IsObject(%slotobj))
+   {
+   messageclient(%sender,'msgclient','\c2%1: %2 - %3', %i, %slotobj, %slotobj.getclassname());
+   }
+   else
+   {
+   messageclient(%sender,'msgclient','\c2%1: %2 - Does not exist. You should not see this error. Code: 2.', %i, %slotobj);
+   }
+   }
+   }
+   else
+   {
+   messageclient(%sender,'msgclient','\c2This device has an invalid slot count: %1. You should not see this error. Code: 3.', %count);
+   return;
+   }
+   }
+   
+   else
+   {
+   messageclient(%sender,'msgclient','\c2Object %1 does not exist. You should not see this error. Code: 4', %obj);
+   return;
+   }
+}
+   
+function ProcessEditorRequest(%sender,%obj,%f)
+{
+   if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2This editor pack is not yours!");
+   return;
+   }
+   
+   if (%obj.getdatablock().getname() !$="DeployedEditorPack")
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to edit devices!");
+   return;
+   }
+   
+   if (%f $="select" || %f $="selecteditor" || %f = "seledit")
+   {
+   %sender.currentedit = %obj;
+   %obj.cloakAnim(500);
+   messageclient(%sender,'msgclient',"\c2Current device set.");
+   return;
+   }
+}
+   
+function ProcessAddObj(%sender,%obj)
+{
+   if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2This object is not yours!");
+   return;
+   }
+   if (!IsObject(%Sender.CurrentEdit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected! You can use '/Editor Select' while pointing at a device to select it.");
+   return;
+   }
+   if (%obj.getdatablock().getname() $= "DeployedEditorPack")
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to edit Piece Manipulating Devices!");
+   return;
+   }
+   %Slots = %sender.currentedit.slotcount;
+   %edit = %sender.currentedit;
+   for (%i=0;%i<%slots;%i++)
+   {
+   if (%edit.slot[%i] $="")
+   {
+   %edit.slot[%i] = %obj;
+   %edit.slotcount++;
+   messageclient(%sender,'msgclient','\c2Object has been added to your current device. (%1)', %i);
+   %obj.slot = %i;
+   %obj.editor = true;
+   %obj.cloakAnim(500);
+   return;
+   }
+   }
+}
+   
+function ProcessDelObj(%sender,%obj,%args)
+{
+   %edit = %sender.currentedit;
+   
+   if (!IsObject(%edit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return;
+   }
+   if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2Not your object!");
+   return;
+   }
+   if (!%obj.editor)
+   {
+   messageclient(%sender,'msgclient',"\c2This object is not bound to a device!");
+   return;
+   }
+   messageclient(%sender,'msgclient','\c2Object deleted from your currently selected device. (%1)', %edit.slot[%obj.slot]);
+   %edit.slot[%obj.slot] = "";
+   %obj.slot = "";
+   %obj.editor = false;
+   Revert(%obj,"all");
+   %obj.cloakAnim(500);
+   if (%edit.slotcount > 1)
+   %edit.slotcount--;
+}
+
+function ProcessRotate(%sender,%obj,%args)
+{
+   %edit = %sender.currentedit;
+   %args = GetWords(%args, 1);
+
+   if (!IsObject(%edit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return;
+   }
+   if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2Not your object!");
+   return;
+   }
+   
+   if (%obj.istrotate)
+   {
+   Revert(%obj,"rotation");
+   messageclient(%sender,'msgclient','\c2Object has been removed from your current device\'s rotation list.');
+
+   %obj.cloakAnim(500);
+   }
+   else
+   {
+   
+   if (%args $= "")
+   {
+   messageclient(%sender,'msgclient','\c2No rotation angle set.');
+   return 1;
+   }
+   else if (%args $= "L")
+   {
+   return 1;
+   }
+   else
+   {
+   if (!%obj.editor)
+   ProcessAddObj(%Sender,%obj);
+
+   %obj.istrotate = true;
+   %obj.erotation = %args;
+   %obj.oldrotation = %obj.getRotation();
+   %obj.iserotated = false;
+   
+   %obj.cloakAnim(500);
+   
+   messageclient(%sender,'msgclient','\c2Object will be rotated with the following angles: %1.', %args);
+   }
+
+   }
+   
+}
+   
+function ProcessScale(%sender,%obj,%args)
+{
+   %scale = getwords(%args,1);
+   %edit = %sender.currentedit;
+
+   if (!IsObject(%edit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return;
+   }
+   
+   else if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2Not your object!");
+   return;
+   }
+   
+   else if (%obj.getdatablock().getname() $= "DeployedEditorPack")
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to scale devices!");
+   return;
+   }
+   
+   else if (%scale $="" && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient',"\c2No scale specified.");
+   return;
+   }
+   
+   else if (getword(%scale,0) > $Editor::MaxScale["X"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The scale %1 is invalid. The X axis is too big. Max: %2', %scale, $Editor::MaxScale["X"]);
+   return;
+   }
+   
+   else if (getword(%scale,1) > $Editor::MaxScale["Y"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The scale %1 is invalid. The Y axis is too big. Max: %2', %scale, $Editor::MaxScale["Y"]);
+   return;
+   }
+   
+   else if (getword(%scale,2) > $Editor::MaxScale["Z"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The scale %1 is invalid. The Z axis is too big. Max: %2', %scale,$Editor::MaxScale["Z"]);
+   return;
+   }
+   
+   else if (getword(%scale,0) < $Editor::MinScale["X"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The scale %1 is invalid. The X axis is too small. Min: %2', %scale, $Editor::MinScale["X"]);
+   return;
+   }
+   
+   else if (getword(%scale,1) < $Editor::MinScale["Y"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The scale %1 is invalid. The Y axis is too small. Min:', %scale, $Editor::MinScale["Y"]);
+   return;
+   }
+   
+   else if (getword(%scale,2) < $Editor::MinScale["Z"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The scale %1is invalid. The Z axis is too small. Min:', %scale, $Editor::MinScale["Z"]);
+   return;
+   }
+   
+   else
+   {
+   %scale = CheckScale(%scale);
+   
+   if (!%obj.istscale)
+   {
+   
+   if (!%obj.editor)
+   ProcessAddObj(%Sender,%obj);
+   
+   %obj.istscale = true;
+   %obj.isescaled = false;
+   messageclient(%sender,'msgclient','\c2Object has been added to your currently selected device\'s scale list. This object will be scaled to %1.', %scale);
+   %obj.escale = %scale;
+   %obj.oldscale = %obj.getscale();
+   %obj.cloakAnim(500);
+   return;
+   }
+   else
+   {
+   Revert(%obj,"scale");
+   messageclient(%sender,'msgclient',"\c2Object has been removed from your currently selected device's scale list. Original scale restored.");
+   %obj.setscale(%obj.oldscale);
+   %obj.cloakAnim(500);
+   }
+   
+   }
+}
+
+function ProcessSize(%sender,%obj,%args)
+{
+   %scale = getwords(%args,1);
+   %edit = %sender.currentedit;
+
+   if (!IsObject(%edit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return;
+   }
+
+   else if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2Not your object!");
+   return;
+   }
+
+   else if (%obj.getdatablock().getname() $= "DeployedEditorPack")
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to size devices!");
+   return;
+   }
+
+   else if (%scale $="" && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient',"\c2No size specified.");
+   return;
+   }
+
+   else if (getword(%scale,0) > $Editor::MaxScale["X"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The size %1 is invalid. The X axis is too big. Max: %2', %scale, $Editor::MaxScale["X"]);
+   return;
+   }
+
+   else if (getword(%scale,1) > $Editor::MaxScale["Y"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The size %1 is invalid. The Y axis is too big. Max: %2', %scale, $Editor::MaxScale["Y"]);
+   return;
+   }
+
+   else if (getword(%scale,2) > $Editor::MaxScale["Z"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The size %1 is invalid. The Z axis is too big. Max: %2', %scale,$Editor::MaxScale["Z"]);
+   return;
+   }
+
+   else if (getword(%scale,0) < $Editor::MinScale["X"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The size %1 is invalid. The X axis is too small. Min: %2', %scale, $Editor::MinScale["X"]);
+   return;
+   }
+
+   else if (getword(%scale,1) < $Editor::MinScale["Y"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The size %1 is invalid. The Y axis is too small. Min:', %scale, $Editor::MinScale["Y"]);
+   return;
+   }
+
+   else if (getword(%scale,2) < $Editor::MinScale["Z"] && %obj.istscale == false)
+   {
+   messageclient(%sender,'msgclient','\c2The size %1is invalid. The Z axis is too small. Min:', %scale, $Editor::MinScale["Z"]);
+   return;
+   }
+
+   else
+   {
+   %scale = CheckScale(%scale);
+
+   if (!%obj.istsize)
+   {
+
+   if (!%obj.editor)
+   ProcessAddObj(%Sender,%obj);
+
+   %obj.istsize = true;
+   %obj.isesized = false;
+   messageclient(%sender,'msgclient','\c2Object has been added to your currently selected device\'s size list. This object will be scaled to %1.', %scale);
+   %obj.esize = %scale;
+   %obj.oldsize = %obj.getrealsize();
+   %obj.cloakAnim(500);
+   return;
+   }
+   else
+   {
+   Revert(%obj,"scale");
+   messageclient(%sender,'msgclient',"\c2Object has been removed from your currently selected device's size list. Original scale restored.");
+   %obj.setscale(%obj.oldsize);
+   %obj.cloakAnim(500);
+   }
+
+   }
+}
+   
+function ProcessFade(%sender,%obj,%args)
+{
+   %edit = %sender.currentedit;
+   if (!isObject(%edit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return;
+   }
+   if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2This object is not yours!");
+   return;
+   }
+   if (%obj.getdatablock().getname() $= "DeployedEditorPack")
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to fade Piece Manipulating Devices!");
+   return;
+   }
+   if (!%obj.istfade)
+   {
+   
+   if (!%obj.editor)
+   ProcessAddObj(%Sender,%obj);
+   
+   %obj.istfade = true;
+   %obj.isefaded = false;
+   %obj.setcloaked(true);
+   %obj.cloakAnim(500);
+   return;
+   }
+   else
+   {
+   Revert(%obj,"fade");
+   %obj.cloakAnim(500);
+   messageclient(%sender,'msgclient',"\c2Object has been removed from your currently selected device's fade list.");
+   }
+}
+
+function ProcessDebris(%sender,%obj,%args)
+{
+   %edit = %sender.currentedit;
+   %deb = GetWord(%args, 0);
+   %debris = GetWord(%args, 1);
+   %timems = GetWord(%args, 2);
+   
+   if (!$Editor::Debris::Enabled)
+   {
+   messageclient(%sender,'msgclient','\c2Unknown command: %1.', %deb);
+   return 1;
+   }
+   
+   if (!isObject(%edit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return;
+   }
+   if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2This object is not yours!");
+   return;
+   }
+   if (%obj.getdatablock().getname() $= "DeployedEditorPack")
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to edit Piece Manipulating Devices!");
+   return;
+   }
+   
+   if (%obj.istdebris)
+   {
+   Revert(%obj,"debris");
+   $Editor::Debris::Count--;
+   %obj.cloakAnim(500);
+   messageclient(%sender,'msgclient',"\c2Object has been removed from your currently selected device's debris list.");
+   return 1;
+   }
+   
+   if (%debris $= "Human" || %debris $= "Bioderm")
+   {
+   
+   if (!%obj.istdebris)
+   {
+   
+   if ($Editor::Debris::Count > $Editor::Debris::Max)
+   {
+   messageclient(%sender,'msgclient','\c2Unable to create debtis emitter, reached max. Max: %1', $Editor::Debris::Max);
+   return 1;
+   }
+
+   if (%timeMS $= "")
+   {
+   messageclient(%sender,'msgclient',"\c2No time in milliseconds specified.");
+   return 1;
+   }
+   if (%timeMS < $Editor::Debris::MinMS)
+   {
+   messageclient(%sender,'msgclient',"\c2Invalid time in milliseconds, too low: "@%timeMS@". Minimum is 100.");
+   return 1;
+   }
+   
+   if (!%obj.editor)
+   ProcessAddObj(%Sender,%obj);
+   
+   %obj.istdebris = true;
+   %obj.isedebris = false;
+   %obj.debristime = %timems;
+   %obj.isedebris = false;
+   %obj.debris = %debris;
+   %obj.cloakAnim(500);
+   $Editor::Debris::Count++;
+   messageclient(%sender,'msgclient',"\c2Object has been added to your currently selected device's debris list. Type: "@%debris@".");
+   return;
+   }
+   }
+   
+   else
+   {
+messageclient(%sender,'msgclient',"\c2Invalid debris type: "@%debris@". Available are: Human and Bioderm.");
+}
+}
+   
+function ProcessHide(%sender,%obj,%args)
+{
+   %edit = %sender.currentedit;
+   
+   if (!isObject(%edit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return;
+   }
+   if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2This object is not yours!");
+   return;
+   }
+   if (%obj.getdatablock().getname() $= "DeployedEditorPack")
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to fade devices!");
+   return;
+   }
+   if (!%obj.isthide)
+   {
+   
+   if (!%obj.editor)
+   ProcessAddObj(%Sender,%obj);
+   
+   %obj.isthide = true;
+   %obj.isehidden = false;
+   messageclient(%sender,'msgclient',"\c2Object has been added to your currently selected device's hide list.");
+   %obj.cloakAnim(500);
+   return;
+   }
+   else
+   {
+   Revert(%obj,"hide");
+   messageclient(%sender,'msgclient',"\c2Object has been removed from your currently selected device's hide list.");
+   %obj.cloakAnim(500);
+   }
+}
+   
+function ProcessCloak(%sender,%obj,%args)
+{
+   %edit = %sender.currentedit;
+   if (!isObject(%edit))
+   {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return;
+   }
+   if (%obj.owner!=%sender && %obj.owner !$=""){
+   messageclient(%sender,'msgclient',"\c2This object is not yours!");
+   return;
+   }
+   if (%obj.getdatablock().getname() $= "DeployedEditorPack")
+   {
+   messageclient(%sender,'msgclient',"\c2Unable to cloak devices!");
+   return;
+   }
+   if (!%obj.istcloak)
+   {
+   
+   if (!%obj.editor)
+   ProcessAddObj(%Sender,%obj);
+   
+   %obj.istcloak = true;
+   %obj.isecloaked = false;
+   messageclient(%sender,'msgclient',"\c2Object has been added to your currently selected device's cloak list.");
+   %obj.cloakAnim(500);
+   return;
+   }
+   else
+   {
+   Revert(%obj,"cloak");
+   messageclient(%sender,'msgclient',"\c2Object has been removed from your currently selected device's cloak list.");
+   %obj.cloakAnim(500);
+   }
+}
+   
+function ProcessName(%sender,%obj,%args)
+{
+   %edit = %sender.currentedit;
+   %name = getwords(%args,1);
+   if (!isObject(%edit)) {
+   messageclient(%sender,'msgclient',"\c2No device selected!");
+   return 1;
+   }
+   else if (%obj.owner!=%sender && %obj.owner !$="") {
+   messageclient(%sender,'msgclient',"\c2This object is not yours!");
+   return 1;
+   }
+   else if (%obj.getdatablock().getname() $= "DeployedEditorPack") {
+   messageclient(%sender,'msgclient',"\c2Unable to name devices!");
+   return 1;
+   }
+   else if (!%obj.istname) {
+      if (!%obj.editor) {
+         ProcessAddObj(%Sender,%obj);
+      }
+      %obj.istname = true;
+      %obj.isenamed = false;
+      
+      //<--Must Be defined-->\\
+      %db = %obj.GetDataBlock();
+      
+      if (%obj.nametag !$= "")
+      %obj.oldname = %obj.nametag;
+      else if (%db.targetNameTag !$= "" && %db.targetTypeTag !$= "")
+      %obj.oldname = GetTaggedString(%obj.getdatablock().targetNameTag SPC %obj.getdatablock().targetTypeTag);
+      else //Gotta fall back on the target name
+      %obj.oldname = GetTaggedString(GetTargetName(%obj.target));
+      
+      %obj.ename = %name;
+      messageclient(%sender,'msgclient',"\c2Object has been added to your currently selected device's name list. This object will be named to: "@%name@"");
+      %obj.cloakAnim(500);
+      return 1;
+   }
+   else if (%obj.istname) {
+      Revert(%obj,"name");
+      messageclient(%sender,'msgclient',"\c2Object has been removed from your currently selected device's cloak list. Old name restored.");
+      %obj.cloakAnim(500);
+      return 1;
+   }
+   else {
+   messageclient(%sender,'msgclient',"\c2An unknown error has occured. Code 5:");
+   return 1;
+   }
+}
+
+//*********************************************\\
+// PERFORMANCE CODE                           *\\
+//*********************************************\\
+
+function EditorPerform(%obj)
+{
+   PerformCloak(%obj);
+   PerformFade(%obj);
+   PerformScale(%obj);
+   PerformHide(%obj);
+   PerformName(%obj);
+   PerformRotate(%obj);
+   PerformSize(%obj);
+   PerformDebris(%obj);
+}
+
+function PerformCloak(%obj)
+{
+   if (!IsObject(%obj))
+   return;
+   %c = %obj.slotcount;
+   %c++;
+   for (%i=0;%i<%c;%i++)
+   {
+   %object = %obj.slot[%i];
+   if (!IsObject(%Object))
+   return;
+   if (!%object.istcloak) //IsTFade = Is To Fade
+   %object.isecloaked = true; //To Make The System Think It's Already Cloaked
+   if (%object.isecloaked)
+   {
+   %object.setcloaked(false);
+   %object.isecloaked = false;
+   }
+   else
+   {
+   schedule(510,0,"SetCloaked",%object,true); //Somehow Fixed The Cloaking Problem
+   %object.isecloaked = true;
+   }
+   }
+}
+   
+function PerformFade(%obj)
+{
+   if (!IsObject(%obj))
+   return;
+   %c = %obj.slotcount;
+   %c = %c++;
+   for (%i=0;%i<%c;%i++)
+   {
+   %object = %obj.slot[%i];
+   if (!IsObject(%Object))
+   return;
+   if (!%object.istfade) //IsTFade = Is To Fade
+   %object.isefaded = true; //To Make The System Think It's Already Faded
+   if (%object.isefaded)
+   {
+   %object.startfade(1,0,0);
+   %object.isefaded= false;
+   }
+   else
+   {
+   %object.cloakAnim(500);
+   schedule(510,0,"fade",%object);
+   %object.isefaded = true;
+   }
+   }
+}
+   
+function PerformHide(%obj)
+{
+   if (!IsObject(%obj))
+   return;
+   for (%i=0;%i<%obj.slotcount;%i++)
+   {
+   %object = %obj.slot[%i];
+   if (!IsObject(%Object))
+   return;
+   if (!%object.isthide) //IsTFade = Is To Fade
+   %object.isehidden = true; //To Make The System Think It's Already Hidden
+   if (%object.isehidden)
+   {
+   %object.hide(0);
+   %object.isehidden= false;
+   }
+   else
+   {
+   %object.cloakAnim(500);
+   schedule(510,0,"Hide",%object);
+   %object.isehidden = true;
+   }
+   }
+}
+
+function PerformDebris(%obj)
+{
+if (!$Editor::Debris::Enabled)
+return;
+
+   if (!IsObject(%obj))
+   return;
+   for (%i=0;%i<%obj.slotcount;%i++)
+   {
+   %object = %obj.slot[%i];
+   if (!IsObject(%Object))
+   return;
+   
+   if (%object.istdebris)
+   {
+   if (%object.isedebris)
+   {
+   %object.isedebris= false;
+   %object.debrisemitter.delete();
+   }
+   else
+   {
+   %object.isedebris = true;
+   PerformDebrisLoop(%object);
+   }
+   }
+   }
+}
+
+function PerformDebrisLoop(%obj)
+{
+cancel(%obj.debrisloop);
+
+if (!%obj.isedebris || !$Editor::Debris::Enabled)
+{
+
+if (IsObject(%obj.debrisemitter))
+%obj.debrisemitter.delete();
+
+%obj.debrisemitter = "";
+
+if (!$Editor::Debris::Enabled)
+{
+$Editor::Debris::Count--;
+%obj.istdebris = false;
+%obj.isedebris = false;
+%obj.debristime = "";
+%obj.isedebris = false;
+%obj.debris = "";
+}
+   
+return;
+}
+
+
+if (!IsObject(%obj.debrisemitter))
+{
+
+if (%obj.debris $= "Human")
+%obj.debrisemitter = new player(){
+position = %obj.gettransform();
+Datablock = "LightMaleHumanArmor";
+Scale = "0 0 0";
+Obj = %obj;
+};
+else
+%obj.debrisemitter = new player(){
+position = %obj.gettransform();
+Datablock = "LightMaleBiodermArmor";
+Scale = "0 0 0";
+Obj = %obj;
+};
+%obj.debrisemitter.startfade(1,0,1);
+%obj.debrisemitter.setmovestate(true);
+}
+
+%obj.debrisemitter.blowup();
+
+%obj.debrisloop = schedule(%obj.debristime,0,"PerformDebrisLoop",%obj);
+}
+   
+function PerformScale(%obj)
+{
+   if (!IsObject(%obj))
+   return;
+   %c = %obj.slotcount;
+   %c = %c++;
+   for (%i=0;%i<%c;%i++)
+   {
+   %object = %obj.slot[%i];
+   if (!IsObject(%Object))
+   return;
+   if (!%object.istscale){ //IsTFade = Is To Fade
+   %object.isescaled = true; //To Make The System Think It's Already Scaled
+   %object.oldscale = %object.getscale();
+   }
+   if (%object.isescaled)
+   {
+   %object.setscale(%object.oldscale);
+   %object.cloakAnim(500);
+   %object.isescaled= false;
+   }
+   else
+   {
+   %object.setscale(%object.escale);
+   %object.cloakAnim(500);
+   %object.isescaled = true;
+   }
+   }
+}
+
+function PerformSize(%obj)
+{
+   if (!IsObject(%obj))
+   return;
+   %c = %obj.slotcount;
+   %c = %c++;
+   for (%i=0;%i<%c;%i++)
+   {
+   %object = %obj.slot[%i];
+   if (!IsObject(%Object))
+   return;
+   if (!%object.istsize){ //IsTFade = Is To Fade
+   %object.isesized = true; //To Make The System Think It's Already Scaled
+   %object.oldsize = %object.getrealsize();
+   }
+   if (%object.isesized)
+   {
+   %object.setrealsize(%object.oldsize);
+   %object.cloakAnim(500);
+   %object.isescaled= false;
+   }
+   else
+   {
+   %object.setrealsize(%object.escale);
+   %object.cloakAnim(500);
+   %object.isesized = true;
+   }
+   }
+}
+
+function PerformRotate(%obj)
+{
+if (!IsObject(%obj))
+return;
+%c = %obj.slotcount;
+%c = %c++;
+for (%i=0;%i<%c;%i++)
+{
+%object = %obj.slot[%i];
+if (!IsObject(%Object))
+return;
+
+if (%object.istrotate)
+{
+
+%object.cloakAnim(500);
+
+if (%object.iserotated)
+{
+%object.iserotated = false;
+%object.setrotation(%object.oldrotation);
+}
+else
+{
+%object.iserotated = true;
+%object.setrotation(%object.erotation);
+}
+}
+}
+}
+
+function PerformName(%obj)
+{
+   if (!IsObject(%obj))
+   return;
+   if (!%obj.isTName) //Idiotic Console Error Fix
+   return;
+   %c = %obj.slotcount;
+   %c = %c++;
+   for (%i=0;%i<%c;%i++)
+   {
+   %object = %obj.slot[%i];
+   if (!IsObject(%Object))
+   return;
+   if (!%object.istname){ //IsTFade = Is To Fade
+   %object.isenamed = true; //To Make The System Think It's Already Scaled
+   if (%object.nametag !$="")
+   %object.oldname = %object.nametag;
+   else
+   %object.oldname = %object.getdatablock().targetNameTag;
+   }
+   if (%object.isenamed)
+   {
+   %object.nametag = %obj.oldname;
+   setTargetName(%object.target,addTaggedString("\c6"@%object.oldname@""));
+   %object.isenamed = false;
+   }
+   else
+   {
+   %object.nametag = %object.ename;
+   setTargetName(%object.target,addTaggedString("\c6"@%object.ename@""));
+   %object.isenamed = true;
+   }
+   }
+}
+
+//*********************************************\\
+// MISC. CODE                                 *\\
+//*********************************************\\
+
+function Hide(%obj)
+{
+   %obj.hide(1);
+}
+
+function fade(%obj)
+{
+   %obj.startfade(1,0,1);
+}
+
+function EvaluateFunction(%f) //To Eval The Command
+{
+   if (%f $="addobj" || %f $= "selecteditor" || %f $="select" || %f $="delobj" || %f $="help" || %f $="cmds" || %f $="fade" || %f $="cloak" || %f $="scale" || %f $="hide" || %f $="name" || %f $="list" || %f $="rotate" || %f $="debris" || %f $="size")
+   return true;
+   else
+   return false;
+}
+   
+function IsMatch(%string1,%string2)
+{
+   %string1 = StrLwr(%string1);
+   %string2 = StrLwr(%string2);
+   
+   if (%string1 $=%string2)
+   return true;
+   else
+   return false;
+}
+   
+function CheckScale(%scale) //Evals The Scale For Any Missing Args, If So, Puts A 1 In The Blank Slot
+{
+   if (getword(%scale,0) $="")
+   %scale = "1" SPC getWord(%scale,1) SPC getWord(%scale,2);
+   if (getword(%scale,1) $="")
+   %scale = getWord(%scale,0) SPC "1" SPC getWord(%scale,2);
+   if (getword(%scale,2) $="")
+   %scale = getWord(%scale,0) SPC getWord(%scale,1) SPC "1";
+   return %scale;
+}
+
+function IsValidClass(%class)
+{
+   if (%class $="Spine" || %class $="Generator" || %class $="Switch" || %class $="WWall" || %class $="Wall" || %class $="MSpine" || %class $="Station" || %class $="Sensor" || %class $="DeployedTurret" || %class $="LogoProjector" || %class $="DeployedLightBase" || %class $="Tripwire" || %class $="Teleport" || %class $="Jumpad" || %class $="Tree" || %class $="Crate" || %class $="GravityField")
+   return true;
+   else
+   return false;
+}
+
+function StaticShape::RevertPieces(%obj,%reset){ return RevertPieces(%obj,%reset); }
+function RevertPieces(%obj)
+{
+if (!%obj.getDataBlock().getName() $="DeployedEditorPack")
+return;
+
+%count = %obj.slotcount;
+%count = %count - 1;
+
+for (%i = 0; %i < %count; %i++)
+{
+%slotobj = %obj.slot[%i];
+
+if (%reset)
+{
+%slotObj.slot = "";
+%slotObj.editor = false;
+%obj.slot[%i] = ""; //Nada..
+}
+
+if (%slotobj.istrotate)
+{
+%slotobj.erotation = "";
+%slotobj.setrotation(%slotobj.oldrotation);
+if (%reset)
+%slotObj.isTRotate = false;
+}
+else if (%slotobj.istscale)
+{
+%slotobj.isescaled = false;
+%slotobj.escale = "";
+%slotobj.setscale(%slotobj.oldscale);
+if (%reset)
+%slotObj.isTScale = false;
+}
+else if (%slotobj.istsize)
+{
+%slotobj.isesized = false;
+%slotobj.setscale(%slotobj.oldsize);
+if (%reset)
+%slotObj.isTSize = false;
+}
+else if (%slotobj.istfade)
+{
+%slotobj.isefaded = false;
+%slotobj.startfade(0,0,0);
+if (%reset)
+%slotObj.isTFade = false;
+}
+else if (%slotobj.istdebris)
+{
+%slotobj.isedebris = false;
+$Editor::Debris::Count--;
+if (%reset)
+%slotObj.isDebris = false;
+}
+else if (%slotobj.isthide)
+{
+%slotobj.isehidden = false;
+%slotobj.hide(0);
+if (%reset)
+%slotObj.isTHide = false;
+}
+else if (%slotobj.istcloak)
+{
+%slotobj.isecloaked = false;
+%slotobj.setcloaked(0);
+if (%reset)
+%slotObj.isTCloak = false;
+}
+
+%slotObj.cloakAnim(500);
+}
+return %obj;
+}
+

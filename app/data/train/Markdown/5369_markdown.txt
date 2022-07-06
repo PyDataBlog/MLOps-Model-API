@@ -1,0 +1,4 @@
+PersonalMob
+===========
+
+Bukkit plugin

@@ -1,0 +1,156 @@
+Есть такой код:
+\begin{minted}{c++}
+// В первом потоке
+for(int i = 0; i < 10000; i++) {
+  x++;
+}
+
+// Во втором потоке
+while(true) {
+  cout << x;
+}
+\end{minted}
+
+Что должно получится на выходе из первого потока?
+\begin{minted}{asm}
+; 10000 раз
+load
+add
+store
+\end{minted}
+
+Компилятор может все соптимизировать до:
+\begin{minted}{asm}
+load
+add ; 10000 раз
+store
+\end{minted}
+
+Понятно, что полученное поведение может быть неожиданным.
+
+Еще одна подобная проблема:
+\begin{minted}{c++}
+  int quit = 1;
+  while(quit) {
+
+  }
+\end{minted}
+Компилятор может заменить цикл на while(true). Для решения подобных проблем еще ключевое слово \cc{volatile}, которое говорит компилятору, что переменная может быть изменена извне и с ней нужно быть поаккуратнее.
+
+\subsection{Потоки в C++}
+\begin{minted}{c++}
+void hello() {
+  cout << "Hello from" << this_thread.get_id() << '\n';
+}
+
+int main() {
+  vector<thread> threads;
+  for (int i = 0; i < 5; i++) {
+    threads.push_back(thread(hello));
+  }
+}
+\end{minted}
+На самом деле в программе не 5, а 6 потоков (один для \cc{main}), но программа окончит работу именно после завершения потока \cc{main}. Чтобы это починить пишем примерно так:
+\begin{minted}{c++}
+for(auto& thread: threads) {
+  thread.join(); // Блокирует оновной поток, до тех пор пока не закончится данный
+}
+\end{minted}
+
+\paragraph{Thread-safe}
+Данный термин означает, что что-либо можно без проблем использовать в многопоточном окружении. При это он не означает атомарность. Например, пример с hello выше может смешивать все 5 строк.
+
+Вопрос к тесту:
+\begin{minted}{c++}
+// Первый способ
+thread t(hello);
+v.push_back(hello);
+
+// Второй способ
+v.push_back(t(hello));
+\end{minted}
+Чем они отличаются и стоит ли использовать \cc{std::move}?
+
+Какие неприятности могут возникать с shared переменными.
+
+\begin{minted}{c++}
+volatile int x;
+
+// Thread 1
+while(true) {
+  x++;
+}
+
+// Thread 2
+while(true) {
+  if (x%2==0)
+    cout << x;
+}
+\end{minted}
+Автор ожидал увидеть на экране только четные числа, но видит все подряд. Это называется состояние гонки.
+
+\begin{minted}{c++}
+struct Counter {
+  volatile int value;
+  Counter(): value(0) {}
+  void increment() {
+    ++value;
+  }
+};
+
+Counter ctr;
+for (int i = 0; i < 5; i++) {
+  threads.push_back(
+    thread([&ctr]() { for (int i = 0; i < 100; i++) { ctr.increment(); }})); 
+}
+// Join
+cout << ctr.value;
+\end{minted}
+Автор ожидал увидеть 500, но он снова ошибся. Что могло пойти не так? Два потока могли параллельно загрузить переменную с одним и тем же значением в какой-то регистр, сделать там инкремент и загрузить. Тогда в результате нескольких инкрементов мы увидем изменение значение переменной лишь на единицу.
+Подобные проблемы решаются семофорами, один из видов которых "--- мьютекс мы сейчас рассмотрим.
+
+\begin{minted}{c++}
+#include<mutex>
+mutex mut;
+mut.lock();
+// Какие-то действия
+mut.unlock();
+\end{minted}
+Если один поток зашел находится внутри мьютекса, то другой туда зайти не может и ему придется подождать.
+
+\begin{minted}{c++}
+void decrement() {
+  mut.lock();
+  if (value == 0)
+    throw exception(" ");
+  --value;
+  mut.unlock();
+}
+\end{minted}
+Проблема в том, что из-за исключения не будет вызван деструктор. Для решения этой проблемы есть \cc{loc_guard} % FIXME check?
+\begin{minted}{c++}
+  lock_guard<mutex> l(mut);
+  // Код decrement без mut.*;
+\end{minted}
+
+\begin{minted}{c++}
+class Integer {
+  int i;
+  mutex mut;
+  void mul() {
+    lock_guard<mutex> l(mut);
+    i *= 3;
+  }
+  void div() {
+    lock_guard<mutex> l(mut);
+    i /= div;
+  }
+  void both() {
+    lock_guard<mutex> l(mut); // Deadlock!
+    mul();
+    div();
+  }
+}
+\end{minted}
+Взяли мьютекс и тут же снова хотим его взять. Не классический дедлок, обычно два потока жду друг друга, а не один ждет сам себя.
+Существует \cc{recursive_mutex} который можно брать несколько раз и в такой ситуации все будет ок.

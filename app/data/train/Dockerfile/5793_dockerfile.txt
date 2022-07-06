@@ -1,0 +1,79 @@
+
+FROM debian:jessie
+
+# Install the libraries, such as libpng libjpeg libgd
+# Install the web runtime container apache2
+RUN apt-get update && apt-get install -y \
+    libpng-dev \
+    libjpeg-dev \
+    libgd-dev \
+    apache2
+
+RUN apt-get install -y \
+    g++ \
+    gcc \
+    make \
+    wget
+
+RUN mkdir -p /usr/src \
+    && wget https://jaist.dl.sourceforge.net/project/gmod/cmap/CMap%201.01/cmap-1.01.tar.gz -P /usr/src \
+    && tar -xvf /usr/src/cmap-1.01.tar.gz -C /usr/src/ \
+    && ln -s /usr/src/cmap-1.01 /var/www/html/cmap \
+    && cd /var/www/html/cmap \
+    && perl -MCPAN -e "force install Bundle::CMap"
+
+RUN cd /var/www/html/cmap \
+    && perl Build.PL
+    
+    
+WORKDIR /var/www/html
+
+EXPOSE 80
+
+ENV APACHE_CONFDIR /etc/apache2
+ENV APACHE_ENVVARS $APACHE_CONFDIR/envvars
+
+# set apache2 runner handler
+RUN set -ex \
+    && sed -ri 's/^export ([^=]+)=(.*)$/: ${\1:=\2}\nexport \1/' "$APACHE_ENVVARS" \
+    && . "$APACHE_ENVVARS" \
+    && for dir in \
+        "$APACHE_LOCK_DIR" \
+        "$APACHE_RUN_DIR" \
+        "$APACHE_LOG_DIR" \
+        /var/www/html \
+    ; do \
+        rm -rvf "$dir" \
+        && mkdir -p "$dir" \
+        && chown -R "$APACHE_RUN_USER:$APACHE_RUN_GROUP" "$dir"; \
+    done
+
+# redirect the error info
+RUN set -ex \
+    && . "$APACHE_ENVVARS" \
+    && ln -sfT /dev/stderr "$APACHE_LOG_DIR/error.log" \
+    && ln -sfT /dev/stdout "$APACHE_LOG_DIR/access.log" \
+    && ln -sfT /dev/stdout "$APACHE_LOG_DIR/other_vhosts_access.log"
+
+RUN ln -s /usr/src/cmap-1.01 /var/www/html/cmap
+
+RUN apt-get install -y libpq-dev
+
+# cmap configuration actions
+RUN cd /var/www/html/cmap \
+    && perl conf/global.conf.PL \
+    && perl cgi-bin/cmap.PL \
+    && sed -i '214s/=Back to Top//' CMapBuilder.pm \
+    && a2enmod cgid \
+    && a2enmod cgi \
+    && ./Build \
+    && perl -MCPAN -e "force install DBD::Pg"
+
+VOLUME ["/var/www/html/cmap/data"]
+
+# clean extra softwares
+RUN apt-get purge -y --auto-remove g++ gcc wget make
+
+COPY entrypoint /usr/local/bin/
+
+ENTRYPOINT ["entrypoint"]

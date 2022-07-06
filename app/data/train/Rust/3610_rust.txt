@@ -1,0 +1,41 @@
+extern crate nanomsg;
+
+use std::thread;
+use std::time::Duration;
+use std::sync::mpsc::*;
+use super::media_player;
+use super::protocol;
+use self::nanomsg::{Socket, Protocol, Error};
+
+
+pub fn run(rx_quit: Receiver<bool>, tx_state: Sender<media_player::State>) {
+  let mut subscriber = match Socket::new(Protocol::Sub) {
+    Ok(socket) => socket,
+    Err(err) => panic!("{}", err)
+  };
+
+  subscriber.subscribe(&String::from("").into_bytes()[..]);
+  subscriber.set_receive_timeout(500).unwrap();
+  
+  match subscriber.connect("tcp://*:5555") {
+    Ok(_) => println!("Connected to server..."),
+    Err(err) => panic!("Failed to bind socket: {}", err)
+  }
+
+  let mut msg_buffer: [u8; 9] = [0; 9];
+
+  while let Err(_) = rx_quit.try_recv() {
+    match subscriber.nb_read(&mut msg_buffer) {
+      Ok(_)                 =>  { let state = protocol::into_state(&msg_buffer[0..9]);
+                                  println!("Received {:?}", state); // debug
+                                  if let Err(_) = tx_state.send(state) {
+                                    break;
+                                  }
+                                },
+      Err(Error::TryAgain)  => {},
+      Err(err)              => panic!("Problem receiving msg: {}", err),
+    }
+
+    thread::sleep(Duration::from_millis(super::HOST_SYNC_INTERVAL_MS / 2));
+  }
+}

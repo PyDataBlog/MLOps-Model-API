@@ -1,0 +1,78 @@
+#
+# Just a few database utils. Not OO. Only thing that has state is a database
+# handle. Please never use this for anything other than this thrown together
+# project.
+#
+
+package YtrmvcLite::Database;
+
+use strict;
+use warnings;
+
+use parent 'Exporter';
+use YtrmvcLite::Strings;
+
+our @EXPORT = (
+  qw(table_exists get_autoincrement init_table db_just_a_test)
+);
+
+our $dbh;
+
+$YtrmvcLite::Strings::strings->{no_db_handle_ref} = 'No database handle provided.';
+
+sub db_just_a_test {
+  return string('no_db_handle_ref');
+}
+
+sub table_exists {
+  my ($table) = @_;
+  my ($sth);
+
+  return 0 unless($sth = $dbh->prepare("SELECT * FROM " . $table . " LIMIT 1;"));
+  return 0 unless($sth->execute());
+  return 1;
+}
+
+sub get_autoincrement {
+  my ($dbsource) = @_;
+
+  print $dbsource, "\n\n";
+
+  return 'INTEGER PRIMARY KEY NOT NULL AUTO_INCREMENT' if($dbsource =~ /^DBI:mysql:/i);
+  return 'INTEGER PRIMARY KEY' if($dbsource =~ /^DBI:SQLite:/i);
+  return 'INTEGER PRIMARY KEY' if($dbsource =~ /^DBI:SQLite2:/i);
+}
+
+sub init_table {
+  my ($table, $columns, $dbsource) = @_;
+  my ($sth, @column_arr);
+
+  foreach my $column (@{$columns}) {
+    my $column_str = "`$$column{name}` " . ($$column{auto_increment} ?
+      get_autoincrement($dbsource) : sub {
+        if($$column{type}) {
+          if($$column{type} eq 'ip') {
+            return 'TEXT' if $dbsource =~ /^DBI:SQLite/i;
+            return 'VARBINARY(16)' if $dbsource =~ /^DBI:MySQL/i;
+
+            # bytea(16) might be better if it actually works...
+            # No idea if this can detect an IP in binary either.
+            return 'inet' if $dbsource =~ /^DBI:Pg/i;
+            return 'TEXT';
+          }
+
+          return $$column{type}
+        }
+
+        return 'TEXT';
+      }->());
+
+    push @column_arr, $column_str;
+  }
+
+  $sth = $dbh->prepare("CREATE TABLE $table (" . join(',', @column_arr) . ")")
+    or die $dbh->errstr;
+  $sth->execute() or die $dbh->errstr;
+}
+
+1;

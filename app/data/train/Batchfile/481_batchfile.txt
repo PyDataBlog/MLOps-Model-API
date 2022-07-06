@@ -1,0 +1,1 @@
+cmd_drivers/base/power/built-in.o :=  /opt/freescale/usr/local/gcc-4.4.4-glibc-2.11.1-multilib-1.0/arm-fsl-linux-gnueabi/bin/arm-none-linux-gnueabi-ld -EL    -r -o drivers/base/power/built-in.o drivers/base/power/sysfs.o drivers/base/power/generic_ops.o drivers/base/power/main.o drivers/base/power/wakeup.o drivers/base/power/runtime.o drivers/base/power/clock_ops.o 

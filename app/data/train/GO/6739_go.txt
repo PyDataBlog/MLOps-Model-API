@@ -1,0 +1,452 @@
+package rest
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"path/filepath"
+	"testing"
+
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+func TestEndpoint(t *testing.T) {
+	var endpoint *Endpoint
+	var acceptor *EndpointAcceptor
+	var builder *EndpointBuilder
+
+	t.Run("Constructor", func(t *testing.T) {
+		id := "the-id"
+		method := http.MethodGet
+		baseURL := new(url.URL)
+		handler := HandlerFunc(func(ctx context.Context, evt events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+			return Respond(http.StatusOK, nil)
+		})
+
+		endpoint, acceptor = newEndpoint(id, method, baseURL, handler)
+		builder = newEndpointBuilder(endpoint)
+
+		assert.Equal(t, id, acceptor.ID())
+		assert.Equal(t, method, acceptor.Method())
+		assert.NotNil(t, acceptor.Handler())
+		assert.Nil(t, acceptor.Hooks().Pre())
+		assert.Nil(t, acceptor.Hooks().Post())
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on invalid ID", func(t *testing.T) {
+				assert.Panics(t, func() { newEndpoint("", method, baseURL, handler) })
+				assert.Panics(t, func() { newEndpoint("invalid ID", method, baseURL, handler) })
+			})
+			t.Run("on blank method", func(t *testing.T) {
+				assert.Panics(t, func() { newEndpoint(id, "", baseURL, handler) })
+			})
+			t.Run("on nil handler", func(t *testing.T) {
+				assert.Panics(t, func() { newEndpoint(id, method, baseURL, nil) })
+			})
+		})
+	})
+
+	t.Run("Type", func(t *testing.T) {
+		typ := acceptor.Type()
+		assert.Equal(t, "endpoint", typ.ID)
+		assert.Equal(t, "Endpoint", typ.Discriminator)
+		assert.Equal(t, "E", typ.Short)
+	})
+
+	t.Run("Headers", func(t *testing.T) {
+		id := "the-header"
+
+		builder.Header(id, true)
+
+		require.Len(t, acceptor.Headers(), 1)
+
+		header := acceptor.Headers()[0]
+		assert.Equal(t, id, header.ID())
+		assert.True(t, header.Required())
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on invalid ID", func(t *testing.T) {
+				assert.Panics(t, func() { builder.Header("", true) })
+				assert.Panics(t, func() { builder.Header("invalid ID", true) })
+			})
+			t.Run("on duplicate ID", func(t *testing.T) {
+				assert.Panics(t, func() { builder.Header(id, true) })
+			})
+		})
+	})
+
+	t.Run("Query Parameters", func(t *testing.T) {
+		id := "the-parameter"
+
+		builder.Query(id, true)
+
+		require.Len(t, acceptor.Query(), 1)
+
+		parameter := acceptor.Query()[0]
+		assert.Equal(t, id, parameter.ID())
+		assert.True(t, parameter.Required())
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on invalid ID", func(t *testing.T) {
+				assert.Panics(t, func() { builder.Query("", true) })
+				assert.Panics(t, func() { builder.Query("invalid ID", true) })
+			})
+			t.Run("on duplicate ID", func(t *testing.T) {
+				assert.Panics(t, func() { builder.Query(id, true) })
+			})
+		})
+	})
+
+	t.Run("Response", func(t *testing.T) {
+		status := http.StatusOK
+
+		builder.Response(status)
+
+		require.Len(t, acceptor.Responses(), 1)
+
+		response := acceptor.Responses()[0]
+		assert.Equal(t, "200", response.Status())
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on invalid status code", func(t *testing.T) {
+				assert.Panics(t, func() { builder.Response(99) })
+				assert.Panics(t, func() { builder.Response(600) })
+			})
+			t.Run("on duplicate status code", func(t *testing.T) {
+				assert.Panics(t, func() { builder.Response(status) })
+			})
+		})
+	})
+
+	t.Run("Regular Expression Response", func(t *testing.T) {
+		status := "the-status"
+
+		builder.ResponseRE(status)
+
+		require.Len(t, acceptor.Responses(), 2)
+
+		response := acceptor.Responses()[1]
+		assert.Equal(t, status, response.Status())
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on duplicate ID", func(t *testing.T) {
+				assert.Panics(t, func() { builder.ResponseRE(status) })
+			})
+		})
+	})
+
+	t.Run("Call", func(t *testing.T) {
+		ctx := context.Background()
+		method := http.MethodGet
+		path := "/the/path"
+
+		server := httptest.NewServer(
+			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				assert.Equal(t, method, r.Method)
+				assert.Equal(t, path, r.URL.Path)
+			}),
+		)
+		defer server.Close()
+
+		baseURL, err := url.Parse(server.URL)
+		require.NoError(t, err)
+
+		endpoint, _ := newEndpoint("the-id", method, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+			return Respond(http.StatusOK, nil)
+		}))
+		endpoint.route = path
+
+		_, err = endpoint.Call(ctx, nil)
+		assert.NoError(t, err)
+
+		t.Run("passes headers", func(t *testing.T) {
+			id := "the-header"
+			normalized := "The-Header"
+			value := "header-value"
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Contains(t, r.Header, normalized)
+					assert.Equal(t, value, r.Header.Get(normalized))
+				}),
+			)
+			defer server.Close()
+
+			baseURL, err := url.Parse(server.URL)
+			require.NoError(t, err)
+
+			endpoint, _ := newEndpoint("the-id", http.MethodGet, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+				return Respond(http.StatusOK, nil)
+			}), func(endpoint *EndpointBuilder) {
+				endpoint.Header(id, true)
+			})
+			endpoint.route = path
+
+			_, err = endpoint.Call(ctx, nil, func(request *RequestBuilder) {
+				request.Header(id, value)
+			})
+			assert.NoError(t, err)
+		})
+
+		t.Run("encodes path parameters", func(t *testing.T) {
+			id := "the-param"
+			value := "param-value"
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, "/the/path/param-value", r.URL.Path)
+				}),
+			)
+			defer server.Close()
+
+			baseURL, err := url.Parse(server.URL)
+			require.NoError(t, err)
+
+			endpoint, _ := newEndpoint("the-id", http.MethodGet, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+				return Respond(http.StatusOK, nil)
+			}))
+			endpoint.route = fmt.Sprintf("/the/path/{%s}", id)
+			endpoint.pathParameters = append(endpoint.pathParameters, newParameter(id, true))
+
+			_, err = endpoint.Call(ctx, nil, func(request *RequestBuilder) {
+				request.Path(id, value)
+			})
+			assert.NoError(t, err)
+		})
+
+		t.Run("passes query parameters", func(t *testing.T) {
+			id := "the-param"
+			value := "param-value"
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					query := r.URL.Query()
+
+					require.Len(t, query, 1)
+					assert.Contains(t, query, id)
+					assert.Equal(t, value, query.Get(id))
+				}),
+			)
+			defer server.Close()
+
+			baseURL, err := url.Parse(server.URL)
+			require.NoError(t, err)
+
+			endpoint, _ := newEndpoint("the-id", http.MethodGet, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+				return Respond(http.StatusOK, nil)
+			}), func(endpoint *EndpointBuilder) {
+				endpoint.Query(id, true)
+			})
+			endpoint.route = "/the/path"
+
+			_, err = endpoint.Call(ctx, nil, func(request *RequestBuilder) {
+				request.Query(id, value)
+			})
+			assert.NoError(t, err)
+		})
+
+		t.Run("encodes body", func(t *testing.T) {
+			body := map[string]interface{}{
+				"Foo": "bar",
+			}
+
+			server := httptest.NewServer(
+				http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Contains(t, r.Header, "Content-Type")
+					assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+
+					var b map[string]interface{}
+					defer r.Body.Close()
+					require.NoError(t, json.NewDecoder(r.Body).Decode(&b))
+					assert.Equal(t, body, b)
+				}),
+			)
+			defer server.Close()
+
+			baseURL, err := url.Parse(server.URL)
+			require.NoError(t, err)
+
+			endpoint, _ := newEndpoint("the-id", http.MethodPost, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+				return Respond(http.StatusOK, nil)
+			}))
+			endpoint.route = "/the/path"
+
+			_, err = endpoint.Call(ctx, body)
+			assert.NoError(t, err)
+
+			t.Run("Panics", func(t *testing.T) {
+				t.Run("when body is passed to HEAD endpoint", func(t *testing.T) {
+					endpoint, _ := newEndpoint("the-id", http.MethodHead, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+						return Respond(http.StatusOK, nil)
+					}))
+					endpoint.route = path
+
+					assert.Panics(t, func() { endpoint.Call(ctx, body) })
+				})
+				t.Run("when body is passed to GET endpoint", func(t *testing.T) {
+					endpoint, _ := newEndpoint("the-id", http.MethodGet, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+						return Respond(http.StatusOK, nil)
+					}))
+					endpoint.route = path
+
+					assert.Panics(t, func() { endpoint.Call(ctx, body) })
+				})
+			})
+		})
+
+		t.Run("strips prefix", func(t *testing.T) {
+
+			server := httptest.NewServer(
+				http.StripPrefix("/prefix", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					assert.Equal(t, path, r.URL.Path)
+				})),
+			)
+			defer server.Close()
+
+			baseURL, err := url.Parse(server.URL)
+			assert.NoError(t, err)
+
+			baseURL.Path = filepath.Join(baseURL.Path, "prefix")
+
+			endpoint, _ := newEndpoint("the-id", http.MethodGet, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+				return Respond(http.StatusOK, nil)
+			}))
+			endpoint.route = "/the/path"
+
+			_, err = endpoint.Call(ctx, nil)
+			assert.NoError(t, err)
+		})
+
+		t.Run("Returns error", func(t *testing.T) {
+			t.Run("on invalid method", func(t *testing.T) {
+				endpoint, _ := newEndpoint("the-id", "invalid method", baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+					return Respond(http.StatusOK, nil)
+				}))
+				endpoint.route = "/the/path"
+
+				_, err := endpoint.Call(ctx, nil)
+				assert.Error(t, err)
+			})
+			t.Run("on invalid path", func(t *testing.T) {
+				endpoint, _ := newEndpoint("the-id", http.MethodGet, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+					return Respond(http.StatusOK, nil)
+				}))
+				endpoint.route = "%%"
+
+				_, err := endpoint.Call(ctx, nil)
+				assert.Error(t, err)
+			})
+			t.Run("on unmarshalable body", func(t *testing.T) {
+				endpoint, _ := newEndpoint("the-id", http.MethodPost, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+					return Respond(http.StatusOK, nil)
+				}))
+				endpoint.route = "/the/path"
+
+				_, err := endpoint.Call(ctx, make(chan int))
+				assert.Error(t, err)
+			})
+			t.Run("on HTTP error", func(t *testing.T) {
+				baseURL := &url.URL{Scheme: "http", Host: "i-dont-exist.foo"}
+				endpoint, _ := newEndpoint("the-id", http.MethodGet, baseURL, HandlerFunc(func(ctx context.Context, req events.APIGatewayProxyRequest) (events.APIGatewayProxyResponse, error) {
+					return Respond(http.StatusOK, nil)
+				}))
+				endpoint.route = "/the/path"
+
+				_, err := endpoint.Call(ctx, nil)
+				assert.Error(t, err)
+			})
+		})
+	})
+}
+
+func TestRequest(t *testing.T) {
+	baseURL := new(url.URL)
+
+	var acceptor *RequestAcceptor
+
+	t.Run("Constructor", func(t *testing.T) {
+		acceptor = newRequest(baseURL)
+
+		assert.Equal(t, baseURL, acceptor.URL())
+		assert.NotNil(t, acceptor.Header())
+		assert.Empty(t, acceptor.Header())
+	})
+
+	t.Run("Header", func(t *testing.T) {
+		id := "The-Header"
+		value := "the-value"
+
+		acceptor := newRequest(baseURL, func(request *RequestBuilder) {
+			request.Header(id, value)
+		})
+		assert.Equal(t, value, acceptor.Header().Get(id))
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on duplicate headers", func(t *testing.T) {
+				assert.Panics(t, func() {
+					newRequest(baseURL, func(request *RequestBuilder) {
+						request.Header(id, "a-value")
+						request.Header(id, "another-value")
+					})
+				})
+			})
+		})
+	})
+
+	t.Run("Path Parameter", func(t *testing.T) {
+		id := "param"
+		value := "the-value"
+
+		acceptor := newRequest(baseURL, func(request *RequestBuilder) {
+			request.request.url.Path = fmt.Sprintf("/foo/{%s}/bar", id)
+			request.Path(id, value)
+		})
+		assert.Equal(t, fmt.Sprintf("/foo/%s/bar", value), acceptor.URL().Path)
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on duplicate path parameter", func(t *testing.T) {
+				assert.Panics(t, func() {
+					newRequest(baseURL, func(request *RequestBuilder) {
+						request.request.url.Path = fmt.Sprintf("/foo/{%s}/bar", id)
+						request.Path(id, "a-value")
+						request.Path(id, "another-value")
+					})
+				})
+			})
+			t.Run("on unknown path parameter", func(t *testing.T) {
+				assert.Panics(t, func() {
+					newRequest(baseURL, func(request *RequestBuilder) {
+						request.request.url.Path = fmt.Sprintf("/foo/{%s}/bar", id)
+						request.Path("not-a-path-parameter", value)
+					})
+				})
+			})
+		})
+	})
+
+	t.Run("Query Parameter", func(t *testing.T) {
+		id := "the-param"
+		value := "the-value"
+
+		acceptor := newRequest(baseURL, func(request *RequestBuilder) {
+			request.Query(id, value)
+		})
+		assert.Equal(t, value, acceptor.URL().Query().Get(id))
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on duplicate parameters", func(t *testing.T) {
+				assert.Panics(t, func() {
+					newRequest(baseURL, func(request *RequestBuilder) {
+						request.Query(id, "a-value")
+						request.Query(id, "another-value")
+					})
+				})
+			})
+		})
+	})
+}

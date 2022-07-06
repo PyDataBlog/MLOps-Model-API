@@ -1,0 +1,265 @@
+\subsection{\coq}
+
+In order to perform \premiseselection for \coq we first need to examine what objects in \coq look like, and what we exactly want to predict.
+
+\subsubsection{\gallina}
+A collection of proofs is represented in \coq as text written in the \gallina\glsadd{gallina} language \cite{huet1992gallina} and stored in a file.
+For a complete definition of the \gallina language we refer to the \coq reference manual\footnote{\coq Reference Manual, Chapter 1: The Gallina specification language\\ \url{https://coq.inria.fr/refman/Reference-Manual003.html}}.
+A proof is one of the commands in the language of commands within \gallina{}, \emph{The Vernacular}.
+These commands are written as sentences, starting with capital letter and ending with a dot.
+
+A sentence can reference other sentences using their names.
+These sentences need not be stored in the same file, but may reference other files.
+Thus for a complete proof multiple files might need to be loaded.
+A sentence can be any of the following:
+\begin{description}
+	\item[Assumption] such as an axiom, conjecture and hypothesis, but also a parameter or variable.
+		An assumption is a name with only a type associated with it.
+	\item[Definition] for extending the environment with associations of names to terms.
+	\item[Inductive / Coinductive] for (co)inductive datatypes.
+	\item[Fixpoint] for fixpoint, or a block of functions defined by mutual well-founded recursion, and cofixpoint, or a block of terms defined by a mutual guarded co-recursion.
+	\item[Lemma with proof] for stating a proposition of which the proof is built.
+		This creates a type (the proposition) and an inhabitant of the type (the proof).
+		This proof is always constructed using tactics, except in the case that a proof is admitted.
+		In this case the proposition is converted into an axiom.
+\end{description}
+We will not go into more detail concerning \gallina because it is not the artifact that this thesis operates on directly.
+
+\begin{figure}[H]
+	\begin{lstlisting}[language=Coq, mathescape]
+Inductive nat : Set :=
+  | O : nat
+  | S : nat -> nat.
+Definition nat_id := fun x : nat => x.
+Fixpoint plus (n m : nat) : nat :=
+  match n with
+  | O => m
+  | S p => S (p + m)
+  end.
+	\end{lstlisting}
+	\caption{A small \gallina \coq file example defining natural numbers and the plus operation}
+\end{figure}
+\subsubsection{\pcic}
+
+Internally \coq represents all objects as terms \glsadd{termclass} of \cic{}\glsadd{cic}.
+\cic is the Calculus of (Co)Inductive Constructions,
+or the Calculus of Constructions \cite{coquand1988calculus} with inductive types and coinduction \cite{huet1987induction} \cite{coquand1990inductively}.
+More recently after \coq version 8 the switch was made to \glsadd{pcic}\pcic, or the Predicative Calculus of (Co)Inductive Constructions \cite{bertot2013interactive}.
+
+\begin{definition}[term]\glsadd{termclass}
+	A term is a noun or compound word of \pcic.
+	A term is typically denoted by $\term$\glsadd{term},
+	with $\terms$\glsadd{terms} being the set of all terms.
+\end{definition}
+
+\begin{definition}[type]\label{def:type}\glsadd{typeclass}
+	A type is denoted by the semantic subclass of types inside the syntactic class term.
+	A type is typically denoted by $\type$\glsadd{type}, with $\types$\glsadd{types} being the set of all types.
+\end{definition}
+
+All terms in \coq are typed.
+We define $\term : \type$ to mean that term $\term$ is of type $\type$.
+\coq is based on the Curry-Howard isomorphism \cite{howard1980formulae}.
+Therefor a type is inside the syntactic class term, and all types can be considered to be terms as well.
+\[ \types \subseteq \terms \]
+
+\begin{definition}[name]
+	A name is an element in the set of names $\names$\glsadd{names}, and is bound to a term. A name is typically denoted by $\name$\glsadd{name}.
+\end{definition}
+Names can be either global (a qualid) or local (an ident).
+In practice we transform the ident and qualid into a human readable canonical name.
+For the purpose of this thesis we disregard this detail, and instead consider each name to be a unique identifier.
+We are interested in these named terms for the purpose of \premiseselection,
+as we wish to select terms which are most likely to help prove a conjecture.
+We define $\name \objdef \term$ to mean that term $\term$ is bound to name $\name$.
+
+\begin{definition}[sort]\label{def:sort}\defgls{sort}
+	The type of a type when manipulated as a term is called a sort.
+	\pcic uses an infinite well-founded typing hierarchy of sorts,
+	with base sorts \glsadd{sortprop}\sortprop and \glsadd{sortset}\sortset,
+	and with a family of sorts \glsadd{sorttype}\sorttype[{i}].
+	The set of sorts named $\sorts$\defgls{sorts} is defined by
+	\[\sorts \equiv \{ \sortprop, \sortset, \sorttype[{i}] ~|~ i \in \mathbb{N} \} \]
+
+	Their types are defined as
+	\[
+		\begin{array}{rcl}
+			\sortprop & : & \sorttype[1] \\
+			\sortset & : & \sorttype[1] \\
+			\forall_{i \in \mathbb{N}}~ \sorttype[i] & : & \sorttype[{i+1}]
+		\end{array}
+	\]
+\end{definition}
+
+The sort \sortprop is intended to be the type of logical propositions.
+\sortset is intended to be the type of small sets such as booleans, the natural numbers, products, subsets and function types over these datatypes.
+For example if we look at the types of the term $0$ and $\texttt{True}$:
+	\[
+		\begin{array}{rcl}
+			0 & : & \texttt{nat} \\
+			\texttt{nat} & : & \sortset \\
+			\texttt{True} & : & \sortprop
+		\end{array}
+	\]
+
+We say a term $\term$ to be of sort $S$ when $\exists A ~.~ (t : A \text{~and~} A : S)$ holds.
+
+In the rest of this thesis, we will use the following \coq file, which contains a the definition
+of natural numbers and a simple proof, to showcase the effects of each describe step in our methods pipeline.
+
+\begin{figure}[H]
+	\begin{lstlisting}[language=Coq, mathescape]
+Inductive nat : Set :=
+  | O : nat
+  | S : nat -> nat.
+Definition nat_id := fun x : nat => x.
+Fixpoint plus (n m : nat) : nat :=
+  match n with
+  | O => m
+  | S p => S (plus p m)
+  end.
+Lemma plus_0_r : $\forall$ x , plus x 0 = x.
+Proof.
+intro x.
+apply eq_sym.
+induction x.
+unfold plus.
+apply eq_refl.
+unfold plus.
+apply f_equal.
+exact IHx.
+Qed.
+	\end{lstlisting}
+	\caption{\coq file example defining natural numbers}
+	\label{figure:natexample}
+\end{figure}
+
+In our example in Figure \ref{figure:natexample}, \texttt{0} and \texttt{S} can be regarded as constructors or objects.
+Both \texttt{nat\_id} and \texttt{plus} can be regarded as functions, which are also objects.
+The following terms are all of sort \sortset:
+$$
+	\begin{array}{rcl}
+		\texttt{0} & : & \texttt{nat} \\
+		\texttt{S} & : & \texttt{nat} \rightarrow \texttt{nat}
+	\end{array}
+$$
+$$
+	\begin{array}{rclcl}
+		\texttt{nat\_id} & \objdef & \lambda x : \texttt{nat}~.~x & : & \texttt{nat} \rightarrow \texttt{nat} \\
+		\texttt{plus} & \objdef & \texttt{fix}~\ldots & : & \texttt{nat} \rightarrow \texttt{nat} \rightarrow \texttt{nat} \\
+	\end{array}
+$$
+
+The following terms are of sort \sortprop, and are therefore always proofs:
+$$
+	\begin{array}{rcl}
+%			fun (P : nat -> Type) (f : P O) (f0 : forall n : nat, P n -> P (S n)) =>
+%			fix F (n : nat) : P n :=
+%			  match n as n0 return (P n0) with
+%			    | O => f
+%				  | S n0 => f0 n0 (F n0)
+%				    end
+
+		\texttt{nat\_ind} & \objdef & \lambda~P~f_0~f_S ~.~ \texttt{fix}~F~n ~:~ P~n ~:= \\
+			&   &  \texttt{match}~ n ~\texttt{with} \\
+			&   &  ~~| ~0 => f_0 \\
+			&	&  ~~| ~S~m => f_S~m~(F~m) \\
+			&	&  \texttt{end} \\
+			& : &  \forall P : \texttt{nat} \rightarrow \sortprop,~
+				P~\texttt{0} \rightarrow (\forall n : \texttt{nat},~ P~n \rightarrow P~(\texttt{S}~n)) \rightarrow \forall n : \texttt{nat},~ P~n \\
+
+%			eq_sym
+%			  (nat_ind (fun x0 : nat => x0 = plus x0 O) eq_refl
+%			       (fun (x0 : nat) (IHx : x0 = plus x0 O) => f_equal S IHx) x)
+%				        : forall x : nat, plus x O = x
+
+		\texttt{plus\_0\_r} & \objdef & \texttt{eq\_sym}
+							~~(\texttt{nat\_ind}~(\lambda x~.~\texttt{plus}~x~0)~\texttt{eq\_refl}~(\lambda x~\texttt{IH}~.~\texttt{f\_equal}~S~\texttt{IH})~x) \\
+							& : & \forall x : \texttt{nat},~ \texttt{plus}~x~0 = x \\
+	\end{array}
+$$
+
+Having described the sets for terms, types, names and sorts,
+we still need to define what each of these mean syntactically in the case of \pcic.
+Before we can summarise the structure of \pcic, we first need to define the list type $\listtype{-}$.
+
+\begin{definition}[\listtype{-}]
+	A list object for type $X$ consists of either an empty list, or a segment with a value of type $X$ followed by a tail.
+	  \[ \forall X ~.~ \listtype{X} = \nil ~|~ \cons{X}{\listtype{X}} \]
+  \end{definition}
+
+\begin{definition}
+	A \pcic term $t \in \terms$ is defined in terms of one of the following:
+
+	\begin{figure}[H]
+		\centering
+		\begin{tabular}{ll}
+			$\emptyterm$                                        & Empty term\glsadd{emptyterm} \\
+			$\text{Rel}(i:\nat)$                       & Variables as De Bruijn \cite{de1972lambda} index \\
+			$\text{Var}(n:\names)$                     & Named (local) variables \\
+			$\text{Evar}(xs:\listtype{\terms}) $        & Existential quantification \\
+			$\text{Sort}(n:\names)$                    & Named Sort of types \\
+			$\text{Cast}(t:\terms,~ A:\types)$ & Type casting check \\
+			$\text{Prods}(x:\names,~ A:\types,~ B:\types$ & $\prod x:A ~.~ B$ \\
+			$\text{Lambdas}(x:\names,~ A:\types,~ t:\terms)$   & $\lambda x:A ~.~ t$ \\
+			$\text{LetIns}(n:\names,~ t:\terms,~ A:\types)$    & $\text{let~} n := t : A \text{~in~} t$ \\
+			$\text{App}(x:\terms,~ ys:\listtype{\terms})$ & Application $x~ys_0 \ldots ys_n$ \\
+			$\text{Const}(n:\names,~ S:\sorts)$ & Constant \\
+			$\text{Ind}(n:\names,~ S:\sorts)$  & Inductive definition \\
+			$\text{Construct}(n:\names,~ S:\sorts)$ & Constructor (of ind. def.) \\
+			$\text{Case}(n:\terms,~ t:\terms,~ ys:\listtype{\terms})$ & Deconstruction (of ind. types) \\
+			$\text{Fix}(n:\listtype{\names},~ A:\listtype{\types},~ ts:\listtype{\terms})$ & Fixpoint functions \\
+			$\text{CoFix}(n:\listtype{\names},~ AS:\listtype{\types},~ ts:\listtype{\terms})$ & Co-fixpoint functions \\
+		\end{tabular}
+	\end{figure}
+\end{definition}
+
+\begin{definition}[sentence]\defgls{sentence}
+	A sentence is a named term. It is comprised of a name $\name$ and a term $\term$. Each term has a type associated with it, which we denote with $\type$.
+	We write each sentence to be of the form
+	\[\name \objdef \term : \type\]
+\end{definition}
+
+Note that the term $\term$ might be empty, for example as is the case with an axiom or an inductive datatype.
+In the case that $\term$ is empty, we write $\name : \type$ instead.
+
+\coq translates \gallina statements contained in \coq vernac (.v) files to terms of \pcic.
+Most notably all tactics are resolved (or executed) into terms.
+
+\begin{definition}[{\coqobj[s]}]\defgls{coqobj}
+	A \coqobj $s$ is a named \pcic term (also called a sentence).
+	We denote the set of all \coq objects as $\objs$.
+	For convenience we denote the ownership of the associated properties with a subscript.
+	Each \coqobj $s \in \objs$ has a name $\name[s]$\glsadd{name},
+	a term $\term[s]$\glsadd{term} and a type $\type[s]$\glsadd{type} associated with it.
+
+	\begin{figure}[H]
+		\centering
+		\begin{tabular}{l}
+			$\text{Constant}(n:\names,~ t:\terms,~ A:\types)$ \\
+			$\text{Variable}(n:\names,~ t:\terms,~ A:\types)$ \\
+			$\text{CurrentProof}(n:\names,~ \text{hyps}:\listtype{\listtype{\types} \times \terms}, t:\terms, A:\types)$ \\
+			$\text{InductiveConstructor}(n:\names,~ A:\types)$ \\
+			$\text{InductiveDefinition}(n:\names,~ A:\types,~ cs:\listtype{\text{InductiveConstructor}})$
+		\end{tabular}
+	\end{figure}
+
+	\begin{figure}[H]
+		\centering
+		\begin{tabular}{lccc}
+			$s = \text{Constant}(n,~ t,~ A)$ & $\name[s] = n$ & $\term[s] = t$ & $\type[s] = A$ \\
+			$s = \text{Variable}(n,~ t,~ A)$ & '' & '' & '' \\
+			$s = \text{CurrentProof}(n,~ \text{hyps},~ t,~ A)$ & '' & '' & '' \\
+			 & & & \\
+			$s = \text{InductiveConstructor}(n,~ A)$ & $\name[s] = n$ & $\term[s] = \emptyterm$ & $\type[s] = A$ \\
+			$s = \text{InductiveDefinition}(n,~ A,~ cs)$ & '' & '' & ''
+		\end{tabular}
+	\end{figure}
+\end{definition}
+
+Thus a \coq file can be considered to be a sequence of \coq objects:
+$$ \name[1] \objdef \term[1] : \type[1], ~~ \name[2] \objdef \term[2] : \type[2], ~~ \ldots $$
+
+A \coq corpus (or library) is a collection of \coq files, possibly including each other.
+It can thus be considered to be a partial ordered set of \coq objects, with the relation $R(a,b)$ for \coq objects $a, b \in \objs$ to be defined as
+\[R(a,b) = \name[b] \texttt{~is referenced in~} \term[a]\]

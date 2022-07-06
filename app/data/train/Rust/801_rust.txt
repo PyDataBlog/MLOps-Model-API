@@ -1,0 +1,124 @@
+//    ams - Advanced Memory Scanner
+//    Copyright (C) 2018 th0rex
+//
+//    This program is free software: you can redistribute it and/or modify
+//    it under the terms of the GNU General Public License as published by
+//    the Free Software Foundation, either version 3 of the License, or
+//    (at your option) any later version.
+//
+//    This program is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//    GNU General Public License for more details.
+//
+//    You should have received a copy of the GNU General Public License
+//    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+//! Lock free Queue implementation.
+
+use std::cell::UnsafeCell;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+pub struct Queue<T> {
+    size: usize,
+    count: AtomicUsize,
+    write_index: AtomicUsize,
+    read_index: AtomicUsize,
+    max_read_index: AtomicUsize,
+    data: UnsafeCell<Box<[T]>>,
+}
+
+impl<T: Clone + Default> Queue<T> {
+    pub fn new(size: usize) -> Queue<T> {
+        Queue {
+            size,
+            count: AtomicUsize::new(0),
+            write_index: AtomicUsize::new(0),
+            read_index: AtomicUsize::new(0),
+            max_read_index: AtomicUsize::new(0),
+            data: UnsafeCell::new(vec![T::default(); size].into_boxed_slice()),
+        }
+    }
+
+    pub fn pop(&self) -> Option<T> {
+        let mut ret;
+        let mut current_read_index;
+        let mut current_max_read_index;
+
+        while {
+            current_read_index = self.read_index.load(Ordering::SeqCst);
+            current_max_read_index = self.max_read_index.load(Ordering::SeqCst);
+
+            if self.count_to_index(current_read_index)
+                == self.count_to_index(current_max_read_index)
+            {
+                return None;
+            }
+
+            ret = unsafe { &*self.data.get() }[self.count_to_index(current_read_index)].clone();
+
+            if self.read_index.compare_and_swap(
+                current_read_index,
+                current_read_index + 1,
+                Ordering::SeqCst,
+            ) == current_read_index
+            {
+                self.count.fetch_sub(1, Ordering::SeqCst);
+
+                return Some(ret);
+            }
+
+            true
+        } {}
+
+        unreachable!();
+    }
+
+    pub fn push(&self, val: T) -> bool {
+        let mut current_read_index;
+        let mut current_write_index;
+
+        while {
+            current_read_index = self.read_index.load(Ordering::SeqCst);
+            current_write_index = self.write_index.load(Ordering::SeqCst);
+
+            if self.count_to_index(current_write_index + 1)
+                == self.count_to_index(current_read_index)
+            {
+                return false;
+            }
+
+            self.write_index.compare_and_swap(
+                current_write_index,
+                current_write_index + 1,
+                Ordering::SeqCst,
+            ) != current_write_index
+        } {}
+
+        unsafe {
+            let slice = &mut **self.data.get();
+            slice[self.count_to_index(current_write_index)] = val;
+        }
+
+        while self.max_read_index.compare_and_swap(
+            current_write_index,
+            current_write_index + 1,
+            Ordering::SeqCst,
+        ) != current_write_index
+        {}
+
+        self.count.fetch_add(1, Ordering::SeqCst);
+
+        true
+    }
+
+    pub fn size(&self) -> usize {
+        self.size
+    }
+
+    fn count_to_index(&self, to: usize) -> usize {
+        to % self.size
+    }
+}
+
+unsafe impl<T> Sync for Queue<T> {}

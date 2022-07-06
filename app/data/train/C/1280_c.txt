@@ -1,0 +1,198 @@
+#ifndef CELLO_SIMULATION_H
+#define CELLO_SIMULATION_H
+
+#include <algorithm>
+#include <stdexcept>
+#include <map>
+#include <memory>
+#include <queue>
+#include <string>
+#include <vector>
+#include <gameplay.h>
+#include <core/Delegate.h>
+#include <core/SimulationTypes.h>
+#include <json/json.h>
+#include <ui/Atlas.h>
+#include <util/Util.h>
+
+using std::map;
+using std::queue;
+using std::runtime_error;
+using std::string;
+using std::vector;
+using gameplay::PhysicsController;
+
+namespace cello
+{
+
+class Component;
+class ComponentFactory;
+
+class Simulation : NonCopyable
+{
+	
+public:
+	/**
+	 * The reserved ID for the System entity
+	 */
+    static const EntityID SYSTEM_ENTITY_ID = 0;
+
+	/**
+	 * The reserved ID to represent an invalid entity
+	 */
+	static const EntityID INVALID_ENTITY_ID = -1;
+
+	explicit Simulation(Atlas* atlas);
+	virtual ~Simulation();
+	Atlas* getAtlas() const { return _atlas;  }
+
+	/**
+	 * Get a reference to a component of the specified entity and component type.
+	 * Returns nullptr if the component or the entity is not found
+	 */
+	template<class ComponentClass>
+	ComponentClass* getComponent(int entityID) const
+	{
+		ComponentType componentType = ComponentClass::getType();
+		auto entityMapIt = _entityMap.find(entityID);
+		if (_entityMap.end() == entityMapIt)
+		{
+			return nullptr;
+		}
+		ComponentTypeMap& componentTypeMap = *(entityMapIt->second);
+		auto componentTypeMapIt = componentTypeMap.find(componentType);
+		if (componentTypeMap.end() == componentTypeMapIt)
+		{
+			return nullptr;
+		}
+		return static_cast<ComponentClass*>(componentTypeMapIt->second);
+	}
+
+	/*
+	 * Returns a list of all components of the specified type
+	 */
+	template<class ComponentClass>
+	ComponentList* getComponentsOfType()
+	{
+		ComponentType componentType = ComponentClass::getType();
+		// If no components of the required type currently exist, a new list
+		// will be created and returned
+		return &_componentMap[componentType];
+	}
+
+	bool isLevelLoaded() const { return _levelLoaded; }
+    void loadLevel(string levelFile, Json::Value levelData);
+    Json::Value saveLevel();
+	string getLevelFile() const { return _levelFile; }
+	string getLevelName() const { return _levelName; }
+	string getScriptName() const { return _scriptName; }
+	void init();
+
+	ComponentTypeMap* getComponentTypeMap(EntityID entity);
+
+	EntityID spawnEntity(string templateName);
+
+	/**
+	 * Queue an entity for destruction. The entity and it's components are removed from
+	 * the simulation but the components still exist in memory to allow other
+	 * components/systems time to remove references to them
+	 */
+	void killEntity(EntityID entity);
+
+	/**
+	 * Kill entity and immediately destroy it.
+	 */
+	void destroyEntity(EntityID entity);
+
+	Delegate<EntityID>& onEntityCreated() { return _entityCreatedDelegate; }
+	Delegate<EntityID>& onEntityKilled() { return _entityKilledDelegate; }
+
+private:
+	bool _levelLoaded;
+	string _levelFile;
+	string _levelName;
+	string _scriptName;
+
+	/**
+	* The value at which automatic ID generation starts
+	*/
+	static const EntityID START_ENTITY_ID = 100;
+
+	/**
+	 * Get the next available unique ID to assign to the next created entity
+	 */
+	inline EntityID getNextEntityID() { return _nextEntityID++; }
+    
+	int _nextEntityID;
+	static const string INHERIT_KEY;
+	static const string LOAD_EXTERNAL_KEY;
+	static const string ENTITY_ID_KEY;
+	static const string ENTITIES_LIST_KEY;
+	static const string GAME_STATE_KEY;
+	static const string TEMPLATE_FILE_EXTENSION;
+	
+	void deserializeComponent(Component* component, Json::Value& componentData);
+	Json::Value serializeComponent(Component* component, Json::Value& parentComponentData, bool copyAll);
+
+	/**
+	* Construct an empty entity from data and returns the Entity ID
+	*/
+	EntityID constructEntity(Json::Value entityData);
+
+	/**
+	 * Construct a component from data, adds it to the specified entity and returns a reference to it
+	 */
+	void constructComponent(EntityID entityID, string componentTypeStr, Json::Value componentData);
+
+	Json::Value preprocessEntityData(Json::Value entityData);
+	Json::Value preprocessComponentData(Json::Value entityData);
+	Json::Value getExternalData(string filename);
+	
+	/**
+	 * Add a component to an entity
+	 */
+	void addComponent(EntityID entityID, ComponentType componentType, Component* component);
+
+	/**
+	 * Remove a component from an entity
+	 */
+	void removeComponent(EntityID entityID, ComponentType);
+
+	/**
+	 * For every entity there is a map of ComponentType=>Component
+	 */
+	map<EntityID, ComponentTypeMap*> _entityMap;
+
+	/**
+	* Stores the list of entities to be destroyed at the end of a turn.
+	* Entities cannot be destroyed mid-turn
+	*/
+	map<EntityID, ComponentTypeMap*> _killedEntityMap;
+
+	/**
+	 * Stores a list of components for every component type
+	 */
+    map<ComponentType, ComponentList> _componentMap;
+
+	/**
+	* Delete the components of the entities in the map
+	*/
+	void destroyEntities(map<EntityID, ComponentTypeMap*>& entityMap);
+
+	void destroyComponentTypeMap(ComponentTypeMap* componentTypeMap);
+
+	/**
+	 * Stores the original template the entity was loaded from. This will
+	 * enable us to generate smaller save files
+	 */
+	map<EntityID, string> _entityTemplateMap;
+
+    ComponentFactory* _componentFactory;
+	
+	Atlas* _atlas;
+	Delegate<EntityID> _entityCreatedDelegate;
+	Delegate<EntityID> _entityKilledDelegate;
+};
+
+}
+#endif

@@ -1,0 +1,185 @@
+<?php
+
+/*
+ * This file is part of the fabschurt/phoundry package.
+ *
+ * (c) 2016 Fabien Schurter <fabien@fabschurt.com>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+use FabSchurt\Phoundry\Asset\{AssetCollection, Directory as DirectoryAsset};
+use FabSchurt\Phoundry\Asset\Collector\{TextFileCollector, TwigTemplateFileCollector};
+use FabSchurt\Phoundry\Console\Application;
+use FabSchurt\Phoundry\Console\Command\InitCommand;
+use FabSchurt\Phoundry\Data\ComposerData;
+use FabSchurt\Phoundry\Data\DataProviderInterface;
+use FabSchurt\Phoundry\Filesystem\Directory;
+use FabSchurt\Phoundry\Filesystem\Exception as FilesystemException;
+use Symfony\Component\Console\Helper\{HelperSet, QuestionHelper};
+use Symfony\Component\Console\Input\InputInterface;
+use Symfony\Component\Console\Output\OutputInterface;
+use Symfony\Component\Console\Tester\CommandTester;
+use Symfony\Component\Filesystem\Filesystem;
+use Symfony\Component\Finder\Finder;
+
+describe(InitCommand::class, function () {
+    beforeEach(function () {
+        $this->subjectFactory = function(
+            array $srcPath = [
+                'files'     => '/dev/null',
+                'templates' => '/dev/null',
+            ]
+        ): InitCommand {
+            $command = new InitCommand(
+                function (array $data = []) use ($srcPath): AssetCollection {
+                    return new AssetCollection([
+                        (new TextFileCollector(
+                            new Directory($srcPath['files']),
+                            new Finder(),
+                            $this->filesystem
+                        ))->collect(),
+                        (new TwigTemplateFileCollector(
+                            new Directory($srcPath['templates']),
+                            new \Twig_Environment(new \Twig_Loader_Filesystem($srcPath['templates'])),
+                            $data,
+                            new Finder(),
+                            $this->filesystem
+                        ))->collect(),
+                        new DirectoryAsset('dir_1', $this->filesystem),
+                        new DirectoryAsset('dir_2', $this->filesystem),
+                    ]);
+                },
+                function (HelperSet $helperSet, InputInterface $input, OutputInterface $output): DataProviderInterface {
+                    return new ComposerData($helperSet->get('question'), $input, $output);
+                },
+                new Filesystem()
+            );
+            $command->setHelperSet(new HelperSet([new QuestionHelper()]));
+
+            return $command;
+        };
+
+        $this->validSrcPathFactory = function (): array {
+            $path          = $this->tmpDir->prefixPath('src');
+            $filesPath     = "{$path}/files";
+            $templatesPath = "{$path}/templates";
+            $this->filesystem->dumpFile("{$filesPath}/file_1.txt", 'This is file 1.');
+            $this->filesystem->dumpFile("{$filesPath}/subdir_1/.file_2.txt", 'And this is file 2.');
+            $this->filesystem->dumpFile("{$filesPath}/file_3", 'That is file 3, which should be ignored.');
+            $this->filesystem->dumpFile(
+                "{$templatesPath}/subdir_2/template_1.twig",
+                "Package name: {{ package_name }}.\nPackage type: {{ package_type }}.\nLicense: {{ license_name }}."
+            );
+            $this->filesystem->dumpFile("{$templatesPath}/template_2", 'This is template 2, which should be ignored.');
+            $this->filesystem->dumpFile("{$templatesPath}/.template_3.twig", 'That is template 3, yep.');
+
+            return [
+                'files'     => $filesPath,
+                'templates' => $templatesPath,
+            ];
+        };
+
+        $this->mockInputStreamFactory = function (string $input) {
+            $stream = fopen('php://memory', 'r+');
+            fputs($stream, $input);
+            rewind($stream);
+
+            return $stream;
+        };
+    });
+
+    describe('->execute()', function () {
+        it('chokes if the passed directory path does not exist', function () {
+            $tester = new CommandTester($this->subjectFactory());
+            $tester->execute(['path' => $this->tmpDir->prefixPath('not_existing_dir')]);
+            expect($tester->getStatusCode())->to->equal(
+                Application::EXIT_CODE_MAPPING[FilesystemException\NonExistentPathException::class]
+            );
+            expect($tester->getDisplay())->to->match('/^\[error\]/');
+        });
+
+        it('chokes if the passed directory path is not writable', function () {
+            $tester      = new CommandTester($this->subjectFactory());
+            $destination = $this->tmpDir->prefixPath('not_writable_dir');
+            $this->filesystem->mkdir($destination, 0444);
+            $tester->execute(['path' => $destination]);
+            expect($tester->getStatusCode())->to->equal(
+                Application::EXIT_CODE_MAPPING[FilesystemException\InvalidPathException::class]
+            );
+            expect($tester->getDisplay())->to->match('/^\[error\]/');
+        });
+
+        it(
+            'asks for confirmation if the passed directory is not empty and stops if the user does not confirm the action',
+            function () {
+                $subject     = $this->subjectFactory();
+                $tester      = new CommandTester($subject);
+                $destination = $this->tmpDir->prefixPath('not_empty_dir');
+                $this->filesystem->dumpFile("{$destination}/.dummy", '');
+                $subject->getHelper('question')->setInputStream($this->mockInputStreamFactory("no\n"));
+                $tester->execute(['path' => $destination]);
+                expect($tester->getStatusCode())->to->equal(
+                    Application::EXIT_CODE_MAPPING[FilesystemException\DirectoryNotEmptyException::class]
+                );
+                expect($tester->getDisplay())
+                    ->to->match('/^The target directory is not empty, proceed anyway\?.*\[error\]/s')
+                ;
+            }
+        );
+
+        it(
+            'initializes a base PHP project structure in the target directory, interactively asking for parameters',
+            function () {
+                $subject     = $this->subjectFactory($this->validSrcPathFactory());
+                $tester      = new CommandTester($subject);
+                $destination = $this->validDestinationFactory();
+                $subject->getHelper('question')->setInputStream(
+                    $this->mockInputStreamFactory(
+                        "jsmith/stuff\nSome description.\n\n\nJohn Smith\njohn@smith.net\nhttp://john.smith.net/\nJohnSmith\n0\n"
+                    )
+                );
+                $tester->execute(['path' => $destination]);
+                expect($tester->getStatusCode())->to->equal(Application::EXIT_CODE_OK);
+                $resultingStructure = array_keys(
+                    iterator_to_array(
+                        new \RecursiveIteratorIterator(
+                            new \RecursiveDirectoryIterator($destination, \FilesystemIterator::SKIP_DOTS),
+                            \RecursiveIteratorIterator::SELF_FIRST
+                        )
+                    )
+                );
+                sort($resultingStructure);
+                expect($resultingStructure)->to->equal([
+                    "{$destination}/.template_3",
+                    "{$destination}/dir_1",
+                    "{$destination}/dir_2",
+                    "{$destination}/file_1",
+                    "{$destination}/subdir_1",
+                    "{$destination}/subdir_1/.file_2",
+                    "{$destination}/subdir_2",
+                    "{$destination}/subdir_2/template_1",
+                ]);
+                foreach (['dir_1', 'dir_2', 'subdir_1', 'subdir_2'] as $dir) {
+                    $dir = "{$destination}/{$dir}";
+                    expect(is_dir($dir))->to->be->true;
+                    expect(is_readable($dir))->to->be->true;
+                    expect(is_writable($dir))->to->be->true;
+                }
+                foreach (['file_1', 'subdir_1/.file_2', 'subdir_2/template_1', '.template_3'] as $file) {
+                    $file = "{$destination}/{$file}";
+                    expect(is_file($file))->to->be->true;
+                    expect(is_readable($file))->to->be->true;
+                    expect(is_writable($file))->to->be->true;
+                }
+                expect(file_get_contents("{$destination}/file_1"))->to->equal('This is file 1.');
+                expect(file_get_contents("{$destination}/subdir_1/.file_2"))->to->equal('And this is file 2.');
+                expect(file_get_contents("{$destination}/subdir_2/template_1"))->to->equal(
+                    "Package name: jsmith/stuff.\nPackage type: library.\nLicense: MIT."
+                );
+                expect(file_get_contents("{$destination}/.template_3"))->to->equal('That is template 3, yep.');
+            }
+        );
+    });
+});

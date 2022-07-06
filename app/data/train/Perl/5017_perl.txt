@@ -1,0 +1,255 @@
+#!/usr/bin/perl
+#
+# Description:
+#   looks for mountable volumes and 'rips' (copy) the "wanted" files (to a custom subdir in $baseTargetPath)
+#   "wanted" files are defined by filename based regexes  (per fstype a different set of regexes can be defined)
+#   => see __DATA__ (at the bottom of the script) 
+#
+# note:
+# * root privilege is needed
+# * depends on external cmds (blkid, fsarchiver)
+# * does not mount already mounted filesystems 
+# * most likely usage involves running this script from liveCD/USB booted Linux OS. => like SystemRescueCd 
+#
+use strict;
+use warnings;
+
+my $baseTargetPath	= "/tmpmntTarget";			# target (base) location for ripped files
+my $tmpmnt 		= "/tmpmntSource";			# tmp mountpoint
+#
+my $shortenedPrefix 	= "SHORTENED_";				# prefex on shortened files
+my ${NAME_MAX} 		= 254 - length($shortenedPrefix);	# char limit on filenames to shorten
+
+
+#
+# main 
+#
+my $DATAPATH;				# target location for files 
+my $LOCALTIME;
+my $logFH;
+my $errorlogFH;
+my %fileset;				# matching set of files to look for filesystem type
+my %fstype;				# filesystem type for partition	
+my %partitionsToRip;			# partition candidiates to rip files from
+#
+
+&check_prerequisites();
+&initialize();
+&getfilesetsbyfilesystemtype();
+&getpartitions();
+&ripPartitions();
+&cleanup();
+
+#
+#
+#
+
+
+sub getfilesetsbyfilesystemtype {
+	# preload filesets per fs type
+	my $fstype;
+	while(<DATA>) {
+		chomp;
+		next if m/^#/;
+		next if m/^\s*$/;
+		if ( m/^\[(\S+)\]/ ) {
+			$fstype = $1;
+			next;
+		}
+		push(@{$fileset{$fstype}}, "$_");
+		print "[$fstype] : [$_]\n";
+		print $logFH "[$fstype] : [$_]\n";
+	}
+}
+
+
+sub getpartitions {
+	# what parititons have been found ?
+	my $partdata	= `ls -l /dev/sd*`;
+	$partdata	.= `ls -l /dev/dm-*`;
+	print $partdata,"\n";
+	while ($partdata =~ m|(/dev/.*)|g ) {
+		my $part = $1;
+		my $type = `blkid $1 `;
+		($type)	 = $type =~ m/TYPE="(\S+)"/;
+		$fstype{$part} = $type;
+	}
+
+	# get fstype for each partition
+	foreach my $p ( keys %fstype ) {
+
+		next if ! defined $fstype{$p} ;
+
+		# now do stuff for each fs -> that we recognise :)
+		if ( exists $fileset{$fstype{$p}} ) {
+			$partitionsToRip{$p}++;		# partition candidiate to rip files from
+			#&do_rip($p, $fstype{$p});
+		} else {
+			# none left unsupported
+			print "$p skipped  =>  no configuration found for fstype [$fstype{$p}]\n";
+			print $errorlogFH "$p skipped => no configuration found for fstype [$fstype{$p}]\n";
+		}
+	}
+
+}
+
+sub ripPartitions {
+	foreach my $p ( keys %partitionsToRip ) {
+		&do_rip($p, $fstype{$p});
+	}
+}
+
+
+sub cleanup {
+	close($logFH);
+	close($errorlogFH);
+	`sync`;
+}
+
+
+sub initialize {
+
+	# create custom targetdir
+	my $custom		= localtime();
+	$custom 		=~ s/\s+/-/g;
+	$custom 		=~ s/:/_/g;
+	$DATAPATH		= "$baseTargetPath/$custom/";
+	mkdir "$DATAPATH";
+
+
+	# logfiles
+	my $logfile		= $DATAPATH . "rip.log";
+	my $logfile2		= $DATAPATH . "rip.log.errors";
+	open($logFH ,">> $logfile");
+	open($errorlogFH,">> $logfile2");
+		
+
+	my $lt = localtime();
+	$lt =~ s/\s+/-/g;
+	$lt =~ s/:/_/g;
+	$LOCALTIME = $lt;
+
+	print $logFH "\n[$lt]\n";
+	print $logFH `fsarchiver probe 2>&1`;
+	print $logFH "--------------------------------------------\n";
+}
+
+
+sub do_rip {
+	my $partition	= shift;
+	my $type	= shift;
+	print "ripping $partition using $type filters \n";
+	print $logFH "ripping $partition using $type filters \n";
+
+	# handle swap
+	if ( $type eq "swap" ) {
+		(my $part) =  $partition =~ m|.*/(.*)$|;
+		my $destfile	= $DATAPATH . $part .  ".Swap_strings";
+		`dd if=$partition | strings > $destfile`;
+		return;
+	}
+
+	# skip if already mounted
+	if ( grep m{ $partition },qx{mount} ) {
+		print "[$partition] skipped was already mounted !\n";
+		return;
+	}
+	
+	`mount -o ro $partition $tmpmnt`;
+
+
+	print "[@{$fileset{$type}}]\n";
+
+	open(FF," find \"$tmpmnt\"  | ");
+	while(<FF>) {
+		chomp;
+		my $line = $_;
+		my $match = 0;
+		foreach my $filter ( @{$fileset{$type}} ) {
+			$match++ if $line =~ m|$filter|i;
+		}
+		if ( $match ) {
+			# found somehthing interesting
+			&get_it($partition,$line);
+		} 
+	}
+	close(FF);
+	`umount $tmpmnt`;
+}
+
+sub get_it {
+	my $part 	= shift;
+	$part 		=~ s|/dev/||;
+	my $file 	= shift;
+	my $destdir	= $DATAPATH . $part . "/" ;
+	mkdir $destdir;
+	# 
+	#
+	$file =~ s|\$|\\\$|g;
+	my $destfile	= $file;	
+	$destfile	=~ s|$tmpmnt||;
+	$destfile	=~ s|/|_|g;
+	$destfile	=~ s|\ |_|g;
+#	print "[$file] -> $destdir \n";
+	print ".";
+
+	my $destfileLength = length($destfile);
+	if ( $destfileLength > ${NAME_MAX} ) {
+		my $fulldestfile = $destfile;
+		$destfile = substr $fulldestfile, -${NAME_MAX}, ${NAME_MAX};
+		$destfile = $shortenedPrefix . $destfile;
+		print $logFH  "[$file] -> [$destfileLength>${NAME_MAX}][shortened][$fulldestfile]->[$destfile]\n";
+		print $errorlogFH "[$file] -> [$destfileLength>${NAME_MAX}][shortened][$fulldestfile]->[$destfile]\n";
+	}
+	print $logFH "[$file] -> $destdir \n";
+
+	print $errorlogFH `cp "$file" "$destdir$destfile" 2>&1`;
+
+
+}
+
+
+sub check_prerequisites {
+	my $failed = 0;
+	# check for root
+	if ( $< ne 0 ) 			{ print "You'll need root privileges !\n"; $failed++ ; }
+
+	# need fsarchiver to search for the available filesystems
+	my $fsarchiverFound		= `which fsarchiver`; 	chomp($fsarchiverFound); 
+	if ( ! $fsarchiverFound )	{ print "[fsarchiver] not found\n"; $failed++;} 
+
+	# need blkid 
+	my $blkidFound			= `which blkid`; 	chomp($blkidFound); 
+	if ( ! $blkidFound )		{ print "[blkid] not found\n"; $failed++;} 
+
+	# target location should exists
+	if ( ! -d "$baseTargetPath" ) 	{ print "target path [$baseTargetPath] not found, cannot continue\n"; $failed++; }
+
+		
+	if ( ! -d "$tmpmnt" ) 		{ print "temporary mount point [$tmpmnt] not found, cannot continue\n"; $failed++; }
+
+	if ( $failed ) 			{ print "[$failed] failed prerequisites\n" ; exit ; }; 
+}
+
+#
+# below is a sample configuration
+# (a starting '#'  means a comment)
+#
+# [<fstype>]   				Start of stanza for a specific fstype, as reported by fsarchiver. Following lines are filename regexes for said fstype  
+# [swap]				special stanze to enable the copy of a stringified version of the swap partition
+#
+
+__DATA__
+[ntfs]
+#my documents/.*\.jpg$
+#Users/.*\.jpg$
+\.jpg$
+[ext2]
+\.jpg$
+[ext3]
+\.jpg$
+[ext4]
+\.jpg$
+[vfat]
+\.jpg$
+#[swap]

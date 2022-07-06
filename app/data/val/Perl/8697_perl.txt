@@ -1,0 +1,261 @@
+#!/usr/bin/env perl
+
+# wlair IRC Bot
+
+# Copyright (c) 2013, 2014, 2015 xoddf2
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#
+#  * Redistributions of source code must retain the above copyright notice,
+#    this list of conditions and the following disclaimer.
+#  * Redistributions in binary form must reproduce the above copyright
+#    notice, this list of conditions and the following disclaimer in the
+#    documentation and/or other materials provided with the distribution.
+#
+# THIS SOFTWARE IS PROVIDED BY THE AUTHOR AND CONTRIBUTORS ``AS IS'' AND ANY
+# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL THE AUTHOR OR CONTRIBUTORS BE LIABLE FOR ANY
+# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+# SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+# CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+# LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+# OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+# DAMAGE.
+
+use strict;
+use warnings;
+
+use Getopt::Long;
+
+use POE;
+use POE::Component::IRC;
+use POE::Component::IRC::Plugin::CTCP;
+use POE::Component::IRC::Plugin::NickServID;
+
+use POE::Component::SSLify;
+
+use YAML::XS qw/LoadFile/;
+use feature qw/say/;
+
+use LWP::Simple;
+
+use Regexp::Common qw/URI/; # For URI titles
+
+use REST::Google::Search;
+use HTML::Restrict;
+
+use POSIX qw(uname); # For CTCP VERSION
+
+my $wlbot_version = "git";
+
+# Default settings
+my $config_file = "$ENV{'HOME'}/.wlbotrc";
+my $config      = LoadFile($config_file);
+my $wlbot_nick  = $config->{nick};
+my $password    = $config->{password};
+my $username    = $config->{username};
+my $ircname     = $config->{gecos};
+my $server      = $config->{server};
+my $port        = $config->{port};
+my $ssl         = $config->{ssl};
+my $channel     = $config->{channel};
+my $usermode    = $config->{usermode};
+my $prefix      = $config->{prefix};
+
+# Command-line options
+my ($opt_help, $opt_version);
+
+GetOptions ("config=s"   => \$config_file,
+            "nick=s"     => \$wlbot_nick,
+            "username=s" => \$username,
+            "password=s" => \$password,
+            "gecos=s"    => \$ircname,
+            "server=s"   => \$server,
+            "port=s"     => \$port,
+            "ssl"        => \$ssl,
+            "channel=s"  => \$channel,
+            "usermode=s" => \$usermode,
+            "prefix=s"   => \$prefix,
+            "help!"      => \$opt_help,
+            "version!"   => \$opt_version);
+
+if (defined $opt_help) {
+    print "usage: wlbot [--nick nick] [--username username] [--gecos ircname]\n";
+    print "             [--server host] [--port port] [--channel channel]\n";
+    print "             [--usermode modes] [--prefix char]\n";
+
+    exit 0;
+} elsif (defined $opt_version) {
+    print "wlair IRC Bot $wlbot_version\n";
+
+    exit 0;
+}
+
+# Refuse to run without a server or channel
+if (($server eq '') && ($channel eq '')) {
+    die("Please specify a server with --server and a channel with --channel.");
+} elsif ($server eq '') {
+    die("Please specify a server with --server.");
+} elsif ($channel eq '') {
+    die("Please specify a channel with --channel.");
+}
+
+# What channel to join
+sub CHANNEL ()
+{
+    $channel
+}
+
+my ($irc) = POE::Component::IRC->spawn();
+
+# What to do, when
+POE::Session->create(
+    inline_states  => {
+        _start     => \&bot_start,
+        irc_001    => \&on_connect,
+        irc_public => \&on_public,
+        irc_msg    => \&on_private,
+    },
+);
+
+# Connect
+sub bot_start {
+    $irc->plugin_add(
+        'NickServID' => POE::Component::IRC::Plugin::NickServID->new(
+            Password => $password
+        ));
+
+    $irc->yield(register => "all");
+
+    $irc->yield(
+        connect => {
+            Nick     => $wlbot_nick,
+            Username => $username,
+            Password => $password,
+            Ircname  => $ircname,
+            Server   => $server,
+            Port     => $port,
+            UseSSL   => $ssl,
+        }
+    );
+
+    # For CTCP VERSION:
+    my ($sysname, $nodename, $release, $version, $machine) = POSIX::uname();
+
+    $irc->plugin_add('CTCP' => POE::Component::IRC::Plugin::CTCP->new(
+        version  => "wlair IRC Bot ${wlbot_version} (running on ${sysname} ${machine})",
+        userinfo => $ircname,
+    ));
+}
+
+# Commands
+sub wlbot_command_ping {
+    my ($to) = @_;
+
+    $irc->yield(privmsg => $to, "pong");
+}
+
+sub wlbot_command_source {
+    my ($to) = @_;
+
+    $irc->yield(privmsg => $to, "My source is at https://github.com/woddfellow2/wlbot");
+}
+
+sub wlbot_command_google {
+    my ($to, $query) = @_;
+
+    REST::Google::Search->http_referer('');
+
+    my $res = REST::Google::Search->new(
+        q => $query,
+    );
+
+    my $hr = HTML::Restrict->new(); # To strip out the <b></b> tags
+
+    my $data = $res->responseData;
+    my $cursor = $data->cursor;
+    my $pages = $cursor->pages;
+
+    my @results = $data->results;
+
+    $irc->yield(privmsg => $to, $hr->process($results[0]->title . ": ". $results[0]->url));
+}
+
+# Web page title announcements
+sub get_www_page_title {
+    my ($to, $url) = @_;
+
+    my $html = get($url);
+    $html =~ m{<TITLE>(.*?)</TITLE>}gism;
+    $html =~ s/1$//;
+
+    $irc->yield(privmsg => $to, "Title: " . $1);
+}
+
+# Set user modes on itself and join
+sub on_connect {
+    $irc->yield(mode => $wlbot_nick => $usermode);
+    $irc->yield(join => CHANNEL);
+}
+
+# What to do in channels
+sub on_public {
+    my ($kernel, $who, $where, $msg) = @_[KERNEL, ARG0, ARG1, ARG2];
+    my $nick    = (split /!/, $who)[0];
+    my $channel = $where->[0];
+    my $ts      = scalar localtime;
+
+    # Commands
+    if ($msg =~ /^(\Q$prefix\E|\Q$wlbot_nick\E.? +)ping */) {
+        wlbot_command_ping(CHANNEL);
+        print STDERR "$nick in $channel pinged at $ts\n";
+    } elsif ($msg =~ /^(\Q$prefix\E|\Q$wlbot_nick\E.? +)source */) {
+        wlbot_command_source(CHANNEL);
+        print STDERR "$nick in $channel called !source at $ts\n";
+    } elsif ($msg =~ /^(\Q$prefix\E|\Q$wlbot_nick\E.? +)gg */) {
+        # Isolate the query
+        my $gg = $msg;
+        $gg =~ s/^(\Q$prefix\E|\Q$wlbot_nick\E.? +)gg *//;
+
+        wlbot_command_google(CHANNEL, $gg);
+        print STDERR "$nick in $channel did a Google search for $gg at $ts\n";
+    } elsif ($msg =~ /$RE{URI}/) {
+        my $uri = $msg;
+        $uri =~ /$RE{URI}/;
+
+        get_www_page_title(CHANNEL, $uri);
+        print STDERR "$nick in $channel posted URI $uri at $ts\n";
+    }
+}
+
+# What to do in PM
+sub on_private {
+    # TODO: Reduce the redundancy (some of this is already in on_public).
+    my ($kernel, $who, $to, $msg) = @_[KERNEL, ARG0, ARG1, ARG2];
+    my $nick    = (split /!/, $who)[0];
+    my $address = (split /!/, $who)[1];
+    my $ts      = scalar localtime;
+
+    # Commands
+    if ($msg =~ /^(\Q$prefix\E)?ping */) {
+        wlbot_command_ping($nick);
+        print STDERR "$nick in private message pinged at $ts\n";
+    } elsif ($msg =~ /^(\Q$prefix\E)?source */) {
+        wlbot_command_source($nick);
+        print STDERR "$nick in private message called !source at $ts\n";
+    } elsif ($msg =~ /^(\Q$prefix\E)?gg */) {
+        # Isolate the query
+        my $gg = $msg;
+        $gg =~ s/^(\Q$prefix\E)?gg *//;
+
+        wlbot_command_google($nick, $gg);
+        print STDERR "$nick in private message did a Google search for $gg at $ts\n";
+    }
+}
+
+$poe_kernel->run();
+exit 0;

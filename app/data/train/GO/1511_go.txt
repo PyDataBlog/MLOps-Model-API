@@ -1,0 +1,347 @@
+/*
+   Copyright 2015 Philippe Hilger, aka "PeerGum"
+
+   Licensed under the Apache License, Version 2.0 (the "License");
+   you may not use this file except in compliance with the License.
+   You may obtain a copy of the License at
+
+      http://www.apache.org/licenses/LICENSE-2.0
+
+   Unless required by applicable law or agreed to in writing, software
+   distributed under the License is distributed on an "AS IS" BASIS,
+   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+   See the License for the specific language governing permissions and
+   limitations under the License.
+*/
+
+//-----------------------------------------------------
+// IMPORTANT:
+// This address layer is network-agnostic.
+// It should not make any reference to the IP network.
+//-----------------------------------------------------
+
+package layer
+
+import (
+	"fmt"
+	"math"
+	"math/rand"
+	"reflect"
+	"strconv"
+	"time"
+)
+
+type AddressDistance uint64
+
+const DIST_MAX AddressDistance = 1 << 16 // maximum distance
+const ADDRESS_SIZE = 2                   // number of 64bits values
+
+const (
+	ADDRESS_INACTIVE = iota
+	ADDRESS_ACTIVE
+)
+
+type AddressValue [ADDRESS_SIZE]uint64
+
+type PeerList []AddressValue
+
+type RerouteList struct {
+	Gimme *PeerList
+	Get   *PeerList
+}
+
+// Address is the peer address structure.
+// One peer can possibly have several peer addresses
+// distributed on its interfaces
+type Address struct {
+	name       string          // name for this peer address
+	value      AddressValue    // peer address
+	interfaces Interfaces      // physical interfaces
+	external   ExternalAddress // external (ip) address
+	port       int             // peer port
+	mgmt       int             // management port
+	status     int             // status of this address
+}
+
+type Addresses []*Address
+
+var (
+	SELF = Address{
+		name:   "self",
+		value:  AddressValue{},
+		port:   DEFAULT_PORT,
+		mgmt:   MGMT_PORT,
+		status: ADDRESS_ACTIVE,
+	}
+)
+
+func init() {
+	rand.Seed(time.Now().UnixNano())
+	fmt.Println("ok")
+}
+
+func (addresses *Addresses) InitSelf() {
+	address := SELF
+	address.SetValue(GetRandomAddress())
+	address.SetExternal(GetExternalAddress())
+	address.SetPort(*peerPort)
+	Logln("port:", *peerPort)
+	interfaces, err := GetInterfaces()
+	if err != nil {
+		Logln("Can't get interfaces:", err)
+		panic(err)
+	}
+	address.SetInterfaces(interfaces)
+	addresses.Add(&address)
+}
+
+func NewAddress(v ...interface{}) *Address {
+	address := &Address{}
+	for _, item := range v {
+		switch item.(type) {
+		case string: // must be name
+			address.SetName(item.(string))
+		case AddressValue:
+			address.SetValue(item.(AddressValue))
+		case ExternalAddress:
+			address.SetExternal(item.(ExternalAddress))
+		case int: // must be port
+			address.SetPort(item.(int))
+		default:
+			Logln("Unknown element when creating an address:", item)
+		}
+	}
+	return address
+}
+
+func GetRandomAddress() (addressValue AddressValue) {
+	for i := range addressValue {
+		addressValue[i] |= (uint64(rand.Int63()) & 0x7fff7fff7fff7fff)
+	}
+	return addressValue
+}
+
+func (addresses *Addresses) Add(address *Address) {
+	*addresses = append(*addresses, address)
+}
+
+func (address *Address) GetName() string {
+	return address.name
+}
+
+func (address *Address) SetName(name string) *Address {
+	address.name = name
+	return address
+}
+
+func (address *Address) GetValue() AddressValue {
+	return address.value
+}
+
+func (address *Address) SetValue(addressValue AddressValue) *Address {
+	address.value = addressValue
+	return address
+}
+
+func (address *Address) GetExternal() ExternalAddress {
+	return address.external
+}
+
+func (address *Address) SetExternal(externalAddress ExternalAddress) *Address {
+	address.external = externalAddress
+	return address
+}
+
+func (address *Address) GetPort() int {
+	return address.port
+}
+
+func (address *Address) GetPortString() string {
+	return strconv.Itoa(address.GetPort())
+}
+
+func (address *Address) SetPort(port int) *Address {
+	address.port = port
+	return address
+}
+
+func (address *Address) GetConnectionString() string {
+	return GetConnectionString(address)
+}
+
+// Is this me?
+func (address *Address) IsSelf() bool {
+	if reflect.DeepEqual(*address, SELF) {
+		return true
+	}
+	return false
+}
+
+// GetInterfaces returns the interfaces used by the address
+func (address *Address) GetInterfaces() Interfaces {
+	return address.interfaces
+}
+
+// SetInterfaces define a set of interfaces for this address
+func (address *Address) SetInterfaces(interfaces Interfaces) *Address {
+	address.interfaces = interfaces
+	return address
+}
+
+//
+// --- calculate distances
+//
+// Distance between 2 addresses
+// is the minimum linear distance
+// between 16bits groups taken as circles"
+//
+func (address *Address) Distance(address2 *Address) AddressDistance {
+	return (address.value).Distance(address2.value)
+}
+
+func (address AddressValue) Distance(address2 AddressValue) AddressDistance {
+	var d AddressDistance = DIST_MAX / 2
+	var vLow, v2Low [ADDRESS_SIZE * 4]uint64
+	for i, v := range address {
+		v2 := address2[i]
+		for j := 0; j < 4; j++ {
+			pos := i*4 + j
+			vLow[pos] = v % uint64(DIST_MAX)
+			v2Low[pos] = v2 % uint64(DIST_MAX)
+			di := DIST_MAX/2 - AddressDistance(
+				math.Abs(float64(int64(DIST_MAX/2)-int64(v2Low[pos]-vLow[pos]))))
+			if di > DIST_MAX/2 {
+				di = DIST_MAX - di
+			}
+			if di < d {
+				d = di
+			}
+			v = v >> 16
+			v2 = v2 >> 16
+		}
+	}
+	if d > 0 {
+	WORMHOLE_TEST:
+		for i, v := range vLow {
+			for j, v2 := range v2Low {
+				if v == v2 && i != j {
+					d = 0
+					break WORMHOLE_TEST
+				}
+			}
+		}
+	}
+	return d
+}
+
+//
+// --- string conversions
+//
+
+func (addresses Addresses) String() (result string) {
+	if len(addresses) == 0 {
+		return "(None)"
+	}
+	for i, address := range addresses {
+		if i > 0 {
+			result += "\n"
+		}
+		result += fmt.Sprintf("- %d: %s", i, address)
+	}
+	return
+}
+
+func (addresses Addresses) Details() (result string) {
+	if len(addresses) == 0 {
+		return "(None)"
+	}
+	for i, address := range addresses {
+		if i > 0 {
+			result += "\n"
+		}
+		result += fmt.Sprintf("- %d:\n%v", i, address.Details())
+	}
+	return
+}
+
+func (address *Address) String() string {
+	return fmt.Sprintf("%s [%s/%s:%d]", address.value, address.name, address.external, address.port)
+}
+
+func (address *Address) Details() string {
+	return fmt.Sprintf("%s [%s/%s:%d]\n%v\n", address.value, address.name, address.external, address.port, address.interfaces)
+}
+
+func (value AddressValue) String() string {
+	strAddress := ""
+	for _, val := range value {
+		strAddress = fmt.Sprintf("%s%016x", strAddress, val)
+	}
+	result := ""
+	for i, char := range strAddress {
+		if i%4 == 0 && i > 0 {
+			result += "-"
+		}
+		result = fmt.Sprintf("%s%c", result, char)
+	}
+	return result
+}
+
+func (peerList PeerList) String() (result string) {
+	for i, address := range peerList {
+		if i > 0 {
+			result += "\n"
+		}
+		result += fmt.Sprintf("[%d] %s", i, address)
+	}
+	return
+}
+
+func (rerouteList RerouteList) String() string {
+	return fmt.Sprintf("Gimme:\n%s\nGet:\n%s", rerouteList.Gimme, rerouteList.Get)
+}
+
+//
+// -- peerlist sorting
+//
+
+type PeerListByZero PeerList
+
+// -- ordering relative to address ZERO
+
+func (peerList PeerListByZero) Less(i, j int) bool {
+	zero := &AddressValue{0, 0}
+	return zero.Distance(peerList[i]) < zero.Distance(peerList[j])
+}
+
+func (peerList PeerListByZero) Swap(i, j int) {
+	peerList[i], peerList[j] = peerList[j], peerList[i]
+}
+
+func (peerList PeerListByZero) Len() int {
+	return len(peerList)
+}
+
+// -- basic ordering relative to Me()
+
+func (peerList PeerList) Less(i, j int) bool {
+	myAddress := me.GetAddress().GetValue()
+	return myAddress.Distance(peerList[i]) < myAddress.Distance(peerList[j])
+}
+
+func (peerList PeerList) Search(addressValue AddressValue) int {
+	for i, value := range peerList {
+		if value == addressValue {
+			return i
+		}
+	}
+	return peerList.Len()
+}
+
+func (peerList PeerList) Swap(i, j int) {
+	peerList[i], peerList[j] = peerList[j], peerList[i]
+}
+
+func (peerList PeerList) Len() int {
+	return len(peerList)
+}

@@ -1,0 +1,230 @@
+var async = require('async');
+
+Array.prototype.count = function() {
+    var amount = 0;
+    this.forEach(function(n) {
+        if( typeof n !== 'number' ) {
+            return;
+        }
+        amount += n;
+    });
+    return amount;
+};
+
+module.exports = function () {
+    return function (game) {
+        var iterateCuboid = function(l1, l2, callback) {
+            var tasks = [];
+            
+            for(var x = (Math.min(l1.x, l2.x) & 0x0f); x <= (Math.max(l1.x, l2.x) & 0x0f); x++) {
+                for(var y = Math.min(l1.y, l2.y); y <= Math.max(l1.y, l2.y); y++) {
+                    for(var z = (Math.min(l1.z, l2.z) & 0x0f); z <= (Math.max(l1.z, l2.z) & 0x0f); z++) {
+                        tasks.push(callback.bind(undefined, {
+                            'x': x,
+                            'y': y,
+                            'z': z
+                        }));
+                    }
+                }
+            }
+            
+            return tasks;
+        };
+        
+        var locationToChunk = function(location) {
+            return {
+                x: location.x >> 4,
+                z: location.z >> 4
+            };
+        };
+        
+        var iterateChunks = function(l1, l2, callback) {
+            var array = [];
+                
+            l1 = locationToChunk(l1);
+            l2 = locationToChunk(l2);
+
+            for(var x = Math.min(l1.x, l2.x); x <= Math.max(l1.x, l2.x); x++) {
+                for(var z = Math.min(l1.z, l2.z); z <= Math.max(l1.z, l2.z); z++) {
+                    array.push(callback.bind(undefined, x, z));
+                }
+            }
+            
+            return array;
+        };
+        
+        var set = function(axis, callbacks, finish) {
+            var startTime = new Date().getTime();
+        
+            var blocks = 
+                    (Math.abs(axis.first.x - axis.second.x) + 1)
+                    * (Math.abs(axis.first.y - axis.second.y) + 1)
+                    * (Math.abs(axis.first.z - axis.second.z) + 1),
+                count = 0;
+                
+            var weMin = {
+                    x: Math.min(axis.first.x, axis.second.x),
+                    z: Math.min(axis.first.z, axis.second.z)
+                },
+                weMax = {
+                    x: Math.max(axis.first.x, axis.second.x),
+                    z: Math.max(axis.first.z, axis.second.z)
+                };
+                
+            async.series(
+                iterateChunks(axis.first, axis.second, function(x, z, callback) {
+                    var cMin = {
+                            x: x << 4,
+                            y: axis.first.y,
+                            z: z << 4
+                        },
+                        cMax = {
+                            x: ((x + 1) << 4) -1,
+                            y: axis.second.y,
+                            z: ((z + 1) << 4) -1
+                        };
+                    
+                    if( weMin.x > cMin.x ) {
+                        cMin.x = weMin.x;
+                    }
+                    
+                    if( weMin.z > cMin.z ) {
+                        cMin.z = weMin.z;
+                    }
+                    
+                    if( weMax.x < cMax.x ) {
+                        cMax.x = weMax.x;
+                    }
+                    
+                    if( weMax.z < cMax.z ) {
+                        cMax.z = weMax.z;
+                    }
+                    
+                    game.map.get_chunk(x, z, function(err, chunk) {
+                        async.parallel(
+                            iterateCuboid(cMin, cMax, callbacks.perBlock.bind(undefined, chunk)),
+                            function(err, results) {
+                                var count = results.count();
+                                
+                                process.nextTick( callback.bind(undefined, null, count) );
+                                
+                                chunk.getPackage(function(newpacket) {
+                                    game.players.forEach(function (player) {
+                                        player.send(newpacket);
+                                    });
+                                });
+                            }
+                        );
+                        
+                    });
+                }),
+                function(err, results) {
+                    var count = results.count(),
+                        endTime = new Date().getTime();
+                        
+                    finish(count, endTime - startTime);
+                }
+            );
+        };
+    
+        game.on("player:join", function (player) {
+        
+            player.message = function(msg, colour) {
+              msg = "§5[Jsmc] §7" + msg;
+              player.send({pid: 0x03, message: msg});
+            };
+
+            player.weAxis = {};
+            player.weReady = function() {
+                if( !('first' in this.weAxis) || !('second' in this.weAxis) ) {
+                    return false;
+                }
+                return true;
+            };
+
+            player.on("click", function (packet) {
+                if( player.inventory.heldItem().block !== 269 ) {
+                    return;
+                }
+                
+                player.weAxis.second = packet.location;
+                player.message("Second point set!");
+            });
+            
+            player.on("dig", function (packet) {
+                if( player.inventory.heldItem().block !== 269 ) {
+                    return;
+                }
+                
+                player.weAxis.first = packet.location;
+                player.message("First point set!");
+            });
+            
+            player.on("command", function(event) {
+                // When player uses a command
+                if (!player.isAdmin()) return;
+                if( event.command.substr(0, 1) !== '/' ) return;
+
+                event.command = event.command.substr(1);
+
+                switch (event.command) {
+                    case "set": {
+                        game.storage.itemInfo(event.args[0], function(data) {
+                            if(!data) {
+                                player.message("No item " + event.args[0] + " found :(?");
+                                return;
+                            }
+                        
+                            set(player.weAxis, {
+                                'perBlock': function(chunk, location, callback) {
+                                    chunk.set_block_type(location.x, location.z, location.y, data.id);
+                                    callback(null, 1);
+                                }
+                            },
+                            function(count, time) {
+                                player.message("Done in " + (Math.floor(time/100) / 10) + "!");
+                                player.message("Changed " + count + " blocks!");
+                            });
+                        });
+                        break;
+                    };
+                    
+                    case "replace": {
+                        game.storage.itemInfo(event.args[0], function(item1) { game.storage.itemInfo(event.args[1], function(item2) {
+                            if(!item1) {
+                                player.message("No item " + event.args[0] + " found :(?");
+                                return;
+                            }
+                            
+                            if(!item2) {
+                                player.message("No item " + event.args[1] + " found :(?");
+                                return;
+                            }
+                        
+                            set(player.weAxis, {
+                                'perBlock': function(chunk, location, callback) {
+                                    if(chunk.get_block_type(location.x, location.z, location.y) !== item1.id) {
+                                        callback(null, 0);
+                                        return;
+                                    }
+                                    chunk.set_block_type(location.x, location.z, location.y, item2.id);
+                                    callback(null, 1);
+                                }
+                            }, function( count, time) {
+                                player.message("Done in " + (Math.floor(time/100) / 10) + "!");
+                                player.message("Changed " + count + " blocks!");
+                            });
+                        });});
+                        break;
+                    };
+                    
+                    case "clear": {
+                        player.weAxis = {};
+                        player.message("World edit points cleared!");
+                        break;
+                    };
+                }
+            });
+        });
+    };
+};

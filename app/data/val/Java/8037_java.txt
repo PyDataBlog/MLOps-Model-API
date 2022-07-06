@@ -1,0 +1,278 @@
+package ooo.purity.unwatermark.gui;
+
+import ooo.purity.unwatermark.Mode;
+import ooo.purity.unwatermark.ModeFactory;
+import ooo.purity.unwatermark.mode.MFSA;
+
+import javax.swing.*;
+
+import java.awt.*;
+import java.awt.datatransfer.DataFlavor;
+import java.awt.datatransfer.Transferable;
+import java.awt.datatransfer.UnsupportedFlavorException;
+
+import java.awt.event.ComponentEvent;
+import java.awt.event.ComponentListener;
+import java.awt.image.BufferedImage;
+import java.awt.print.PrinterException;
+import java.io.File;
+import java.io.IOException;
+import java.io.PrintWriter;
+import java.io.StringWriter;
+
+class ViewFrame extends JFrame {
+	private static final long serialVersionUID = -908237280313491890L;
+
+	private final JFileChooser openChooser = new JFileChooser();
+	private final JFileChooser saveChooser = new JFileChooser();
+
+	private final ImagePanel imagePanel = new ImagePanel();
+	private final JScrollPane scrollPane = new JScrollPane(imagePanel, ScrollPaneConstants.VERTICAL_SCROLLBAR_NEVER,
+			ScrollPaneConstants.HORIZONTAL_SCROLLBAR_NEVER);
+
+	private final DefaultListModel<Document> listModel = new DefaultListModel<>();
+	final JList<Document> list = new JList<>(listModel);
+
+	private class Document {
+
+		private final File file;
+
+		private BufferedImage image;
+		private Mode mode = ModeFactory.create(MFSA.NAME);
+
+		private Document(final File file) throws IOException {
+			this.file = file;
+			image = mode.apply(file);
+		}
+
+		private void show() {
+			imagePanel.setName(file.getName());
+			imagePanel.setImage(image);
+			imagePanel.setBounds(0, 0,
+					scrollPane.getWidth() - scrollPane.getVerticalScrollBar().getWidth(),
+					scrollPane.getHeight() - scrollPane.getHorizontalScrollBar().getHeight());
+			imagePanel.setVisible(true);
+			imagePanel.repaint();
+		}
+
+		@Override
+		public String toString() {
+			return file.getName();
+		}
+	}
+
+	private class ViewTransferHandler extends TransferHandler {
+
+		private static final long serialVersionUID = 2695692501459052660L;
+
+		@Override
+		public boolean canImport(final TransferSupport support) {
+			if (!support.isDataFlavorSupported(DataFlavor.javaFileListFlavor)) {
+				return false;
+			}
+
+			final boolean copySupported = (COPY & support.getSourceDropActions()) == COPY;
+
+			if (!copySupported) {
+				return false;
+			}
+
+			support.setDropAction(COPY);
+			return true;
+		}
+
+		@Override
+		@SuppressWarnings({"unchecked", "serial"})
+		public boolean importData(final TransferSupport support) {
+			if (!canImport(support)) {
+				return false;
+			}
+
+			final Transferable transferable = support.getTransferable();
+
+			try {
+				final java.util.List<File> fileList =
+						(java.util.List<File>) transferable.getTransferData(DataFlavor.javaFileListFlavor);
+
+				return unwatermark(fileList.toArray(new File[fileList.size()]));
+			} catch (final UnsupportedFlavorException | IOException e) {
+				return false;
+			}
+		}
+	}
+
+	ViewFrame() {
+		super("Unwatermark");
+
+		final JSplitPane splitPane = new JSplitPane(JSplitPane.HORIZONTAL_SPLIT, list, scrollPane);
+
+		splitPane.setDividerLocation(120);
+		getContentPane().add(splitPane);
+
+		list.getSelectionModel().setSelectionMode(ListSelectionModel.SINGLE_SELECTION);
+
+		list.addListSelectionListener(e -> {
+			if (e.getValueIsAdjusting()) {
+				return;
+			}
+
+			final Document document = list.getSelectedValue();
+
+			if (document != null) {
+				document.show();
+			}
+		});
+
+		final TransferHandler transferHandler = new ViewTransferHandler();
+
+		setTransferHandler(transferHandler);
+		setBackground(Color.LIGHT_GRAY);
+
+		imagePanel.setTransferHandler(transferHandler);
+		imagePanel.setLayout(new BorderLayout());
+		imagePanel.setBackground(Color.LIGHT_GRAY);
+
+		scrollPane.setBackground(Color.LIGHT_GRAY);
+		scrollPane.addComponentListener(new ComponentListener() {
+
+			@Override
+			public void componentResized(ComponentEvent e) {
+				imagePanel.setBounds(0, 0,
+						scrollPane.getWidth() - scrollPane.getVerticalScrollBar().getWidth(),
+						scrollPane.getHeight() - scrollPane.getHorizontalScrollBar().getHeight());
+			}
+
+			@Override
+			public void componentMoved(ComponentEvent e) {
+
+			}
+
+			@Override
+			public void componentShown(ComponentEvent e) {
+
+			}
+
+			@Override
+			public void componentHidden(ComponentEvent e) {
+
+			}
+		});
+
+		pack();
+		initialiseMenuBar();
+
+		openChooser.setMultiSelectionEnabled(true);
+		openChooser.setFileSelectionMode(JFileChooser.FILES_ONLY);
+
+		saveChooser.setMultiSelectionEnabled(false);
+	}
+
+	private void initialiseMenuBar() {
+		final JMenuBar menuBar = new JMenuBar();
+		JMenu menu;
+
+		menu = new JMenu("File");
+
+		menu.add(new JMenuItem("Open...")).addActionListener(e -> {
+			if (openChooser.showOpenDialog(this) == JFileChooser.APPROVE_OPTION) {
+				unwatermark(openChooser.getSelectedFiles());
+			}
+		});
+
+		menu.add(new JMenuItem("Save...")).addActionListener(e -> {
+			Document document = list.getSelectedValue();
+
+			if (null == document && listModel.size() > 0) {
+				document = listModel.getElementAt(0);
+			}
+
+			if (null == document) {
+				return;
+			}
+
+			saveChooser.setSelectedFile(document.file);
+			if (saveChooser.showSaveDialog(this) == JFileChooser.APPROVE_OPTION) {
+				unwatermark(document, saveChooser.getSelectedFile());
+			}
+		});
+
+		menu.add(new JMenuItem("Print")).addActionListener(e -> {
+			Document document = list.getSelectedValue();
+
+			if (null == document && listModel.size() > 0) {
+				document = listModel.getElementAt(0);
+			}
+
+			if (null == document) {
+				return;
+			}
+
+			try {
+				document.mode.print(document.file);
+			} catch (final IOException | PrinterException exc) {
+				displayException(exc);
+			}
+		});
+
+		menuBar.add(menu);
+
+		menu = new JMenu("Help");
+		menu.add(new JMenuItem("About")).addActionListener(e -> {
+			JOptionPane.showMessageDialog(imagePanel, "Unwatermark\nmattcg@gmail.com");
+		});
+
+		menuBar.add(menu);
+		setJMenuBar(menuBar);
+	}
+
+	private boolean unwatermark(final File... files) {
+		try {
+			Document document = null;
+
+			for (File file : files) {
+				document = new Document(file);
+				listModel.add(listModel.size(), document);
+			}
+
+			if (null != document) {
+				document.show();
+			}
+		} catch (final IOException e) {
+			displayException(e);
+			return false;
+		}
+
+		return true;
+	}
+
+	private void unwatermark(final Document input, final File output) {
+		try {
+			input.mode.apply(input.file, output);
+		} catch (final IOException e) {
+			displayException(e);
+		}
+	}
+
+	@SuppressWarnings("serial")
+	private void displayException(final Exception e) {
+		final JPanel panel = new JPanel();
+		final JPanel labelPanel = new JPanel(new BorderLayout());
+		final StringWriter writer = new StringWriter();
+
+		labelPanel.add(new JLabel("Unable to unwatermark."));
+		panel.add(labelPanel);
+		panel.add(Box.createVerticalStrut(10));
+
+		e.printStackTrace(new PrintWriter(writer));
+		panel.add(new JScrollPane(new JTextArea(writer.toString())){
+
+			@Override
+			public Dimension getPreferredSize() {
+				return new Dimension(480, 320);
+			}
+		});
+
+		panel.setLayout(new BoxLayout(panel, BoxLayout.PAGE_AXIS));
+		JOptionPane.showMessageDialog(imagePanel, panel, "Error", JOptionPane.ERROR_MESSAGE);
+	}
+}

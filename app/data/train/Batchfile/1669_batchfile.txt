@@ -1,0 +1,1 @@
+cmd_drivers/net/wireless/ath/ath6kl/ath6kl_sdio.ko := arm-poky-linux-gnueabi-ld -EL -r  -T /second_extend/yocto_file/linux_yocto/scripts/module-common.lds --build-id  -o drivers/net/wireless/ath/ath6kl/ath6kl_sdio.ko drivers/net/wireless/ath/ath6kl/ath6kl_sdio.o drivers/net/wireless/ath/ath6kl/ath6kl_sdio.mod.o

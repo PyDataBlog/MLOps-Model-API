@@ -1,0 +1,110 @@
+﻿Namespace Performance
+
+    Public Module _Shared
+
+        Private _FallbackPath As String = ""
+        Private _PerformanceLogPath As String = ""
+        Private _ThreadLevel As New Concurrent.ConcurrentDictionary(Of Integer, Integer)
+        Private _ThreadMessages As New Concurrent.ConcurrentDictionary(Of Integer, List(Of String))
+
+        Public Property ThreadLevel(threadID As Integer) As Integer
+            Get
+                Return _ThreadLevel.GetOrAdd(threadID, 0)
+            End Get
+            Set(value As Integer)
+                _ThreadLevel.AddOrUpdate(threadID, value, Function() value)
+            End Set
+        End Property
+
+        Private ReadOnly Property ThreadMessages(threadID As Integer) As List(Of String)
+            Get
+                Return _ThreadMessages.GetOrAdd(threadID, New List(Of String))
+            End Get
+        End Property
+
+        Public Function StartCounterDB([class] As String, method As String, other As String) As PerfCounter
+            Return StartCounter(False, "{0} -> {1}. {2}".FormatWith([class], method, other))
+        End Function
+
+        Public Function StartCounter([class] As String, method As String, other As String) As PerfCounter
+            Return StartCounter("{0} -> {1}. {2}".FormatWith([class], method, other))
+        End Function
+
+        Public Function StartCounter([class] As String, method As String) As PerfCounter
+            Return StartCounter("{0} -> {1}".FormatWith([class], method))
+        End Function
+
+        Public Function StartCounter(message As String) As PerfCounter
+            Return StartCounter(True, message)
+        End Function
+
+        Private Function StartCounter(incrementLevel As Boolean, message As String) As PerfCounter
+            If Not Settings.PerformanceCounters Then
+                Return Nothing
+            End If
+            Return New PerfCounter(incrementLevel, message)
+        End Function
+
+        Friend Function GetPerformanceLogPath() As String
+            If String.IsNullOrEmpty(_PerformanceLogPath) OrElse Not IO.Directory.Exists(_PerformanceLogPath) Then
+                If String.IsNullOrEmpty(Settings.PerformanceLogPath) Then
+                    _PerformanceLogPath = GetFallbackPath()
+                Else
+                    _PerformanceLogPath = Settings.PerformanceLogPath
+                End If
+                Dim LogDirectory As String = IO.Path.GetDirectoryName(_PerformanceLogPath)
+                If Not IO.Directory.Exists(LogDirectory) Then
+                    IO.Directory.CreateDirectory(LogDirectory)
+                End If
+            End If
+            Return _PerformanceLogPath
+        End Function
+
+        Private Function GetFallbackPath() As String
+            If String.IsNullOrEmpty(_FallbackPath) Then
+                _FallbackPath = "{0}Performance.log".FormatWith(Settings.Directories.AppDataCompanyProductVersion)
+            End If
+            Return _FallbackPath
+        End Function
+
+        Friend Sub IncrementLevel(threadID As Integer)
+            ThreadLevel(threadID) += 1
+        End Sub
+
+        Friend Sub LogCounter(incrementLevel As Boolean, message As String, seconds As Double, threadID As Integer)
+            If incrementLevel Then
+                ThreadLevel(threadID) -= 1
+            End If
+
+            If ThreadLevel(threadID) = 0 Then
+                If ThreadMessages(threadID).Count <= 0 Then
+                    WritePerfCounter("Thread ID: {0}{1}{2}{3:N3}s: {4}".FormatWith(threadID, vbNewLine, Settings.DefaultIndent, seconds, message))
+                Else
+                    Dim Lines As String = "Thread ID: {0}".FormatWith(threadID)
+                    For Each CurrentMessage As String In ThreadMessages(threadID).ToList
+                        Lines = "{0}{1}{2}".FormatWith(Lines, vbNewLine, CurrentMessage)
+                    Next
+                    WritePerfCounter("{0}{1}{2:N3}s: {3}".FormatWith(Lines, vbNewLine, seconds, message))
+                End If
+                ThreadMessages(threadID).Clear()
+            Else
+                Dim Lines As String = "{0:N3}s: {1}".FormatWith(seconds, message)
+                For I As Integer = 0 To ThreadLevel(threadID)
+                    Lines = "{0}{1}".FormatWith(Settings.DefaultIndent, Lines)
+                Next
+                ThreadMessages(threadID).Add(Lines)
+            End If
+        End Sub
+
+        Private Sub WritePerfCounter(message As String)
+            If Not Settings.PerformanceCounters Then
+                Return
+            End If
+
+            IORoutines.WriteToFile(True, True, GetPerformanceLogPath(), True, message)
+            frmPerformance.Instance.AddMessage("{0}{1}".FormatWith(message, vbNewLine))
+        End Sub
+
+    End Module
+
+End Namespace

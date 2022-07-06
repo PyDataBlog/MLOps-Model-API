@@ -1,0 +1,59 @@
+#!/usr/local/bin/python3
+import sys
+import boto3
+import os
+from botocore.exceptions import ClientError
+import json
+import argparse
+from botocore.utils import InstanceMetadataFetcher
+from botocore.credentials import InstanceMetadataProvider
+import platform
+
+
+region = os.getenv('AWS_DEFAULT_REGION', 'us-east-1')
+duration = int(os.getenv('AWS_CLIENT_DURATION', 7200))
+aws_access_key_id = os.getenv('CI_AWS_ACCESS_KEY_ID', None)
+aws_secret_access_key = os.getenv('CI_AWS_SECRET_ACCESS_KEY', None)
+session_name = 'jenkkins'
+parser = argparse.ArgumentParser(description='AWS creds custom')
+parser.add_argument('--role-arn', '-r', default=None, dest='role_arn', help='AWS IAM role arn for temp session token.')
+args, unknown = parser.parse_known_args()
+role_arn = args.role_arn
+if role_arn is not None:
+    try:
+        provider = InstanceMetadataProvider(iam_role_fetcher=InstanceMetadataFetcher(timeout=1000, num_attempts=5))
+        _creds = provider.load()
+        temp_session = boto3.Session(
+            aws_access_key_id=_creds.access_key, aws_secret_access_key=_creds.secret_key, aws_session_token=_creds.token)
+        sts_client = temp_session.client("sts", region_name=region)
+        params = {"RoleArn": role_arn, "RoleSessionName": session_name, "DurationSeconds": duration,}
+        response = sts_client.assume_role(**params).get("Credentials")
+        cred = {
+            "Version": 1,
+            "AccessKeyId": response.get("AccessKeyId"),
+            "SecretAccessKey": response.get("SecretAccessKey"),
+            "SessionToken": response.get("SessionToken"),
+            "Expiration": response.get("Expiration").isoformat(),
+        }
+    except ClientError as ex:
+        sys.exit(255)
+else:
+    if aws_access_key_id is None or aws_secret_access_key is None:
+        sys.exit(255)
+    try:
+        params = {"aws_access_key_id": aws_access_key_id, "aws_secret_access_key": aws_secret_access_key, "region_name": region}
+        temp_session = boto3.Session(**params)
+        sts_client = temp_session.client("sts", region_name=region)
+        params = {"DurationSeconds": duration}
+        response = sts_client.get_session_token(**params).get("Credentials")
+        cred = {
+            "Version": 1,
+            "AccessKeyId": response.get("AccessKeyId"),
+            "SecretAccessKey": response.get("SecretAccessKey"),
+            "SessionToken": response.get("SessionToken"),
+            "Expiration": response.get("Expiration").isoformat(),
+        }
+    except ClientError as ex:
+        sys.exit(255)
+
+print(json.dumps(cred))

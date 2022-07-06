@@ -1,0 +1,141 @@
+/*
+ * Copyright © 2017 No0n3Left <no0n3left@gmail.com>
+ *
+ * This file is part of Remnant
+ *
+ * Remnant is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Remnant is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty
+ * of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Remnant. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <assimp/cimport.h>
+#include <assimp/postprocess.h>
+#include <assimp/scene.h>
+#include <functional>
+#include "opengl/mesh.h"
+
+Mesh::Mesh(const std::string& filename, unsigned int index): hash(Mesh::pre_hash(filename, index))
+{
+	const aiScene* scene = aiImportFile(filename.c_str(), aiProcess_Triangulate | aiProcess_CalcTangentSpace);
+	const aiMesh* mesh = scene->mMeshes[index];
+	this->name = mesh->mName.C_Str();
+	this->vertex_count = mesh->mNumVertices;
+	std::cout << "Vertices = " << this->vertex_count << std::endl;
+
+	if (mesh->HasPositions()) {
+		GLfloat* vertex_positions = new GLfloat[this->vertex_count * 3];
+		for (unsigned int i = 0; i < this->vertex_count; ++i) {
+			const aiVector3D* vertex_position = &(mesh->mVertices[i]);
+			vertex_positions[i * 3 + 0] = static_cast<GLfloat>(vertex_position->x);
+			vertex_positions[i * 3 + 1] = static_cast<GLfloat>(vertex_position->y);
+			vertex_positions[i * 3 + 2] = static_cast<GLfloat>(vertex_position->z);
+		}
+		this->position_vbo.set_data(3 * sizeof(GLfloat) * this->vertex_count, vertex_positions, GL_STATIC_DRAW);
+		this->position_vbo.bind();
+		this->vao.enable_attrib(0);
+		this->vao.attrib_pointer(0, 3, GL_FLOAT, GL_FALSE, 0, 0);
+		GLERRORDEBUG();
+		delete[] vertex_positions;
+	}
+
+	if (mesh->HasTextureCoords(0)) {
+		GLfloat* vertex_texcoords = new GLfloat[this->vertex_count * 2];
+		for (unsigned int i = 0; i < this->vertex_count; ++i) {
+			const aiVector3D* vertex_texcoord = &(mesh->mTextureCoords[0][i]);
+			vertex_texcoords[i * 2 + 0] = static_cast<GLfloat>(vertex_texcoord->x);
+			vertex_texcoords[i * 2 + 1] = static_cast<GLfloat>(vertex_texcoord->y);
+		}
+		this->texcoord_vbo.set_data(3 * sizeof(GLfloat) * this->vertex_count, vertex_texcoords, GL_STATIC_DRAW);
+		delete[] vertex_texcoords;
+		this->texcoord_vbo.bind();
+		this->vao.enable_attrib(1);
+		this->vao.attrib_pointer(1, 2, GL_FLOAT, GL_FALSE, 0, 0);
+		GLERRORDEBUG();
+	}
+
+	if (mesh->HasNormals()) {
+		GLfloat* vertex_normals = new GLfloat[this->vertex_count * 3];
+		for (unsigned int i = 0; i < this->vertex_count; ++i) {
+			const aiVector3D* vertex_normal = &(mesh->mNormals[i]);
+			vertex_normals[i * 3 + 0] = static_cast<GLfloat>(vertex_normal->x);
+			vertex_normals[i * 3 + 1] = static_cast<GLfloat>(vertex_normal->y);
+			vertex_normals[i * 3 + 2] = static_cast<GLfloat>(vertex_normal->z);
+		}
+		this->normal_vbo.set_data(3 * sizeof(GLfloat) * this->vertex_count, vertex_normals, GL_STATIC_DRAW);
+		delete[] vertex_normals;
+		this->normal_vbo.bind();
+		this->vao.enable_attrib(2);
+		this->vao.attrib_pointer(2, 3, GL_FLOAT, GL_FALSE, 0, 0);
+		GLERRORDEBUG();
+	}
+
+	if(mesh->HasTangentsAndBitangents()) {
+		GLfloat* vertex_tangents = new GLfloat[this->vertex_count * 3];
+		for (unsigned int i = 0; i < this->vertex_count; ++i) {
+			const aiVector3D* vertex_tangent = &(mesh->mTangents[i]);
+			vertex_tangents[i * 3 + 0] = static_cast<GLfloat>(vertex_tangent->x);
+			vertex_tangents[i * 3 + 1] = static_cast<GLfloat>(vertex_tangent->y);
+			vertex_tangents[i * 3 + 2] = static_cast<GLfloat>(vertex_tangent->z);
+		}
+		this->tangent_vbo.set_data(3 * sizeof(GLfloat) * this->vertex_count, vertex_tangents, GL_STATIC_DRAW);
+		delete[] vertex_tangents;
+		this->tangent_vbo.bind();
+		this->vao.enable_attrib(3);
+		this->vao.attrib_pointer(3, 3, GL_FLOAT, GL_FALSE, 0, 0);
+		GLERRORDEBUG();
+	}
+	this->material = std::make_shared<Material>(scene->mMaterials[mesh->mMaterialIndex]);
+	aiReleaseImport(scene);
+}
+
+Mesh::Mesh(Mesh&& other)
+	: hash(std::move(other.hash)), material(std::move(other.material)), vao(std::move(other.vao)), vertex_count(std::move(other.vertex_count)),
+	position_vbo(std::move(other.position_vbo)), texcoord_vbo(std::move(other.texcoord_vbo)), normal_vbo(std::move(other.normal_vbo)), tangent_vbo(std::move(other.tangent_vbo)) {}
+
+Mesh::~Mesh() {}
+
+/*
+Mesh& Mesh::operator=(Mesh&& other)
+{
+	this->hash = std::move(other.hash);
+	this->material = std::move(other.material);
+	this->object_name = std::move(other.object_name);
+	this->vertex_count = std::move(other.vertex_count);
+	return *this;
+}
+*/
+
+void Mesh::bind() const
+{
+	this->vao.bind();
+	GLERRORDEBUG();
+}
+
+const std::shared_ptr<Material>& Mesh::get_material() const noexcept
+{
+	return this->material;
+}
+
+GLuint Mesh::get_object_name() const noexcept
+{
+	return this->vao.get_object_name();
+}
+
+unsigned int Mesh::get_vertex_count() const noexcept
+{
+	return this->vertex_count;
+}
+
+std::size_t Mesh::pre_hash(const std::string& filename, unsigned int index)
+{
+	return std::hash<std::string>()(filename);	// XXX BAD REDO
+}

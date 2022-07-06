@@ -1,0 +1,120 @@
+﻿cls
+Import-Module OperationsManager
+ ."c:\Program Files\System Center 2012\Operations Manager\Powershell\OperationsManager\Functions.ps1"
+Start-OperationsManagerClientShell -ManagementServerName: "" -PersistConnection: $true
+$today = Get-Date -UFormat %m/%d/%Y
+$login_date = (Get-Date).AddDays(-1)
+$login_date = Get-Date $login_date -UFormat %m/%d/%Y
+$alerts = get-scomalert -criteria 'ResolutionState = ''0'' AND (Name = ''Server 2003 Admin Login Alert'' OR Name = ''Server 2008 Admin Login Alert'')' #| Where-Object {$_.TimeRaised -ge $login_date -and $_.TimeRaised -lt $today}
+if ($alerts -eq $null) {
+	# "No Alerts at this time."
+	exit 10;
+}
+$rowdata = ""
+$login_time = $last_logintime = $login_target = $last_logintarget = ""
+
+#set up connection to database engine
+[void][System.Reflection.Assembly]::LoadWithPartialName("MySql.Data")
+$connectionString = "server=cledb01;uid=monitor;pwd=Subway235;database=scom"
+$connection = New-Object MySql.Data.MySqlClient.MySqlConnection
+$connection.ConnectionString = $connectionString
+$connection.Open()
+
+#Begin processing alerts
+
+#first empty our table
+$cmd = $connection.CreateCommand()
+$cmd.CommandText = "TRUNCATE TABLE alerts"
+$result = $cmd.ExecuteNonQuery()
+
+foreach ($alert in $alerts) {
+	$alertobject = get-scomalert -Id $alert.id | Select-Object TimeRaised,name,monitoringobjectname,description
+	$login_time = $alertobject.TimeRaised.ToString()
+	$login_time = get-Date $login_time -UFormat "%Y-%m-%d %H:%M:%S"
+	$login_target = $alertobject.MonitoringObjectName.ToString()
+	$id = $alert.id.ToString()
+	if ($alertobject.Name -eq "Server 2003 Admin Login Alert") {
+		#parse server 2003 alert
+		$descr = $alert.Description.Split("`n")
+		#find username
+		$user_line = $descr[2].Split("`t")
+		$username = $user_line[2]
+		#find source machine
+		$machine_line = $descr[28].Split("`t")
+		$machine_ip = $machine_line[2]
+		if ($machine_ip -eq "-") {
+			$login_type = "Interactive"
+			$machine_ip = "-"
+		} else {
+			$login_type = "Remote Desktop"
+		}
+
+	} elseif ($alertobject.Name -eq "Server 2008 Admin Login Alert") {
+		#parse server 2008 alert
+		$descr = $alert.Description.Split("`n")
+		$user_line = $descr[12].Split("`t")
+		$username = $user_line[3]
+		#find source machine
+		$machine_line = $descr[23].Split("`t")
+		$machine_ip = $machine_line[2]
+		if ($machine_ip -eq "-") {
+			$login_type = "Interactive"
+		} else {
+			$login_type = "Remote Desktop"
+		}
+	}
+	$command = $connection.CreateCommand()
+	$command.CommandText = "INSERT INTO alerts VALUES('$id','$login_time','$login_target','$login_type','$username','$machine_ip')"
+	$result = $command.ExecuteNonQuery()
+	Get-SCOMAlert -ID $alert.Id | Set-SCOMAlert -ResolutionState 255
+}
+
+#Now that we have our data, pull it out and format it for mailing
+$command = $connection.CreateCommand()
+$command.CommandText = "select distinct target,user,type,count(id) as count from alerts group by target order by target asc"
+$reader = $command.ExecuteReader()
+
+$body = "<html>`n<body>`n<table border='1'>`n<th>Server</th><th>Username</th><th>Login Type</th><th>Login Count</th>`n"
+$row = ""
+
+try {
+	while ($reader.read()) {
+		$target = $reader.GetString('target')
+		$user = $reader.GetString('user')
+		$type = $reader.GetString('type')
+		$count = $reader.GetInt32('count')
+		$row += "<tr><td>$target</td><td>$user</td><td>$type</td><td align='center'>$count</td></tr>`n"
+		
+		#If connection was RDP, break out and list the IPs
+		if ($type -eq "Remote Desktop") {
+			# Have to create a new connection as the first is servicing the open DataReader
+			$connection2 = New-Object Mysql.Data.MySqlClient.MySqlConnection
+			$connection2.ConnectionString = $connectionString
+			$connection2.Open()
+			
+			$cmd2 = "SELECT source from alerts where target = '"+$target+"' AND user = '"+$user+"' AND type = '"+$type+"'"
+			$cmd2 = "select distinct source,count(id) as logins from alerts where target = '"+$target+"' AND user = '"+$user+"' AND type = '"+$type+"' group by source order by logins desc" 
+			$command2 = $connection2.CreateCommand()
+			$command2.CommandText = $cmd2
+			$reader2 = $command2.ExecuteReader()
+			try {
+				while ($reader2.read()) {
+					$source = $reader2.GetString('source')
+					$logins = $reader2.GetInt32('logins')
+					$row += "<tr><td colspan='3' align='right'>$source</td><td align='center'>$logins</td></tr>`n"
+				}
+			} finally {
+				$reader2.Close()
+				$connection2.Close()
+			}
+		}
+	}
+} finally {
+	$reader.Close()
+	$connection.Close()
+}
+$body = $body + $row + "</table>`n</body>`n</html>"
+
+#Send the mail
+$smtpserver = "clehubcas01.chart-ind.local"
+Send-MailMessage -SmtpServer $smtpserver -From "SCOM2012@chart-ind.local" -To "nathaniel.hauenstein@chartindustries.com" -Cc "Justan.Mosley@chartindustries.com" -Cc "Kenneth.Chie@chartindustries.com" -Cc "kevin.merolla@chartindustries.com" -Subject "Admin Logins for $login_date" -Body $body -BodyAsHtml

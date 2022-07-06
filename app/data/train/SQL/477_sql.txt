@@ -1,0 +1,114 @@
+IF EXISTS (SELECT name FROM sysobjects WHERE name = "sp_mobux_revengdb" AND type = "P")
+BEGIN
+    DROP PROC sp_mobux_revengdb
+END
+go
+
+CREATE PROCEDURE sp_mobux_revengdb @reveng_dbname varchar(32)=NULL, @reveng_for_load bit=0
+AS
+BEGIN
+
+DECLARE @factor    float
+DECLARE @dbname    varchar(32)
+DECLARE @devname   varchar(32)
+DECLARE @size      int
+DECLARE @segtype   int
+DECLARE @logflag   int
+DECLARE @alterflag int
+DECLARE @initflag  int
+DECLARE @sqlcmd    varchar(16348)
+DECLARE @forloadcmd varchar(16348)
+
+IF (@reveng_for_load != 0)
+BEGIN
+    SELECT @forloadcmd = "FOR LOAD" + char(10)
+END
+
+
+IF (@reveng_dbname = NULL)
+BEGIN
+    RAISERROR 19048, "sp_mobux_revengdb", "@reveng_dbname"
+    RETURN(1)
+END
+/* Check is the specified database does exist */
+IF NOT EXISTS (SELECT name FROM master..sysdatabases WHERE name = @reveng_dbname)
+BEGIN
+    RAISERROR 17590
+    RETURN(1)
+END
+
+/* Initialize helper flags */
+SELECT @initflag  = 0
+SELECT @logflag   = 0
+SELECT @alterflag = 0
+
+
+/* 2k pages  => @factor = 512 */
+SELECT @factor = (1048576. / @@pagesize)
+
+DECLARE c_revdb CURSOR FOR
+SELECT d.name, u.size/@factor, dv.name, segmap
+FROM master..sysdatabases d,
+     master..sysusages u,
+     master..sysdevices dv
+WHERE    d.dbid = u.dbid
+--AND      u.vstart BETWEEN dv.low AND dv.high
+AND      u.vdevno = dv.vdevno
+AND      dv.status & 2 = 2
+AND      d.dbid = db_id(@reveng_dbname)
+ORDER BY d.dbid , lstart
+
+OPEN c_revdb
+
+FETCH c_revdb INTO @dbname, @size, @devname, @segtype
+
+WHILE (@@sqlstatus != 2)
+BEGIN
+
+/* The first data segment is used for the create database statement */
+IF (@initflag=0 AND @segtype != 4)
+    BEGIN
+        SELECT @sqlcmd = 'CREATE DATABASE ' + @dbname + ' ON ' + @devname + ' = ' + str(@size, 5, 0)
+        SELECT @initflag = 1
+    END
+ELSE
+BEGIN
+    /* the first log segment */
+    IF (@segtype = 4 AND @logflag = 0 AND @initflag = 1)
+    BEGIN
+        SELECT @sqlcmd =  @sqlcmd + char(10) +  'log ON ' + @devname + ' = ' + str(@size, 5, 0) + char(10)
+        SELECT @logflag = 1
+    END
+    /* if the segment is not a logsegment and another logsegment has already
+    * been added, attache the following alter database command */
+    ELSE IF ( @segtype != 4 AND @logflag = 1 AND @initflag = 1)
+    BEGIN
+    SELECT @sqlcmd = @sqlcmd + @forloadcmd +  'go' + char(10)
+        SELECT @sqlcmd =   @sqlcmd + 'ALTER DATABASE ' + @dbname + ' ON ' + @devname + ' = ' + str(@size, 5, 0) + char(10)
+        SELECT @alterflag = 1
+    END
+    /* add the log segments to the alter database command */
+    ELSE IF (@alterflag = 1 AND @segtype = 4 AND @initflag = 1)
+    BEGIN
+    SELECT @sqlcmd = @sqlcmd +  @forloadcmd + 'go' + char(10)
+        SELECT @sqlcmd =   @sqlcmd + 'ALTER DATABASE ' + @dbname + ' log ON ' + @devname + ' = ' + str(@size, 5, 0) + char(10)
+        SELECT @alterflag = 1
+    END
+    /* add the rest of the segements */
+    ELSE
+    BEGIN
+        SELECT @sqlcmd =   @sqlcmd + char(10) +  ', ' + @devname + ' = ' + str(@size, 5, 0)
+    END
+END
+
+FETCH c_revdb INTO @dbname, @size, @devname, @segtype
+END
+
+CLOSE c_revdb
+DEALLOCATE CURSOR c_revdb
+
+SELECT @sqlcmd = ltrim(rtrim(@sqlcmd)) + char(10) + 'go'
+SELECT @sqlcmd
+RETURN 0
+END
+go

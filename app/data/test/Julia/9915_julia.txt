@@ -1,0 +1,51 @@
+function ksintegrateUnrolled(u, Lx, dt, Nt);
+# integrate Kuramoto-Shivashinsky eqn for inputs
+#   u  = initial condition, array of gridpoint values of u(x) on uniform grid
+#   Lx = periodic domain length
+#   dt = time step
+#   Nt = number of time steps
+
+    Nx = length(u)                      # number of gridpoints
+    kx = vcat(0:Nx/2-1, 0, -Nx/2+1:-1)  # integer wavenumbers: exp(2*pi*kx*x/L)
+    alpha = 2*pi*kx/Lx                  # real wavenumbers:    exp(alpha*x)
+    D = 1im*alpha;                      # spectral D = d/dx operator 
+    L = alpha.^2 - alpha.^4             # spectral L = -D^2 - D^4 operator
+    G = -0.5*D                          # spectral -1/2 D operator, to eval -u u_x = 1/2 d/dx u^2
+
+    # convenience variables
+    dt2  = dt/2;
+    dt32 = 3*dt/2;
+    A =  ones(Nx) + dt2*L;
+    B = (ones(Nx) - dt2*L).^(-1);
+
+    # compute uf == Fourier coeffs of u and Nnf == Fourier coeffs of -u u_x
+    uf  = fft(u);
+    Nnf  = G.*fft(u.^2); # Nnf == -1/2 d/dx (u^2) = -u u_x, spectral
+    Nn1f = Nnf;          # use Nnf1 = Nnf at first time step
+
+    # timestepping loop
+    for n = 0:Nt
+
+        Nn1f = copy(Nnf);                 # shift nonlinear term in time: N^{n-1} <- N^n
+        Nnf  = G.*fft(real(ifft(uf)).^2); # compute Nn = -u u_x
+
+        ##############################################################
+        # unroll array operations to compute timestepping formula
+        for n = 1:length(uf)
+            @fastmath @inbounds uf[n] = B[n]* (A[n] * uf[n] + dt32*Nnf[n] - dt2*Nn1f[n]);
+        end
+
+
+    end
+    u = real(ifft(u))
+end
+
+
+Nx = 512;
+Lx = Nx/16*pi             # spatial domain [0, L] periodic
+dt = 1/16;                # discrete time step 
+T  = 200;                 # integrate from t=0 to t=T
+nplot = round(Int,1/dt);  # save every nploth time step
+Nt = round(Int, T/dt);    # total number of timesteps
+x = Lx*(0:Nx-1)/Nx;
+u = cos(x/16).*(1+2*sin(x/16)).*(1+0.01*sin(x/32)); # an initial condition

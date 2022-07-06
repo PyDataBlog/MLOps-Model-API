@@ -1,0 +1,46 @@
+package shred.man.cuda.cumath
+
+import jcuda.Pointer
+import jcuda.driver.CUdeviceptr
+import jcuda.runtime.{cudaMemcpyKind, JCuda}
+import scala.reflect.ClassTag
+import shred.man.cuda.driver.{CuContext, CuPointed}
+
+class CuValueGenerator[A: ClassTag](ptrFn: (Array[A]) => Pointer, sizeOf: Int)
+{
+  private def apply(memInit: (CUdeviceptr) => _)(implicit ctx: CuContext): CuValue[A] = {
+    val pointer = new CUdeviceptr()
+    JCuda.cudaMalloc(pointer, sizeOf)
+    memInit(pointer)
+    new CuValue(pointer, ptrFn, sizeOf)(ctx)
+  }
+
+  def apply(value: A)(implicit ctx: CuContext): CuValue[A] = {
+    apply((p: CUdeviceptr) =>{
+      val arr = Array[A](value)
+      JCuda.cudaMemcpy(p, ptrFn(arr), sizeOf, cudaMemcpyKind.cudaMemcpyHostToDevice)
+    })
+  }
+
+  def apply(memset: Boolean = true)(implicit ctx: CuContext): CuValue[A] = {
+    apply((p: CUdeviceptr) => if (memset) { JCuda.cudaMemset(p, 0, sizeOf) })
+  }
+}
+
+class CuValue[A: ClassTag](
+  pointer: Pointer,
+  ptrFn: (Array[A]) => Pointer,
+  sizeOf: Int
+)(val ctx: CuContext) extends CuPointed(pointer)
+{
+  def load(): A = {
+    val arr = new Array[A](1)
+    JCuda.cudaMemcpy(ptrFn(arr), ptr(), sizeOf, cudaMemcpyKind.cudaMemcpyDeviceToHost)
+    arr(0)
+  }
+
+  def store(value: A) {
+    val arr = Array[A](value)
+    JCuda.cudaMemcpy(ptr(), ptrFn(arr), sizeOf, cudaMemcpyKind.cudaMemcpyHostToDevice)
+  }
+}

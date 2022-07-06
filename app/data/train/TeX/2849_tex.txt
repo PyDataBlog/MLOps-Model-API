@@ -1,0 +1,524 @@
+\documentclass[a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage[T1]{fontenc}
+%\usepackage[italian]{babel}
+\usepackage{microtype}
+\usepackage{acronym}
+\usepackage{mathtools}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage{amsthm}
+\usepackage[hidelinks,breaklinks=true]{hyperref}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage{algorithm}
+\usepackage{algpseudocode}
+
+\newcommand{\me}{\ensuremath{\mathrm{e}}}
+\newcommand{\md}{\ensuremath{\mathrm{d}}}
+\newcommand{\tc}{\ensuremath{\mathrm{t.c.:}\quad}}
+\newcommand{\expected}[1]{\ensuremath{\mathrm{\textbf{E}}\left[#1\right]}}
+\newcommand{\variance}[1]{\ensuremath{\mathrm{\textbf{Var}}\left(#1\right)}}
+\newcommand{\prob}[1]{\ensuremath{\mathrm{\textbf{P}}\left(#1\right)}}
+%\newcommand{\max}[1]{\ensuremath{\mathrm{max}\left(#1\right)}}
+\newcommand{\abs}[1]{\ensuremath{\left|#1\right|}}
+\newcommand{\mR}{\ensuremath{\mathbb{R}}}
+\newcommand{\mN}{\ensuremath{\mathbb{N}}}
+\newcommand{\codei}[1]{\texttt{#1}}
+
+%\newtheorem{defi}{Definizione}[chapter]
+
+\lstset{inputpath=src}
+\lstdefinestyle{customPy}{
+ language=python,
+ showstringspaces=false,
+ basicstyle=\footnotesize\ttfamily,
+ keywordstyle=\bfseries\color{green!40!black},
+ commentstyle=\itshape\color{purple!40!black},
+ identifierstyle=\color{blue},
+ stringstyle=\color{orange},
+}
+
+%\DeclarePairedDelimiter\abs{\lvert}{\rvert}
+
+\author{
+  {\Large Stefano Martina}\\
+  {\small stefano.martina@stud.unifi.it}\\
+  Universit\`a degli Studi di Firenze\\
+  Scuola di Scienze Matematiche, Fisiche e Naturali\\
+  Corso magistrale di Informatica
+}
+\title{{\Huge\bfseries A simulated annealing approach to solve path
+    planning}}%\\{\large\bfseries Esame di Laboratorio di Fisica Computazionale}}
+
+\begin{document}
+\maketitle
+\thispagestyle{empty}
+\vfill
+\begin{abstract}
+  This work is about a \emph{simulated annealing} method for performing path
+  planning.
+
+  A \emph{B-spline} curve is used to represents the path, and the
+  position of the control vertexes is considered as the status of the
+  system. The number of points of the curve that cross an obstacle
+  is the measure of a \emph{Lagrangian multiplier} that, used together with
+  the status of the system, form a multidimensional surface on which
+  saddle points are the desired configurations of (local) minimal path that
+  don't cross obstacles. A simulated annealing method is finally used
+  to find the optimal between those saddle points.
+\end{abstract}
+\newpage
+\section{Introduction}
+The \emph{Path planning} problem is a common problem in robotics, the
+purpose is to find the best route in a bidimensional (or
+tridimensional) space with obstacles in it, from one point to
+another. Many techniques exists for calculating the path, in this work
+we analyze the application to this problem of a statistical method
+commonly used in optimization problems.
+
+\section{Prerequisites}
+
+\subsection{Splines}\label{sec:spline}
+A \emph{spline} $\mathbf{S}(t)$ is a parametric function - defined in a certain space
+(bidimensional in this work) as a
+function of a certain parameter $t$ - that is composed from polynomial
+functions, piecewise in intervals in $t$.
+
+Formally we define the parametric domain
+$$[a,b]\subset\mR$$
+and a partition of that space defined by the \emph{nodes}
+$$\tau = \{\tau_0,\dots,\tau_l\}$$
+such that $a=\tau_0<\tau_1<\dots<\tau_{l-1}<\tau_l=b$ forming the
+intervals
+$$
+I_i=
+\begin{cases}
+  [\tau_i,\tau_{i+1}) & \mbox{if } i=0,\dots,l-2\\
+    [\tau_i,\tau_{i+1}] & \mbox{if } i=l-1\\
+\end{cases}
+$$
+is possible to define the following spaces:
+\paragraph{Piecewise polynomial functions space} $P_{m,\tau}$
+is the space of the functions that are polynomials of maximum degree $m$
+in each interval $I_i$ of the partition, formally:
+\begin{multline*}
+  P_{m,\tau}=\{f:[a,b]\rightarrow\mR\ \mid\ \exists p_0\dots
+  p_{l-1}\in\Pi_m \ \text{such that}\\
+  f(t)=p(t),\ \forall t\in I_i,\
+  i=0\dots l-1\}
+\end{multline*}
+where $\Pi_m$ is the space of the polynomials of degree from $0$ to
+$m$. The dimension of this space is $l\cdot(m+1)$ because have $l$
+polynomials and the dimension of $\Pi_m$ is $m+1$.
+\paragraph{Classic spline functions space} $S_{m,\tau}$ is the space of
+the piecewise polynomial functions that have continuity $C^{m-1}$ in
+the junctions of the intervals, formally:
+$$
+S_{m,\tau}=P_{m,\tau}\cap C^{m-1}[a,b].
+$$
+The dimension of this space is $l\cdot(m+1)-(l-1)\cdot m\,=\,l+m$.
+\paragraph{Generalized spline functions space} $S_{m,\tau,M}$ is the
+space of piecewise polynomial function that have a discontinuity or a
+continuity until $C^{m-1}$ in the junctions of the intervals,
+determined by the values of the multiplicity's
+vector
+$$
+M=\{m_1,\dots,m_{l-1}\},\quad m_i\in\mN,\quad 1\leq m_i\leq m+1.
+$$
+Formally:
+\begin{multline*}
+  S_{m,\tau,M}=\{f:[a,b]\rightarrow\mR\ \mid\ \exists p_0\dots
+  p_{l-1}\in\Pi_m \ \text{such that}\\
+  f(t)=p(t),\ \forall t\in I_i,\
+  i=0\dots l-1\ \text{and}\\
+  p_{i-1}^{(j)}(\tau_i)=p_{i}^{(j)}(\tau_i),\ j=0,\dots,m-m_i,\ i=1,\dots,l-1\}.
+\end{multline*}
+The dimension of the space is between the previous two, and is true
+that:
+$$
+\Pi_m\subseteq S_{m,\tau}\subseteq S_{m,\tau,M}\subseteq P_{m,\tau},
+$$
+in fact:
+\begin{itemize}
+  \item if $m_i=1$ for all $i=1,\dots,l-1$, then
+    $S_{m,\tau,M}=S_{m,\tau}$;
+  \item if $m_i=m+1$ for all $i=1,\dots,l-1$, then
+    $S_{m,\tau,M}=P_{m,\tau}$.
+\end{itemize}
+
+\subsubsection{Truncated-powers base for classic splines}\label{sec:truncpow}
+A truncated power $(t-\tau_i)_+^m$ is
+defined by
+$$
+(t-\tau_i)_+^m=
+\begin{cases}
+  0,&\mbox{if}\quad t\leq\tau_i\\
+  (t-\tau_i)^m, &\mbox{otherwise}.
+\end{cases}
+$$
+Is possible to demonstrate that the functions
+$$
+g_i(t)=(t-\tau_i)_+^m)\ \in S_{m\tau},\quad i=1,\dots,l-1
+$$
+are linearly independents, and that
+$$
+1,t,t^2,\dots,t^m,(t-\tau_1)_+^m,\dots,(t-\tau_{l-1})_+^m
+$$
+form a base for the classic spline functions space. A generic element
+from this space can be expressed like
+$$
+\mathbf{S}(t)=\sum_{i=0}^m \mathbf{c_i}\cdot t^i\, +\, \sum_{j=1}^{l-1} \mathbf{d_i}\cdot (t-\tau_j)_+^m
+$$
+but this form is not a practical representation of a spline because
+there isn't an intuitive correlation between the points
+$\mathbf{c_i}$, $\mathbf{d_j}$ and the curve. For this purpose we
+define the \emph{B-splines base} in section~\ref{sec:bsplines}.
+
+\subsubsection{B-Splines base for classic splines}\label{sec:bsplines}
+\emph{B-splines} are splines defined with a specific base. In this
+paragraph we consider only the classic splines $S_{m,\tau}$ and not
+the generalized splines $S_{m,\tau,M}$, furthermore we consider the
+\emph{order}: $k=m+1$.
+
+For defining the B-splines we need to extend the partition vector
+$\tau=\{\tau_0,\cdots,\tau_l\}$ with $k-1$ nodes to the left and $k-1$ to
+the right, so we define a new vector
+$$
+T=\{t_0,\dots,t_{k-2},t_{k-1},\dots,t_{n+1},t_{n+2},\dots,t_{n+k}\}
+$$
+such that
+$$
+t_0\leq\dots\leq t_{k-2}\leq \{t_{k-1}\equiv\tau_0\equiv a\}<\dots<
+\{t_{n+1}\equiv\tau_l\equiv b\}\leq t_{n+2}\leq\dots\leq t_{n+k}.
+$$
+$\tau$ have $l+1$ elements, so we can calculate the value of
+$$
+n=l+k-2,
+$$
+and the dimension of $S_{m,\tau}$ is
+$$
+l+m=l+k-1=n+1
+$$
+that is the number of necessary bases for the space.
+
+The $n+1$ basis $N_{i,k}(t)$ of the B-splines of order $k$ for
+$i=0,\dots,n$ are defined by the 
+recursive formula:
+\begin{align*}
+  N_{i,1}(t) &=
+  \begin{cases}
+    1,\quad \mbox{if}\quad t_i\leq t<t_{i+1}\\
+    0,\quad \mbox{otherwise}
+  \end{cases}\\
+  N_{i,k}(t) &= \omega_{i,k-1}(t)\cdot N_{i,k-1}(t)\ +\
+  (1-\omega_{i+1,k-1}(t))\cdot N_{i+1,k-1}(t)
+\end{align*}
+where
+$$
+\omega_{i,k}(t) = \frac{t-t_i}{t_{i+k}-t_i}.
+$$
+
+The elements of the classic splines space can be expressed in the form
+$$
+\mathbf{S}(t)=\sum_{i=0}^n\mathbf{v_i}\cdot N_{i,k}(t),
+$$
+and this representation is more convenient respect to the one of
+section~\ref{sec:truncpow} because the curve $\mathbf{S}(t)$ roughly
+follow the shape given by the points $\mathbf{v_i}$. Those points are
+called \emph{control vertexes} and the polygon defined by them is
+called \emph{control polygon} and they can be used to control the
+shape of the curve.
+
+\subsection{Lagrangian relaxation}
+A general constrained discrete optimization problem can be expressed in
+the form:
+\begin{equation}\label{eq:opt}
+\begin{aligned}
+& \underset{x}{\text{minimize}}
+& & f(x) \\
+& \text{subject to}
+& & g(x)=0.
+\end{aligned}
+\end{equation}
+Where $x$ is the state of the system in a discrete space $X$, $f(x)$
+is the function to
+minimize, and $g(x)=0$ is the constrain. the functions can also be
+in a multidimensional discrete space, in that case the $x$ is a vector
+$\mathbf{x}=(x_1,\dots,x_n)$ of variables.
+
+For solving this class
+of problem is necessary a \emph{Lagrange relaxation} method, that
+augment the variable space $X$ by a \emph{Lagrange multiplier} space
+$\Lambda$ of dimension equal to the number of constraints - one in the
+problem~\eqref{eq:opt}.
+
+The \emph{generalized discrete Lagrangian
+  function} corresponding to the problem~\eqref{eq:opt} is:
+\begin{equation}\label{eq:lagrangianFun}
+  L_d(x,\lambda)=f(x)+\lambda H(h(x)).
+\end{equation}
+Where $\lambda$ is a variable in $\Lambda$, and if the dimension of
+$\Lambda$ is more than one $\lambda$ must be transposed in
+formula~\eqref{eq:lagrangianFun}; $H(x)$ is a non negative function
+with the property that $H(0)=0$, the purpose is to transform $g(x)$ in
+a non negative function - if $g(x)$ isn't already not negative - for
+instance can be $H(g(x))=|g(x)|$ or $H(g(x))=h^2(x)$.
+
+Under the previous assumptions the set of \emph{local minima}
+in problem~\eqref{eq:opt} - that respect the constraints -  coincide
+with the set of \emph{discrete saddle point}
+in the augmented space. A point $(x^*,\lambda^*)$ is a discrete saddle
+point if:
+\begin{equation*}
+  L_d(x^*,\lambda)\leq L_d(x^*,\lambda^*)\leq L_d(x,\lambda^*)
+\end{equation*}
+for all $x\in\mathcal{N}(x^*)$ and for all $\lambda\in\Lambda$, where
+$\mathcal{N}(x^*)$ is the set of all neighbours of $x^*$.
+
+For resolving the optimization problem~\eqref{eq:opt} is necessary to
+calculate all the discrete saddle points $(x^*,\lambda^*)$ using some
+optimization method (i.e. simulated annealing) on the surface
+represented by
+equation~\eqref{eq:lagrangianFun}, and then choose
+the one that minimize $f(x^*)$. $x^*$ is then the desired minimum.
+
+\section{Path planning}
+In this project the space is bidimensional and the obstacles are
+represented as an array of vertexes and are closed polygons - the last
+vertex is connected to the first one. The path is calculated from a
+provided point to another provided point in the space, and is assumed
+that the user don't choose one or both of those points inside an
+obstacle.
+
+Is also possible - and advised - to add a bounding box around the
+scene.
+
+The path planning is performed doing a simulated annealing using, as the state of the system, the
+configuration of the vertexes of the path; a Dijkstra algorithm is
+performed for finding the initial state of the system, using a pruned 
+Voronoi diagram as basis.
+
+\section{Algorithm}
+\subsection{Initialization}
+The first phase is to initialize the method with an initial state. For
+doing that, the algorithm first build a graph of possible routes
+around obstacles, then find a shortest path on that graph, and finally
+normalize that path.
+
+\subsubsection{Building the graph}
+\begin{enumerate}
+\item\label{item:distDots} initially the algorithm distribute a series of points along the
+  edges of the obstacles and of the bounding box;
+\item\label{item:voronoi} then build a Voronoi
+  diagram using that points as input sites;
+\item\label{item:graph} after that, transform the diagram in a graph, using the
+  vertexes and edges of the cells as nodes and edges of the graph;
+\item\label{item:pruning} then
+  delete all the edges that cross an obstacle;
+\item\label{item:startEnd} the final step is to connect the desired start and end points to the
+  graph - is possible to use two different methods for connecting
+  those points, one is to connect to the nearest visible vertex of the
+  graph, the other one is to connect to every visible vertex of the
+  graph.
+\end{enumerate}
+
+The result is a sparse
+graph that embrace all obstacles and that maintain equal distance from
+obstacles, like in figure~\ref{fig:voronoi}.
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{img/voronoi.pdf}
+  \caption{Pruned Voronoi graph.}
+  \label{fig:voronoi}
+\end{figure}
+
+In the figure the obstacles are the orange polygons; the bounding box
+coincide with the border of the plot; the blue dots are the ones
+distributed in point~\ref{item:distDots}; the green points are the
+vertexes of the pruned Voronoi diagram, constructed on
+points~\ref{item:voronoi}, \ref{item:graph}, and~\ref{item:pruning};
+the two red dots are the start and end vertexes added on point~\ref{item:startEnd}.
+Note that there are also non influential disconnected graphs inside
+the obstacles.
+
+\subsubsection{Shortest path in graph}
+The algorithm need to find a shortest path after the graph
+generation. For doing that use the Dijkstra algorithm from the start
+point to the end point.
+
+\subsubsection{Normalization of path}
+The purpose of the normalization phase is to have a path with vertexes
+that have a certain distance between them.
+
+In the specific the
+algorithm go by all the vertexes of the shortest path, and measure the
+distance from the previous vertex. If the distance is shorter than a
+provided threshold merge the current and previous vertexes in
+a single one located in the middle. If the distance is longer than
+another provided threshold create a new vertex in the middle between
+the current and the previous ones.
+
+\subsection{Annealing}
+The annealing phase is the key part of the algorithm, the purpose is
+to make the initial path shorter, and on the same time keep the path
+in a state where is possible to apply a specific spline without
+colliding with obstacles.
+
+\subsubsection{Lagrangian relaxation applied to the project}
+In the project the variable space $X$ is composed of all possible
+configuration of the path, or in other words is the vector
+$\mathbf{v}=(\mathbf{v}_1,\dots,\mathbf{v}_n)$ of all $n$ ordered
+vertexes $\mathbf{v}_i=(x_i,y_i)$ of the
+path. The problem~\eqref{eq:opt} is formulated in two different
+versions in the project.
+\begin{itemize}
+\item The first one is:
+  \begin{equation*}
+    \begin{aligned}
+      & \underset{\mathbf{v}}{\text{minimize}}
+      & & length(\mathbf{v}) \\
+      & \text{subject to}
+      & & \left|bspline(\mathbf{v})\cap \bigcup_{i\in I}obstacle_i\right| = 0.
+    \end{aligned}
+  \end{equation*}
+  Where $length(\mathbf{v})$ is the sum of the length of every edge of the
+  path, that is the sum of the distances of every consecutive pair of
+  vertexes $\mathbf{v_{i-1}}$ and $\mathbf{v_i}$; $bspline(\mathbf{v})$
+  is the set of points of the \emph{B-Spline} obtained as explained in
+  sections~\ref{sec:spline} and~\ref{sec:bsplines}, using the path as
+  control polygon;
+  $obstacle_i$ is the surface of the $i^{th}$ of $m$ obstacles, and
+  $I=\{1,\dots,m\}$.
+\item The second version is similar, but the function to minimize is
+  $angle(\mathbf{v})$ instead of $length(\mathbf{v})$, where
+  \begin{equation*}
+    angle(\mathbf{v}) = \frac{\sum_{i=2}^{n-1}(1+\cos(\measuredangle \mathbf{v}_{i-1}\mathbf{v}_{i}\mathbf{v}_{i+1}))}{n-2},
+  \end{equation*}
+  and
+  \begin{equation*}
+    cos(\measuredangle
+    \mathbf{v}_{i-1}\mathbf{v}_{i}\mathbf{v}_{i+1})=\frac{(\mathbf{v}_{i-1}-\mathbf{v}_{i})\cdot
+      (\mathbf{v}_{i+1}-\mathbf{v}_{i})}{\|\mathbf{v}_{i-1}-\mathbf{v}_{i}\|\
+      \|\mathbf{v}_{i+1}-\mathbf{v}_{i})\|}.
+  \end{equation*}
+\end{itemize}
+
+The constraint function is not negative, and is calculated as the
+ratio
+\begin{equation*}
+constraint(\mathbf{v}) = \frac{|\{\mathbf{p} \in spline(\mathbf{v})\ |\ \exists i\in\{1,\dots,m\}
+  : \mathbf{p}\in obstacle_i \}|}{|\{\mathbf{p} \in spline(\mathbf{v})\}|}
+\end{equation*}
+where the points $\mathbf{p}$ of the spline are calculated in a discrete form. That
+function is not negative, so the Lagrangian function correspondent to
+equation~\eqref{eq:lagrangianFun} is
+\begin{equation}\label{eq:lagrangianFunProj}
+    L_d(\mathbf{v},\lambda)=length(\mathbf{v})+\lambda\cdot constraint(\mathbf{v}),
+\end{equation}
+or, alternatively, the correspondent one that use $angle(\mathbf{v})$ instead of $length(\mathbf{v})$.
+
+\subsubsection{Annealing phase}
+The target of the simulated annealing phase is to find the minimum
+saddle points in
+the curve represented by the
+equation~\eqref{eq:lagrangianFunProj}.
+\begin{algorithm}
+ \caption{Annealing}\label{alg:annealing}
+ \begin{algorithmic}[1]
+   \Procedure{annealing}{$\mathbf{x}$}
+   \State $\lambda\gets initialLambda$\label{alg:annealing:initialize}
+   \State $T\gets initialTemperature$
+   \While{not $terminationCondition()$}\label{alg:annealing:while}
+   \ForAll{number of trials}\label{alg:annealing:for}
+   \State $changeLambda\gets$ true with $changeLambdaProb$\label{alg:annealing:lambdaProb}
+   \If{$changeLambda$}
+   \State $\lambda'\gets neighbour(\lambda)$\label{alg:annealing:changeLambda}
+   \State $\lambda\gets \lambda'$ with probability $\me^{-([energy(\mathbf{x},\lambda)-energy(\mathbf{x},\lambda')]^+/T)}$
+   \Else
+   \State $\mathbf{x}'\gets neighbour(\mathbf{x})$\label{alg:annealing:changeX}
+   \State $\mathbf{x}\gets \mathbf{x}'$ with probability $\me^{-([energy(\mathbf{x}',\lambda)-energy(\mathbf{x},\lambda)]^+/T)}$
+   \EndIf
+   \EndFor
+   \State $T\gets T\cdot warmingRatio$\label{alg:annealing:cooling}
+   \EndWhile
+   \EndProcedure
+ \end{algorithmic}
+\end{algorithm}
+
+The algorithm~\ref{alg:annealing} is the annealing process, on
+line~\ref{alg:annealing:initialize} $\lambda$ and the
+temperature are initialized; the \emph{while} on
+line~\ref{alg:annealing:while} is the main loop and the terminating
+condition\footnote{For the animation there isn't a terminating
+  condition.} is given by a minimum temperature or a minimum variation of
+energy between two iterations; the \emph{for} at
+line~\ref{alg:annealing:for} repeat the annealing move for a certain
+number of trials, on each iteration the algorithm probabilistically
+try to make a move of the state of the system, first on
+line~\ref{alg:annealing:lambdaProb} make a choice if moving in the
+Lagrangian space or in the space of the path, after that based on that
+choice try to move the system in a neighbouring state - in the
+Lagrangian space at
+line~\ref{alg:annealing:changeLambda} or in the path space at
+line~\ref{alg:annealing:changeX} - the choice is made
+probabilistically in the meaning that if the energy increase in the
+Lagrangian space or decrease in the path space the probability of
+choosing the new state is 1, if the energy decrease in the Lagrangian
+space or increase in the path space then the new state is accepted
+with a probability that is\footnote{Note that $[x]^+=\max(0,x)$.}:
+$$\exp(-\frac{\Delta energy}{T}).$$
+Finally at the end of every trial set,
+at line~\ref{alg:annealing:cooling}, the temperature $T$ is cooled by
+a certain factor.
+
+The $neighbour$ function choose a neighbour of the state and is
+defined depending on the input
+\begin{itemize}
+  \item for $\lambda$ move uniformly in a range $[-maxLambdaPert, maxLambdaPert]$;
+  \item for path pick randomly one of the nodes, except the extremes,
+    then pick an angle in $[0,2\pi]$ and a distance
+    uniformly\footnote{Or at choice with a
+      Gaussian with mean in the perpendicular direction of the two
+      neighbouring points.} in a specific range.
+\end{itemize}
+
+The $energy$ function is equivalent of $L_d$ in the
+equation~\eqref{eq:lagrangianFunProj}:
+$$energy(\mathbf{x},\lambda)=length(\mathbf{x})+\lambda\cdot
+constraints(\mathbf{x})$$
+or
+$$energy(\mathbf{x},\lambda)=angle(\mathbf{x})+\lambda\cdot
+constraints(\mathbf{x})$$
+depending of the chosen method. The function $length(\mathbf{x})$
+returns the total length of the path represented by the points
+$\mathbf{x}$, $angle(\mathbf{x})$ is the mean complementary angle between
+every pair of consecutive segments in the path $\mathbf{x}$, and
+$constraints(\mathbf{x})$ return the ratio between the points inside the
+obstacles and all the points of the
+B-spline obtained using the path $\mathbf{x}$ as control polygon.
+
+The annealing process
+find a saddle point probabilistically increasing the energy, moving
+$\lambda$ and 
+decreasing the energy moving the points.
+
+\begin{figure}[htb]
+  \centering
+  \includegraphics[width=\textwidth]{img/final.pdf}
+  \caption{Final configuration after annealing.}
+  \label{fig:final}
+\end{figure}
+In figure~\ref{fig:final} is visible the state of the system after a
+certain amount of iterations.
+
+\newpage
+\nocite{*}
+\phantomsection
+\addcontentsline{toc}{section}{\refname}
+\bibliographystyle{apalike}
+\bibliography{report}
+
+\end{document}
+

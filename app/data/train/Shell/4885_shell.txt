@@ -1,0 +1,115 @@
+#!/usr/bin/env bash
+
+EchoOk()   { echo "🆗  $@"; }
+EchoTick() { echo "✅  $@"; }
+
+AddCustomMenuEntryIfNeeded()
+{
+    if [[ $# == 0 || $# > 1 ]]; then
+        echo "usage: AddCustomMenuEntryIfNeeded com.company.appname"
+        return 1
+    fi
+    local BUNDLE=$1
+    local contents=`defaults read com.apple.universalaccess "com.apple.custommenu.apps"`
+    local grepResults=`echo $contents | grep $BUNDLE`
+    # Skip if it contains app already
+    [[ -z $grepResults ]] || return 0
+
+    echo "defaults write com.apple.universalaccess \"com.apple.custommenu.apps\" -array-add \"$BUNDLE\""
+    defaults write com.apple.universalaccess "com.apple.custommenu.apps" -array-add "$BUNDLE"
+}
+
+SetKeyboardShortcut()
+{
+    if [[ $# < 3 || $# > 3 ]]; then
+        echo "usage: SetKeyboardShortcut com.company.appname 'Menu title' 'Shortcut'"
+        return 1
+    fi
+    local BUNDLE=$1
+    local MENU_TITLE=$2
+    local SHORTCUT=$3
+
+    AddCustomMenuEntryIfNeeded "$BUNDLE"
+
+    local contents=`defaults read "$BUNDLE" NSUserKeyEquivalents 2>/dev/null`
+    local grepResults=`echo $contents | grep "$MENU_TITLE"`
+    if [[ -z $grepResults ]]; then
+        defaults write "$BUNDLE" NSUserKeyEquivalents -dict-add "$MENU_TITLE" -string "$SHORTCUT"
+        EchoTick "DEFAULTS: [$BUNDLE] NSUserKeyEquivalents '$MENU_TITLE' = '$SHORTCUT'"
+        return 0
+    fi
+
+    # Shortcut already exists
+    EchoOk "DEFAULTS: [$BUNDLE] NSUserKeyEquivalents '$MENU_TITLE' = '$SHORTCUT'"
+    return 1
+}
+
+isTruthy() { [[ $1 == "1" || $1 == "true" || $1 == "YES" ]]; }
+isFalsey() { [[ $1 == "0" || $1 == "false" || $1 == "NO" ]]; }
+
+SetDefaultType()
+{
+    if [[ $# < 4 || $# > 4 ]]; then
+        echo "usage: SetDefaultString <BUNDLE> <KEY> <TYPE> <VALUE>"
+        echo "ie: SetDefaultString com.apple.CrashReporter DialogType string none"
+        exit 1
+    fi
+
+    local BUNDLE=$1
+    local KEY=$2
+    local TYPE=$3
+    local VALUE=$4
+
+    local OLD_VALUE=$(defaults read "$BUNDLE" "$KEY" 2>/dev/null)
+    local EXIT_STATUS=$?
+    local NEEDS_WRITE=true
+    local MESSAGE="DEFAULTS: [$BUNDLE] $KEY = $VALUE"
+
+    if [[ $EXIT_STATUS == 0 ]]; then
+        if [[ $VALUE == $OLD_VALUE ]]; then NEEDS_WRITE=false
+        elif [[ $TYPE == bool ]]; then
+            if [[ $VALUE == true  ]]; then isTruthy $OLD_VALUE && NEEDS_WRITE=false; fi
+            if [[ $VALUE == false ]]; then isFalsey $OLD_VALUE && NEEDS_WRITE=false; fi
+        fi
+    fi
+
+    if [[ $NEEDS_WRITE == false ]]; then
+        EchoOk $MESSAGE
+        return 1
+    fi
+
+    defaults write "$BUNDLE" "$KEY" -$TYPE "$VALUE"
+    EchoTick $MESSAGE
+}
+
+SetDefaultBool()
+{
+    if [[ $# < 3 || $# > 3 ]]; then
+        echo "usage: SetDefaultBool <BUNDLE> <KEY> <VALUE>"
+        echo "ie: SetDefaultBool com.apple.screencapture disable-shadow true"
+        exit 2
+    fi
+    SetDefaultType "$1" "$2" bool "$3"
+}
+
+SetDefaultString()
+{
+    if [[ ! $# == 3 ]]; then
+        echo "usage: SetDefaultString <BUNDLE> <KEY> <VALUE>"
+        echo "ie: SetDefaultString com.apple.CrashReporter DialogType none"
+        exit 2
+    fi
+    SetDefaultType "$1" "$2" string "$3"
+}
+
+SetDefaultInteger()
+{
+    if [[ ! $# == 3 ]]; then
+        echo "usage: SetDefaultInteger <BUNDLE> <KEY> <VALUE>"
+        echo "ie: SetDefaultInteger com.apple.AppleMultitouchTrackpad TrackpadThreeFingerTapGesture 2"
+        exit 2
+    fi
+    SetDefaultType "$1" "$2" integer "$3"
+}
+
+

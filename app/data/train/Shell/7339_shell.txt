@@ -1,0 +1,165 @@
+#!/bin/bash
+cd ${1}/
+
+mem=$(($(($(grep MemTotal /proc/meminfo | awk '{print $2}') / 1000000))-5))
+thr=$(($(grep -c ^processor /proc/cpuinfo)-1))
+npools=5
+nTOT=0
+#cat individual fasta per pool
+# 	HAPLOIDS 1 & 2:
+for i in $(seq $npools)
+do
+npool=$(cut -d$'\t' -f1 Simulated_Lolium_perenne_PHENOTYPES_POOLED.index | grep ${i} | wc -w)
+nTOT=$((nTOT + $npool))
+indexPOOL=$(head -n$(($nTOT +1)) Simulated_Lolium_perenne_PHENOTYPES_POOLED.index | tail -n $npool | cut -d$'\t' -f2 )
+for f in $indexPOOL
+do
+cat Simulated_Lolium_perenne-${3}${f%%.*}-hap1.fasta.gz >> Simulated_Lolium_perenne_GENOTYPES-POOL${i}-hap1.fasta.gz
+cat Simulated_Lolium_perenne-${3}${f%%.*}-hap2.fasta.gz >> Simulated_Lolium_perenne_GENOTYPES-POOL${i}-hap2.fasta.gz
+done
+cat Simulated_Lolium_perenne_GENOTYPES-POOL${i}-hap1.fasta.gz Simulated_Lolium_perenne_GENOTYPES-POOL${i}-hap2.fasta.gz > Simulated_Lolium_perenne_GENOTYPES-POOL${i}.fasta.gz
+done
+#cleaning up a bit :-)
+mkdir RAW_SIMULATED_FASTA
+mv Simulated_Lolium_perenne-GENO*.fasta.gz RAW_SIMULATED_FASTA
+####FOR TESTING:  !!! DELETE RAW SEQUENCES !!!!
+#rm -R RAW_SIMULATED_FASTA
+#scp them simulated raw sequences into the 2TB volume of sim02--small
+scp -r -i ~/.ssh/KEY RAW_SIMULATED_FASTA ubuntu@115.146.95.28://volume1/SIMULATED/DNA/
+rm -R RAW_SIMULATED_FASTA
+
+#ddRADseq (need to be in the python scripts directory for the other py dependencies :-|)
+cd ~/SOFTWARES/ddRADseqTools/Package*/
+cat > poolsIND.txt << EOF
+#RECORD FORMAT: individual_id;replicated_individual_id or NONE;population_id;index1_seq(5'->3')$
+# For GWAlpha2 pool
+POOLED;NONE;pool;GGTCTT;ATCACG
+EOF
+###################################################################################################
+# FOR ALL POSSIBLE REnzyme PAIR:
+cat > Renzyme.txt << EOF
+EcoRI
+MseI
+PstI
+SbfI
+EOF
+
+touch /${VOLUME}/SIMULATED/DNA/Simulated_Lolium_perenne_RADseq_COVERAGE.csv
+
+for k in $(seq $(cat Renzyme.txt | wc -l))
+do
+enzyme1=$(head -n$k Renzyme.txt | tail -n 1)
+
+for j in $(seq $((k+1)) $(cat Renzyme.txt | wc -l))
+do
+enzyme2=$(head -n$j Renzyme.txt | tail -n 1)
+
+for i in $(seq $npools)
+do
+#simulate RE digetion
+./rsitesearch.py \
+--genfile=${1}/Simulated_Lolium_perenne_GENOTYPES-POOL${i}.fasta.gz \
+--enzyme1=$enzyme1 --enzyme2=$enzyme2 \
+--minfragsize=160 --maxfragsize=600 \
+--fragstinterval=25 \
+--fragstfile=${1}/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-REDIGEST.txt \
+--fragsfile=${1}/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-FRAGMENTS.fasta &> /dev/null
+#simulate sequencing
+./simddradseq.py \
+--fragsfile=${1}/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-FRAGMENTS.fasta \
+--individualsfile=poolsIND.txt \
+--technique=IND1_IND2_DBR \
+--enzyme1=$enzyme1 --enzyme2=$enzyme2 \
+--readtype=PE \
+--mutprob=0.05 \
+--insertlen=200 \
+--locinum=200000 \
+--readsnum=12500000 \
+--format=FASTQ \
+--readsfile=${1}/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS &> /dev/null
+# #remove PCR duplicates
+# ./pcrdupremoval.py \
+# --format=FASTQ \
+# --readtype=PE \
+# --readsfile1=/mnt/SIMULATED/DNA/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-1.fastq \
+# --readsfile2=/mnt/SIMULATED/DNA/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-2.fastq \
+# --clearfile=/mnt/SIMULATED/DNA/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-CLEARED \
+# --dupstfile=/mnt/SIMULATED/DNA/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-CLEARED.stats
+# #trimming off the adapters
+# ./readstrim.py \
+# --format=FASTQ \
+# --readtype=PE \
+# --readsfile1=/mnt/SIMULATED/DNA/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-CLEARED-1.fastq \
+# --readsfile2=/mnt/SIMULATED/DNA/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-CLEARED-2.fastq \
+# --trimfile=/mnt/SIMULATED/DNA/Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-TRIMMED
+done
+#variant calling with bcftools mpileup .. | bcftools call ..
+cd $1
+bwa index -p Lolium_perenne_genome -a bwtsw Lolium_perenne_genome_FIXED.fasta
+samtools faidx Lolium_perenne_genome_FIXED.fasta; mv Lolium_perenne_genome_FIXED.fasta.fai Lolium_perenne_genome.fai
+for i in $(seq $npools)
+do
+### PIPE IT! PIPE IT! PIPE IT! ;-P
+#align them bunch of illumina reads into the reference genome built above
+bwa mem -t $thr -M Lolium_perenne_genome \
+Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-1.fastq \
+Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ILLREADS-2.fastq \
+> Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.sam
+#compress the aligned sam file into a bam file
+samtools view -@ $thr -Sb \
+Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.sam \
+> Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.bam
+#sort these bam files for indexing
+samtools sort -@ $thr -m ${mem}G Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.bam \
+> Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.sorted
+mv Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.sorted Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.bam
+#build bam index, #remove duplicates and #rebuild cleaned bam index with picard
+java -ea -Xmx${mem}g -jar ~/SOFTWARES/picard.jar BuildBamIndex \
+I=Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.bam &> /dev/null
+#java -ea -Xmx30g -jar ~/SOFTWARES/picard.jar MarkDuplicates \
+#I=Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED.bam \
+#METRICS_FILE=metrics.txt \
+#REMOVE_DUPLICATES=true AS=true \
+#O=Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED-CLEANED.bam
+#java -ea -Xmx30g -jar ~/SOFTWARES/picard.jar BuildBamIndex \
+#I=Simulated_Lolium_perenne_POOL${i}-${enzyme1}x${enzyme2}-ALIGNED-CLEANED.bam
+done
+
+#variant calling without duplicate removal
+if [ "$2" = "vcf" ]
+then
+bcftools mpileup -f Lolium_perenne_genome_FIXED.fasta \
+Simulated_Lolium_perenne_POOL*-${enzyme1}x${enzyme2}-ALIGNED.bam | \
+bcftools call -mv -Ov \
+-o Simulated_Lolium_perenne_POOLED_GENOTYPES-${enzyme1}x${enzyme2}.vcf
+fi
+#generate the .sync genotype file for GWAlpha
+ls Simulated_Lolium_perenne_POOL*-${enzyme1}x${enzyme2}-ALIGNED.bam > bam.list
+samtools mpileup -b bam.list \
+> Simulated_Lolium_perenne_POOLED_GENOTYPES-${enzyme1}x${enzyme2}.mpileup
+java -ea -Xmx${mem}g -jar ~/SOFTWARES/popoolation2*/mpileup2sync.jar \
+--input Simulated_Lolium_perenne_POOLED_GENOTYPES-${enzyme1}x${enzyme2}.mpileup \
+--output Simulated_Lolium_perenne_POOLED_GENOTYPES-${enzyme1}x${enzyme2}.sync.temp \
+--fastq-type sanger \
+--min-qual 30
+
+# removing monomorphic loci (TEST 20170904 - awk:::alex's suggestion! Works perfectly! :-D)
+awk -v OFS='\t' '{if ($4!=$5 || $5!=$6 || $6!=$7 || $7!=$8) print $1,$2,$3,$4,$5,$6,$7,$8}' Simulated_Lolium_perenne_POOLED_GENOTYPES-${enzyme1}x${enzyme2}.sync.temp > Simulated_Lolium_perenne_POOLED_GENOTYPES-${enzyme1}x${enzyme2}.sync
+
+#INSERT ASSESSMENT STEPS HERE:
+echo ${enzyme1}x${enzyme2} >> Simulated_Lolium_perenne_RADseq_COVERAGE.csv
+grep "scaffold" Simulated_Lolium_perenne_POOLED_GENOTYPES-${enzyme1}x${enzyme2}.sync | cut -f1 -d$'\t' > SCAF.list.temp
+uniq SCAF.list.temp > SCAF.names.temp
+uniq -c SCAF.list.temp | sed 's/ s/:s/g' | grep -n scaffold | cut -f2 -d: | sed 's/ //g' > SCAF.counts.temp
+paste -d, SCAF.names.temp SCAF.counts.temp >> Simulated_Lolium_perenne_RADseq_COVERAGE.csv
+
+rm bam.list
+mkdir ${enzyme1}x${enzyme2}
+mv *${enzyme1}x${enzyme2}*.* ${enzyme1}x${enzyme2}/
+####FOR TESTING:  !!! DELETE RAW SEQUENCES !!!!
+rm ${enzyme1}x${enzyme2}/*.fastq ${enzyme1}x${enzyme2}/*.fasta ${enzyme1}x${enzyme2}/*.sam *.temp
+
+cd ~/SOFTWARES/ddRADseqTools/Package*/
+done
+done
+###################################################################################################

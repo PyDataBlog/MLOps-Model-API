@@ -1,0 +1,127 @@
+{-# LANGUAGE OverloadedLists #-}
+
+module Irg.Lab1.Geometry.Shapes where
+
+import qualified Irg.Lab1.Geometry.Vector as V
+import qualified Data.Vector as V2
+import Data.Maybe
+import Debug.Trace
+
+type Number = Float
+
+myTrace :: Show a => a -> a
+myTrace x = if False then traceShowId x else x
+
+polygonFill :: Polygon -> [(Dot, Dot)]
+polygonFill p@(Polygon poly)
+  | polygonOrientation p /= Clockwise   = error "The polygon has to be oriented clockwise"
+  | otherwise                           = mapMaybe getPolyLineForY ([minimum ys .. maximum ys] :: [Number])
+  where
+    edges = myTrace $ polygonEdges p
+    len = length poly
+    ys = map ((V2.! 1) . unpackDot) $ V.toList poly
+    yOfNthVertex n = unpackDot (poly V2.! n) V2.! 1
+    leftEdges = myTrace $ map fst $ filter (\(_, i) -> yOfNthVertex i < yOfNthVertex ((i+1) `mod` len)) $ zip edges [0..]
+    rightEdges = filter (`notElem` leftEdges) edges
+    getXsOfEdgesOnY edgess y = mapMaybe (getXOfIntersection y) edgess
+    getPolyLineForY y
+      | null (getXsOfEdgesOnY rightEdges y) || null (getXsOfEdgesOnY leftEdges y)   = Nothing
+      | l < d                                                                       = Just (Dot [l, y, 1], Dot [d, y, 1])
+      | otherwise                                                                   = Nothing
+      where
+        l = maximum (myTrace $ getXsOfEdgesOnY leftEdges y)
+        d = minimum (getXsOfEdgesOnY rightEdges y)
+
+toListWithValid :: Int -> V.Vector Number -> [Number]
+toListWithValid n vec
+  | length vec == n   = V.toList vec
+  | otherwise         = error $ "Invalid vector size (" ++ show (length vec) ++ ")"
+
+fromListWithValid :: Int -> [Number] -> V.Vector Number
+fromListWithValid n ls
+  | length ls == n    = V.fromList ls
+  | otherwise         = error $ "Invalid list size (" ++ show (length ls) ++ ")"
+
+data Dot = Dot (V.Vector Number) deriving (Eq, Show)
+data Line = Line (V.Vector Number) deriving (Eq, Show)
+data Polygon = Polygon (V.Vector Dot) deriving (Eq, Show)
+data Location = Above | On | Under deriving (Eq, Show)
+data InOut = Inside | Outside deriving (Eq, Show)
+data Orientation = Clockwise | Counterclockwise | Neither deriving (Eq, Show)
+
+relationDotLine :: Dot -> Line -> Location
+relationDotLine dot line
+  | scalar > 0  = Above
+  | scalar == 0 = On
+  | otherwise   = Under
+  where scalar = V.scalarProduct (unpackDot dot) (unpackLine line)
+
+relationDotPolyNthEdge :: Int -> Dot -> Polygon -> Location
+relationDotPolyNthEdge n dot poly = relationDotLine dot (polygonEdges poly !! n)
+
+isDotInsidePolygon :: Dot -> Polygon -> Bool
+isDotInsidePolygon dot poly = above && (orientation == Counterclockwise) || under && (orientation == Clockwise)
+  where
+    under = all ((Above /=) . relationDotLine dot) $ polygonEdges poly
+    above = all ((Under /=) . relationDotLine dot) $ polygonEdges poly
+    orientation = polygonOrientation poly
+
+lineFromDots :: Dot -> Dot -> Line
+lineFromDots (Dot d1) (Dot d2) = Line $ V.vectorProduct d1 d2
+
+polygonEdges :: Polygon -> [Line]
+polygonEdges (Polygon poly) = fmap (\i -> lineFromDots (poly V2.! i) (poly V2.! ((i+1) `mod` len))) lens
+  where
+    lens = [0..len-1]
+    len = length poly
+
+polygonOrientation :: Polygon -> Orientation
+polygonOrientation p@(Polygon poly)
+  | clockwise         = Clockwise
+  | counterclockwise  = Counterclockwise
+  | otherwise         = Neither
+  where
+    edges = polygonEdges p
+    len = length poly
+    lens = [0..len-1] :: [Int]
+    relationPolyEdgeAndNextVertex i = relationDotLine (poly V2.! ((i + 2) `mod` len)) (edges !! i)
+    clockwise = all ((Above /=) . relationPolyEdgeAndNextVertex) lens
+    counterclockwise = all ((Under /=) . relationPolyEdgeAndNextVertex) lens
+
+getXOfIntersection :: Number -> Line -> Maybe Number
+getXOfIntersection y (Line edge)
+  | edge V2.! 0 == 0  = Nothing
+  | otherwise         = Just ((-(edge V2.! 1) * y - (edge V2.! 2)) / (edge V2.! 0))
+
+
+reversePolygon :: Polygon -> Polygon
+reversePolygon = polygonFromLists . reverse . polygonToLists
+
+polygonToClockwise :: Polygon -> Polygon
+polygonToClockwise poly
+  | polygonOrientation poly == Counterclockwise   = reversePolygon poly
+  | polygonOrientation poly == Neither            = error "Neither clockwise nor counterclockwise"
+  | otherwise                                     = poly
+
+unpackDot :: Dot -> V.Vector Number
+unpackDot (Dot a) = a
+unpackLine :: Line -> V.Vector Number
+unpackLine (Line a) = a
+unpackPolygon :: Polygon -> V.Vector Dot
+unpackPolygon (Polygon a) = a
+
+dotFromList :: [Number] -> Dot
+dotFromList = Dot . fromListWithValid 3
+dotToList :: Dot -> [Number]
+dotToList = toListWithValid 3 . unpackDot
+
+lineFromList :: [Number] -> Line
+lineFromList = Line . fromListWithValid 3
+lineToList :: Line -> [Number]
+lineToList = toListWithValid 3 . unpackLine
+
+polygonFromLists :: [[Number]] -> Polygon
+polygonFromLists = Polygon . V.fromList . map dotFromList
+
+polygonToLists :: Polygon -> [[Number]]
+polygonToLists = map (V.toList . unpackDot) . V.toList . unpackPolygon

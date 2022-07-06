@@ -1,0 +1,105 @@
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
+module Main
+    where
+
+import Control.Monad
+import Control.Monad.State
+import Control.Applicative
+import Data.List
+import System.IO
+import System.Random
+import Data.Function (on)
+
+import AI
+import Types
+import Protocol
+
+newtype GameContext a = GameContext { runGame :: StateT ProtocolState IO a }
+    deriving (Functor, Applicative, Monad, MonadIO, MonadState ProtocolState)
+
+data Move
+    = NoMoves
+    | StepDown
+    | StepLeft
+    | StepRight
+    | TurnLeft
+    | TurnRight
+    | DropDown
+    deriving (Eq, Ord, Enum)
+
+instance Show Move where
+    show NoMoves   = "no_moves"
+    show StepDown  = "down"
+    show StepLeft  = "left"
+    show StepRight = "right"
+    show TurnLeft  = "turnleft"
+    show TurnRight = "turnright"
+    show DropDown  = "drop"
+
+
+main :: IO ()
+main = do
+    hSetBuffering stdout NoBuffering
+    evalStateT (runGame loop) mkProtocolState
+
+
+loop :: GameContext ()
+loop = do
+    input_line <- liftIO getLine
+    parseInput handleAction $ words input_line
+    is_eof <- liftIO isEOF
+    unless is_eof loop
+
+
+handleAction :: Int -> GameContext ()
+handleAction timeout = do
+    let allMoves = [StepLeft, StepRight]
+    block <- gets _thisPieceType
+    position <- gets _thisPiecePosition
+    solution <- variants block position
+    let myCleverPlan = moves block position solution
+    liftIO $ putStrLn $ formatMoves myCleverPlan
+  where
+    formatMoves = intercalate "," . map show
+
+
+myBot :: GameContext Player
+myBot = do
+    context <- get
+    let players = _players context
+        botname = _myBotName context
+    return $ head . filter ((botname ==) . _playerName) . _players $ context
+
+
+edges :: Block -> GameContext (Int, Int)
+edges block = do
+    let blockM = blockMatrix block
+        blockL = length blockM
+    width <- gets _fieldWidth
+    return (0, width - blockL)
+
+
+variants :: Block -> (Int, Int) -> GameContext (Int, Int)
+variants block (x, y) = do
+    (lo, hi) <- edges block
+    player   <- myBot
+    let field = _playerField player
+    let vars = [ (x', r) | r <- [0 .. 3], x' <- [lo .. hi] ]
+    let var' = zip (map (\(x', r) -> fitness (dropFigure (block, r) (x', y) field)) vars) vars
+    return . snd . minimumBy (compare `on` fst) $ var'
+
+
+moves :: Block -> (Int, Int) -> (Int, Int) -> [Move]
+moves block (x, y) (x', r) = moveSide (x - x') ++ moveRotate r
+  where
+    moveSide 0 = []
+    moveSide x
+        | x > 0 = StepLeft : moveSide (x - 1)
+        | x < 0 = StepRight : moveSide (x + 1)
+    moveRotate 1 = TurnRight : []
+    moveRotate 2 = TurnRight : TurnRight : []
+    moveRotate 3 = TurnLeft : []
+    moveRotate _ = []

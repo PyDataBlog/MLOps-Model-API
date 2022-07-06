@@ -1,0 +1,98 @@
+#Pkg.add("MLBase")
+#Pkg.add("Mocha")
+#Pkg.add("HDF5")
+ENV["MOCHA_USE_NATIVE_EXT"] = "true"
+ENV["OMP_NUM_THREADS"] = 1
+blas_set_num_threads(1)
+
+using Mocha
+using HDF5
+using MLBase
+
+function experiment(experiment_id,train_data_layer,test_data_layer)
+  experiment_id=Dates.format(now(), "yyyymmdd_HHMMSS")
+  conv_layer  = ConvolutionLayer(name="conv1", n_filter=32, kernel=(7,7), bottoms=[:data], tops=[:conv])
+  pool_layer  = PoolingLayer(name="pool1", kernel=(2,2), stride=(2,2), bottoms=[:conv], tops=[:pool])
+  conv2_layer = ConvolutionLayer(name="conv2", n_filter=64, kernel=(5,5), bottoms=[:pool], tops=[:conv2])
+  pool2_layer = PoolingLayer(name="pool2", kernel=(2,2), stride=(2,2), bottoms=[:conv2], tops=[:pool2])
+  fc1_layer   = InnerProductLayer(name="ip1", output_dim=25, neuron=Neurons.ReLU(), bottoms=[:pool2], tops=[:ip1])
+  fc2_layer   = InnerProductLayer(name="ip2", output_dim=16, bottoms=[:ip1], tops=[:ip2])
+  loss_layer  = SoftmaxLossLayer(name="loss", bottoms=[:ip2,:label])
+
+  common_layers = [conv_layer, pool_layer, conv2_layer, pool2_layer, fc1_layer, fc2_layer]
+  net = Net("LSA16_train", backend, [train_data_layer, common_layers..., loss_layer])
+  #println(net)
+  exp_dir = "snapshots/lsa16_$(Mocha.default_backend_type)_$experiment_id"
+
+  method = SGD()
+  iterations=250
+  params = make_solver_parameters(method, max_iter=iterations, regu_coef=0.0005,
+                                  mom_policy=MomPolicy.Fixed(0.9),
+                                  lr_policy=LRPolicy.Inv(0.01, 0.0001, 0.75),
+                                  load_from=exp_dir)
+  solver = Solver(method, params)
+
+  setup_coffee_lounge(solver, save_into="$exp_dir/lsa16_statistics.jld", every_n_iter=round(Int,iterations/2))
+
+  # report training progress every 100 iterations
+  add_coffee_break(solver, TrainingSummary(), every_n_iter=round(Int,iterations/10) )
+
+  # save snapshots every 5000 iterations
+  add_coffee_break(solver, Snapshot(exp_dir), every_n_iter=round(Int,iterations/2))
+
+  # show performance on test data every 1000 iterations
+  data_layer_test = HDF5DataLayer(name="test-data", source="data/test.txt", batch_size=64)
+  acc_layer = AccuracyLayer(name="test-accuracy", bottoms=[:ip2, :label])
+  test_net = Net("LSA16-test", backend, [test_data_layer, common_layers..., acc_layer])
+  add_coffee_break(solver, ValidationPerformance(test_net), every_n_iter= round(Int,iterations/10) )
+
+  solve(solver, net)
+  #TODO return training and test accuracy
+
+  destroy(net)
+  return test_net
+end
+
+function evaluate(test_net,test_data_layer)
+  #score=forward_epoch(test_net)
+  accuracy_layer_state=get_layer_state(test_net, "test-accuracy")
+  accuracy=accuracy_layer_state.accuracy
+  destroy(test_net)
+  return accuracy
+end
+
+function make_data_layer(xs,ys,subset;complement=false)
+  if (complement)
+    subset=setdiff(1:length(ys),subset)
+  end
+  x=xs[:,:,1,subset]
+  y=ys[subset]
+  MemoryDataLayer(tops=[:data,:label],batch_size=100,data=Array[x,y])
+end
+
+srand(12345678)
+#data_layer  = AsyncHDF5DataLayer(name="train-data", source="lsa16/train.txt", batch_size=64, shuffle=true)
+y = h5read("lsa16/lsa16_train.hdf5", "label")
+x = h5read("lsa16/lsa16_train.hdf5", "data_images")
+
+
+backend = DefaultBackend()
+init(backend)
+
+
+experiments=30
+n = length(y)
+test_set_size=100
+scores = cross_validate(
+    subset -> experiment("",make_data_layer(x,y,subset),make_data_layer(x,y,subset,complement=true)),
+    (model, subset) -> evaluate(model, make_data_layer(x,y,subset)),  # evaluation function
+    n,
+    StratifiedRandomSub(y,test_set_size,experiments)
+    )
+
+(m, s) = mean_and_std(scores)
+
+println("Experiments $experiments")
+println("Mean: $m (std: $s)")
+
+shutdown(backend)

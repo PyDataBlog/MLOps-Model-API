@@ -1,0 +1,212 @@
+{-# LANGUAGE DeriveFunctor, GADTs, KindSignatures, ScopedTypeVariables #-}
+
+module Chamber.Data.Boolean where
+
+import qualified Data.Map as M
+import Debug.Trace
+import Data.Maybe
+import Data.Monoid
+import Data.List hiding (concat, foldr)
+import Prelude hiding (concat, foldr)
+import Data.Foldable
+import Control.Monad.State
+import Control.Monad.ST
+import Data.STRef
+import Chamber.Data.NC
+import qualified Chamber.Data.Formula as F
+
+--------------------------------------------------------------------------------
+
+type Variable = Int -- Should be (strictly) positive.
+type Literal = Int
+
+type CNF = [[Literal]]
+
+-- Functions for constructing formulae
+
+evalCNF :: (Variable -> Bool) -> CNF -> Bool
+eq      ::  NC a  -> NC a -> NC a
+xor     ::  NC a  -> NC a -> NC a
+ite     ::  NC a  -> NC a -> NC a -> NC a
+land    :: [NC a] -> NC a
+lor     :: [NC a] -> NC a
+
+-- Conversion to NC.
+
+toNC :: F.Formula a -> NC a
+
+-- Functions for transforming formulae
+
+-- Transform a formula of 3 args. into a boolean function.
+-- TODO: Generalize this via Template Haskell
+
+ftf3 :: (Eq a) => a -> a -> a -> F.Formula a -> Bool -> Bool -> Bool -> Bool
+
+-- [litify] transform a formula on a comparable (via ==) types to formula only
+-- on integers, returning an list specifying the variable assignment.
+
+litify :: Ord a => NC a -> (NC Variable, M.Map a Variable, Int)
+
+-- [cnf] performs the simple (worst-case exponential time) conversion of an
+-- arbitrary formula to one in which all NOT gates directly preceed variables
+-- and every AND gate appears above every OR gate.
+
+cnf :: NC a -> NC a
+
+-- [convert] wraps [cnf] and translates the result it into a CNF type.
+
+convert :: NC Variable -> CNF
+
+-- [cnfPoly] performs polynomial time expansion of the formula, which may add
+-- additional variables. The State monad is used to keep track of how many
+-- variables are used in the formula. [cnfPoly] returns (within the monad) a
+-- variable representing the result current expression as well as additional
+-- clauses that make it happen.
+
+cnfPoly :: NC Variable -> State (Variable, CNF) Variable
+convertPoly :: NC Variable -> (CNF, Int)
+convertPolyST :: NC Variable -> Int -> (CNF, Int)
+
+-- print a CNF in DIMCAS format
+
+dimacs :: Int -> CNF -> String
+
+-- parse a solution in DIMCAS format; solution is expected to be an actual
+-- solution, not "s UNSATISIFIABLE"
+
+undimacs :: String -> M.Map Int Bool
+
+--------------------------------------------------------------------------------
+
+ftf3 v1 v2 v3 f v1b v2b v3b = F.eval varmap f
+  where varmap x =
+          if x == v1 then v1b else
+            if x == v2 then v2b else
+              if x == v3 then v3b else undefined
+
+evl a x = if x < 0 then not $ a (abs x) else a x
+evalCNF a c = foldr (&&) True $ map ((foldr (||) False).(map $ evl a)) c
+
+eq  f g   = Or (And f g) (And (Not f) (Not g))
+xor f g   = Or (And (Not f) g) (And f (Not g))
+ite f g h = Or (And f g) (And (Not f) h)
+
+land []  = undefined
+land [x] = x
+land (x:xs) = And x (land xs)
+
+lor []  = undefined
+lor [x] = x
+lor (x:xs) = Or x (lor xs)
+
+toNC (F.Var v) = Var v
+toNC (F.Not f) = Not (toNC f)
+toNC (F.And fs) = case fs of
+  [x] -> toNC x
+  (x:xs) -> And (toNC x) $ toNC (F.And xs)
+toNC (F.Or  fs) = case fs of
+  [x] -> toNC x
+  (x:xs) -> Or (toNC x) $ toNC (F.Or xs)
+toNC (F.Xor fs) = case fs of
+  [x] -> toNC x
+  (x:xs) -> xor (toNC x) $ toNC (F.Xor xs)
+toNC (F.Eql fs) = case fs of
+  [x, y] -> eq (toNC x) (toNC y)
+  (x:y:xs) -> And (eq (toNC x) (toNC y)) (toNC $ F.Eql (y:xs))
+toNC (F.Dec x y z) = ite (toNC x) (toNC y) (toNC z)
+
+-- Convert to CNF ([And]s above [Or]s)
+
+distributeLeft x (And e f) = And (distributeLeft x e) (distributeLeft x f)
+distributeLeft x y = Or x y
+
+distributeOr (And e f) y = And (distributeOr e y) (distributeOr f y)
+distributeOr x y = distributeLeft x y
+
+cnf (Var v) = Var v
+cnf (Not (Var v)) = Not (Var v)
+cnf (Not (Not f)) = f
+cnf (Not (And e f)) = cnf $ Or (Not e) (Not f)
+cnf (Not (Or e f)) = cnf $ And (Not e) (Not f)
+cnf (And e f) = And (cnf e) (cnf f)
+cnf (Or e f) = distributeOr (cnf e) (cnf f)
+
+clausify (Var v) = [v]                       -- Clausify should only be called
+clausify (Not (Var v)) = [-v]                -- on formula with only `Or' nodes
+clausify (Or e f) = clausify e ++ clausify f -- and `Not' nodes in which all the
+clausify (And _ _) = undefined               -- `Not' nodes appear directly
+clausify (Not _) = undefined                 -- above variables.
+
+listify (And e f) = convert e ++ convert f
+listify x = [clausify x]
+
+convert = listify.cnf
+
+new = do (var, cs) <- get; put (var + 1, cs); return var
+
+shed cs = do (x, cs') <- get
+             put (x, cs ++ cs')
+
+cnfPoly (Var v)   = return v
+cnfPoly (Not f)   = do v <- cnfPoly f
+                       n <- new
+                       shed [[v,n], [-v,-n]]
+                       return n
+cnfPoly (Or f g)  = do fv <- cnfPoly f
+                       gv <- cnfPoly g
+                       n <- new
+                       shed [[n,-fv], [n,-gv], [-n,fv,gv]]
+                       return n
+cnfPoly (And f g) = do fv <- cnfPoly f
+                       gv <- cnfPoly g
+                       n <- new
+                       shed [[-n,fv], [-n,gv], [n,-fv,-gv]]
+                       return n
+
+cnfPolyST :: STRef s Int -> STRef s CNF -> NC Variable -> ST s (Variable)
+cnfPolyST nref lref f = case f of
+  (Var v)   -> return v
+  (Not f)   -> do v <- cnfPolyST nref lref f
+                  n <- readSTRef nref
+                  modifySTRef nref (+1)
+                  modifySTRef lref ([[v,n], [-v,-n]]++)
+                  seq n $ return n
+  (Or f g)  -> do fv <- cnfPolyST nref lref f
+                  gv <- cnfPolyST nref lref g
+                  n <- readSTRef nref
+                  modifySTRef nref (+1)
+                  modifySTRef lref ([[n,-fv], [n,-gv], [-n,fv,gv]]++)
+                  seq n $ return n
+  (And f g) -> do fv <- cnfPolyST nref lref f
+                  gv <- cnfPolyST nref lref g
+                  n <- readSTRef nref
+                  modifySTRef nref (+1)
+                  modifySTRef lref ([[-n,fv], [-n,gv], [n,-fv,-gv]]++)
+                  seq n $ return n
+
+convertPoly f = ([v]:clauses, v)
+  where (v, clauses) = execState (cnfPoly f)
+                     $ (1 + (length $ nub $ foldr (:) [] f), [])
+
+convertPolyST f vn = runST $ do
+  n <- newSTRef $ 1 + vn
+  cnf <- newSTRef []
+  v <- cnfPolyST n cnf f
+  cnf' <- readSTRef cnf
+  n' <- readSTRef n
+  return $ ([v]:cnf', v)
+
+litify f = (fmap (m M.!) f, m, n)
+  where list = nub $ foldr (:) [] f
+        (n, m) = foldr (\v (k, m) -> (k + 1, M.insert v k m)) (1, M.empty) list
+
+dimacs varnum cnf = "p cnf " ++ show varnum ++ " " ++ (show $ length cnf) ++ "\n" ++ cs
+  where cs = concat $ intersperse "\n" $ map formatClause cnf
+        -- varnum = length $ nub $ map abs $ concat cnf
+        formatClause c = (concat $ intersperse " " $ map show c) ++ " 0"
+
+undimacs s = foldr (\i m -> if i > 0 then M.insert i True m
+                            else M.insert (-i) False m) M.empty
+             $ map read $ words $ filter (\x -> (x /= '\n') && (x /= 'v'))
+             $ concat $ filter (\l -> ((head l) /= 'c') && ((head l) /= 's'))
+             $ lines s

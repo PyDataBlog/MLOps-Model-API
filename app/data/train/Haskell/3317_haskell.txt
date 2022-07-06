@@ -1,0 +1,126 @@
+
+module Text.Email.Parser.Polymorphic (
+    addrSpec, -- addrSpec is from this module, the rest are re-exports.
+    localPart,
+    domainPart,
+    EmailAddress,
+    unsafeEmailAddress,
+    toByteString
+    ) where
+
+import Text.Email.Parser (localPart, domainPart, EmailAddress(..), unsafeEmailAddress, toByteString)
+import Text.Domain.Parser.Polymorphic (domainParser,isAsciiAlphaNum)
+import qualified Data.ByteString.Char8 as BS
+import Data.ByteString (ByteString)
+
+import Text.Parser.Combinators hiding (between)
+import Text.Parser.Char
+import Control.Applicative
+import Control.Monad (void)
+import Data.List (intercalate)
+
+--import Data.Char (isAscii, isAlpha, isDigit)
+--import Data.List (intercalate)
+
+addrSpec :: (Monad m, CharParsing m) => m EmailAddress
+addrSpec = do
+    l <- local
+    char '@'
+    d <- domain
+    return (unsafeEmailAddress (BS.pack l) (BS.pack d))
+
+local :: (Monad m, CharParsing m) => m String
+local = dottedAtoms
+
+domain :: (Monad m, CharParsing m) => m String
+domain = domainName <|> domainLiteral
+
+domainName :: (Monad m, CharParsing m) => m String
+domainName = undefined -- TODO: Not sure how to do this part polymorphically.
+
+dottedAtoms :: (Monad m, CharParsing m) => m String
+dottedAtoms = intercalate "." <$>
+        between1 (optional cfws) (atom <|> quotedString) `sepBy1` char '.'
+
+atom :: (Monad m, CharParsing m) => m String
+atom = some (satisfy isAtomText)
+
+isAtomText :: Char -> Bool
+isAtomText x = isAsciiAlphaNum x || x `elem` "!#$%&'*+/=?^_`{|}~-"
+
+domainLiteral :: (Monad m, CharParsing m) => m String
+domainLiteral = do
+    innards <- between (optional cfws *> char '[') (char ']' <* optional cfws)
+        (many (optional fws >> some (satisfy isDomainText)) <* optional fws)
+    return $ concat ["[",concat innards,"]"]
+
+isDomainText :: Char -> Bool
+isDomainText x = x `elem` "\33-\90\94-\126" || isObsNoWsCtl x
+
+quotedString :: (Monad m, CharParsing m) => m String
+quotedString = do
+    innards <- between (char '"') (char '"') (many (optional fws >> quotedContent) <* optional fws)
+    return $ "\"" ++ (concat innards) ++ "\""
+
+quotedContent :: (Monad m, CharParsing m) => m String
+quotedContent = some (satisfy isQuotedText) <|> quotedPair
+
+isQuotedText :: Char -> Bool
+isQuotedText x = x `elem` "\33\35-\91\93-\126" || isObsNoWsCtl x
+
+quotedPair :: (Monad m, CharParsing m) => m String
+quotedPair = (\ c -> ['\\',c]) <$> (char '\\' *> (vchar <|> wsp <|> lf <|> cr <|> obsNoWsCtl <|> nullChar))
+
+cfws :: (Monad m, CharParsing m) => m ()
+cfws = skipMany (comment <|> fws)
+
+fws :: (Monad m, CharParsing m) => m ()
+fws = void (wsp1 >> optional (crlf >> wsp1)) <|> (skipSome (crlf >> wsp1))
+
+between :: Applicative f => f l -> f r -> f a -> f a
+between l r x = l *> x <* r
+
+between1 :: Applicative f => f lr -> f a -> f a
+between1 lr x = lr *> x <* lr
+
+comment :: (Monad m, CharParsing m) => m ()
+comment = between (char '(') (char ')') $ skipMany (void commentContent <|> fws)
+
+commentContent :: (Monad m, CharParsing m) => m ()
+commentContent = skipSome (satisfy isCommentText) <|> void quotedPair <|> comment
+
+isCommentText :: Char -> Bool
+isCommentText x = x `elem` "\33-\39\42-\91\93-\126" || isObsNoWsCtl x
+
+nullChar :: (CharParsing m) => m Char
+nullChar = char '\0'
+
+wsp1 :: (CharParsing m) => m ()
+wsp1 = skipSome (satisfy isWsp)
+
+wsp :: (CharParsing m) => m Char
+wsp = satisfy isWsp
+
+isWsp :: Char -> Bool
+isWsp x = x == ' ' || x == '\t'
+
+cr :: (CharParsing m) => m Char
+cr = char '\r'
+
+lf :: (CharParsing m) => m Char
+lf = char '\n'
+
+crlf :: (Monad m, CharParsing m) => m ()
+crlf = void $ cr >> lf
+
+isVchar :: Char -> Bool
+isVchar c = c `elem` "\x21-\x7e"
+
+vchar :: (CharParsing m) => m Char
+vchar = satisfy isVchar
+
+isObsNoWsCtl :: Char -> Bool
+isObsNoWsCtl c = c `elem` "\1-\8\11-\12\14-\31\127"
+
+obsNoWsCtl :: (CharParsing m) => m Char
+obsNoWsCtl = satisfy isObsNoWsCtl

@@ -1,0 +1,193 @@
+
+{-# LANGUAGE TypeSynonymInstances #-}
+module Kwil.Lexer where
+
+import           Data.Char
+import           Data.List
+import Data.Maybe (listToMaybe)
+import Control.Monad.Trans.State.Lazy
+import Control.Monad
+data Token = LowerCaseID String
+          | UpperCaseID String
+          | Equals
+          | LBracket
+          | RBracket
+          | LParen
+          | RParen
+          | ClassDot -- ::
+          | QualifierDot -- .
+          | CaseSeparator
+          | LambdaSymbol
+          | ArrowSymbol
+          | Semicolon
+          | Number Integer
+          | If
+          | Then
+          | Else
+          | Data
+          | Case
+          | Of
+          | Otherwise
+          | EndOfFile deriving (Read, Show, Eq)
+
+isIDChar c = isAlphaNum c || c == '_'
+
+-- Here's a list of reserved words that
+-- cannot be used in names
+reservedTokens = [(";", Semicolon),
+                  ("{", LBracket),
+                  ("}", RBracket),
+                  ("(", LParen),
+                  (")", RParen),
+                  ("::", ClassDot),
+                  (".", QualifierDot),
+                  ("=", Equals),
+                  ("|", CaseSeparator),
+                  ("\\", LambdaSymbol),
+                  ("->", ArrowSymbol),
+                  ("if", If),
+                  ("then", Then),
+                  ("else", Else),
+                  ("data", Data),
+                  ("case", Case),
+                  ("of", Of),
+                  ("otherwise", Otherwise)]
+
+data KToken = KToken {
+  token :: Token,
+  location :: Location
+}
+
+instance Show KToken where
+  show (KToken token location) =  show token
+
+data Location = Loc {
+  filename :: String,
+  line :: Integer,
+  col :: Integer
+}
+
+moveRight steps loc = loc {col = col loc + toInteger steps}
+-- when newlining, we return to the start of the line
+moveDown steps loc = loc {col=1, line=line loc + toInteger steps}
+
+-- utility function, drop but return count as well
+dropCount f l = let (dropped, kept) = span f l in (length dropped, kept)
+
+
+data ReaderData = ReaderData String Location
+data InputReader a = Reader { runReader :: ReaderData -> (a, ReaderData) }
+
+
+instance Functor InputReader where
+  fmap f reader = Reader $ \rData ->
+    let (result,state) = runReader reader rData in
+      (f result, state)
+
+instance Applicative InputReader where
+  pure a = Reader $ \rData -> (a, rData)
+  rF <*> rA = Reader $ \rData ->
+    let (f, newState) = runReader rF rData
+        (a, newState') = runReader rA newState in (f a, newState')
+
+instance Monad InputReader where
+  (>>=) (Reader firstOp) nextOpDecider = Reader $ \rData ->
+     -- run through the reader, and use it to find the next state
+     let (result, newState) = firstOp rData
+         nextOp = nextOpDecider result in
+          runReader nextOp newState
+
+-- just get one character but don't edit the data
+peek = Reader $ \rData@(ReaderData input loc) -> (listToMaybe input, rData)
+
+-- take one character and move the cursor location
+takeOne :: InputReader Char
+takeOne = Reader $ \(ReaderData (i:is) loc) ->
+  if i == '\n' then
+    let newLoc = moveDown 1 loc in (i, ReaderData is newLoc)
+  else
+    let newLoc = moveRight 1 loc in (i, ReaderData is newLoc)
+
+-- just get the current location
+curLoc :: InputReader Location
+curLoc = Reader $ \rData@(ReaderData _ loc) -> (loc, rData)
+-- just get the current input
+curInput :: InputReader String
+curInput = Reader $ \rData@(ReaderData input pos) -> (input, rData)
+
+-- full token helper: take the location and pair it with an AST token
+aToken :: Token -> Location -> InputReader KToken
+aToken token loc = return $ KToken token loc
+
+-- take N tokens
+takeN = flip replicateM takeOne
+
+-- takeWhile for our reader... take values that match our preditcate
+takeWhileR :: (Char -> Bool) -> InputReader String
+takeWhileR predicate = do
+  mTop <- peek
+  case mTop of
+    Just top ->
+      if predicate top then do
+        takeOne -- take the top character off
+        rest <- takeWhileR predicate
+        return $ top:rest
+      else
+        return []
+    Nothing -> return []
+
+parseFile :: String -> String -> [KToken]
+parseFile input fname =
+  let initialLocation = Loc fname 1 1
+      rData = ReaderData input initialLocation
+      -- run the reader itself
+      (tokens, endState) = runReader parseKTokens rData in
+        tokens
+
+parseKTokens :: InputReader [KToken]
+parseKTokens = do
+  token <- parseKTokenM
+  case token of
+    KToken EndOfFile loc -> return [token]
+    _ -> do
+      tokens <- parseKTokens
+      return (token:tokens)
+
+parseKTokenM :: InputReader KToken
+parseKTokenM = do
+  maybeFirstChar <- peek
+  loc <- curLoc
+  case maybeFirstChar of
+    Nothing -> aToken EndOfFile loc
+    Just _ -> parseReserved
+
+parseReserved :: InputReader KToken
+parseReserved = do
+  input <- curInput
+  -- check for each reserved token whether the token representation
+  -- is a prefix of the input
+  case find (flip isPrefixOf input . fst) reservedTokens of
+    Just (tokenRepr, astToken) -> do
+      tokenLoc <- curLoc
+      takeN (length tokenRepr) -- pop the tokens
+      aToken astToken tokenLoc
+    Nothing -> parseIDs
+
+parseIDs = do
+  (Just fstChar) <- peek -- we've previously checked for non-emptiness
+  loc <- curLoc
+  if isLower fstChar then do
+    lowerID <- takeWhileR isIDChar
+    aToken (LowerCaseID lowerID) loc
+  else if isUpper fstChar then do
+    upperID <- takeWhileR isIDChar
+    aToken (UpperCaseID upperID) loc
+  else if isDigit fstChar then do
+    digits <- takeWhileR isDigit
+    aToken (Number (read digits)) loc
+  else if isSpace fstChar then do
+    parseSpaces
+    parseKTokenM
+  else error $ " Lexer token error : token was <<" ++  (fstChar:">>")
+
+parseSpaces = takeWhileR isSpace

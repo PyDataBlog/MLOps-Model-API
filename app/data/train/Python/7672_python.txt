@@ -1,0 +1,182 @@
+from django.db import models
+
+from django.contrib.auth import models as auth
+import datetime
+
+from application import settings
+
+from django.db.models.signals import post_save
+from django.dispatch import receiver
+
+typeChoices = (
+	('task', 'Task'), 
+	('userStory', 'User Story'),
+	)	
+
+statusChoices = (
+	('toDo', 'To do'), 
+	('inProgress', 'in progress'),
+	('done', 'Done'),
+	)
+
+categoryChoices = (
+	('frontend', 'Frontend'), 
+	('backend', 'Backend'),
+	('design', 'Design'),
+	)
+
+purposeChoices = (
+	('bugfix', 'Bugfix'), 
+	('feature', 'Feature'),
+	)
+
+class WorkGroup(models.Model):
+	name = models.CharField(
+		max_length=200,
+		unique = True,
+		)
+
+	def __unicode__(self):
+		return u'%s' % (self.name)
+
+class TaskCard(models.Model):
+
+	creator = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		related_name='createdTasks',
+		on_delete=models.PROTECT,
+		)
+	processor = models.ForeignKey(
+		settings.AUTH_USER_MODEL,
+		related_name='processingTasks',
+		blank=True,
+		null=True,
+		)
+	createTime = models.DateTimeField(
+		auto_now_add=True,
+		)
+
+	startTime = models.DateField(
+		null=True,
+		blank=True,
+		)
+	#endTime = models.DateTimeField()
+
+	#sprint = models.ForeignKey(Sprint)
+
+	title = models.CharField(
+		max_length=200,
+		)
+
+	taskType = models.CharField(
+		max_length=15, 
+		choices=typeChoices,
+		default='task',
+		)
+
+	taskPurpose = models.CharField(
+		max_length=15, 
+		choices=purposeChoices,
+		blank=True,
+		null=True,
+		)
+
+	taskCategory = models.CharField(
+		max_length=15, 
+		choices=categoryChoices,
+		blank=True,
+		null=True,
+		)
+
+	description = models.TextField()
+
+	status = models.CharField(
+		max_length=15, 
+		choices=statusChoices,
+		blank=True,
+		null=True,
+		)
+
+	group = models.ForeignKey(
+		WorkGroup,
+		null=True,
+		blank=True,
+		)
+
+	def __unicode__(self):
+		return self.title	
+
+	def save(self, *args, **kwargs):
+		if self.startTime is None and self.processor is not None:
+			self.startTime = datetime.date.today()
+			self.status = 'in progress'
+		if self.status is None:
+			self.status = statusChoices[0][1]
+		if self.group is None:
+			self.group = self.creator.taskCardUser.workGroup
+
+		super(TaskCard, self).save(*args, **kwargs)
+
+	def commentsDescending(self, *args, **kwargs):
+		return self.comments.order_by('-published',)
+
+
+class TaskCardUser(models.Model):
+	user = models.OneToOneField(
+		settings.AUTH_USER_MODEL,
+		related_name='taskCardUser'
+		)
+
+	workGroup = models.ForeignKey(
+		WorkGroup,
+		related_name='taskCardUser'
+		)
+
+	def __unicode__(self):
+		return u'%s' % (self.user)
+
+#@receiver(post_save, sender=settings.AUTH_USER_MODEL)
+def connectTaskCardUser(sender, instance, created, **kwargs):
+	if created:
+		TaskCardUser.objects.create(user=instance, workGroup=WorkGroup.objects.get(id=1))
+
+post_save.connect(connectTaskCardUser, sender=settings.AUTH_USER_MODEL)
+
+
+
+class Comment(models.Model):
+
+	taskCard = models.ForeignKey(
+		TaskCard,
+		related_name = 'comments',
+		)
+
+
+	author =  models.ForeignKey(
+		settings.AUTH_USER_MODEL
+		)
+
+	published = models.DateTimeField(
+		null=True,
+		blank=True,
+		)
+
+	text = models.CharField(
+		max_length=255, 
+		)
+
+	def save(self, *args, **kwargs):
+		self.published = datetime.datetime.now()
+
+		super(Comment, self).save(*args, **kwargs)
+
+	class Meta:
+		unique_together = ('taskCard', 'published')
+		
+			
+#class Sprint(models.Model):
+
+#	startTime = models.DateTimeField()
+#	endTime = models.DateTimeField()
+
+

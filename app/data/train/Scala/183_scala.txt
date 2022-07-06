@@ -1,0 +1,320 @@
+/**
+  * codebook.runtime.io.TLSAdaptor
+  *
+  * Copyright (c) 2016-2017 Osamu Takahashi
+  * Copyright (c) 2016-2017 Rusty Raven Inc.
+  *
+  * This software is released under the MIT License.
+  * http://opensource.org/licenses/mit-license.php
+  *
+  * @author Osamu Takahashi
+  */
+package codebook.runtime.io
+
+import java.nio.ByteBuffer
+
+import javax.net.ssl.SSLEngineResult.HandshakeStatus
+import javax.net.ssl.{SSLContext, SSLEngine, SSLEngineResult, SSLHandshakeException}
+import akka.actor.{Actor, ActorLogging, ActorRef}
+import akka.dispatch.ControlMessage
+import akka.io.Tcp._
+import akka.util.ByteString
+import codebook.runtime.packet.{Packet, PacketReader}
+import codebook.runtime.protocol.SystemMessages
+import codebook.runtime.protocol.SystemMessages.InvalidPacketReceived
+
+/**
+  * Created by takahashi on 2017/02/24.
+  */
+class TLSAdaptor(before:ActorRef,sslCtx:Option[SSLContext] = None,isSSLClient:Boolean = false,useRawData:Boolean = false) extends Actor with ActorLogging {
+  private var _engine:Option[SSLEngine] = None
+  private var _sendWrapBuffer:ByteBuffer = _
+  private var _sendUnwrapBuffer:ByteBuffer = _
+  private var _recvWrapBuffer:ByteBuffer = _
+  private var _recvUnwrapBuffer:ByteBuffer = _
+  private var _established = false
+  private var _after:Option[ActorRef] = None
+
+  private val _reader:Option[PacketReader] = if (!useRawData) Some(new PacketReader) else None
+
+  context watch before
+
+  override def preStart(): Unit = {
+    log.info("Starting TLS Adaptor")
+    sslCtx.foreach {
+      ctx =>
+        _engine = Option(ctx.createSSLEngine())
+    }
+    _engine match {
+      case Some(e) =>
+        log.info("Setting up SSLClient")
+        e.setUseClientMode(isSSLClient)
+        e.beginHandshake()
+        val session = e.getSession
+        val wl = session.getPacketBufferSize
+        val uwl = session.getApplicationBufferSize
+        _sendWrapBuffer = ByteBuffer.allocate(wl)
+        _sendUnwrapBuffer = ByteBuffer.allocate(uwl)
+        _recvWrapBuffer = ByteBuffer.allocate(wl)
+        _recvUnwrapBuffer = ByteBuffer.allocate(uwl)
+        _underflowBuffer = ByteBuffer.allocate(uwl)
+        _recvWrapBuffer.clear()
+        _recvUnwrapBuffer.clear()
+        _underflowBuffer.clear()
+//        log.info(s"PacketBufferSize:$wl")
+//        log.info(s"ApplicationBufferSize:$uwl")
+
+        _doHandshaking(e,e.getHandshakeStatus)
+
+      case _ =>
+//        _after.foreach(_ ! SystemMessages.Connected)
+    }
+  }
+
+  private def _doWrap(e:SSLEngine,src:ByteBuffer):Unit = {
+//    log.info(s"_doWrap:[${if (isSSLClient) "client" else "server"}]")
+    var loop = false
+    var stat = HandshakeStatus.NEED_WRAP
+
+//    src.flip()
+//    _sendUnwrapBuffer.put(src)
+//    _sendUnwrapBuffer.flip()
+
+    do {
+      loop = false
+      try {
+//        log.info(s"wrap buffer:${_sendWrapBuffer}")
+        val r = e.wrap(src, _sendWrapBuffer)
+//        log.info(s"wrap status:$r")
+        stat = r.getHandshakeStatus
+
+        if (r.bytesProduced() > 0) {
+//          log.info(s"sends ${r.bytesProduced()}")
+          _sendWrapBuffer.flip()
+          before ! Write(ByteString(_sendWrapBuffer)) // This will cause array copy, so safe
+//          log.info(s"send:${_sendWrapBuffer}")
+          _sendWrapBuffer.clear()
+        }
+
+        r.getStatus match {
+          case SSLEngineResult.Status.OK =>
+
+          case SSLEngineResult.Status.BUFFER_OVERFLOW =>
+            val appSize = e.getSession.getApplicationBufferSize
+            val b = ByteBuffer.allocate(appSize + _sendWrapBuffer.position())
+            _sendWrapBuffer.flip()
+            b.put(_sendWrapBuffer)
+            _sendWrapBuffer = b
+            loop = true
+
+          case SSLEngineResult.Status.BUFFER_UNDERFLOW =>
+          // need more data
+
+          case SSLEngineResult.Status.CLOSED =>
+
+
+        }
+      } catch {
+        case ex:SSLHandshakeException =>
+          log.error(s"${ex.getMessage}")
+          loop = false
+      }
+    } while(loop)
+    _doHandshaking(e,stat)
+  }
+
+  private var _underflowBuffer:ByteBuffer = _
+  private var _recvUnderflow = false
+
+  /**
+    * @note dont flip src, because src will be converted from ByteString using asByteBuffer.
+    *       It wraps source ByteString and creates read-only ByteBuffer.
+    * @param e SSLEngine
+    * @param src a source bytes
+    */
+  private def _doUnwrap(e:SSLEngine,src:ByteBuffer):Unit = {
+//    log.info(s"_doUnwrap:[${if (isSSLClient) "client" else "server"}]${src.limit()}")
+    var loop = false
+    var stat = HandshakeStatus.NEED_UNWRAP
+    var unwrapStat = SSLEngineResult.Status.OK
+
+//    log.info(s"ubuff:${_underflowBuffer.position()}")
+
+    _recvWrapBuffer.clear()
+    if (_recvUnderflow) {
+      _recvWrapBuffer.put(_underflowBuffer)
+      _recvUnderflow = false
+    }
+    _recvWrapBuffer.put(src)
+    _recvWrapBuffer.flip()
+
+//    log.info(s"recv buff:${_recvWrapBuffer.limit()}")
+
+    do {
+      do {
+        loop = false
+        //_recvUnwrapBuffer.clear()
+        try {
+          val r = e.unwrap(_recvWrapBuffer, _recvUnwrapBuffer)
+//          log.info(s"unwrap status:$r")
+//          log.info(s"unwrap buffer:${_recvUnwrapBuffer}")
+
+          if (r.bytesProduced() > 0) {
+//          log.info(s"unwrapping ${r.bytesConsumed()} bytes")
+            _recvUnwrapBuffer.flip()
+            // This will cause array copy, so safe
+            _reader match {
+              case Some(reader) =>
+                try {
+                  reader.pickup(ByteString(_recvUnwrapBuffer)).foreach(pkts => _after.foreach(aft => pkts.foreach(aft ! _)))
+                } catch {
+                  case e: RuntimeException =>
+                    _after.foreach(_ ! InvalidPacketReceived)
+                    log.error(s"Invalid Packet Received:${e.getMessage}")
+                }
+              case None =>
+                _after.foreach(_ ! ByteString(_recvUnwrapBuffer))
+            }
+            _recvUnwrapBuffer.clear()
+          }
+
+          stat = r.getHandshakeStatus
+          unwrapStat = r.getStatus
+
+          unwrapStat match {
+            case SSLEngineResult.Status.OK =>
+//              log.info("OK")
+
+            case SSLEngineResult.Status.BUFFER_OVERFLOW =>
+//              log.info("BUFFER_OVERFLOW")
+              val appSize = e.getSession.getApplicationBufferSize
+              val b = ByteBuffer.allocate(appSize + _recvUnwrapBuffer.position())
+              _recvUnwrapBuffer.flip()
+              b.put(_recvUnwrapBuffer)
+              _recvUnwrapBuffer = b
+              loop = true
+
+            case SSLEngineResult.Status.BUFFER_UNDERFLOW =>
+//              log.info("BUFFER_UNDERFLOW")
+
+              _underflowBuffer.clear()
+              _underflowBuffer.put(_recvWrapBuffer)
+              _underflowBuffer.flip()
+              _recvUnderflow = true
+
+//              log.info(s"wrap renew:${_recvWrapBuffer.position()}")
+//              log.info(s"wrap renew:${_recvWrapBuffer.limit()}")
+//              log.info(s"src pos:${src.position()}")
+//              log.info(s"src lim:${src.limit()}")
+//              log.info(s"ubuff renew:${_underflowBuffer.position()}")
+//              log.info(s"ubuff renew:${_underflowBuffer.limit()}")
+//              log.info("----------------")
+
+            case SSLEngineResult.Status.CLOSED =>
+
+
+          }
+        } catch {
+          case e : javax.net.ssl.SSLException =>
+            log.warning(e.getMessage)
+            _after.foreach(_ ! SystemMessages.InvaludTLSSession)
+        }
+      } while (loop)
+      _doHandshaking(e, stat)
+
+    } while (unwrapStat == SSLEngineResult.Status.OK && _recvWrapBuffer.position() < _recvWrapBuffer.limit())
+  }
+  
+  private def _runDelegateTask(e:SSLEngine):Unit =
+    Option(e.getDelegatedTask).foreach(_.run())
+
+  private def _doHandshaking(e:SSLEngine,res:HandshakeStatus):Unit = {
+    var loop = true
+    var r = res
+    while(loop) {
+//      log.info(s"HandshakeStatus:[${if (isSSLClient) "client" else "server"}] $r")
+      r match {
+        case HandshakeStatus.NEED_WRAP =>
+          _doWrap(e,_sendUnwrapBuffer)
+
+        case HandshakeStatus.NEED_UNWRAP =>
+          // Nothing to do
+          loop = false
+
+        case HandshakeStatus.NEED_TASK =>
+          _runDelegateTask(e)
+
+        case HandshakeStatus.FINISHED =>
+          log.info(s"[${if (isSSLClient) "client" else "server"}]TLS handshaking done")
+          _established = true
+          _after.foreach(_ ! SystemMessages.Connected)
+
+        case _ =>
+          loop = false
+      }
+      r = e.getHandshakeStatus
+    }
+  }
+
+
+  def receive = {
+    case Received(bytes) =>
+//      log.info(s"recv ${bytes.length}")
+      _engine match {
+        case Some(e) =>
+          val src = bytes.asByteBuffer
+          _doUnwrap(e,src)
+        case None =>
+          _reader match {
+            case Some(reader) =>
+              try {
+                reader.pickup(bytes).foreach(pkts=>_after.foreach(aft => pkts.foreach(aft ! _)))
+              } catch {
+                case e : RuntimeException =>
+                  _after.foreach(_ ! InvalidPacketReceived)
+                  log.error(s"Invalid Packet Received:${e.getMessage}")
+              }
+            case None =>
+              _after.foreach(_ ! bytes)
+          }
+      }
+
+    case w @ Write(bytes,ack) =>
+      _engine match {
+        case Some(e) =>
+          _doWrap(e,bytes.asByteBuffer)
+        case None =>
+          before ! w
+      }
+
+//    case c @ SystemMessages.Closed =>
+//      log.info("TLSAdapter will stop")
+//      _after.foreach(_ ! c)
+//      context.stop(self)
+
+    case Register(after,_,_) =>
+      _after = Some(after)
+      sslCtx.getOrElse(after ! SystemMessages.Connected)
+
+    case _ : ConnectionClosed =>
+      log.info("ServerPort is going to shut down")
+      _after.foreach(_ ! SystemMessages.Closed)
+      context.stop(self)
+
+    case ErrorClosed(str) =>
+      log.info(s"Serverport:$str")
+      self ! Closed
+
+    case msg:ControlMessage =>
+      if (sender == before) {
+        _after.foreach(_ ! msg)
+      } else {
+        before ! msg
+      }
+    case cmd : Command =>
+      before ! cmd
+
+    case pkt : Packet =>
+      self ! Write(pkt.bytes)
+  }
+}

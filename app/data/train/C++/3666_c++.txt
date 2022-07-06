@@ -1,0 +1,1706 @@
+/**
+ * libz80
+ * Copyright (C) 2015 David Jolly
+ * ----------------------
+ *
+ * libz80 is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * libz80 is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <fstream>
+#include "../include/z80.h"
+#include "../include/z80_assembler_type.h"
+
+namespace Z80_NS {
+
+	namespace Z80_LANG_NS {
+
+		#define CODE_COUNT 1
+		#define CODE_EXTENDED 2
+		#define CODE_OFFSET 0
+		#define COND_EXPRESSION_COUNT 3
+		#define COND_EXPRESSION_OPERAND_LEFT 0
+		#define COND_EXPRESSION_OPERAND_RIGHT 2
+		#define COND_EXPRESSION_OPERATOR 1
+		#define DEFS_EXPRESSION_COUNT 2
+		#define DEFS_EXPRESSION_OFFSET 1
+		#define DEFS_EXPRESSION_VALUE_OFFSET 0
+		#define EXPRESSION_COUNT_MIN 1
+		#define EXPRESSION_LEFT_OFF 0
+		#define EXPRESSION_RIGHT_OFF 1
+		#define IF_CONDITIONAL_COUNT_MAX 3
+		#define IF_CONDITIONAL_COUNT_MIN 2
+		#define IF_CONDITIONAL_ID_OFF 0
+		#define IF_CONDITIONAL_STMT_MAIN_OFF 1
+		#define IF_CONDITIONAL_STMT_AUX_OFF 2
+		#define MACRO_CHILD_OFF 0
+		#define MACRO_COUNT 1
+		#define OPERATOR_CHILD_OFF 0
+		#define OPERATOR_COUNT 1
+		#define UNARY_OPERATOR_CHILD_OFF 0
+		#define UNARY_OPERATOR_COUNT 1
+
+		#define THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT(_EXCEPT_, _TOK_, _VERB_) \
+			THROW_Z80_ASSEMBLER_EXCEPTION_MESSAGE(_EXCEPT_, \
+				"%s\n%lu:%s", CHECK_STR(z80_token::as_string(_TOK_)), \
+				(TOKEN_CONTEXT_ROW((_TOK_).context()) + 1), \
+				CHECK_STR(z80_token::token_exception_as_string((_TOK_).context(), _VERB_)))
+		#define THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(_EXCEPT_, _TOK_, _VERB_, _FORMAT_, ...) \
+			THROW_Z80_ASSEMBLER_EXCEPTION_MESSAGE(_EXCEPT_, _FORMAT_ "\n%lu:%s", __VA_ARGS__, \
+				(TOKEN_CONTEXT_ROW((_TOK_).context()) + 1), \
+				CHECK_STR(z80_token::token_exception_as_string((_TOK_).context(), _VERB_)))
+
+		bool 
+		operator==(
+			__in const z80_bin_t &left,
+			__in const z80_bin_t &right
+			)
+		{
+			bool result;
+			size_t iter = 0;
+
+			TRACE_ENTRY();
+
+			result = (&left == &right);
+			if(!result) {
+
+				result = (left.size() == right.size());
+				if(result) {
+
+					for(; iter < left.size(); ++iter) {
+
+						if(left.at(iter) != right.at(iter)) {
+							result = false;
+							break;
+						}
+					}
+				}
+			}
+
+			TRACE_EXIT("Return Value: 0x%x", result);
+			return result;
+		}
+
+		bool 
+		operator!=(
+			__in const z80_bin_t &left,
+			__in const z80_bin_t &right
+			)
+		{
+			bool result;
+
+			TRACE_ENTRY();
+
+			result = !(left == right);
+
+			TRACE_EXIT("Return Value: 0x%x", result);
+			return result;
+		}
+
+		bool 
+		operator==(
+			__in const z80_lst_t &left,
+			__in const z80_lst_t &right
+			)
+		{
+			bool result;
+			z80_lst_t::const_iterator iter, right_iter;
+
+			TRACE_ENTRY();
+
+			result = (&left == &right);
+			if(!result) {
+
+				result = (left.size() == right.size());
+				if(result) {
+
+					for(iter = left.begin(); iter != left.end(); ++iter) {
+
+						right_iter = right.find(iter->first);
+						if((right_iter == right.end())
+								|| (right_iter->second != iter->second)) {
+							result = false;
+							break;
+						}
+					}
+				}
+			}
+
+			TRACE_EXIT("Return Value: 0x%x", result);
+			return result;
+		}
+
+		bool 
+		operator!=(
+			__in const z80_lst_t &left,
+			__in const z80_lst_t &right
+			)
+		{
+			bool result;
+
+			TRACE_ENTRY();
+
+			result = !(left == right);
+
+			TRACE_EXIT("Return Value: 0x%x", result);
+			return result;
+		}
+
+		_z80_assembler::_z80_assembler(
+			__in_opt const std::string &input,
+			__in_opt bool is_file
+			)
+		{
+			TRACE_ENTRY();
+
+			z80_assembler::set(input, is_file);
+
+			TRACE_EXIT("Return Value: 0x%x", 0);
+		}
+
+		_z80_assembler::_z80_assembler(
+			__in const _z80_assembler &other
+			) :
+				z80_parser(other),
+				m_binary(other.m_binary),
+				m_identifier_map(other.m_identifier_map),
+				m_label_map(other.m_label_map)
+		{
+			TRACE_ENTRY();
+			TRACE_EXIT("Return Value: 0x%x", 0);
+		}
+
+		_z80_assembler::~_z80_assembler(void)
+		{
+			TRACE_ENTRY();
+			TRACE_EXIT("Return Value: 0x%x", 0);
+		}
+
+		_z80_assembler &
+		_z80_assembler::operator=(
+			__in const _z80_assembler &other
+			)
+		{
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			z80_parser::operator=(other);
+			m_binary = other.m_binary;
+			m_identifier_map = other.m_identifier_map;
+			m_label_map = other.m_label_map;
+
+			TRACE_EXIT("Return Value: 0x%p", this);
+			return *this;
+		}
+
+		z80_bin_t 
+		_z80_assembler::binary(void)
+		{
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+			TRACE_EXIT("Return Value: size: %lu", m_binary.size());
+			return m_binary;
+		}
+
+		std::string 
+		_z80_assembler::binary_as_string(
+			__in const z80_bin_t &binary,
+			__in_opt bool verbose
+			)
+		{
+			size_t iter = 0;
+			std::stringstream result;
+
+			TRACE_ENTRY();
+
+			if(verbose) {
+				result << "Binary size: " << std::setprecision(3) 
+						<< (binary.size() / BYTES_PER_KBYTE) 
+						<< " KB (" << binary.size() << " bytes)" 
+						<< std::endl;
+			}
+
+			for(; iter < binary.size(); ++iter) {
+
+				if(!(iter % BLOCK_LEN)) {
+
+					if(iter) {
+						result << std::endl;
+					}
+
+					result << VALUE_AS_HEX(uint16_t, iter) << " |";
+				}
+
+				result << " " << VALUE_AS_HEX(uint8_t, binary.at(iter));
+			}
+
+			TRACE_EXIT("Return Value: %s", CHECK_STR(result.str()));
+			return result.str();
+		}
+
+		void 
+		_z80_assembler::clear(void)
+		{
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			z80_parser::reset();
+			m_binary.clear();
+			m_identifier_map.clear();
+			m_label_map.clear();
+
+			TRACE_EXIT("Return Value: 0x%x", 0);
+		}
+
+		size_t 
+		_z80_assembler::discover(void)
+		{
+			size_t result;
+			z80_node_factory_ptr node_fact = NULL;
+			z80_token_factory_ptr tok_fact = NULL;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			node_fact = z80_node_factory::acquire();
+			tok_fact = z80_token_factory::acquire();
+			z80_assembler::clear();
+			run_preprocessor(tok_fact, node_fact);
+			run_assembler(tok_fact, node_fact);
+			result = m_binary.size();
+
+			TRACE_EXIT("Return Value: size: %lu", result);
+			return result;
+		}
+
+		void 
+		_z80_assembler::evaluate_command(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition
+			)
+		{
+			uint16_t val;			
+			uint32_t code;
+			z80_token tok;
+			size_t iter, off;
+			z80_command_info_comp_t info;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_CODE) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EXPECTING_COMMAND,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			if(!tok.length()) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			code = tok.code();
+
+			if(!determine_command_simple(tok.subtype())) {
+
+				z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+				if(node.children().size() == CODE_COUNT) {
+					val = evaluate_expression(statement, node.children().at(CODE_OFFSET), origin, 
+							token_factory, node_factory);
+
+					info = determine_command_information(tok.subtype(), tok.mode());
+
+					if(determine_command_relative(tok.subtype())) {
+
+						if(val > origin) {
+							val = (val - origin - tok.length()) % UINT8_MAX;
+						} else {
+							val = UINT8_MAX - ((origin - val) % UINT8_MAX) 
+									- (info.first.second - info.second.size());
+						}
+					}
+
+					off = info.second.front();
+
+					if(info.second.size() == CODE_EXTENDED) {
+						((uint8_t *) &code)[off] = (val & UINT8_MAX);
+						((uint8_t *) &code)[++off] = ((val >> BITS_PER_BYTE) & UINT8_MAX);
+					} else {
+						((uint8_t *) &code)[off] = (val & UINT8_MAX);
+					}
+				}
+			}
+
+			for(iter = 0; iter < tok.length(); ++iter) {
+				m_binary.push_back((code >> (iter * BITS_PER_BYTE)) & UINT8_MAX);
+			}
+
+			origin += tok.length();
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit);
+		}
+
+		void 
+		_z80_assembler::evaluate_directive(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__in const std::string &base_path,
+			__inout bool &exit_condition
+			)
+		{
+			uint8_t val;
+			z80_token tok;
+			std::string text;
+			size_t len, count = 0;
+			z80_lst_t::iterator iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_DIRECTIVE) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EXPECTING_DIRECTIVE,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			switch(tok.subtype()) {
+				case DIRECTIVE_DEFINE:
+					tok = z80_parser::acquire_token(statement, ++offset, 
+							token_factory, node_factory);
+
+					if(tok.type() != TOKEN_IDENTIFIER) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_EXPECTING_IDENTIFIER,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					text = tok.text();
+
+					iter = m_identifier_map.find(text);
+					if(iter != m_identifier_map.end()) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_DUPLICATE_DEFINITION,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					m_identifier_map.insert(std::pair<std::string, uint16_t>(text, 
+							evaluate_expression(statement, ++offset, origin,
+							token_factory, node_factory)));
+					break;
+				case DIRECTIVE_DEFINE_BYTE:
+				case DIRECTIVE_DEFINE_WORD:
+					evaluate_expression_list(statement, ++offset, origin, token_factory,
+							node_factory, exit_condition, tok.subtype() == DIRECTIVE_DEFINE_WORD);
+					break;
+				case DIRECTIVE_DEFINE_SPACE: {
+
+						z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+						if(node.children().size() != DEFS_EXPRESSION_COUNT) {
+							THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+						}
+
+						val = evaluate_expression(statement, node.children().at(DEFS_EXPRESSION_VALUE_OFFSET), 
+								origin, token_factory, node_factory);
+						len = evaluate_expression(statement, node.children().at(DEFS_EXPRESSION_OFFSET), 
+								origin, token_factory, node_factory);
+
+						for(; count < len; ++count) {
+							m_binary.push_back(val);
+						}
+
+						origin += len;
+					} break;
+				case DIRECTIVE_END_SEGMENT:
+					exit_condition = true;
+					break;
+				case DIRECTIVE_IF_CONDITIONAL: {
+
+						z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+						if((node.children().size() < IF_CONDITIONAL_COUNT_MIN)
+								|| (node.children().size() > IF_CONDITIONAL_COUNT_MAX)) {
+							THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+						}
+
+						if(evaluate_expression_conditional(statement, 
+								node.children().at(IF_CONDITIONAL_ID_OFF), 
+								origin, token_factory, node_factory)) {
+							evaluate_statement_list(statement, 
+									node.children().at(IF_CONDITIONAL_STMT_MAIN_OFF), 
+									origin, token_factory, node_factory, 
+									exit_condition);
+						} else if(node.children().size() == IF_CONDITIONAL_COUNT_MAX) {
+							evaluate_statement_list(statement, 
+									node.children().at(IF_CONDITIONAL_STMT_AUX_OFF), 
+									origin, token_factory, node_factory, 
+									exit_condition);
+						}
+					} break;
+				case DIRECTIVE_IF_DEFINED: {
+
+						z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+						if((node.children().size() < IF_CONDITIONAL_COUNT_MIN)
+								|| (node.children().size() > IF_CONDITIONAL_COUNT_MAX)) {
+							THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+						}
+
+						tok = z80_parser::acquire_token(statement, node.children().at(IF_CONDITIONAL_ID_OFF), 
+								token_factory, node_factory);
+
+						if(tok.type() != TOKEN_IDENTIFIER) {
+							THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+								Z80_ASSEMBLER_EXCEPTION_EXPECTING_IDENTIFIER,
+								tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+
+						if(m_identifier_map.find(tok.text()) != m_identifier_map.end()) {
+							evaluate_statement_list(statement, 
+									node.children().at(IF_CONDITIONAL_STMT_MAIN_OFF), 
+									origin, token_factory, node_factory,
+									exit_condition);
+						} else if(node.children().size() == IF_CONDITIONAL_COUNT_MAX) {
+							evaluate_statement_list(statement, 
+									node.children().at(IF_CONDITIONAL_STMT_AUX_OFF), 
+									origin, token_factory, node_factory, 
+									exit_condition);
+						}
+					} break;
+				case DIRECTIVE_INCLUDE:
+					break;
+				case DIRECTIVE_INCLUDE_BINARY: {
+						tok = z80_parser::acquire_token(statement, ++offset, 
+								token_factory, node_factory);
+
+						if(tok.type() != TOKEN_LITERAL_STRING) {
+							THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+								Z80_ASSEMBLER_EXCEPTION_EXPECTING_LITERAL_STRING,
+								tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+
+						std::ifstream file(z80_lexer_base::base_path() + tok.text(), 
+								std::ios::in | std::ios::binary);
+
+						if(!file) {
+							THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+								Z80_ASSEMBLER_EXCEPTION_FILE_NOT_FOUND,
+								tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+
+						file.seekg(0, std::ios::end);
+						len = file.tellg();
+						file.seekg(0, std::ios::beg);
+
+						for(; count < len; ++count) {
+
+							if(file.eof()) {
+								break;
+							}
+
+							m_binary.push_back(file.get());
+						}
+
+						file.close();
+						origin += len;
+					} break;
+				case DIRECTIVE_ORIGIN:
+					tok = z80_parser::acquire_token(statement, ++offset, 
+							token_factory, node_factory);
+
+					if(tok.type() != TOKEN_IMMEDIATE) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_EXPECTING_IMMEDIATE,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					origin = tok.value();
+					break;
+				case DIRECTIVE_UNDEFINE:
+					tok = z80_parser::acquire_token(statement, ++offset, 
+							token_factory, node_factory);
+
+					if(tok.type() != TOKEN_IDENTIFIER) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_EXPECTING_IDENTIFIER,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					iter = m_identifier_map.find(tok.text());
+					if(iter == m_identifier_map.end()) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_UNDEFINED_DEFINITION,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					m_identifier_map.erase(iter);
+					break;
+				default:
+					THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+						Z80_ASSEMBLER_EXCEPTION_INVALID_DIRECTIVE,
+						tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit);
+		}
+
+		uint16_t 
+		_z80_assembler::evaluate_expression(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory
+			)
+		{
+			z80_token tok;
+			uint16_t result = 0;
+			size_t expr_off = offset;
+			bool expr_header = false;
+			z80_node_child_lst_t::iterator child_iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+
+			if(tok.type() == TOKEN_EXPRESSION) {
+				expr_header = true;
+
+				if(node.children().size() < EXPRESSION_COUNT_MIN) {
+					THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+				}
+
+				expr_off = node.children().at(EXPRESSION_LEFT_OFF);
+				tok = z80_parser::acquire_token(statement, expr_off, token_factory, 
+						node_factory);
+			}
+
+			switch(tok.type()) {
+				case TOKEN_EXPRESSION:
+					result = evaluate_expression(statement, expr_off, origin, token_factory,
+								node_factory);
+					break;
+				case TOKEN_MACRO: {
+
+						z80_node node = z80_parser::acquire_node(statement, expr_off, node_factory);
+						if(node.children().size() != MACRO_COUNT) {
+							THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+						}
+
+						result = evaluate_expression(statement, node.children().at(MACRO_CHILD_OFF),
+								origin, token_factory, node_factory);
+
+						switch(tok.subtype()) {
+							case MACRO_HIGH:
+								result = (result >> BITS_PER_BYTE) & UINT8_MAX;
+								break;
+							case MACRO_LOW:
+								result = result & UINT8_MAX;
+								break;
+							case MACRO_WORD:
+								break;
+							default:
+								THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+									Z80_ASSEMBLER_EXCEPTION_INVALID_MACRO,
+									tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+					} break;
+				case TOKEN_SYMBOL: {
+
+						z80_node node = z80_parser::acquire_node(statement, expr_off, node_factory);
+						if(node.children().size() != UNARY_OPERATOR_COUNT) {
+							THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+						}
+
+						result = evaluate_expression(statement, node.children().at(UNARY_OPERATOR_CHILD_OFF),
+								origin, token_factory, node_factory);
+
+						switch(tok.subtype()) {
+							case SYMBOL_ARITHMETIC_SUBTRACTION:
+								result *= -1;
+								break;
+							case SYMBOL_UNARY_NOT:
+								result = !result;
+								break;
+							default:
+								THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+									Z80_ASSEMBLER_EXCEPTION_INVALID_UNARY_OPERATOR,
+									tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+					} break;
+				default:
+					result = evaluate_expression_terminal(statement, expr_off, origin, token_factory, 
+								node_factory);
+					break;
+			}
+
+			if(expr_header && 
+					(node.children().size() > EXPRESSION_COUNT_MIN)) {
+
+				for(child_iter = node.children().begin() + EXPRESSION_RIGHT_OFF; 
+						child_iter != node.children().end(); ++child_iter) {
+					result = evaluate_expression_operator(statement, *child_iter, origin, 
+							token_factory, node_factory, result);
+				}
+			}
+
+			TRACE_EXIT("Return Value: 0x%04x (off: %lu, org: 0x%04x)", result, offset, origin);
+			return result;
+		}
+
+		bool 
+		_z80_assembler::evaluate_expression_conditional(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory
+			)
+		{
+			z80_token tok;
+			bool result = false;
+			uint16_t left, right;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_EXPRESSION_CONDITIONAL) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+					Z80_ASSEMBLER_EXCEPTION_EXPECTING_EXPRESSION_CONDITIONAL,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+			if(node.children().size() != COND_EXPRESSION_COUNT) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			left = evaluate_expression(statement, node.children().at(COND_EXPRESSION_OPERAND_LEFT), 
+					origin, token_factory, node_factory);
+			right = evaluate_expression(statement, node.children().at(COND_EXPRESSION_OPERAND_RIGHT), 
+					origin, token_factory, node_factory);
+			tok = z80_parser::acquire_token(statement, node.children().at(COND_EXPRESSION_OPERATOR), 
+					token_factory, node_factory);
+
+			if(tok.type() != TOKEN_SYMBOL) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+					Z80_ASSEMBLER_EXCEPTION_EXPECTING_OPERATOR,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			switch(tok.subtype()) {
+				case SYMBOL_EQUALS:
+					result = (left == right);
+					break;
+				case SYMBOL_GREATER_THAN:
+					result = (left > right);
+					break;
+				case SYMBOL_GREATER_THAN_EQUALS:
+					result = (left >= right);
+					break;
+				case SYMBOL_LESS_THAN:
+					result = (left < right);
+					break; 
+				case SYMBOL_LESS_THAN_EQUALS:
+					result = (left <= right);
+					break;
+				case SYMBOL_NOT_EQUALS:
+					result = (left != right);
+					break;
+				default:
+					THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+						Z80_ASSEMBLER_EXCEPTION_INVALID_OPERATOR,
+						tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			TRACE_EXIT("Return Value: 0x%x (off: %lu, org: 0x%04x)", result, offset, origin);
+			return result;
+		}
+
+		void 
+		_z80_assembler::evaluate_expression_list(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition,
+			__in_opt bool wide
+			)
+		{
+			uint16_t val;
+			z80_token tok;
+			std::string::iterator str_iter;
+			z80_node_child_lst_t::iterator iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_EXPRESSION_LIST) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EXPECTING_EXPRESSION_LIST,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+
+			for(iter = node.children().begin(); iter != node.children().end(); ++iter) {
+				tok = z80_parser::acquire_token(statement, *iter, token_factory,
+						node_factory);
+
+				switch(tok.type()) {
+					case TOKEN_LITERAL_STRING:
+
+						for(str_iter = tok.text().begin(); str_iter != tok.text().end(); 
+								++str_iter) {
+
+							if(wide) {
+								m_binary.push_back(0);
+								origin += sizeof(uint8_t);
+							}
+
+							m_binary.push_back(*str_iter);
+							origin += sizeof(uint8_t);
+						}
+						break;
+					default:
+						val = evaluate_expression(statement, *iter, origin,
+								token_factory, node_factory);
+
+						if(wide) {
+							m_binary.push_back((val >> BITS_PER_BYTE) & UINT8_MAX);
+							origin += sizeof(uint8_t);
+						}
+
+						m_binary.push_back(val & UINT8_MAX);
+						origin += sizeof(uint8_t);
+						break;
+				}
+			}
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		uint16_t 
+		_z80_assembler::evaluate_expression_operator(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__in uint16_t current
+			)
+		{
+			z80_token tok;
+			uint16_t result = 0, right_result;
+			z80_node_child_lst_t::iterator child_iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_SYMBOL) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+					Z80_ASSEMBLER_EXCEPTION_EXPECTING_OPERATOR,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+			if(node.children().size() < OPERATOR_COUNT) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			right_result = evaluate_expression(statement, node.children().at(OPERATOR_CHILD_OFF), 
+						origin, token_factory, node_factory);
+
+			if(node.children().size() > OPERATOR_COUNT) {
+
+				for(child_iter = node.children().begin() + OPERATOR_COUNT; 
+						child_iter != node.children().end();
+						++child_iter) {
+					result += evaluate_expression_operator(statement, *child_iter,
+									origin, token_factory, node_factory, 
+									right_result);
+				}
+			} else {
+
+				switch(tok.subtype()) {
+					case SYMBOL_ARITHMETIC_ADDITION:
+						result = current + right_result;
+						break;
+					case SYMBOL_ARITHMETIC_DIVISION:
+						result = current / right_result;
+						break;
+					case SYMBOL_ARITHMETIC_MODULUS:
+						result = current % right_result;
+						break;
+					case SYMBOL_ARITHMETIC_MULTIPLICATION:
+						result = current * right_result;
+						break;
+					case SYMBOL_ARITHMETIC_SUBTRACTION:
+						result = current - right_result;
+						break;
+					case SYMBOL_BINARY_AND:
+						result = current & right_result;
+						break;
+					case SYMBOL_BINARY_OR:
+						result = current | right_result;
+						break;
+					case SYMBOL_BINARY_XOR:
+						result = current ^ right_result;
+						break;
+					case SYMBOL_SHIFT_LEFT:
+						result = current << right_result;
+						break;
+					case SYMBOL_SHIFT_RIGHT:
+						result = current >> right_result;
+						break;
+					default:
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_INVALID_OPERATOR,
+							tok, true, "%s", CHECK_STR(tok.to_string()));	
+				}
+			}
+
+			TRACE_EXIT("Return Value: 0x%04x (off: %lu, org: 0x%04x, curr: %lu)", result, 
+					offset, origin, current);
+			return result;
+		}
+
+		uint16_t 
+		_z80_assembler::evaluate_expression_terminal(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory
+			)
+		{
+			z80_token tok;
+			uint16_t result = 0;
+			z80_lst_t::iterator iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			switch(tok.type()) {
+				case TOKEN_CONSTANT:
+					result = tok.subtype();
+					break;
+				case TOKEN_IDENTIFIER:
+
+					iter = m_identifier_map.find(tok.text());
+					if(iter == m_identifier_map.end()) {
+
+						iter = m_label_map.find(tok.text());
+						if(iter == m_label_map.end()) {
+							THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+								Z80_ASSEMBLER_EXCEPTION_UNDEFINED_DEFINITION,
+								tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+					}
+
+					result = iter->second;
+					break;
+				case TOKEN_IMMEDIATE:
+				case TOKEN_LITERAL_CHARACTER:
+					result = tok.value();
+					break;
+				default:
+					THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+						Z80_ASSEMBLER_EXCEPTION_INVALID_EXPRESSION_TERMINAL,
+						tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			TRACE_EXIT("Return Value: 0x%04x (off: %lu, org: 0x%04x)", result, offset, origin);
+			return result;
+		}
+
+		void 
+		_z80_assembler::evaluate_preprocessor_command(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition
+			)
+		{
+			z80_token tok;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_CODE) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EXPECTING_COMMAND,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			origin += tok.length();
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		void 
+		_z80_assembler::evaluate_preprocessor_directive(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__in const std::string &base_path,
+			__inout bool &exit_condition
+			)
+		{
+			z80_token tok;
+			size_t len, pos;
+			std::string text;
+			z80_lst_t::iterator iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_DIRECTIVE) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EXPECTING_DIRECTIVE,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			switch(tok.subtype()) {
+				case DIRECTIVE_DEFINE:
+					tok = z80_parser::acquire_token(statement, ++offset, 
+							token_factory, node_factory);
+
+					if(tok.type() != TOKEN_IDENTIFIER) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_EXPECTING_IDENTIFIER,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					text = tok.text();
+
+					iter = m_identifier_map.find(text);
+					if(iter != m_identifier_map.end()) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_DUPLICATE_DEFINITION,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					m_identifier_map.insert(std::pair<std::string, uint16_t>(text, 
+							evaluate_expression(statement, ++offset, origin,
+							token_factory, node_factory)));
+					break;
+				case DIRECTIVE_DEFINE_BYTE:
+				case DIRECTIVE_DEFINE_WORD:
+					evaluate_preprocessor_expression_list(statement, ++offset, origin, token_factory,
+							node_factory, exit_condition, tok.subtype() == DIRECTIVE_DEFINE_WORD);
+					break;
+				case DIRECTIVE_DEFINE_SPACE: {
+
+						z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+						if(node.children().size() != DEFS_EXPRESSION_COUNT) {
+							THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+						}
+
+						origin += evaluate_expression(statement, node.children().at(DEFS_EXPRESSION_OFFSET), 
+								origin, token_factory, node_factory);
+					} break;
+				case DIRECTIVE_END_SEGMENT:
+					exit_condition = true;
+					break;
+				case DIRECTIVE_IF_CONDITIONAL: {
+
+						z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+						if((node.children().size() < IF_CONDITIONAL_COUNT_MIN)
+								|| (node.children().size() > IF_CONDITIONAL_COUNT_MAX)) {
+							THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+						}
+
+						if(evaluate_expression_conditional(statement, 
+								node.children().at(IF_CONDITIONAL_ID_OFF), 
+								origin, token_factory, node_factory)) {
+							evaluate_preprocessor_statement_list(statement, 
+									node.children().at(IF_CONDITIONAL_STMT_MAIN_OFF), 
+									origin, token_factory, node_factory, 
+									exit_condition);
+						} else if(node.children().size() == IF_CONDITIONAL_COUNT_MAX) {
+							evaluate_preprocessor_statement_list(statement, 
+									node.children().at(IF_CONDITIONAL_STMT_AUX_OFF), 
+									origin, token_factory, node_factory, 
+									exit_condition);
+						}
+					} break;
+				case DIRECTIVE_IF_DEFINED: {
+
+						z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+						if((node.children().size() < IF_CONDITIONAL_COUNT_MIN)
+								|| (node.children().size() > IF_CONDITIONAL_COUNT_MAX)) {
+							THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+						}
+
+						tok = z80_parser::acquire_token(statement, node.children().at(IF_CONDITIONAL_ID_OFF), 
+								token_factory, node_factory);
+
+						if(tok.type() != TOKEN_IDENTIFIER) {
+							THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+								Z80_ASSEMBLER_EXCEPTION_EXPECTING_IDENTIFIER,
+								tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+
+						if(m_identifier_map.find(tok.text()) != m_identifier_map.end()) {
+							evaluate_preprocessor_statement_list(statement, 
+									node.children().at(IF_CONDITIONAL_STMT_MAIN_OFF), 
+									origin, token_factory, node_factory,
+									exit_condition);
+						} else if(node.children().size() == IF_CONDITIONAL_COUNT_MAX) {
+							evaluate_preprocessor_statement_list(statement, 
+									node.children().at(IF_CONDITIONAL_STMT_AUX_OFF), 
+									origin, token_factory, node_factory, 
+									exit_condition);
+						}
+					} break;
+				case DIRECTIVE_INCLUDE: {
+						tok = z80_parser::acquire_token(statement, ++offset, 
+								token_factory, node_factory);
+
+						if(tok.type() != TOKEN_LITERAL_STRING) {
+							THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+								Z80_ASSEMBLER_EXCEPTION_EXPECTING_LITERAL_STRING,
+								tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+
+						z80_parser par(z80_lexer_base::base_path() + tok.text(), true);
+						par.discover();
+
+						if(par.size()) {
+							pos = position();
+
+							if(par.statement() == par.statement_begin()) {
+								par.move_next_statement();
+							}
+
+							while(par.has_next_statement()) {
+								insert_statement(par.statement(), ++pos);
+								par.move_next_statement();
+							}
+						}
+					} break;
+				case DIRECTIVE_INCLUDE_BINARY: {
+						tok = z80_parser::acquire_token(statement, ++offset, 
+								token_factory, node_factory);
+
+						if(tok.type() != TOKEN_LITERAL_STRING) {
+							THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+								Z80_ASSEMBLER_EXCEPTION_EXPECTING_LITERAL_STRING,
+								tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+
+						std::ifstream file(z80_lexer_base::base_path() + tok.text(), 
+								std::ios::in | std::ios::binary);
+
+						if(!file) {
+							THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+								Z80_ASSEMBLER_EXCEPTION_FILE_NOT_FOUND,
+								tok, true, "%s", CHECK_STR(tok.to_string()));
+						}
+
+						file.seekg(0, std::ios::end);
+						len = file.tellg();
+						file.close();
+						origin += len;
+					} break;
+				case DIRECTIVE_ORIGIN:
+					tok = z80_parser::acquire_token(statement, ++offset, 
+							token_factory, node_factory);
+
+					if(tok.type() != TOKEN_IMMEDIATE) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_EXPECTING_IMMEDIATE,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					origin = tok.value();
+					break;
+				case DIRECTIVE_UNDEFINE:
+					tok = z80_parser::acquire_token(statement, ++offset, 
+							token_factory, node_factory);
+
+					if(tok.type() != TOKEN_IDENTIFIER) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_EXPECTING_IDENTIFIER,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					iter = m_identifier_map.find(tok.text());
+					if(iter == m_identifier_map.end()) {
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_UNDEFINED_DEFINITION,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+					}
+
+					m_identifier_map.erase(iter);
+					break;
+				default:
+					THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+						Z80_ASSEMBLER_EXCEPTION_INVALID_DIRECTIVE,
+						tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		void 
+		_z80_assembler::evaluate_preprocessor_expression_list(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition,
+			__in_opt bool wide
+			)
+		{
+			z80_token tok;
+			z80_node_child_lst_t::iterator iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_EXPRESSION_LIST) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EXPECTING_EXPRESSION_LIST,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+
+			for(iter = node.children().begin(); iter != node.children().end(); ++iter) {
+				tok = z80_parser::acquire_token(statement, *iter, token_factory,
+						node_factory);
+
+				switch(tok.type()) {
+					case TOKEN_LITERAL_STRING:
+						origin += (wide ? (sizeof(uint16_t) * tok.text().size()) : tok.text().size());
+						break;
+					default:
+						origin += (wide ? sizeof(uint16_t) : sizeof(uint8_t));
+						break;
+				}
+			}
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		void 
+		_z80_assembler::evaluate_preprocessor_label(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition
+			)
+		{
+			z80_token tok;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_LABEL) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EXPECTING_LABEL,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			if(m_label_map.find(tok.text()) != m_label_map.end()) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(Z80_ASSEMBLER_EXCEPTION_DUPLICATE_LABEL,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			m_label_map.insert(std::pair<std::string, uint16_t>(tok.text(), origin));
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		void 
+		_z80_assembler::evaluate_preprocessor_statement(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition
+			)
+		{
+			z80_token tok;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			if(!statement.empty()) {
+				tok = z80_parser::acquire_token(statement, offset, token_factory, 
+						node_factory);
+
+				if(tok.type() != TOKEN_STATEMENT) {
+					THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+						Z80_ASSEMBLER_EXCEPTION_MALFORMED_STATEMENT,
+						tok, true, "%s", CHECK_STR(tok.to_string()));
+				}
+
+				tok = z80_parser::acquire_token(statement, ++offset, token_factory, 
+						node_factory);
+
+				switch(tok.type()) {
+					case TOKEN_CODE:
+						evaluate_preprocessor_command(statement, offset, origin, 
+								token_factory, node_factory, 
+								exit_condition);
+						break;
+					case TOKEN_DIRECTIVE:
+						evaluate_preprocessor_directive(statement, offset, origin, 
+								token_factory, node_factory,
+								z80_lexer_base::base_path(), 
+								exit_condition);
+						break;
+					case TOKEN_LABEL:
+						evaluate_preprocessor_label(statement, offset, origin, 
+								token_factory, node_factory, 
+								exit_condition);
+						break;
+					default:
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_INVALID_STATEMENT,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+				}
+			}
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		void 
+		_z80_assembler::evaluate_preprocessor_statement_list(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition
+			)
+		{
+			z80_token tok;
+			z80_node_child_lst_t::iterator iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_STATEMENT_LIST) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+					Z80_ASSEMBLER_EXCEPTION_EXPECTING_STATEMENT_LIST,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+
+			for(iter = node.children().begin(); iter != node.children().end(); ++iter) {
+				evaluate_preprocessor_statement(statement, *iter, origin, token_factory,
+						node_factory, exit_condition);
+			}
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		void 
+		_z80_assembler::evaluate_statement(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition
+			)
+		{
+			z80_token tok;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!statement.empty()) {
+				tok = z80_parser::acquire_token(statement, offset, token_factory, 
+						node_factory);
+
+				if(tok.type() != TOKEN_STATEMENT) {
+					THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+						Z80_ASSEMBLER_EXCEPTION_MALFORMED_STATEMENT,
+						tok, true, "%s", CHECK_STR(tok.to_string()));
+				}
+
+				tok = z80_parser::acquire_token(statement, ++offset, token_factory, 
+						node_factory);
+
+				switch(tok.type()) {
+					case TOKEN_CODE:
+						evaluate_command(statement, offset, origin, token_factory, 
+								node_factory, exit_condition);
+						break;
+					case TOKEN_DIRECTIVE:
+						evaluate_directive(statement, offset, origin, token_factory, 
+								node_factory, z80_lexer_base::base_path(), 
+								exit_condition);
+						break;
+					case TOKEN_LABEL:
+						break;
+					default:
+						THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+							Z80_ASSEMBLER_EXCEPTION_INVALID_STATEMENT,
+							tok, true, "%s", CHECK_STR(tok.to_string()));
+				}
+			}
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		void 
+		_z80_assembler::evaluate_statement_list(
+			__in const z80_stmt_t &statement,
+			__inout size_t &offset,
+			__inout uint16_t &origin,
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory,
+			__inout bool &exit_condition
+			)
+		{
+			z80_token tok;
+			z80_node_child_lst_t::iterator iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			tok = z80_parser::acquire_token(statement, offset, token_factory, 
+					node_factory);
+
+			if(tok.type() != TOKEN_STATEMENT_LIST) {
+				THROW_Z80_ASSEMBLER_EXCEPTION_CONTEXT_MESSAGE(
+					Z80_ASSEMBLER_EXCEPTION_EXPECTING_STATEMENT_LIST,
+					tok, true, "%s", CHECK_STR(tok.to_string()));
+			}
+
+			z80_node node = z80_parser::acquire_node(statement, offset, node_factory);
+
+			for(iter = node.children().begin(); iter != node.children().end(); ++iter) {
+				evaluate_statement(statement, *iter, origin, token_factory,
+						node_factory, exit_condition);
+			}
+
+			TRACE_EXIT("Return Value: off: %lu, org: 0x%04x, exit: 0x%x", offset, origin, exit_condition);
+		}
+
+		z80_lst_t 
+		_z80_assembler::identifier(void)
+		{
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+			TRACE_EXIT("Return Value: 0x%x", 0);
+			return m_identifier_map;
+		}
+
+		z80_lst_t 
+		_z80_assembler::label(void)
+		{
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+			TRACE_EXIT("Return Value: 0x%x", 0);
+			return m_label_map;
+		}
+
+		std::string 
+		_z80_assembler::listing(void)
+		{
+			z80_lst_t::iterator iter;
+			std::stringstream result;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			for(iter = m_identifier_map.begin(); iter != m_identifier_map.end();
+					++iter) {
+				result << iter->first << LISTING_SYMBOL_SEPERATOR << LISTING_TYPE_IDENTIFIER
+						<< LISTING_SYMBOL_SEPERATOR << iter->second << std::endl;
+			}
+
+			for(iter = m_label_map.begin(); iter != m_label_map.end(); ++iter) {
+				result << iter->first << LISTING_SYMBOL_SEPERATOR << LISTING_TYPE_LABEL
+						<< LISTING_SYMBOL_SEPERATOR << iter->second << std::endl;
+			}
+
+			TRACE_EXIT("Return Value: %s", CHECK_STR(result.str()));
+			return result.str();
+		}
+
+		void 
+		_z80_assembler::run_assembler(
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory
+			)
+		{
+			size_t offset;
+			z80_token tok;
+			z80_stmt_t stmt;
+			bool exit_condition = false;
+			uint16_t origin = ORIGIN_INIT;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			m_binary.clear();
+			m_identifier_map.clear();
+			z80_parser::reset();
+
+			if(statement() == statement_begin()) {
+				stmt = move_next_statement();
+			} else {
+				stmt = statement();
+			}
+
+			while(has_next_statement()) {
+				offset = 0;
+
+				if(stmt.empty()) {
+					THROW_Z80_ASSEMBLER_EXCEPTION_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EMPTY_STATEMENT,
+						"pos: %lu", z80_parser::position());
+				}
+
+				evaluate_statement(stmt, offset, origin, token_factory, node_factory, 
+						exit_condition);
+
+				if(exit_condition) {
+					break;
+				}
+
+				stmt = move_next_statement();
+			}
+
+			TRACE_EXIT("Return Value: 0x%x", 0);
+		}
+
+		void 
+		_z80_assembler::run_preprocessor(
+			__in z80_token_factory_ptr token_factory,
+			__in z80_node_factory_ptr node_factory
+			)
+		{
+			size_t offset;
+			z80_token tok;
+			z80_stmt_t stmt;
+			bool exit_condition = false;
+			uint16_t origin = ORIGIN_INIT;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			if(!token_factory || !node_factory) {
+				THROW_Z80_ASSEMBLER_EXCEPTION(Z80_ASSEMBLER_EXCEPTION_INTERNAL_EXCEPTION);
+			}
+
+			z80_parser::reset();
+
+			if(statement() == statement_begin()) {
+				stmt = move_next_statement();
+			} else {
+				stmt = statement();
+			}
+
+			while(has_next_statement()) {
+				offset = 0;
+
+				if(stmt.empty()) {
+					THROW_Z80_ASSEMBLER_EXCEPTION_MESSAGE(Z80_ASSEMBLER_EXCEPTION_EMPTY_STATEMENT,
+						"pos: %lu", z80_parser::position());
+				}
+
+				evaluate_preprocessor_statement(stmt, offset, origin, token_factory,
+						node_factory, exit_condition);
+
+				if(exit_condition) {
+					break;
+				}
+
+				stmt = move_next_statement();
+			}
+
+			TRACE_EXIT("Return Value: 0x%x", 0);
+		}
+
+		void 
+		_z80_assembler::set(
+			__in const std::string &input,
+			__in_opt bool is_file
+			)
+		{
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			z80_assembler::clear();
+			z80_parser::set(input, is_file);
+
+			TRACE_EXIT("Return Value: 0x%x", 0);
+		}
+
+		size_t 
+		_z80_assembler::size(void)
+		{
+			size_t result;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			result = m_binary.size();
+
+			TRACE_EXIT("Return Value: %lu", result);
+			return result;
+		}
+
+		std::string 
+		_z80_assembler::to_string(
+			__in_opt bool verbose
+			)
+		{
+			std::stringstream result;
+			z80_lst_t::iterator iter;
+
+			TRACE_ENTRY();
+			SERIALIZE_CALL_RECUR(m_lock);
+
+			result << binary_as_string(m_binary, verbose);
+
+			if(!m_binary.empty()) {
+				result << std::endl;
+			}
+
+			result << "Identifier[" << m_identifier_map.size() << "]";
+
+			if(verbose) {
+				for(iter = m_identifier_map.begin(); iter != m_identifier_map.end();
+						++iter) {
+					result << std::endl << "--- [" << VALUE_AS_HEX(uint16_t, iter->second)
+							<< "] " << iter->first;
+				}
+			}
+
+			result << std::endl << "Label[" << m_label_map.size() << "]";
+
+			if(verbose) {
+				for(iter = m_label_map.begin(); iter != m_label_map.end();
+						++iter) {
+					result << std::endl << "--- [" << VALUE_AS_HEX(uint16_t, iter->second)
+							<< "] " << iter->first;
+				}
+			}
+
+			TRACE_EXIT("Return Value: %s", CHECK_STR(result.str()));
+			return result.str();
+		}
+	}
+}

@@ -1,0 +1,385 @@
+package server
+
+import (
+	"fmt"
+	"math/big"
+	"net/http"
+	"strconv"
+	"time"
+
+	"github.com/san-lab/banketh-quorum/banketh/bots"
+	"github.com/san-lab/banketh-quorum/banketh/cryptobank"
+	"github.com/san-lab/banketh-quorum/banketh/data"
+	"github.com/san-lab/banketh-quorum/lib/bank/banktypes"
+	"github.com/san-lab/banketh-quorum/lib/db"
+	"github.com/san-lab/banketh-quorum/lib/ethapi"
+)
+
+func HandleBackoffice(w http.ResponseWriter, req *http.Request) {
+	if !logged(w, req) {
+		reload(w, req, "/")
+		return
+	}
+	req.ParseForm()
+	whatToShowA, ok := req.Form["whattoshow"]
+	if !ok || whatToShowA[0] == "Cashins" {
+		HandleCashins(w, req)
+		return
+	} else if whatToShowA[0] == "Cashouts" {
+		HandleCashouts(w, req)
+		return
+	} else if whatToShowA[0] == "PaymentTerminations" {
+		HandlePaymentTerminations(w, req)
+		return
+	}
+	showError(w, req, "Navigation error")
+}
+
+func HandleCashins(w http.ResponseWriter, req *http.Request) {
+	cashins, err := db.ReadTable(data.DBNAME, data.DBTABLECASHINS, &data.CashinT{}, "", "Time desc")
+	if err != nil {
+		showErrorf(w, req, "Unable to read cashin transactions table [%v]", err)
+		return
+	}
+	passdata := map[string]interface{}{
+		"Cashins":  cashins,
+		"Currency": cryptobank.CURRENCY,
+	}
+	placeHeader(w, req)
+	templates.ExecuteTemplate(w, "cashins.html", passdata)
+}
+
+func HandleCashouts(w http.ResponseWriter, req *http.Request) {
+	cashouts, err := db.ReadTable(data.DBNAME, data.DBTABLECASHOUTS, &data.CashoutT{}, "", "Time desc")
+	if err != nil {
+		showErrorf(w, req, "Unable to read cashout transactions table [%v]", err)
+		return
+	}
+	passdata := map[string]interface{}{
+		"Cashouts": cashouts,
+		"Currency": cryptobank.CURRENCY,
+	}
+	placeHeader(w, req)
+	templates.ExecuteTemplate(w, "cashouts.html", passdata)
+}
+
+func HandlePaymentTerminations(w http.ResponseWriter, req *http.Request) {
+	paymentTerminations, err := db.ReadTable(data.DBNAME, data.DBTABLEPAYMENTTERMINATIONS, &data.PaymentTerminationT{}, "", "Time desc")
+	if err != nil {
+		showErrorf(w, req, "Unable to read payment terminations table [%v]", err)
+		return
+	}
+	passdata := map[string]interface{}{
+		"PaymentTerminations": paymentTerminations,
+		"Currency":            cryptobank.CURRENCY,
+	}
+	placeHeader(w, req)
+	templates.ExecuteTemplate(w, "paymentterminations.html", passdata)
+}
+
+func HandleManualAddFunds(w http.ResponseWriter, req *http.Request) {
+	if !logged(w, req) {
+		reload(w, req, "/")
+		return
+	}
+	req.ParseForm()
+
+	bankaccountA, ok := req.Form["bankaccount"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+
+	banktridA, ok := req.Form["banktrid"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+
+	amountA, ok := req.Form["amount"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+	amount, err := strconv.ParseFloat(amountA[0], 64)
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Wrong amount argument %v [%v]", amountA[0], err)
+		reload(w, req, "/backoffice")
+		return
+	}
+
+	messageA, ok := req.Form["message"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+
+	bankethaccountA, ok := req.Form["bankethaccount"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+	bankethaccount, err := strconv.ParseUint(bankethaccountA[0], 0, 64)
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Wrong banketh account %v [%v]", bankethaccountA[0], err)
+		reload(w, req, "/backoffice")
+		return
+	}
+
+	manyaccounts, err := cryptobank.Many_accounts(ethclient)
+	if int64(bankethaccount) >= manyaccounts {
+		pushAlertf(w, req, ALERT_DANGER, "Account %v does not exist in banketh", bankethaccountA[0])
+		reload(w, req, "/backoffice")
+		return
+	}
+
+	account, err := cryptobank.Read_account(ethclient, bankethaccount)
+	if err != nil {
+		showErrorf(w, req, "Error reading account %v from ethereum node [%v]", bankethaccount, err)
+		return
+	}
+
+	bankethamount, _ := big.NewFloat(0).Mul(big.NewFloat(amount), big.NewFloat(cryptobank.PRECISION)).Int(nil)
+
+	txHash, err := cryptobank.Add_funds(ethclient, int64(bankethaccount), bankethamount)
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Add_funds method call failed! [%v]", err)
+		reload(w, req, "/backoffice")
+		return
+	}
+
+	newT := data.CashinT{
+		BankTrID:                    banktridA[0],
+		Time:                        db.MyTime(time.Now()),
+		BankAccount:                 bankaccountA[0],
+		BankAmount:                  amount,
+		Message:                     messageA[0],
+		ToAddress:                   account.Owner,
+		ToAccount:                   int64(bankethaccount),
+		BankethAmount:               big.NewInt(0).Set(bankethamount),
+		AddFundsOrSubmitPaymentHash: txHash,
+		ReturnTrID:                  "",
+		ReturnMessage:               "",
+		Status:                      data.CASHIN_STATUS_MANUALLY_FINISHED,
+	}
+
+	err = db.WriteEntry(data.DBNAME, data.DBTABLECASHINS, newT)
+	if err != nil {
+		errMsg := fmt.Sprintf("Sent an addFunds call (hash %v) but could not write it to DB! [%v]", err)
+		pushAlert(w, req, ALERT_DANGER, errMsg)
+		db.RegisterEvent(data.DBNAME, data.DBTABLEEVENTS, db.EVENT_MANUAL_INTERVENTION_NEEDED,
+			errMsg+fmt.Sprintf(" - Need manual intervention, we should record the transaction in the DB; projected transaction was %v", newT))
+		reload(w, req, "/backoffice")
+		return
+	}
+}
+
+func HandleManualAddTransfer(w http.ResponseWriter, req *http.Request) {
+	if !logged(w, req) {
+		reload(w, req, "/")
+		return
+	}
+	req.ParseForm()
+
+	banktridA, ok := req.Form["banktrid"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+
+	bankaccountA, ok := req.Form["bankaccount"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+
+	amountA, ok := req.Form["amount"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+	amount, err := strconv.ParseFloat(amountA[0], 64)
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Wrong amount argument %v [%v]", amountA[0], err)
+		reload(w, req, "/backoffice")
+		return
+	}
+
+	typeA, ok := req.Form["type"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+
+	messageA, ok := req.Form["message"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+
+	newTransfer := banktypes.BankTransferT{
+		TransferID: banktridA[0],
+		Time:       db.MyTime(time.Now()),
+		Account:    bankaccountA[0],
+		Amount:     amount,
+		Type:       typeA[0],
+		Message:    messageA[0],
+	}
+	d, err := db.ConnectDB(data.DBNAME)
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Error connecting to the database [%v]", err)
+		reload(w, req, "/backoffice")
+		return
+	}
+
+	not_ok := bots.Process_inbound_transfer(d, &newTransfer)
+	if not_ok {
+		pushAlertf(w, req, ALERT_DANGER, "Error processing manual inbound transfer - pls check the console log")
+		reload(w, req, "/backoffice")
+		return
+	}
+
+}
+
+func HandleManualRemoveFunds(w http.ResponseWriter, req *http.Request) {
+	if !logged(w, req) {
+		reload(w, req, "/")
+		return
+	}
+	req.ParseForm()
+
+	var redeemFundsHash ethapi.Hash
+	var err error
+	redeemFundsHashA, ok := req.Form["redeemfundshash"]
+	if ok && redeemFundsHashA[0] != "" {
+		redeemFundsHash, err = ethapi.String_to_hash(redeemFundsHashA[0])
+		if err != nil {
+			pushAlertf(w, req, ALERT_DANGER, "Bad hash %v [%v]", redeemFundsHashA[0], err)
+			reload(w, req, "/backoffice")
+			return
+		}
+	}
+
+	bankethaccountA, ok := req.Form["bankethaccount"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+	bankethaccount, err := strconv.ParseUint(bankethaccountA[0], 0, 64)
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Wrong banketh account %v [%v]", bankethaccountA[0], err)
+		reload(w, req, "/backoffice")
+		return
+	}
+	manyaccounts, err := cryptobank.Many_accounts(ethclient)
+	if int64(bankethaccount) >= manyaccounts {
+		pushAlertf(w, req, ALERT_DANGER, "Account %v does not exist in banketh", bankethaccountA[0])
+		reload(w, req, "/backoffice")
+		return
+	}
+	account, err := cryptobank.Read_account(ethclient, bankethaccount)
+	if err != nil {
+		showErrorf(w, req, "Error reading account %v from ethereum node [%v]", bankethaccount, err)
+		return
+	}
+
+	amountA, ok := req.Form["amount"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+	amount, err := strconv.ParseFloat(amountA[0], 64)
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Wrong amount argument %v [%v]", amountA[0], err)
+		reload(w, req, "/backoffice")
+		return
+	}
+	bankethamount, _ := big.NewFloat(0).Mul(big.NewFloat(amount), big.NewFloat(cryptobank.PRECISION)).Int(nil)
+
+	redemptionModeA, ok := req.Form["redemptionmode"]
+	if !ok {
+		showError(w, req, "Form error")
+		return
+	}
+	redemptionMode, err := strconv.ParseUint(redemptionModeA[0], 0, 64)
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Wrong redemption mode %v [%v]", redemptionModeA[0], err)
+		reload(w, req, "/backoffice")
+		return
+	}
+
+	routingInfoA, given := req.Form["routinginfo"]
+	if given {
+		if len(routingInfoA[0]) > 32 {
+			pushAlertf(w, req, ALERT_DANGER, "Wrong routing info (%v)", routingInfoA[0])
+			reload(w, req, "/backoffice")
+			return
+		}
+	}
+
+	var errorCode int64
+	errorCodeA, given := req.Form["errorcode"]
+	if given {
+		errorCode, err = strconv.ParseInt(errorCodeA[0], 0, 64)
+		if err != nil {
+			pushAlertf(w, req, ALERT_DANGER, "Wrong redemption error code (%v)", errorCodeA[0])
+			reload(w, req, "/backoffice")
+			return
+		}
+	}
+
+	/*
+		redemptionCodeSent := big.NewInt(0)
+		redemptionCodeSentA, given := req.Form["redemptioncodesent"]
+		if given {
+			redemptionCodeSent, ok = redemptionCodeSent.SetString(redemptionCodeSentA[0], 0)
+			if !ok {
+				pushAlertf(w, req, ALERT_DANGER, "Wrong redemption code (%v)", redemptionCodeSentA[0])
+				reload(w, req, "/backoffice")
+				return
+			}
+		}
+	*/
+
+	bankaccountA, _ := req.Form["bankaccount"]
+	banktridA, _ := req.Form["banktrid"]
+	messageA, _ := req.Form["message"]
+
+	txHash, err := cryptobank.Remove_funds(ethclient, int64(bankethaccount), bankethamount, redeemFundsHash, errorCode)
+	/*
+		txHash, err := cryptobank.Remove_funds(ethclient, int64(bankethaccount), bankethamount, redemptionCodeSent)
+	*/
+	if err != nil {
+		pushAlertf(w, req, ALERT_DANGER, "Remove_funds method call failed! [%v]", err)
+		reload(w, req, "/backoffice")
+		return
+	}
+
+	newT := data.CashoutT{
+		RedeemFundsHash: redeemFundsHash,
+		Time:            db.MyTime(time.Now()),
+		FromAccount:     int64(bankethaccount),
+		FromAddress:     account.Owner,
+		BankethAmount:   big.NewInt(0).Set(bankethamount),
+		RedemptionMode:  redemptionMode,
+		RoutingInfo:     routingInfoA[0],
+		ErrorCode:       errorCode,
+		RemoveFundsHash: txHash,
+		// MakeTransferHash: // Not neccessary, since this is a known cashout
+		BankAccount: bankaccountA[0],
+		BankAmount:  amount,
+		BankTrID:    banktridA[0],
+		Message:     messageA[0],
+		Status:      data.CASHOUT_STATUS_MANUALLY_FINISHED,
+	}
+
+	err = db.WriteEntry(data.DBNAME, data.DBTABLECASHOUTS, newT)
+	if err != nil {
+		errMsg := fmt.Sprintf("Sent an remove_funds call (hash %v) but could not write it to DB! [%v]", err)
+		pushAlert(w, req, ALERT_DANGER, errMsg)
+		db.RegisterEvent(data.DBNAME, data.DBTABLEEVENTS, db.EVENT_MANUAL_INTERVENTION_NEEDED,
+			errMsg+fmt.Sprintf(" - Need manual intervention, we should record the transaction in the DB; projected transaction was %v", newT))
+		reload(w, req, "/backoffice")
+		return
+	}
+}

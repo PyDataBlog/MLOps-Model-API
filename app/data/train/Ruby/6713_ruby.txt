@@ -1,0 +1,45 @@
+module Rack::MultiTenant
+  class GetIdentity
+    def initialize(app, user_key = "REMOTE_USER", &getter)
+      @app, @user_key, @getter = app, user_key, getter
+    end
+
+    def call(env)
+      user, tenant = env.values_at(@user_key, "rack.multitenant.current_tenant")
+      Next.new(@app, env).call(@getter.call(user, tenant))
+    end
+
+    class Next
+      def initialize(app, env)
+        @app, @env = app, env
+      end
+
+      def call(result)
+        case result
+        when Proc
+          result.call(self)
+        when nil
+          forbid!
+        when false
+          forbid!
+        else
+          pass result
+        end
+      end
+
+      def pass(identity)
+        @env["rack.multitenant.identity"] = identity
+        @app.call(@env)
+      end
+
+      def forbid!(forbidden_app = nil)
+        [403, {"Content-Type" => "text/html"},
+          "No identity found for #{@env['rack.multitenant.current_tenant']}"]
+      end
+
+      def create_identity_with(subapp)
+        # TODO: calls subapp that either creates or gets the user on the path to creating a new identity.
+      end
+    end
+  end
+end

@@ -1,0 +1,96 @@
+# Julia script version of MiekMath-results.ipynb
+using DataFrames
+using Plots
+using MathProblems
+using MathGame
+using Report
+using Tools
+#games = load_games()
+games = joinpath("results", "games_juliabox") |> load_games #Testing
+games_count = length(games)
+if games_count > 0
+  println("Games played so far: $games_count")
+else
+  println("No previous games.")
+end
+
+# Select player
+players = sort(unique([x.player for x in games]))
+isel = 1
+# START Keep this code for use in MiekMath-results.ipynb
+# isel = if length(players) > 1
+#   println("Select player for report:")
+#   for (i, p) in enumerate(players)
+#     println(@sprintf("%i) %s", i, p.name))
+#   end
+#   input_number_between("Player? ", 1, length(players))
+# else
+#   1
+# end
+# END Keep this code for use in MiekMath-results.ipynb
+player = players[isel]
+println(@sprintf("Reporting for player %s", player.name))
+
+# Statistics per game kind for selected player
+games_player = [x for x in games if x.player == player]
+gamekind_games = games_by_kind(games_player)
+println("Games per kind:")
+println(@sprintf("%22s : score  [count]", "game kind"))
+for (kind, games_c) in gamekind_games
+  kind_str = join(map(label, kind), ", ")
+  games_count_c = length(games_c)
+  median_score = median([score(g.result) for g in games_c])
+  println(@sprintf("%22s :  %4.1f  [ %3i ]",
+    kind_str, median_score, games_count_c))
+end
+
+#%% Score vs time
+pyplot()
+for (kind, games_c) in gamekind_games
+  games_c = gamekind_games[kind]
+  kind_str = join(map(label, kind), ", "," and ")
+  df_games_plot = truncated_scores(games_c)
+  n_report_min = 3
+  if nrow(df_games_plot) < n_report_min
+    println("$kind_str : Fewer than $n_report_min games.")
+    continue
+  end
+  f = df_games_plot
+  annotation = [(x[1], x[2]+0.5, x[3]) for x in zip(f[:time_number],f[:score],f[:ann_text])]
+  plt = plot(df_games_plot,:time_number, :score, seriestype=:bar, linewidth=2, bar_width=1,
+    color=df_games_plot[:color], legend=false, annotation=annotation)
+  ann_game_count = [(x[1], 1, string(x[3])) for x in zip(f[:time_number],f[:score],f[:game_count])]
+  annotate!(ann_game_count)
+  ti = "$player : $kind_str"
+  score_max = maximum(df_games_plot[:score])
+  ymax = 1.1*(score_max+0.5) # make room for text
+  plot!(xlabel="time", ylabel="Score", title=ti, ylims=(0,ymax))
+  plot!(xticks=(df_games_plot[:time_number],df_games_plot[:time_str]))
+  display(plt)
+end
+
+#%% Most difficult problems
+top_worst_count = 10
+problem_count_min = 100
+print_mode = "table" # "sheet", "table"
+println("Top $top_worst_count most difficult problems")
+for (kind,games_c) in gamekind_games
+    println()
+    kind_str = join(map(label,kind),", ", " and ") |> uppercase
+    println(kind_str)
+    res = problem_performance(games_c)
+    if nrow(res) < problem_count_min
+        println("Fewer than $problem_count_min problems solved")
+        continue
+    end
+    resagg = aggregate_performance(res)
+    top_worst_count = min(top_worst_count, nrow(resagg))
+    if print_mode=="sheet"
+      for p in resagg[1:top_worst_count,:problem]
+        println("$p ______")
+      end
+    else
+      cols_print = [:label,:a,:b,:solution,:mode_answer,:diff, :count]
+      display(head(resagg[cols_print],top_worst_count))
+    end
+end

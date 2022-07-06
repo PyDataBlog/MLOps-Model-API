@@ -1,0 +1,201 @@
+package pTracker::Domain::Project::EditLock;
+use strict;
+use warnings;
+
+=head1 NAME
+
+pTracker::Domain::Project::EditLock
+
+=head1 SYNOPSIS
+
+Create, check and clear edit locks on pTracker records. The intent is
+to allow a user to obtain an exclusive lock for up to 15 minutes in
+order to make edits without having to worry about anyone else making,
+and saving, an edit to the same record before they have had a chance to
+finish their edit.
+
+15 minutes was chosen as it is initially believed that it *should* be
+long enough to edit most records.
+
+After the lock expires then any other user should be able to obtain a
+lock and make edits. It is entirely possible to continue editing after
+a lock has expired without there being any issue, however users should
+be aware that if a parallel edit is made after their lock expires then
+their edits may be rejected and they may need ot re-edit the record.
+
+=head1 METHODS
+
+=over
+
+=cut
+
+use pTracker::Domain::Util;
+
+my $db_conn;
+my $register;
+my $utils;
+
+=item register (args)
+
+Takes a hashref of arguments as input consisting of a config section
+and a register section where the register section is a hash of pointers
+to already registered objects.
+
+Adds blessed instance of itself to the register and also returns the
+blessed instance.
+
+=cut
+
+sub register {
+    my ( $class, $args ) = @_;
+    my $me = _whoami();
+
+    if ( exists $args->{register}{$me} ) {
+        return $args->{register}{$me};
+    }
+
+    my $self = bless {}, $class;
+    # Update register immediately to avoid "Deep recursion on subroutine" error
+    $args->{register}{$me} = $self;
+
+    # Grab a pointer to the database connection broker
+    $db_conn  = $args->{register}{'pTracker::DB'};
+    $register = $args->{register};
+
+    $utils = pTracker::Domain::Util->register($args);
+
+    return $self;
+}
+
+=item edit_lock_status
+
+Determine if a record currenty has an edit lock on it, by whom and for
+how much time remains before the lock expires.
+
+=cut
+
+sub edit_lock_status {
+    my ( $self, $args ) = @_;
+
+    my $item_id   = $utils->get_arg( 'item_id',   $args );
+    my $item_type = $utils->get_arg( 'item_type', $args );
+    my $lang      = $utils->get_arg( 'lang',      $args );
+
+    my $query = q{
+SELECT username,
+        lock_status AS is_locked,
+        time_remaining
+    FROM v_advisory_lock
+    WHERE item_type_name = ?::character varying
+        AND item_id = ?::integer
+};
+
+    my $d = $db_conn->record( { query => $query, parms => [ $item_type, $item_id ] } );
+
+    my $username       = $d->{data}{username};
+    my $is_locked      = $d->{data}{is_locked};
+    my $time_remaining = $d->{data}{time_remaining};
+
+    my $lock_remaining = 0;
+    my $message;
+
+    if ( $username && $time_remaining ) {
+
+        # Remove decimal seconds `00:14:59.971945`.
+        $time_remaining =~ s/\.[0-9]+$//;
+        if ( $time_remaining =~ m/^\-/ ) {
+
+            # Someone's lock ran out
+            $time_remaining =~ s/^\-//;
+            $message = [
+                _loc(
+                    "Could not get an edit lock. %1 had a lock on this record that expired %s ago.",
+                    $lang, $username, $time_remaining
+                )
+            ];
+        }
+        else {
+            my ( $minutes, $seconds ) = ( split ':', $time_remaining )[ -2, -1 ];
+            $lock_remaining = ( $minutes * 60 ) + $seconds;
+            $message = [ _loc( "%1 has an edit lock on this record.", $lang, $username ) ];
+        }
+    }
+    else {
+        $is_locked = 0;
+    }
+
+    return ( $is_locked, $username, $message, $lock_remaining );
+}
+
+=item has_edit_lock
+
+Determine if the specified user has an edit lock on an item
+
+=cut
+
+sub has_edit_lock {
+    my ( $self, $args ) = @_;
+
+    my $auth_user = $utils->get_arg( 'auth_user', $args );
+
+    my ( $is_locked, $username, $message, $lock_remaining ) = $self->edit_lock_status($args);
+    $username ||= '';
+
+    return ( $is_locked && ( $auth_user eq $username ) );
+}
+
+=item get_edit_lock
+
+Attempt to obtain an edit lock on a record. Returns the result of the
+edit_lock_status function to indicate if there is a lock, who has it, and
+for how long (in case some other user obtained a lock first).
+
+=cut
+
+sub get_edit_lock {
+    my ( $self, $args ) = @_;
+
+    my $item_id   = $utils->get_arg( 'item_id',   $args );
+    my $item_type = $utils->get_arg( 'item_type', $args );
+    my $auth_user = $utils->get_arg( 'auth_user', $args );
+
+    my $query = q{SELECT advisory_lock__set(?::character varying, ?::integer, ?::character varying)};
+
+    my $d = $db_conn->update( { query => $query, parms => [ $item_type, $item_id, $auth_user ] } );
+
+    return $self->edit_lock_status($args);
+}
+
+=item clear_edit_lock
+
+Used for clearing a lock prior to it's natural expiration time-- either
+for edits that were completed *early* or that were cancelled.
+
+=cut
+
+sub clear_edit_lock {
+    my ( $self, $args ) = @_;
+
+    my $item_id   = $utils->get_arg( 'item_id',   $args );
+    my $item_type = $utils->get_arg( 'item_type', $args );
+    my $auth_user = $utils->get_arg( 'auth_user', $args );
+
+    my $query = q{SELECT advisory_lock__clear(?::character varying, ?::integer, ?::character varying)};
+
+    my $d = $db_conn->update( { query => $query, parms => [ $item_type, $item_id, $auth_user ] } );
+}
+
+sub _loc {
+    my ( $msgid, $lang, @parms ) = @_;
+    return $utils->translate_msg( $msgid, $lang, @parms );
+}
+
+sub _whoami { return (caller)[0]; }
+
+1;
+
+=head1 Copyright (C) 2015-2016 gsiems.
+
+This file is licensed under the Artistic License 2.0
+
+=cut

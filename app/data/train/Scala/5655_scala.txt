@@ -1,0 +1,114 @@
+package screens
+
+import app.AppRouter.Page
+import autowire._
+import chandu0101.scalajs.react.components.Implicits._
+import chandu0101.scalajs.react.components.materialui.{ MuiMuiThemeProvider, MuiRaisedButton, MuiTextField }
+import components.DateSelector
+import japgolly.scalajs.react.extra.router.RouterCtl
+import japgolly.scalajs.react.vdom.prefix_<^._
+import japgolly.scalajs.react.{ ReactComponentB, _ }
+import services.AjaxClient
+import shared.models.SharedDefault.SharedJob
+import shared.services.BizApi
+import scala.collection.mutable
+import scala.language.{ existentials, implicitConversions, postfixOps }
+import scalacss.Defaults._
+
+/**
+ * display a form to allow a business user to modify an existing job
+ */
+object ModifyJobScreen {
+
+  case class Props(page: RouterCtl[Page], theJob: SharedJob, resetCallback: () => Callback)
+
+  case class State(form: SharedJob)
+
+  class Backend(scope: BackendScope[Props, State]) {
+
+    // to store the job dates
+    val dateSet = mutable.Set[String]()
+
+    def mounted() = {
+      scope.props.map(p => {
+        dateSet ++= (for (s <- p.theJob.job_dates.split(",")) yield s.trim()).toList
+        scope.setState(State(p.theJob)).runNow()
+      }).runNow()
+      Callback.empty
+    }
+
+    def onChangeValue(attrib: String)(e: ReactEventI) = {
+      val newValue = e.target.value
+      if (newValue != null && attrib.nonEmpty) {
+        attrib match {
+          case "job_number" => scope.modState(s => s.copy(s.form.copy(job_number = newValue))).runNow()
+          case "job_address" => scope.modState(s => s.copy(s.form.copy(job_address = newValue))).runNow()
+          case "workers" => scope.modState(s => s.copy(s.form.copy(workers = newValue.toShort))).runNow()
+          case "job_type" => scope.modState(s => s.copy(s.form.copy(job_type = newValue))).runNow()
+          case "description" => scope.modState(s => s.copy(s.form.copy(description = Option(newValue)))).runNow()
+        }
+      }
+      Callback.empty
+    }
+
+    // collect the job dates from DateSelector component
+    def dateCollector = (values: List[String]) => {
+      dateSet.clear()
+      dateSet ++= values
+      Callback.empty
+    }
+
+    def updateAction(props: Props, state: State)(e: ReactEventH) = {
+      // add the dates to the form as a csv string
+      val newForm = state.form.copy(job_dates = dateSet.mkString(","))
+      // send the form/job to the server, then call the parent callback i.e. redirect to UpdateJobScreen
+      AjaxClient[BizApi].updateJob(newForm).call().map(x => scope.props.map(p => p.resetCallback()).runNow())
+      Callback.empty
+    }
+
+    // call the parent callback i.e. redirect to UpdateJobScreen without any change to the job
+    def cancel(props: Props)(e: ReactEventH) = scope.props.map(p => p.resetCallback()).runNow()
+
+    def render(props: Props, state: State) = {
+      MuiMuiThemeProvider()(
+        <.div(^.`class` := "jumbotron", ^.display.flex, ^.flexDirection.column,
+          <.h4("新しいジョブを作成"),
+          <.br(),
+          DateSelector("jobDatePicker", state.form.job_dates, dateCollector),
+
+          MuiTextField(`type` = "text", hintText = "job_number", floatingLabelText = "職務番号",
+            id = "job_number_id", onChange = onChangeValue("job_number") _, value = state.form.job_number)(),
+
+          MuiTextField(`type` = "text", hintText = "job_address", floatingLabelText = "住所",
+            id = "job_address_id", onChange = onChangeValue("job_address") _, value = state.form.job_address)(),
+
+          MuiTextField(`type` = "number", hintText = "workers", floatingLabelText = "労働者",
+            id = "workers_id", onChange = onChangeValue("workers") _, value = state.form.workers.toString)(),
+
+          MuiTextField(`type` = "job_type", hintText = "job_type", floatingLabelText = "職種",
+            id = "job_type_id", onChange = onChangeValue("job_type") _, value = state.form.job_type)(),
+
+          MuiTextField(multiLine = true, `type` = "text", hintText = "description", floatingLabelText = "仕事内容",
+            id = "description_id", onChange = onChangeValue("description") _,
+            value = state.form.description.getOrElse[String](" "))(),
+
+          <.br(),
+          <.div(
+            MuiRaisedButton(onClick = updateAction(props, state) _, label = "そうさ", primary = true)(),
+            <.a(" "),
+            MuiRaisedButton(onClick = cancel(props) _, label = "キャンセル", primary = true)()
+          ))
+      )
+    }
+
+  }
+
+  val component = ReactComponentB[Props]("ModifyJobScreen")
+    .initialState(State(new SharedJob()))
+    .renderBackend[Backend]
+    .componentDidMount(_.backend.mounted())
+    .build
+
+  def apply(page: RouterCtl[Page], theJob: SharedJob, reset: () => Callback) = component(Props(page, theJob, reset))
+}
+

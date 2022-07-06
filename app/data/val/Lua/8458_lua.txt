@@ -1,0 +1,125 @@
+-- Handles balances
+local BalanceService = {}
+Neko.balances = BalanceService
+
+BalanceService.balances = {}
+
+BalanceService.balancesByName = {}
+
+-- Checks to see what battlerage came back
+function BalanceService.giveBattlerage(trigger)
+	local rage = trigger.matches[1]
+
+	if not BalanceService.balancesByName[rage] then return end
+
+	BalanceService.balancesByName[rage]:give()
+end
+
+-- Gets a balance by name
+function BalanceService.get(name)
+	return BalanceService.balancesByName[name]
+end
+
+-- Returns a new balance instance
+function BalanceService.new(name)
+	local newBalance = Balance.new(name)
+
+	-- Add it to the balances table and sort them by weight
+	table.insert(BalanceService.balances, newBalance)
+	table.sort(BalanceService.balances)
+
+	-- Add it to the balancesByName index
+	BalanceService.balancesByName[newBalance.name] = newBalance
+
+	return newBalance
+end
+
+function BalanceService.readData()
+	-- Set up the balances
+	local currentBal = false
+	for line in io.lines(DATAPATH.."balances.txt") do
+		if line:match("^%[(.*)%]$") then
+			currentBal = BalanceService.new(line:match("^%[(.*)%]$"))
+		elseif line:match("^blockingFlag%: (.*)$") then
+			local flag = line:match("^blockingFlag%: (.*)$")
+
+			BalanceService.registerFlag(flag, currentBal)
+		elseif line:match("^field%: (.*)$") then
+			local field = line:match("^field%: (.*)$")
+
+			currentBal.field = field
+		elseif line:match("^haveColor%: (.*)$") then
+			local haveColor = line:match("^haveColor%: (.*)$")
+
+			currentBal.haveColor = Text.colors[haveColor]
+		elseif line:match("^prompt%: (.*)$") then
+			local prompt = line:match("^prompt%: (.*)$")
+
+			currentBal.prompt = prompt
+		elseif line:match("^takenColor%: (.*)$") then
+			local takenColor = line:match("^takenColor%: (.*)$")
+
+			currentBal.takenColor = Text.colors[takenColor]
+		end
+	end
+
+	-- Add the triggers
+	for line in io.lines(DATAPATH.."balance-triggers.txt") do
+		if line:match("^\"(.*)\" (%a+) (%a+)$") then
+			local trigger, balName, action = line:match("^\"(.*)\" (%a+) (%a+)$")
+
+			local bal = BalanceService.get(balName)
+
+			if not bal then
+			elseif action == "give" then
+				Neko.triggers.register(trigger, function() bal:give() end, string.format("Give %s", bal.name))
+			elseif action == "take" then
+				Neko.triggers.register(trigger, function() bal:take() end, string.format("Take %s", bal.name))
+			end
+		end
+	end
+
+	-- Load the plugins
+	for _, bal in ipairs(BalanceService.balances) do
+		loadFile("Objects/Plugins/Balances/"..bal.name..".lua")
+	end
+
+	Text.display(Text.colors.green, #Neko.balances.balances, Text.colors.yellow, " balances loaded.\n")
+end
+
+-- Register a balance to a flag
+function BalanceService.registerFlag(flag, balance)
+	Neko.flags.register(flag, balance)
+end
+
+-- Shows the balances on the prompt
+function BalanceService.showPrompt()
+    Text.display("[")
+    Text.display(BalanceService.balancesByName.bal:display())
+    Text.display(BalanceService.balancesByName.eq:display())
+    Text.display("|")
+    Text.display(BalanceService.balancesByName.battlerage:display())
+    Text.display("]")
+end
+
+function BalanceService.updateGmcp(data)
+	for _, balance in ipairs(BalanceService.balances) do
+		if not data.Char.Vitals[balance.field] then
+		elseif data.Char.Vitals[balance.field] == "1" then
+			balance:give()
+		elseif data.Char.Vitals[balance.field] == "0" then
+			balance:take()
+		end
+	end
+end
+
+-- Tie it into other systems
+Neko.gmcp.register("Char.Vitals", BalanceService.updateGmcp)
+Neko.prompt.addDisplay(BalanceService.showPrompt)
+
+-- Do callbacks
+Neko.events.register("onBoot", BalanceService.readData)
+
+-- Triggers
+Neko.triggers.register("^You can use (%a+) again%.$", BalanceService.giveBattlerage, "Checks for returning battlerage.")
+Neko.triggers.register("^Your (%a+) ability could be used again but you lack the necessary Rage%.$", BalanceService.giveBattlerage, "Checks for returning battlerage.")

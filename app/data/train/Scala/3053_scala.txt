@@ -1,0 +1,109 @@
+/**
+  * codebook.runtime.packet.TcpClientPort
+  *
+  * Copyright (c) 2016 Osamu Takahashi
+  * Copyright (c) 2016 Rusty Raven Inc.
+  *
+  * This software is released under the MIT License.
+  * http://opensource.org/licenses/mit-license.php
+  *
+  * @author Osamu Takahashi
+  */
+package codebook.runtime.io
+
+import akka.actor._
+import akka.io.{IO, Tcp}
+import codebook.runtime.packet.PacketReader
+import codebook.runtime.protocol._
+import java.net.InetSocketAddress
+import javax.net.ssl.SSLContext
+
+import akka.util.ByteString
+import codebook.runtime.util.TimeLimits._
+
+/**
+  * The tcp client trait
+  */
+trait TcpClientPort extends Actor with ActorLogging {
+
+  def hostname:String
+  def port:Int
+  val retryConnection:Boolean = false
+
+  def useRawData = false
+
+  import Tcp._
+  import context.system
+  import codebook.runtime.io.PortConversion._
+
+  private var _listener:Option[ActorRef] = None
+//  private var _reader:Option[PacketReader] = None
+  private var _socket:Option[ActorRef] = None
+
+  def sslContext:Option[SSLContext] = None
+
+  def connect():Unit =
+    IO(Tcp) ! Connect(new InetSocketAddress(hostname,port))
+
+  def disconnect():Unit =
+    _socket.foreach(_ ! Close)
+
+  override def preStart():Unit =
+    connect()
+
+  def createServiceActor(socket:ActorRef):ActorRef
+
+  private def _setRetry():Unit =
+    if (retryConnection) {
+      context.system.scheduler.scheduleOnce(_5s,self,SystemMessages.Retry)(context.system.dispatcher)
+    }
+
+  def receive = {
+    case CommandFailed(_: Connect) =>
+      _setRetry()
+      //handler ! SystemMessages.ConnectFailed
+
+    case c @ Connected(remote, local) =>
+      log.info("The Client Connected")
+      val connection = sender()
+
+      val handler = context.system.actorOf(Props(new TLSAdaptor(connection,sslContext,true,useRawData)))
+      val serv = createServiceActor(handler)
+      
+      _listener = Some(handler)
+//      _reader  = Some(new PacketReader)
+      _socket = Some(connection)
+
+      connection ! Register(self)
+      handler ! Register(serv)
+
+      context become {
+        case r @ Received(b) =>
+          _listener.foreach(_ ! r)
+
+        case _ : ConnectionClosed =>
+          log.info("The Client Disconnected")
+          _listener.foreach(_ ! SystemMessages.Closed)
+          _setRetry()
+          _listener = None
+//          _reader = None
+          _socket = None
+          context.unbecome()
+
+//        case req:Request =>
+//          _socket.foreach(_.send(req))
+        case bytes:ByteString =>
+          _listener.foreach(_ ! Write(bytes))
+
+        case wrt:Write =>
+          _listener.foreach(_ ! wrt)
+
+        case e =>
+          log.info(s"Client Socket received unexpected message: $e")
+      }
+
+    case SystemMessages.Retry =>
+      log.info("Retying Connection")
+      connect()
+  }
+}

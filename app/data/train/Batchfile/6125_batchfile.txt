@@ -1,0 +1,1 @@
+cmd_drivers/dpram/built-in.o :=  /home/spacecaker/CodeSourcery/Sourcery_CodeBench_Lite_for_ARM_EABI/bin/arm-none-eabi-ld -EL    -r -o drivers/dpram/built-in.o drivers/dpram/dpram.o drivers/dpram/multipdp.o 

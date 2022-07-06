@@ -1,0 +1,59 @@
+﻿
+-- =============================================
+-- Author:		zmgowin
+-- Create date: 2013-05-22
+-- Description:	结算-返利-标记商户返利-标记商户
+-- =============================================
+ALTER PROCEDURE [dbo].[pS_Rebate_Mark_Merc]
+	@User_Id numeric(10),				 --用户ID
+	@Merchant_Id numeric(10),			 --商户ID
+	@Busi_No nvarchar(16),               --业务流水号
+	@Retval  int output,                 --返回标志。0为成功，其他为异常
+	@Retinf  nvarchar(1024) output       --返回信息。0为成功，其他为Err_Msg 
+AS
+BEGIN
+	set nocount on;
+	declare @L_Event_Id numeric(6)=102505;		--结算事件ID
+	declare @L_Rebate_Amount numeric(16,6);     --事件返利费用
+
+	begin try   
+		select @L_Rebate_Amount=standard_fee
+		  from merchant_s_standard_parm
+		 where level3_balance_event_id = @L_Event_Id
+		   and user_type = 0
+		   and price_type = 0;
+		   
+		if(@L_Rebate_Amount is null)
+			begin
+				set @Retval = 600406;
+				set @Retinf = '未找到标记商户返利执行标准。';
+				return;
+			end
+		
+		if(@L_Rebate_Amount>0)
+			begin
+				--网站准备金账户支出标记返利金额
+				exec pS_Upd_Flow_Bal 4,0,3010,@L_Event_Id,-1,1,@L_Rebate_Amount,null,@Busi_No,@Retval output,@Retinf output;
+				if(@Retval>0) return;
+				
+				if(@User_Id=0)
+					begin
+						--网站准备金账户收入标记返利金额
+						exec pS_Upd_Flow_Bal 4,@User_Id,3010,@L_Event_Id,1,1,@L_Rebate_Amount,@Merchant_Id,@Busi_No,@Retval output,@Retinf output;
+						if(@Retval>0) return;						
+					end
+				else
+					begin
+						--会员信用账户收入标记返利金额
+						exec pS_Upd_Flow_Bal 1,@User_Id,1020,@L_Event_Id,1,1,@L_Rebate_Amount,@Merchant_Id,@Busi_No,@Retval output,@Retinf output;
+						if(@Retval>0) return;				
+					end
+			end 
+
+		set @Retval=0;
+		set @Retinf='成功。';				  
+	end try
+    begin catch
+		select @Retval=ERROR_NUMBER(),@Retinf=ERROR_MESSAGE();
+    end catch
+END

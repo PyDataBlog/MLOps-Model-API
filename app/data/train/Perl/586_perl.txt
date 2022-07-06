@@ -1,0 +1,69 @@
+package PillowFort::Modules::RTorrent;
+use parent 'PillowFort::Module';
+
+use strict;
+use warnings;
+use utf8;
+
+use Mojo::IOLoop;
+use RPC::RTorrent;
+
+my $paused_actions = ['start', 'remove'];
+my $running_actions = ['stop', 'remove'];
+
+my $entry_update = sub {
+    my ($entry, $item) = @_;
+    my $progress = "$item->{down_total} / $item->{size_bytes}";
+    $entry->{title}   = "[$item->{state}]$item->{name}";
+    $entry->{subtext} = join("\n", $progress, $item->{message});
+    $entry->{actions} = $item->{state} ? $running_actions : $paused_actions;
+    $entry->{hash}    = $item->{hash};
+    return $entry;
+};
+
+my $transform = sub {
+    $entry_update->(new PillowFort::Module::Entry (), $_[0]);
+};
+
+sub _init {
+    my $self = shift;
+    my $index = {};
+
+    my $rtc = RPC::RTorrent->new($self->{url});
+    $rtc->on(add => sub {
+        for(@{$_[0]}){
+            my $entry = $transform->($_);
+            $index->{$_->{hash}} = $entry;
+            $self->add_entry($entry);
+        }
+    });
+    $rtc->on(remove => sub {
+        for(@{$_[0]}){
+            my $entry = $index->{$_};
+            $self->remove_entry($entry);
+            delete $index->{$_};
+        }
+    });
+    my $update = sub {
+        $rtc->update;
+        $rtc->for_each(sub {
+            $entry_update->($index->{$_[0]->{hash}}, $_[0]);
+        });
+        $self->send_entries;
+    };
+
+    $self->{watcher} = Mojo::IOLoop->recurring(
+        $self->{timer}->{interval},
+        $update
+    );
+    Mojo::IOLoop->next_tick($update) if $self->{timer}->{autostart};
+
+    $self->{actions} = {
+        'stop'   => sub { $rtc->stop($_[1]->{hash}) },
+        'start'  => sub { $rtc->start($_[1]->{hash}) },
+        'remove' => sub { $rtc->erase($_[1]->{hash}) },
+    };
+    return $self;
+}
+
+1;

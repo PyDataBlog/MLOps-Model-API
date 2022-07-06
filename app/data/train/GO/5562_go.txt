@@ -1,0 +1,107 @@
+// Copyright 2014 Michael Johnson. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+package main
+
+import (
+	"encoding/xml"
+	"fmt"
+	"log"
+	"net/http"
+	"net/url"
+	"strings"
+
+	jsonrpc "github.com/gorilla/rpc/v2/json2"
+)
+
+type RosterInfo struct {
+	XMLName xml.Name `json:"-" xml:"entry"`
+
+	ServiceID string `json:"service_id" xml:"serviceid"`
+	Username  string `json:"username" xml:"name"`
+	Rank      string `json:"rank" xml:"rank"`
+	Paygrade  string `json:"paygrade" xml:"paygrade"`
+
+	SpecialPermissions int `json:"special_permissions,omitempty" xml:"-"`
+
+	ResolvedPermissions int `json:"resolved_permissions" xml:"-"`
+}
+
+type _roster struct {
+	XMLName xml.Name `xml:"feed"`
+
+	Results []*RosterInfo `xml:"entry"`
+}
+
+func getRosterInfo(username string) (*RosterInfo, error) {
+	//https://spreadsheets.google.com/a/nightexcessive.us/tq?tq=SELECT%20B,%20C,%20D,%20E%20WHERE%20lower%28%60C%60%29%20=%20%27nightexcessive%27&key=0Ap8U9Kiw1ISGdG1xZnl1X0JKTzFNZ25fQkVJUk9Ja0E&gid=0
+	q := make(url.Values)
+	q.Set("sq", fmt.Sprintf("name=\"%s\"", strings.Replace(username, "\"", "\\\"", -1)))
+	spreadsheetURL := &url.URL{
+		Scheme:   "https",
+		Host:     "spreadsheets.google.com",
+		Path:     "/feeds/list/" + *rosterKey + "/od6/private/full",
+		RawQuery: q.Encode(),
+	}
+
+	req, err := http.NewRequest("GET", spreadsheetURL.String(), nil)
+	if err != nil {
+		log.Printf("Error creating GET request for spreadsheet: %s", err)
+		return nil, &jsonrpc.Error{Code: jsonrpc.E_SERVER, Message: "An unknown error occured while retrieving roster data."}
+	}
+	req.Header.Set("x-goog-api-version", "2")
+	req.Header.Set("x-goog-project-id", googleConfig.Web.ProjectID)
+
+	res, err := googleClient.Do(req)
+	if err != nil {
+		log.Printf("Error sending GET request for spreadsheet: %s", err)
+		return nil, &jsonrpc.Error{Code: jsonrpc.E_SERVER, Message: "An unknown error occured while retrieving roster data."}
+	}
+
+	decoder := xml.NewDecoder(res.Body)
+	decoded := &_roster{
+		Results: make([]*RosterInfo, 0),
+	}
+	if err = decoder.Decode(decoded); err != nil {
+		log.Printf("Error decoding roster data: %s", err)
+		return nil, &jsonrpc.Error{Code: jsonrpc.E_SERVER, Message: "An error occured while retrieving roster data."}
+	}
+
+	if len(decoded.Results) == 1 {
+		return decoded.Results[0], nil
+	} else if len(decoded.Results) <= 0 {
+		return nil, &jsonrpc.Error{Code: E_NO_RESULTS, Message: "No roster results were returned for the given username."}
+	}
+
+	return nil, &jsonrpc.Error{Code: E_MULTIPLE_RESULTS, Message: "Multiple roster results were returned for the given username."}
+}
+
+func (t *TS3Service) GetUserData(r *http.Request, params *LoginResponse, response *RosterInfo) error {
+	userLoginToken := new(LoginToken)
+	err := cookieGen.Decode("login_token", params.LoginToken, userLoginToken)
+	if err != nil {
+		log.Printf("Error decoding login token: %s", err)
+		return &jsonrpc.Error{Code: jsonrpc.E_SERVER, Message: "An unknown error occured while decoding the login token."}
+	}
+
+	loginToken, forumID, err := testLogin(userLoginToken.Username, "", userLoginToken.Hash)
+	if err != nil {
+		return err
+	}
+
+	rosterInfo, err := getRosterInfo(loginToken.Username)
+	if err != nil {
+		return err
+	}
+	*response = *rosterInfo
+
+	response.SpecialPermissions = resolveSpecialPermissions(forumID)
+	response.ResolvedPermissions, err = resolvePermission(response)
+	if err != nil {
+		log.Printf("Error resolving permissions for %d: %s", forumID, err)
+		response.ResolvedPermissions = PERM_SERVICEMAN
+	}
+
+	return nil
+}

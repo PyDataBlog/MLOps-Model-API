@@ -1,0 +1,83 @@
+############################ 
+# Szymański's algorithm
+# @Author William Herrera
+# @ref Wikipedia article
+# @version 0.1.1
+# @date 16 Novemebr 2017
+############################
+
+# from wikipedia, https://en.wikipedia.org/wiki/Szyma%C5%84ski%27s_algorithm
+
+@everywhere static maxprocesses = 16
+@everywhere static szymanski_flags = zeros(UInt8, maxprocesses+ 1)
+@everywhere static szymanski_index = Threads.Atomic{Int}(0)
+
+mutable struct szymanski
+    Int selfsflag
+    Int flagindex
+    function szymanski()
+        this = new()
+        this.selfsflag = 0
+        this.flagindex = (szymanski_index += 1)
+        if(this.currentindex > maxprocesses)
+            Base.Throw("The maximum allowable number of processes, $maxprocesses, has been exceeded.")
+        end
+        this
+    end
+end
+
+function szymanski_awaitstartcritical(s)
+    s.selfsflag = 1
+    needtocheck = true
+    while needtocheck
+        needtocheck = false
+        for i in szymanski_flags
+            if i > 2
+                needtocheck = true
+                yield()
+            end
+        end
+    s.selfsflag = 3
+    for i in szymanski_flags
+        if i == 1
+            s.selfsflag = 2
+            needtocheck = true
+            while needtocheck
+                needtocheck = false
+                for i in szymanski_flags
+                    if i == 4
+                        needtocheck = true
+                        yield()
+                    end
+                end
+            end
+        end
+    end
+    s.selfsflag = 4
+    needtocheck = true
+    while needtocheck
+        needtocheck = false
+        for i in 1:s.flagindex-1
+            if szymanski_flags[i] > 1
+                needtocheck = true
+                yield()
+            end
+        end
+    end
+end
+
+
+function szymankski_exitcritical(s)
+    needtocheck = true
+    while needtocheck
+        needtocheck = false
+        for i in szymanski_flags[s.flagindex+1:end]
+            if szymanski_flags[i] == 2 || szymanski_flags[i] == 3
+                needtocheck = true
+                yield()
+            end
+        end
+    end
+    s.selfsflag = 0
+end
+

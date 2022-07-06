@@ -1,0 +1,235 @@
+require 'thor'
+require 'yell'
+
+class Nifty::CommandExecutioner < Thor
+  class << self
+    # Force Thor to exit with a non-zero return value on failure (after `exit` is called).
+    #
+    # @return [TrueClass, FalseClass] true if thor fail, false otherwise
+    def exit_on_failure?
+      true
+    end
+
+    # List all available transfer methods for the backend
+    #
+    # @param [Nifty::Backend] backend
+    # @return [Array] array of transfer method classes that support the backend
+    def available_transfer_methods(backend)
+      unless Nifty::TransferMethods.constants.include? backend.camelize.to_sym
+        fail Nifty::CommandExecutionError, "No backend with name '#{backend}'"
+      end
+
+      clazz = "Nifty::TransferMethods::#{backend.camelize}".constantize
+      constants = clazz.constants.map { |sym| sym.to_s.downcase }
+      constants.select! do |constant|
+        unknown = clazz.const_get(constant.camelize)
+
+        unknown.respond_to?('transfer_method?') && unknown.transfer_method?
+      end
+
+      constants.sort
+    end
+
+    # List all available backends
+    #
+    # @return [Array] array of all available backend classes
+    def available_backends
+      constants = Nifty::Backends.constants.map { |sym| sym.to_s.downcase }
+      constants.select! do |constant|
+        unknown = Nifty::Backends.const_get(constant.camelize)
+
+        unknown.respond_to?('backend?') && unknown.backend?
+      end
+
+      constants.sort
+    end
+  end
+
+  # global options
+  class_option :"appliance-dir",
+                :required => true,
+                :default => Nifty::Settings['appliance-dir'],
+                :type => :string,
+                :aliases => '-a',
+                :desc => 'Directory from where appliance descriptors will be loaded'
+  class_option :"transfer-method",
+                :required => true,
+                :default => Nifty::Settings['transfer']['method'],
+                :type => :string,
+                :aliases => '-m',
+                :desc => 'Transfer method for image upload'
+  class_option :"transfer-destination",
+                :default => Nifty::Settings['transfer']['destination'],
+                :type => :string,
+                :aliases => '-t',
+                :desc => 'Image upload destination'
+  class_option :"remote-host",
+                :default => Nifty::Settings['transfer']['remote-host'],
+                :type => :string,
+                :desc => 'Name of the remote host'
+  class_option :"remote-user",
+                :default => Nifty::Settings['transfer']['remote-user'],
+                :type => :string,
+                :desc => 'Name of the remote user'
+  class_option :"logging-level",
+                :required => true,
+                :default => Nifty::Settings['logging']['level'],
+                :type => :string,
+                :enum => Yell::Severities
+  class_option :"logging-file",
+                :default => Nifty::Settings['logging']['file'],
+                :type => :string,
+                :desc => 'File to write log to'
+  class_option :debug,
+                :default => Nifty::Settings['debug'],
+                :type => :boolean,
+                :desc => 'Runs nifty in debug mode'
+
+  desc 'version', 'Prints NIFTY\'s version'
+  def version
+    $stdout.puts Nifty::VERSION
+  end
+
+  desc 'backends', 'Lists all available backends with their description'
+  def backends
+    backends = self.class.available_backends
+    longest = backends.map { |backend| backend.length }.sort.last
+    backends.each do |backend|
+      $stdout.puts "%-#{longest + 2}s" % "#{backend}" + "# #{Nifty::Backends.const_get(backend.camelize).description}"
+    end
+  end
+
+  available_backends.each do |backend|
+    backend_clazz = Nifty::Backends.const_get(backend.camelize)
+    options = backend_clazz.options
+    options.each do |name, parameters|
+      parameters[:default] = Nifty::Settings[backend][name.to_s] || parameters[:default]
+      method_option name, parameters
+    end
+
+    class_eval %Q^
+desc '#{backend}', 'Runs NIFTY with backend #{backend}'
+def #{backend}
+  start('#{backend}', options)
+end
+
+desc '#{backend}-transfer-methods', 'Lists all available transfer methods with their description for #{backend.inspect} backend'
+def #{backend}_transfer_methods
+  methods = self.class.available_transfer_methods '#{backend}'
+  longest = methods.map { |method| method.length }.sort.last
+  methods.each do |method|
+    $stdout.puts "%-\#{longest + 2}s" % "\#{method}" + "# \#{Nifty::TransferMethods::#{backend.camelize}.const_get(method.camelize).description}"
+  end
+end
+^
+
+    if backend_clazz.respond_to? 'migrate'
+      options = backend_clazz.migrate_options
+      options.each do |name, parameters|
+        parameters[:default] = Nifty::Settings[backend][name.to_s] || parameters[:default]
+        method_option name, parameters
+      end
+
+      class_eval %Q^
+desc '#{backend}-migrate', 'Prepares #{backend.inspect} for integration with NIFTY'
+def #{backend}_migrate
+  migrate('#{backend}', options)
+end
+^
+    end
+  end
+
+  private
+
+  # Starts NIFTY with selected backend
+  #
+  # @param [String] backend backend's name
+  # @param [Hash] options options from command line
+  def start(backend, options)
+    parameters = options.to_hash.deep_symbolize_keys
+    init_log parameters
+
+    backend = Nifty::Backends.const_get(backend.camelize)
+    logger.debug "Selected backend '#{backend.inspect}'"
+
+    transfer_method = construct_transfer_method(backend, parameters)
+    logger.debug "Selected transfer method '#{transfer_method.inspect}'"
+
+    logger.debug "Parameters: #{parameters}"
+
+    processor = Nifty::Event::Processor.new(backend, transfer_method, parameters)
+    exit processor.process_events
+  end
+
+  def migrate(backend, options)
+    parameters = options.to_hash.deep_symbolize_keys
+    init_log parameters
+
+    backend = Nifty::Backends.const_get(backend.camelize)
+    logger.debug "Selected backend '#{backend.inspect}'"
+
+    exit backend.migrate(parameters)
+  end
+
+  # Inits logging according to the settings
+  #
+  # @param [Hash] parameters
+  # @option parameters [String] logging-level
+  # @option parameters [String] logging-file file to log to
+  # @option parameters [TrueClass, FalseClass] debug debug mode
+  # @return [Type] description of returned object
+  def init_log(parameters)
+    parameters[:"logging-level"] = 'DEBUG' if parameters[:debug]
+
+    Yell.new :stdout, :name => Object, :level => parameters[:"logging-level"].downcase, :format => Yell::DefaultFormat
+    Object.send :include, Yell::Loggable
+
+    if parameters[:"logging-file"]
+      unless (File.exist?(parameters[:"logging-file"]) && File.writable?(parameters[:"logging-file"])) || (File.writable?(File.dirname(parameters[:"logging-file"])))
+        logger.error "File #{parameters[:"logging-file"]} isn't writable"
+        return
+      end
+
+      logger.adapter :file, parameters[:"logging-file"]
+    end
+  end
+
+  # Returns class representing transfer method of specified name
+  #
+  # @param [Nifty::Backend] backend
+  # @param [String] transfer_method_name name of the transfer method
+  # @return [Nifty::TransferMethod] transfer method class
+  def transfer_method_constant(backend, transfer_method_name)
+    transfer_methods = "Nifty::TransferMethods::#{backend.name.demodulize}".constantize
+    backend_name = backend.name.demodulize.underscore
+    error_msg = "No such transfer method '#{transfer_method_name}' for backend '#{backend_name}'"
+    unless transfer_methods.constants.include?(transfer_method_name.camelize.to_sym)
+      $stdout.puts error_msg
+      exit Nifty::ExitCodes::NO_TRANSFER_METHOD_ERROR_EXIT_CODE
+    end
+
+    transfer_method = transfer_methods.const_get(transfer_method_name.camelize)
+    unless transfer_method.respond_to?('backend') && transfer_method.backend == backend
+      $stdout.puts error_msg
+      exit
+    end
+
+    transfer_method
+  end
+
+  # Returns transfer method according to settings
+  #
+  # @param [Nifty::Backend] backend
+  # @param [Hash] parameters
+  # @option parameters [String] transfer-method name of the transfer method
+  # @option parameters [String] transfer-destination destination fo the transfer method
+  # @return [Nifty::TransferMethod] instance of specified transfer method
+  def construct_transfer_method(backend, parameters)
+    transfer_method_const = transfer_method_constant(backend, parameters[:"transfer-method"])
+
+    transfer_method_const.new(parameters[:"transfer-destination"], parameters)
+  rescue Nifty::Errors::TransferMethodError => ex
+    $stdout.puts ex.message
+    exit Nifty::ExitCodes::TRANSFER_METHOD_ERROR_EXIT_CODE
+  end
+end

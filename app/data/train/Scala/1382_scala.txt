@@ -1,0 +1,102 @@
+/* Copyright (C) 2016 Luis Rodero-Merino
+ *
+ * This file is part of MxCompanions
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
+ */
+package mxcompanions
+
+
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.TimeUnit._
+import mxcompanions.circuitbreaker.CircuitBreakerConfiguration
+import mxcompanions.delegate.DelegateConfiguration
+import org.scalacheck.Arbitrary.arbitrary
+import org.scalacheck.Gen
+import scala.concurrent.duration.FiniteDuration
+
+
+/**Generators to be used for tests of [[mxcompanions.circuitbreaker.CircuitBreaker]],
+ * [[mxcompanions.circuitbreaker.CircuitBreakerConfiguration]],
+ * [[mxcompanions.delegate.Delegate]] and
+ * [[mxcompanions.delegate.DelegateConf]].
+ */
+object Gens {
+
+  val bitRingSize: Gen[Int] = Gen.choose(1,10)
+  val bitRingFalibleSize: Gen[Int] = Gen.chooseNum(-10,10)
+
+  val bitRingInsertions: Gen[List[Boolean]] = for {
+    amount <- Gen.choose(0,100)
+    toInsert <- Gen.containerOfN[List,Boolean](amount, arbitrary[Boolean])
+  } yield toInsert
+
+  // We ignore time units smaller than milliseconds
+  val timeUnit: Gen[TimeUnit] = Gen.oneOf(
+    DAYS, HOURS, MINUTES, SECONDS, MILLISECONDS
+  )
+
+  val finiteDuration: Gen[FiniteDuration] = for {
+    nanoseconds <- arbitrary[Int]
+    timeUnit <- timeUnit
+    time = timeUnit.convert(nanoseconds, NANOSECONDS)
+  } yield FiniteDuration(time, timeUnit)
+
+  val finiteDurationNullable: Gen[FiniteDuration] =
+    Gen.oneOf[FiniteDuration](CircuitBreakerConfiguration.default.timeInOpenState, null)
+
+  /* We need a generator for `FiniteDuration` instances that have
+   * positive length. Using `finiteDurationGen suchThat (_.length > 0)`
+   * cannot do the work because scalacheck can give up before getting all
+   * the instances it needs (not often, but it really happens). Thus,
+   * we must take the long path to define this generator.
+   */
+  val positiveFiniteDuration: Gen[FiniteDuration] = for {
+    nanoseconds <- Gen.chooseNum(1, Int.MaxValue)
+    timeUnit <- timeUnit
+    time = timeUnit.convert(nanoseconds, NANOSECONDS) if(time > 0)
+  } yield FiniteDuration(time, timeUnit)
+
+  val delay: Gen[FiniteDuration] = for {
+    nanoseconds <- Gen.chooseNum(1, Int.MaxValue)
+    timeUnit <- timeUnit
+    time = timeUnit.convert(nanoseconds, NANOSECONDS) if (time > 0)
+  } yield FiniteDuration(time, timeUnit)
+
+  val failureRate: Gen[Float] = Gen.choose(0.0F, 1.0F) suchThat (_ > 0.0F)
+
+  val delegateConf: Gen[DelegateConfiguration] = for {
+    fd <- Gen.choose(1,5) map (FiniteDuration(_, MILLISECONDS))
+    tries <- Gen.choose(1,5)
+  } yield DelegateConfiguration.conf.
+          delay(fd).
+          maxTries(tries).
+          build.get
+
+  val circuitBreakerConf: Gen[CircuitBreakerConfiguration] = for {
+    fr <- failureRate
+    tios <- delay
+    rfr <- failureRate
+    mrto <- Gen.choose(1,Int.MaxValue)
+    mrtr <- Gen.choose(1,Int.MaxValue)
+  } yield CircuitBreakerConfiguration.conf.
+          failureRate(fr).
+          timeInOpenState(tios).
+          reopeningFailureRate(rfr).
+          minRequestsToOpen(mrto).
+          minRequestsToReopen(mrtr).
+          build.get
+
+}

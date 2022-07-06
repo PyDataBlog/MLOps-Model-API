@@ -1,0 +1,63 @@
+#!/usr/bin/env python
+
+import csv
+import json
+import sys
+
+import click
+
+
+def score(company, sexbiases):
+    """
+    Given a company record with board of directors and executive names,
+    return our guess of the % of governance that is male.
+
+    Since names are not always unambiguous determinants of sex, we also
+    return an error bound, with 0.0 being perfect and 1.0 being possibly 100%
+    wrong.
+    """
+    men = 0
+    error = 0.0
+
+    governors = company['board'] + company['executives']
+    
+    # Get all governor names, de-duping since board/exec team may overlap
+    names = set([governor.get('name', '') for governor in governors])
+    
+    for name in names:
+        first_name = name.split(' ')[0].strip().title()
+        bias = sexbiases.get(first_name, 0.0)  # Assume male if not known, with maximal error bound
+        if bias <= 0.0:
+            men += 1
+        error += 1.0 - abs(bias)
+                
+    count = len(names)
+    return (men/count, error/count)
+    
+
+@click.command()
+@click.option('--companies', type=click.File(mode='rt'), required=True, help="A companies data file, as created by symbol-to-company-details.")
+@click.option('--sexbiases', type=click.File(mode='rt'), required=True, help="A sex bias CSV datafile, as in first_name_sex_bias.csv")
+def corpscore(companies, sexbiases):
+    sexbias_reader = csv.reader(sexbiases)
+    sexbiases = dict([item[0], float(item[1])] for item in sexbias_reader)
+    
+    fieldnames = ['symbol', 'url', 'percent_men', 'error', 'description']
+    writer = csv.DictWriter(sys.stdout, fieldnames=fieldnames)
+    writer.writeheader()
+    
+    for company_json in companies:
+        company = json.loads(company_json)
+        percent_men, error = score(company, sexbiases)
+        writer.writerow({
+            'symbol': company['symbol'],
+            'url': company.get('url'),
+            'percent_men': percent_men,
+            'error': error,
+            'description': company.get('description'),
+        })
+        sys.stdout.flush()
+        
+
+if __name__ == '__main__':
+    corpscore()

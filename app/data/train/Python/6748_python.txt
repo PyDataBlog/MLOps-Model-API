@@ -1,0 +1,62 @@
+import sys
+
+from . import (
+    utils, env, defs, context, layers, parser, preprocessor, loader, analyzer,
+    generator)
+
+
+LAYERS = (
+    (parser.Parser, "parse"),
+    (preprocessor.Preprocessor, "transform_ast"),
+    (loader.Loader, "expand_ast"),
+    (analyzer.Analyzer, "expand_ast"),
+    (generator.Generator, "expand_ast")
+)
+
+
+def _get_context_args_from_settings(string, settings):
+    return {
+        "main_file_hash": utils.get_string_hash(string),
+        "main_file_name": settings["main_file_name"],
+        "module_paths": settings["module_paths"],
+        "loaded_modules": settings["loaded_modules"],
+        "test_mode_on": settings["test_mode_on"],
+        "env": env.Env()
+    }
+
+
+def _update_context_args():
+    return {**context.modified_context_args(), **{"env": env.Env()}}
+
+
+def compile_string(string, **settings):
+    context_args = _get_context_args_from_settings(string, settings)
+    current_ast = string
+    for layer_cls, method_name in LAYERS:
+        if settings["stop_before"] == layer_cls:
+            return current_ast
+        with context.new_context(**context_args):
+            layer = layer_cls()
+            if method_name == "parse":
+                current_ast = layer.parse(current_ast)
+            else:
+                new_ast = getattr(layers, method_name)(
+                    current_ast, registry=layer.get_registry())
+                if new_ast is not None:
+                    current_ast = list(new_ast)
+        if settings["stop_after"] == layer_cls:
+            return current_ast
+        context_args = _update_context_args()
+    return "\n".join(current_ast)
+    #return current_ast
+
+
+def compile_file(in_file, **settings):
+    result = compile_string(
+        utils.read_file(in_file),
+        main_file_name=in_file.split("/")[-1].split(".")[0], **settings)
+    if settings["print_ast"]:
+        for node in result:
+            print(node)
+        sys.exit(0)
+    return result

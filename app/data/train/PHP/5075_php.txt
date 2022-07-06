@@ -1,0 +1,383 @@
+<?php 
+
+
+class Remisiones_model
+{
+	//status de las remisiones
+	protected $statusRemisionPorAutorizar = 2;
+	protected $statusRemisionCancelada = 3;
+	protected $statusRemisionRechazada = 4;
+	protected $statusRemisionAplicada = 5;
+
+	function aceptaRemision($remisionID,$comentarios,$contactoID,$link)
+	{
+		//cambiamos el status de la remision
+		$s = "UPDATE t_remision SET remision_status_id = $this->statusRemisionAplicada WHERE remision_id = '$remisionID'";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+
+		//insertamos en el log el cambio de status de la remision
+		$this->insertaRemisionLog($this->statusRemisionAplicada,$contactoID,$remisionID,$link);
+
+		//insertamos el comentario de la remision
+		$s2 = "INSERT INTO t_remision_comentario(contacto_id, remision_comentario_comm, remision_id, remision_comentario_titulo, remision_comentario_fecha) VALUES($contactoID,
+		'$comentarios', $remisionID, 'Remision Aceptada', NOW())";
+		$q2 = mysqli_query($link,$s2) or die (mysqli_error($link));
+
+		$comentarioID = mysqli_insert_id($link);
+
+		$s3 = "SELECT remision_comentario_fecha AS fechaComentario FROM t_remision_comentario WHERE remision_comentario_id = $comentarioID";
+		$q3 = mysqli_query($link,$s3) or die (mysqli_error($link));
+		$r3 = mysqli_fetch_assoc($q3);
+		//pendiente incorporar transacciones
+		return $r3["fechaComentario"];
+
+	}
+
+	function getComentariosRemision($remisionID,$link)
+	{
+		$s = "
+			SELECT
+			(IF(ISNULL(crem.contacto_id),(SELECT CONCAT(usuario_nombre,' ',usuario_apellido) FROM t_usuario WHERE usuario_id = crem.usuario_id), (SELECT CONCAT(contacto_nombre,' ',contacto_apellido) FROM t_contacto WHERE contacto_id = crem.contacto_id))) AS nombreUsuario, crem.remision_comentario_titulo AS comentarioTitulo, crem.remision_comentario_fecha AS comentarioFecha, crem.remision_comentario_comm AS comentarioRemision
+			FROM
+			t_remision_comentario crem
+			WHERE crem.remision_id = $remisionID
+			ORDER BY crem.remision_comentario_id DESC
+		";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+
+		$rows = mysqli_num_rows($q);
+
+        if ($rows > 0) {
+
+        	while ($r = mysqli_fetch_assoc($q)) {
+        		
+        		$resultado[] = $r;
+
+        	}
+
+        	return $resultado;
+        	
+        }else{
+
+        	return false;
+
+        }
+
+	}
+
+	function getInfoRemision($remisionHash,$link)
+    {
+        $s = "
+        	SELECT
+        	rem.remision_id AS remisionID,
+        	rstat.remision_status_nombre AS remisionStatus,
+        	cli.cliente_razon AS cliente,
+        	rem.remision_correos AS correosContacto,
+        	rem.remision_planta AS asignadoPlanta,
+        	rem.remision_ubicacion AS asignadoUbicacion,
+        	asig.asignado_ccosto AS asignadoCentroCosto,
+        	rem.remision_fecha_alta AS remisionFecha,
+        	contipo.contrato_tipo_nombre AS tipoContrato,
+        	rem.remision_subtotal AS remisionSubtotal,
+        	rem.remision_iva AS remisionIva,
+        	rem.remision_total AS remisionTotal,
+        	rem.remision_folio AS remisionFolio,
+        	asig.asignado_costo AS precioUnitario,
+        	asig.asignado_id AS asignadoID,
+        	con.contrato_numero_proveedor AS numeroProveedor,
+        	con.contrato_numero AS numeroContrato,
+        	con.contrato_numero_pedido AS numeroPedido,
+        	rem.remision_subtotal_fijo AS subtotalFijo
+        	FROM
+        	t_remision rem
+        	INNER JOIN t_remision_status rstat ON rem.remision_status_id = rstat.remision_status_id
+        	INNER JOIN t_asignado asig ON rem.asignado_id = asig.asignado_id
+        	INNER JOIN t_contrato con ON con.contrato_id = asig.contrato_id
+        	INNER JOIN t_cliente cli ON asig.cliente_id = cli.cliente_id
+        	INNER JOIN t_contrato_tipo contipo ON contipo.contrato_tipo_id = asig.asignado_tipo_contrato
+        	WHERE
+        	rem.remision_encripta = '$remisionHash'
+        ";
+        $q = mysqli_query($link,$s) or die (mysqli_error($link));
+        $r = mysqli_fetch_assoc($q);
+
+        $resultado = mysqli_num_rows($q);
+
+        if ($resultado > 0) {
+
+        	return $r;
+        	
+        }else{
+
+        	return false;
+
+        }
+
+        
+    }
+
+    function getInfoContactoAsignado($contactoID,$numeroCorreo,$link)
+    {
+		$correoSeleccionado = "contacto_correo".$numeroCorreo;
+		$s = "
+			SELECT
+			CONCAT(contacto_nombre,' ',contacto_apellido) AS contacto_nombre, $correoSeleccionado AS correoContacto, contacto_tel1 AS contactoTel1
+			FROM
+			t_contacto
+			WHERE contacto_id = $contactoID
+		";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+		$r = mysqli_fetch_assoc($q);
+
+		return $r;
+    }
+ 
+    function getPeriodo($remisionID,$link)
+	{
+		//obtener la fecha de la remision
+		$s = "
+			SELECT 
+			DATE(rem.remision_fecha_alta) AS remisionFecha, 
+			rem.asignado_id AS asignadoID,
+			asig.asignado_dia_corte AS diaCorte,
+			ctasig.asignado_corte_tipo_nombre AS tipoCorte
+			FROM 
+			t_remision rem			
+			INNER JOIN t_asignado asig ON asig.asignado_id = rem.asignado_id
+			INNER JOIN t_asignado_corte_tipo ctasig ON ctasig.asignado_corte_tipo_id = asig.asignado_corte_tipo_id
+			WHERE rem.remision_id = $remisionID
+		";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+		$r = mysqli_fetch_assoc($q);
+
+		$resultado["fechaActual"] = $r["remisionFecha"];
+
+		//ahora obtenemos la fecha del periodo anterior, buscando la remision anterior que corresponda al mismo asignado		
+		$s2 = "
+			SELECT 
+			DATE(remision_fecha_alta) AS remisionFecha 
+			FROM 
+			t_remision 
+			WHERE asignado_id = $r[asignadoID] 
+			AND DATE(remision_fecha_alta) < '$r[remisionFecha]' 
+			AND remision_id NOT IN($remisionID) 
+			AND (remision_status_id = 2 OR remision_status_id = 5) 
+			ORDER BY remision_id DESC 
+			LIMIT 1
+		";
+		$q2 = mysqli_query($link,$s2) or die (mysqli_error($link));
+		//si la consulta arrojo un resultado, se tomara la fecha de la remision anterior
+		if (mysqli_num_rows($q2) > 0) {
+
+			if ($r["tipoCorte"] == "Dia de Corte") {
+				
+				//descomponemos la fecha para obtener el mes de la remision actual, y envez de poner el dia actial ponemos el dia de corte
+				$fechaArray = explode("-",$resultado["fechaActual"]);
+				$resultado["fechaActual"] = $fechaArray[0]."-".$fechaArray[1]."-".$r["diaCorte"];
+
+				//calculamos la fecha anterior, restando un mes al mes de la fecha actual
+				$mesAnterior = $fechaArray[1] - 1;
+
+				if ($mesAnterior == 0) {
+
+					$mesAnterior = "12";
+
+				}elseif($mesAnterior > 0 && $mesAnterior < 10){
+
+					$mesAnterior = "0$mesAnterior";
+
+				}
+
+				$diaFechaAnterior = $r["diaCorte"] + 1;
+				$resultado["fechaAnterior"]	= $fechaArray[0]."-".$mesAnterior."-".$diaFechaAnterior;
+
+			}else{
+
+				//este es corte por mes completo
+				//descomponemos la fecha para obtener el mes de la remision actual, y envez de poner el dia actual ponemos el dia de corte
+				$fechaArray = explode("-",$resultado["fechaActual"]);
+				$days = date("t");
+				$resultado["fechaActual"] = $fechaArray[0]."-".$fechaArray[1]."-$days";			
+
+				$resultado["fechaAnterior"] = $fechaArray[0]."-".$fechaArray[1]."-01";
+
+			}
+			
+			
+
+		}else{
+
+			//si la consulta no arrojo un resultado, se toma la fecha de inicio de operacion de la asignacion de equipo			
+			$s3 = "SELECT DATE(asignado_inicio_operacion) AS asignadoFecha, asignado_primera_remision_completa AS periodoCompleto FROM t_asignado WHERE asignado_id = $r[asignadoID]";
+			$q3 = mysqli_query($link,$s3) or die (mysqli_error($link));
+			$infoAsignado = mysqli_fetch_assoc($q3);
+
+			if ($infoAsignado["periodoCompleto"] == 1) {
+
+				if ($r["tipoCorte"] == "Dia de Corte") {
+
+					//descomponemos la fecha para obtener el mes de la remision actual, y envez de poner el dia actial ponemos el dia de corte
+					$fechaArray = explode("-",$resultado["fechaActual"]);
+					$resultado["fechaActual"] = $fechaArray[0]."-".$fechaArray[1]."-".$r["diaCorte"];
+
+					//calculamos la fecha anterior, restando un mes al mes de la fecha actual
+					$mesAnterior = $fechaArray[1] - 1;
+					if ($mesAnterior == 0) {
+
+						$mesAnterior = "12";
+
+					}elseif($mesAnterior > 0 && $mesAnterior < 10){
+
+						$mesAnterior = "0$mesAnterior";
+
+					}
+
+					$diaFechaAnterior = $r["diaCorte"] + 1;
+					$resultado["fechaAnterior"]	= $fechaArray[0]."-".$mesAnterior."-".$diaFechaAnterior;
+
+				}else{
+
+					//este es corte por mes completo
+					//descomponemos la fecha para obtener el mes de la remision actual, y envez de poner el dia actual ponemos el dia de corte
+					$fechaArray = explode("-",$resultado["fechaActual"]);
+					$days = date("t");
+					$resultado["fechaActual"] = $fechaArray[0]."-".$fechaArray[1]."-$days";			
+
+					$resultado["fechaAnterior"] = $fechaArray[0]."-".$fechaArray[1]."-01";
+
+				}
+
+			}else{
+
+				$resultado["fechaAnterior"] = $infoAsignado["asignadoFecha"];
+
+			}	
+
+		}
+
+		return $resultado;
+	}
+
+	function getPartidasRemision($remisionID,$link)
+	{
+		$s = "
+			SELECT
+			pro.producto_serie AS productoSerie, CONCAT(ptip.producto_tipo_nombre,' ',mar.producto_marca_nombre,' ',mode.producto_modelo_nombre) AS productoDescripcion, prem.partida_remision_contador_ini AS contadorIni, prem.partida_remision_contador_fin AS contadorFin, prem.partida_remision_tipo AS tipoImpresion, prem.partida_remision_id AS partidaID, prem.remision_id AS remisionID, prem.partida_remision_total AS partidaImporte, (prem.partida_remision_contador_fin - prem.partida_remision_contador_ini) consumo, prem.asignado_soporte_leyenda AS soporteLeyenda, mode.producto_modelo_nombre AS productoModelo, (SELECT SUM(partida_remision_contador_fin) FROM t_partida_remision WHERE producto_id = pro.producto_id AND remision_id = $remisionID) AS contadorTotalEquipo
+			FROM
+			t_partida_remision prem
+			INNER JOIN t_producto pro ON pro.producto_id = prem.producto_id
+			INNER JOIN t_producto_modelo mode ON mode.producto_modelo_id = pro.producto_modelo_id
+			INNER JOIN t_producto_marca mar ON mar.producto_marca_id = mode.producto_marca_id
+			INNER JOIN t_producto_tipo ptip ON ptip.producto_tipo_id = pro.producto_tipo_id
+			WHERE prem.remision_id = $remisionID
+		";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+		while ($r = mysqli_fetch_assoc($q)) {
+			$resultado[] = $r;
+		}
+
+		return $resultado;
+	}
+
+	function getPartidasExcedente($remisionID,$link)
+	{
+		$s = "
+			SELECT
+			pro.producto_serie AS productoSerie, CONCAT(ptip.producto_tipo_nombre,' ',mar.producto_marca_nombre,' ',mode.producto_modelo_nombre) AS productoDescripcion, prem.partida_remision_contador_ini AS contadorIni, prem.partida_remision_contador_fin AS contadorFin, prem.partida_remision_tipo AS tipoImpresion, prem.partida_remision_id AS partidaID, prem.remision_id AS remisionID, prem.partida_remision_total AS partidaImporte, (prem.partida_remision_contador_fin - prem.partida_remision_contador_ini) consumo, prem.asignado_soporte_leyenda AS soporteLeyenda, (premex.partida_remision_excedente_cantidad * premex.partida_remision_excedente_precio) AS importeExcedente, premex.partida_remision_excedente_cantidad AS cantidadExcedente, premex.partida_remision_excedente_precio AS precioExcedente
+			FROM
+			t_partida_remision_excedente premex
+			INNER JOIN t_partida_remision prem ON prem.partida_remision_id = premex.partida_remision_id
+			INNER JOIN t_producto pro ON pro.producto_id = prem.producto_id
+			INNER JOIN t_producto_modelo mode ON mode.producto_modelo_id = pro.producto_modelo_id
+			INNER JOIN t_producto_marca mar ON mar.producto_marca_id = mode.producto_marca_id
+			INNER JOIN t_producto_tipo ptip ON ptip.producto_tipo_id = pro.producto_tipo_id
+			WHERE premex.remision_id = $remisionID
+		";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+
+		if (mysqli_num_rows($q) > 0) {
+
+			while ($r = mysqli_fetch_assoc($q)) {
+				
+				$resultado[] = $r;
+
+			}
+
+			return $resultado;
+
+		}else{
+
+			return false;
+
+		}
+
+	}
+
+	function historialConsumo($asignadoID,$link)
+	{
+		$s = "
+			SELECT
+			prem.partida_remision_contador_ini AS contadorIni, prem.partida_remision_contador_fin AS contadorFin, (prem.partida_remision_contador_fin - prem.partida_remision_contador_ini) consumo, prem.partida_remision_tipo AS tipoImpresion, prem.partida_remision_total AS partidaImporte, DATE(rem.remision_fecha_alta) AS fechaRemision, rem.remision_id AS remisionID, pro.producto_serie AS productoSerie, prem.asignado_soporte_leyenda AS soporteLeyenda
+			FROM
+			t_partida_remision prem
+			INNER JOIN t_remision rem ON rem.remision_id = prem.remision_id
+			INNER JOIN t_producto pro ON pro.producto_id = prem.producto_id
+			WHERE rem.asignado_id = $asignadoID AND (rem.remision_status_id = 2 OR rem.remision_status_id = 5)
+		";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+		while ($r = mysqli_fetch_assoc($q)) {
+			$resultado[] = $r;
+		}
+
+		return $resultado;
+	}
+
+	function insertarComentarioRemision($campos,$link)
+	{
+		$s = "INSERT INTO t_remision_comentario(remision_comentario_comm, remision_id, remision_comentario_fecha, remision_comentario_titulo, contacto_id) VALUES('$campos[comentarios]',$campos[remisionID],NOW(),'$campos[asunto]',$campos[contactoID])";
+		if(mysqli_query($link,$s)){
+
+			return true;
+
+		}else{
+
+			return false;
+
+		}
+	}
+
+	function insertaRemisionLog($status,$contactoID,$remisionID,$link)
+	{
+		$s = "INSERT INTO t_remision_log(contacto_id, remision_status_id, remision_id, remision_log_fecha) VALUES($contactoID,$status,$remisionID,NOW())";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+		//devolvemos el id de log insertado
+		return mysqli_insert_id($link);
+	}
+
+	function rechazaRemision($remisionID,$comentarios,$contactoID,$link)
+	{
+		//cambiamos el status de la remision
+		$s = "UPDATE t_remision SET remision_status_id = $this->statusRemisionRechazada WHERE remision_id = '$remisionID'";
+		$q = mysqli_query($link,$s) or die (mysqli_error($link));
+
+		//insertamos en el log el cambio de status de la remision
+		$this->insertaRemisionLog($this->statusRemisionRechazada,$contactoID,$remisionID,$link);
+
+		//insertamos el comentario de la remision
+		$s2 = "INSERT INTO t_remision_comentario(contacto_id, remision_comentario_comm, remision_id, remision_comentario_titulo, remision_comentario_fecha) VALUES($contactoID,
+		'$comentarios', $remisionID, 'Remision Rechazada', NOW())";
+		$q2 = mysqli_query($link,$s2) or die (mysqli_error($link));
+
+		$comentarioID = mysqli_insert_id($link);
+
+		$s3 = "SELECT remision_comentario_fecha AS fechaComentario FROM t_remision_comentario WHERE remision_comentario_id = $comentarioID";
+		$q3 = mysqli_query($link,$s3) or die (mysqli_error($link));
+		$r3 = mysqli_fetch_assoc($q3);
+		//pendiente incorporar transacciones
+		return $r3["fechaComentario"];
+	}
+}
+
+
+
+ ?>

@@ -1,0 +1,1 @@
+cmd_arch/powerpc/boot/simpleImage.virtex440-simple-partial-1 := /bin/sh /tools/dev/repos/linux-2.6-xlnx/arch/powerpc/boot/wrapper -c -o arch/powerpc/boot/simpleImage.virtex440-simple-partial-1 -p simpleboot-virtex440-simple-partial-1 -C "ppc_4xx-"  -d arch/powerpc/boot/virtex440-simple-partial-1.dtb vmlinux

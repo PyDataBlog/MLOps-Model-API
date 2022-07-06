@@ -1,0 +1,322 @@
+require 'net/ftp'
+
+class QueueWorker
+  include Sidekiq::Worker
+
+  def perform(plex)
+    rows = SysPlex.where(plex: plex)
+    if rows.count==1 then
+      row = rows.first
+      while row["status"]!=1
+        sleep(60)
+      end
+    end
+    # Do something
+    @plex = plex
+    @queue = ('A'..'Z').to_a
+    @mask = Array.new(26)
+    @mask.fill(0)
+    @mutex = Mutex.new  
+    # 恢复现场
+    rows = SysQueue.where(plex: plex, state: 1)
+    num = rows.count
+    if num>0 then
+      rows.each do |row|
+        pos = row['sequence'].to_i
+        @mutex.synchronize do
+          @mask[pos] = 1
+        end
+      end
+    end
+    loop do
+      clear
+      sleep(2)
+      record_s = SysQueue.where(plex: plex, state: 0)
+      if record_s.count>0
+        send_jcl(record_s)
+      end
+      sleep(2)
+      record_r = SysQueue.where(plex: plex, state: 1)
+      if record_r.count>0
+        receive(record_r)
+      end
+      break if record_s.count==0 and record_r.count==0  
+      sleep(2)
+    end 
+  end
+
+  # 提交或取回失败5次，状态置为3，让出掩码位置
+  def clear
+    rows = SysQueue.where("plex=? AND times>=?", @plex, 5)
+    if rows.count>0 then
+      rows.each do |row|
+        row.update_columns(state: 3)
+        pos = row['sequence'].to_i
+        @mutex.synchronize do
+          @mask[pos] = 0
+        end
+      end
+    end
+  end
+
+  # 发送JCL
+  def send_jcl(waitting_queue)
+    # puts "%#{@system.ljust(6)}% send()"
+    zosuser = get_zosuser(@plex)
+    if !zosuser
+      puts "%#{@plex.ljust(6)}% #{DateTime.now.strftime('%Y-%m-%d %H:%M:%S')} #{@plex} ini file not found"
+      return false
+    end
+
+    jcl_params = Array.new
+    a_mask = Array.new
+    @mask.each do |aa|
+      a_mask << aa
+    end
+
+    waitting_queue.each do |row|
+      for j in 0..25 do
+        if a_mask[j]==0 then
+          a_mask[j] = 1
+          h = Hash.new
+          h.store('md5',row['md5'])
+          h.store('jcl',row['jcl'].upcase)
+          h.store('jobname',"#{zosuser["account"]}#{@queue[j]}")
+          h.store('pos',j)
+          jcl_params << h
+          break
+        end
+      end
+    end
+    ftp_send(zosuser,jcl_params) 
+  end
+
+  def get_zosuser(plex)
+    rows = SysPlex.where(plex: plex)
+    if rows.count==1 then
+      row = rows.first
+      zosuser = Hash.new
+      zosuser.store("ip", row['ip'])
+      zosuser.store("port", row['port'])
+      zosuser.store("account", row['account'])
+      zosuser.store("password", row['password'])
+      return zosuser
+    else
+      return false
+    end
+  end
+
+  def ftp_send(zosuser,jcl_params)
+    # puts "%#{@system.ljust(6)}% ftp_send()"
+    rc = true
+    current_md5 = ''
+    ftp_login = false
+    begin
+      ftp = Net::FTP.new()
+      ftp.binary = false
+      ftp.connect(zosuser["ip"],zosuser["port"])
+      ftp.login(zosuser["account"],zosuser["password"])
+      ftp_login = true
+      ftp.sendcmd('SITE FILETYPE=JES')
+      # puts ftp.last_response
+      jcl_params.each do |h|
+
+        current_md5 = h["md5"]
+
+        if File.exist?(h["md5"]) then
+          File.delete(h["md5"])
+        end
+        f_jcl = File.new(h["md5"],"w")
+        s_jcl = h["jcl"].gsub(/JOBNAME/,h["jobname"])
+        f_jcl.puts(s_jcl)
+        f_jcl.close
+        ftp.puttextfile(h["md5"])
+
+        if /(JOB\d{5})/.match(ftp.last_response) || /(JO\d{6})/.match(ftp.last_response) || /(J\d{7})/.match(ftp.last_response) then
+          jobid = $1
+          record1 = SysJeslog.where(md5: h["md5"]).first
+          record1.update_columns(time1: Time.now.strftime('%Y-%m-%d %H:%M:%S'))
+          record2 = SysQueue.where(md5: h["md5"]).first
+          record2.update_columns(state: 1, jobid: jobid, sequence: h["pos"])
+          @mutex.synchronize do
+            @mask[h["pos"]] = 1
+          end
+        end
+
+      end
+      ftp.close
+    rescue => err
+      ftp_fail(current_md5)
+      puts "%#{@plex.ljust(6)}% #{DateTime.now.strftime('%Y-%m-%d %H:%M:%S')} |error| #{err.to_s}"
+      if ftp_login
+        ftp.close 
+      end
+      rc = false
+    end
+    return rc
+  end
+
+  def ftp_fail(s_md5)   
+    rows = SysQueue.where(md5: s_md5)
+    if rows.count==1 then
+      record = rows.first
+      times = record['times'].to_i
+      record.update_columns(times: times+1)
+    end
+  end
+
+  def receive(endding_queue)
+    # puts "%#{@system.ljust(6)}% receive()"
+    zosuser = get_zosuser(@plex)
+    if !zosuser
+      puts "%#{@plex.ljust(6)}% #{DateTime.now.strftime('%Y-%m-%d %H:%M:%S')} #{@plex} ini file not found"
+      return false
+    end
+
+    jcl_params = Array.new
+    a_mask = Array.new
+    @mask.each do |aa|
+      a_mask << aa
+    end
+
+    endding_queue.each do |row|
+      for j in 0..25 do
+        if a_mask[j]==1 then
+          a_mask[j] = 0
+          h = Hash.new
+          h.store('md5',row['md5'])
+          h.store('jobid',row['jobid'])
+          h.store('pos',row['sequence'].to_i)
+          jcl_params << h
+          break
+        end
+      end
+    end
+    ftp_receive(zosuser,jcl_params)
+  end
+
+  def ftp_receive(zosuser,jcl_params)
+    # puts "%#{@system.ljust(6)}% ftp_receive()"
+    # p a_jobid
+    rc = false
+    current_md5 = ''
+    ftp_login = false
+    begin
+      ftp = Net::FTP.new()
+      ftp.binary = false
+      ftp.connect(zosuser["ip"],zosuser["port"])
+      ftp.login(zosuser["account"],zosuser["password"])
+      ftp_login = true
+      ftp.sendcmd('SITE FILETYPE=JES')
+      lines = ftp.dir()
+
+      jcl_params.each do |h|
+        current_md5 = h["md5"]
+        lines.each do |line|
+          line = line.upcase
+          if line.include?(h["jobid"]) && line.include?("OUTPUT") && line.include?("SPOOL FILES") then
+            puts "%#{@plex.ljust(6)}% #{DateTime.now.strftime('%Y-%m-%d %H:%M:%S')} #{@plex} get #{h["jobid"]}"
+            if File.exist?("/home/klys/projects/itsm/public/jesout/#{h["md5"]}") then
+              File.delete("/home/klys/projects/itsm/public/jesout/#{h["md5"]}")
+            end
+            ftp.gettextfile("#{h["jobid"]}","/home/klys/projects/itsm/public/jesout/#{h["md5"]}")
+            file_time = Time.now
+            ftp.gettextfile("#{h["jobid"]}","/home/klys/projects/itsm/public/jesout/#{h["md5"]}-#{file_time.strftime('%Y-%m-%d-%H-%M-%S')}")
+            maxrc = ftp_save(h["md5"],zosuser["account"],file_time)
+            record = SysQueue.where(md5: h["md5"]).first
+            if maxrc=='0' || maxrc=='4' then
+              record.update_columns(state: 4)
+            else
+              record.update_columns(state: 2)
+            end
+            @mutex.synchronize do
+              @mask[h["pos"]] = 0  
+            end
+          end
+        end
+      end
+      ftp.close
+    rescue => err
+      ftp_fail(current_md5)
+      puts "%#{@plex.ljust(6)}% #{DateTime.now.strftime('%Y-%m-%d %H:%M:%S')} |error| #{@plex} #{err.to_s}"
+      if ftp_login
+        ftp.close 
+      end
+      rc = false
+    end
+    return rc
+  end
+
+  def ftp_save(s_md5,user,time2)
+    # puts "%#{@system.ljust(6)}% ftp_save()"
+    file = File.open("/home/klys/projects/itsm/public/jesout/#{s_md5}")
+    maxrc = get_maxrc(file,user)
+    if maxrc==false then
+      maxrc = "NULL"
+    end
+    lines = File.read("/home/klys/projects/itsm/public/jesout/#{s_md5}")
+    # mysql text max length 65535
+    if lines.length>35000
+      lines = lines[0..34999]
+    end
+    lines = lines.unpack("C*").pack("U*")
+    lines.gsub!(/\'/,"''")    
+    lines.gsub!(/\0/," ")   
+    record = SysJeslog.where(md5: s_md5).last
+    record.update_columns(detail: lines, time2: time2.strftime('%Y-%m-%d %H:%M:%S'), maxrc: maxrc)
+    file.close
+    File.delete(s_md5)
+    return maxrc
+  end
+
+  def get_maxrc(lines,user)
+    rc = false
+    maxrc = ''
+    flag = 0
+    a_rc = Array.new  
+    pos1 = 0
+    lines.each do |line|
+      n = line.index("-STEPNAME PROCSTEP")
+      if n!=nil then
+        pos1 = n
+      end
+      if flag>0 then
+        kk = pos1 + 10
+        if line[pos1-2..pos1]=='  -' then 
+          a = pos1+18
+          b = pos1+23
+          a_rc << line[a..b].strip
+          flag = flag + 1
+        end
+      else
+        flag = 0
+      end
+      if n!=nil then
+        flag = 1
+      end
+      if /#{user}. - ENDED/.match(line) then
+        break
+      end
+    end
+    if a_rc.length>0 then
+      if a_rc.length==1 && a_rc.include?("FLUSH") then
+        maxrc = "JCL ERROR"
+      else
+        maxrc = '0'
+        a_rc.each do |item|
+          if /[^0-9|FLUSH]/.match(item) then
+            maxrc = "ABEND_#{item}"
+            break
+          elsif item.to_i>maxrc.to_i then
+            maxrc = item.to_i.to_s
+          end
+        end
+      end
+      rc = maxrc
+    else
+      rc = false
+    end
+    return rc
+  end
+
+end

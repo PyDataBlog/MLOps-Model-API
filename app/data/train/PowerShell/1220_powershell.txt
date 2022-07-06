@@ -1,0 +1,241 @@
+<#
+.SYNOPSIS
+This PowerShell script module file provides a step function to be used in a
+series of executable PowerShell steps that is intended to be included in all
+main PowerShell scripts that reside within the automation framework.
+
+.DESCRIPTION
+Note: This script module is NOT intended to be executed independent of another
+PowerShell script referencing and using it.
+#>
+
+function Install-JavaKeyTrustStore {
+    <#
+    .SYNOPSIS
+    Installs a Java keystore and truststore and imports any certificates
+    into them. In addition, certifcates are added to the default Java
+    keystore.
+
+    .DESCRIPTION
+    N/A
+
+    .EXAMPLE
+    There are no parameters for this function.
+ 
+    Install-JavaKeyTrustStore
+    #>
+
+    # read context file into hashtable
+    $context = Read-Context
+
+    # read properties from context
+    $javaCertKeyStore = $context.Get_Item("javaCertKeyStore")
+    $javaCertKeyStoreAlgorithm = $context.Get_Item("javaCertKeyStoreAlgorithm")
+    $javaCertKeyStoreAlias = $context.Get_Item("javaCertKeyStoreAlias")
+    $javaCertKeyStoreExpiration = $context.Get_Item("javaCertKeyStoreExpiration")
+    $javaCertKeyStoreKeySize = $context.Get_Item("javaCertKeyStoreKeySize")
+    $javaCertKeyStoreOrgCity = $context.Get_Item("javaCertKeyStoreOrgCity")
+    $javaCertKeyStoreOrgCountry = $context.Get_Item("javaCertKeyStoreOrgCountry")
+    $javaCertKeyStoreOrgDomain = $context.Get_Item("javaCertKeyStoreOrgDomain")
+    $javaCertKeyStoreOrgName = $context.Get_Item("javaCertKeyStoreOrgName")
+    $javaCertKeyStoreOrgState = $context.Get_Item("javaCertKeyStoreOrgState")
+    $javaCertKeyStoreOrgUnit = $context.Get_Item("javaCertKeyStoreOrgUnit")
+    $javaCertsImportIntoKeyStore = $context.Get_Item("javaCertsImportIntoKeyStore")
+    $javaCertTrustStore = $context.Get_Item("javaCertTrustStore")
+    $javaKeyStore = $context.Get_Item("javaKeyStore")
+    $javaKeyToolExec = $context.Get_Item("javaKeyToolExec")
+    $javaVersion = $context.Get_Item("javaVersion")
+    $keystoreHome = $context.Get_Item("keystoreHome")
+
+    # only install Java keystore and truststore if Java is installed
+    if ($Global:DevTools.Java.IsInstalled -eq $true) {
+
+        # ensure Java Keytool exists
+        if (Test-FileExists -filePath $javaKeyToolExec) {
+
+            # prompt for Java keystore password
+            $certKeyStorePassword = Read-Host "Enter required Java keystore password"
+
+            # validate Java keystore password
+            if (-Not ($certKeyStorePassword)) {
+                Write-Exception -Message "Java keystore password was not entered!!!" -ErrorAction Stop
+            }
+
+            # prompt for Java truststore password
+            $certTrustStorePassword = Read-Host "Enter required Java truststore password"
+
+            # validate Java truststore password
+            if (-Not ($certTrustStorePassword)) {
+                Write-Exception -Message "Java truststore password was not entered!!!" -ErrorAction Stop
+            }
+
+            # create keystore home directory
+            New-Directory -dirPath $keystoreHome
+
+            # delete Java keystore, if it exists
+            Remove-File -filePath $javaCertKeyStore
+
+            # delete Java truststore, if it exists
+            Remove-File -filePath $javaCertTrustStore
+
+            # keytool process information
+            $process = $javaKeyToolExec
+            $args =  "-genkey "
+            $args += "-noprompt "
+            $args += "-keyalg $javaCertKeyStoreAlgorithm "
+            $args += "-alias $javaCertKeyStoreAlias "
+            $args += "-keystore `"$javaCertKeyStore`" "
+            $args += "-storepass $certKeyStorePassword "
+            $args += "-keypass $certKeyStorePassword "
+            $args += "-validity $javaCertKeyStoreExpiration "
+            $args += "-keysize $javaCertKeyStoreKeySize "
+            $args += "-dname `"CN=$javaCertKeyStoreOrgDomain, OU=$javaCertKeyStoreOrgUnit, O=$javaCertKeyStoreOrgName, L=$javaCertKeyStoreOrgCity, S=$javaCertKeyStoreOrgState, C=$javaCertKeyStoreOrgCountry`""
+
+            # create Java certificate keystore
+            Write-Info "Creating Java certificate keystore to '$javaCertKeyStore'..."
+            $exitCode = Invoke-Process -processPath $process `
+                                        -processArgs $args `
+                                        -outputToMask $certKeyStorePassword
+
+            # get list of certificates to import into Java keystore
+            $certs = $javaCertsImportIntoKeyStore -split ","
+
+            # ensure certificates are defined to import into Java Keystore
+            if ($certs) {
+
+                # install each certificate into Java keystore
+                foreach ($cert in $certs) {
+
+                    # get certificate information
+                    $certAlias = [System.IO.Path]::GetFileNameWithoutExtension($cert)
+
+                    # output certificate information
+                    Write-Info "Discovered certificate '$cert' with alias '$certAlias'"
+
+                    # ensure certificate file exists
+                    if (Test-FileExists -filePath $cert) {
+
+                        # keytool process information
+                        $process = $javaKeyToolExec
+                        $args =  "-delete "
+                        $args += "-alias $certAlias "
+                        $args += "-keystore `"$javaCertKeyStore`" "
+                        $args += "-storepass $certKeyStorePassword"
+
+                        # delete certificate from Java keystore, if it exists
+                        Write-Info "Deleting certificate '$cert' from Java keystore '$javaCertKeyStore'..."
+                        $exitCode = Invoke-Process `
+                                        -processPath $process `
+                                        -processArgs $args `
+                                        -outputToMask $certKeyStorePassword `
+                                        -ignoreErrorOutput $true
+
+                        Write-Success "Deleted certificate '$cert' from Java keystore '$javaCertKeyStore' successfully. Operation SUCCEEDED!!!"
+
+                        # keytool process information
+                        $process = $javaKeyToolExec
+                        $args =  "-import "
+                        $args += "-noprompt "
+                        $args += "-trustcacerts "
+                        $args += "-alias $certAlias "
+                        $args += "-file `"$cert`" "
+                        $args += "-keystore `"$javaCertKeyStore`" "
+                        $args += "-storepass $certKeyStorePassword "
+                        $args += "-keypass $certKeyStorePassword"
+
+                        # install certificate into Java keystore
+                        Write-Info "Installing certificate '$cert' into Java keystore '$javaCertKeyStore'..."
+                        $exitCode = Invoke-Process `
+                                        -processPath $process `
+                                        -processArgs $args `
+                                        -outputToMask $certKeyStorePassword `
+                                        -ignoreErrorOutput $true
+
+                        # keytool process information
+                        $process = $javaKeyToolExec
+                        $args =  "-delete "
+                        $args += "-alias $certAlias "
+                        $args += "-keystore `"$javaCertTrustStore`" "
+                        $args += "-storepass $certTrustStorePassword"
+
+                        # delete certificate from Java truststore, if it exists
+                        Write-Info "Deleting certificate '$cert' from Java truststore '$javaCertTrustStore'..."
+                        $exitCode = Invoke-Process `
+                                        -processPath $process `
+                                        -processArgs $args `
+                                        -outputToMask $certTrustStorePassword `
+                                        -ignoreErrorOutput $true
+
+                        Write-Success "Deleted certificate '$cert' from Java keystore '$javaCertTrustStore' successfully. Operation SUCCEEDED!!!"
+
+                        # keytool process information
+                        $process = $javaKeyToolExec
+                        $args =  "-import "
+                        $args += "-noprompt "
+                        $args += "-file $cert "
+                        $args += "-alias $certAlias "
+                        $args += "-keystore `"$javaCertTrustStore`" "
+                        $args += "-storepass $certTrustStorePassword "
+                        $args += "-keypass $certTrustStorePassword"
+
+                        # install certificate into Java truststore
+                        Write-Info "Installing certificate '$cert' into Java truststore '$javaCertTrustStore'..."
+                        $exitCode = Invoke-Process `
+                                        -processPath $process `
+                                        -processArgs $args `
+                                        -outputToMask $certTrustStorePassword `
+                                        -ignoreErrorOutput $true
+
+                        # keytool process information
+                        $process = $javaKeyToolExec
+                        $args =  "-delete "
+                        $args += "-alias $certAlias "
+                        $args += "-keystore `"$javaKeyStore`" "
+                        $args += "-storepass $certKeyStorePassword"
+
+                        # delete certificate from Java keystore, if it exists
+                        Write-Info "Deleting certificate '$cert' from Java keystore '$javaKeyStore'..."
+                        $exitCode = Invoke-Process `
+                                        -processPath $process `
+                                        -processArgs $args `
+                                        -outputToMask $certKeyStorePassword `
+                                        -ignoreErrorOutput $true
+
+                        Write-Success "Deleted certificate '$cert' from Java keystore '$javaKeyStore' successfully. Operation SUCCEEDED!!!"
+
+                        # keytool process information
+                        $process = $javaKeyToolExec
+                        $args =  "-import "
+                        $args += "-noprompt "
+                        $args += "-trustcacerts "
+                        $args += "-alias $certAlias "
+                        $args += "-file `"$cert`" "
+                        $args += "-keystore `"$javaKeyStore`" "
+                        $args += "-storepass $certKeyStorePassword "
+                        $args += "-keypass $certKeyStorePassword"
+
+                        # install certificate into Java keystore
+                        Write-Info "Installing certificate '$cert' into Java keystore '$javaKeyStore'..."
+                        $exitCode = Invoke-Process `
+                                        -processPath $process `
+                                        -processArgs $args `
+                                        -outputToMask $certKeyStorePassword `
+                                        -ignoreErrorOutput $true
+                    }
+                }
+
+                # validate process completed
+                if ($exitCode -ne 0) {
+
+                    Write-Exception -Message "Unable to create Java keystore, install certificates into Java keystore, and create Java truststore. Operation FAILED." -ErrorAction Stop
+                }
+                else {
+                    Write-Success "Java keystore created, certificates installed into Java keystore, and Java truststore created successfully. Operation SUCCEEDED!!!"
+                }
+            }
+        }
+    }
+    else {
+        Write-Info "Skipping installation. Java JDK ($(Get-VersionOrDefault -version $javaVersion)) is not installed."
+    }
+}

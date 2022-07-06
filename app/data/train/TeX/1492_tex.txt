@@ -1,0 +1,536 @@
+\documentclass[letterpaper]{article}
+\usepackage[centering,width=7.25in,height=9.75in,includefoot]{geometry}
+\usepackage[parfill]{parskip}
+\usepackage{amsmath,amssymb,array,theorem,graphicx}
+\usepackage{multicol,xcolor,shortvrb,fancyvrb}
+\usepackage[user,titleref]{zref}
+\usepackage{xspace}
+\usepackage[breaklinks,colorlinks]{hyperref}
+\hypersetup{
+  pdftitle={OpenPGP + GnuPG Tutorial and Reference Guide},
+%   pdfsubject={Further (short) Description of Document},
+  pdfauthor={Dean Serenevy},
+}
+\renewcommand{\title}[2][]{\begin{center}\sffamily\bfseries\Large #2\ifx\relax#1\else\\[1ex]\normalsize #1\fi\end{center}\vspace{1ex}}
+\let\epsilon\varepsilon\let\phi\varphi
+\makeatletter
+\def\section{\@startsection{section}{1}{\z@}{-2ex\@plus-.5ex\@minus-.2ex}{.001ex\@plus0ex\@minus.3ex}{\normalfont\Large\sffamily\bfseries}}
+\def\subsection{\@startsection{subsection}{2}{\z@}{-2ex\@plus-.5ex\@minus-.2ex}{.001ex\@plus0ex\@minus.3ex}{\normalfont\large\sffamily\bfseries}}
+\def\subsubsection{\@startsection{subsubsection}{3}{\z@}{-2ex\@plus-.5ex\@minus-.2ex}{-2ex\@plus0ex\@minus.3ex}{\normalfont\large\sffamily\bfseries}}
+\makeatother
+\def\tightitems{\setlength{\parskip}{0pt}}
+
+\def\TODO#1{\textsl{[[TODO: #1]]}}
+% \pagestyle{empty}
+\setlength{\columnsep}{4em}
+
+% COMMANDS:
+%----------
+% |              a ShortVerb
+% \sl#1          for meta-syntax in code blocks
+% \opt#1         for optional parameters
+% code           fancyvrb environment allowing \commands
+% \columnbreak   for breaking columns
+\def\opt#1{\textcolor[gray]{.5}{#1}}
+\def\sl#1{{\textrm{\textsl{#1}}}}
+\MakeShortVerb{\|}
+\renewcommand{\_}[1]{\ifmmode_{_{#1}}\else\underline{\phantom{n}}$\,$#1\fi}
+
+\DefineVerbatimEnvironment{code}{Verbatim}
+{gobble=2,baselinestretch=.8,commandchars=\\\{\}}
+
+% hkp://keys.gnupg.net
+\def\keyserver{pgp.mit.edu\xspace}
+\newcommand{\keyID}[1][key\_id]{\sl{#1}\xspace}
+
+\renewcommand{\thefootnote}{}
+\begin{document}
+
+\title[Version 0.85, Nov 2013 --- Dean Serenevy]
+{OpenPGP + GnuPG 1.4.10\\
+Tutorial and Reference Guide}
+
+% kgpg: +
+% gpa: +
+
+% http://www.gnupg.org/gph/en/manual.html#AEN526
+% http://wiki.debian.org/subkeys
+% http://keyring.debian.org/creating-key.html
+% http://ekaia.org/blog/2009/05/10/creating-new-gpgkey/
+% https://help.ubuntu.com/community/GnuPrivacyGuardHowto
+% http://pgp-tools.alioth.debian.org/
+% http://www.apache.org/dev/openpgp.html
+% http://www.apache.org/dev/openpgp.html#wot
+% http://www.elho.net/crypto/policy/
+% http://en.wikipedia.org/wiki/Pretty_Good_Privacy#Web_of_trust
+
+
+\tableofcontents
+
+\section{Overview}
+
+I have seen many quick ``getting started'' guides that completely skip over
+the web of trust management bits of managing a GnuPG database. I have also
+seen many high-level ``web of trust is great'' articles that bypass details
+of controlling that trust and technicalities of what commands to run. This
+tutorial is the result of my research into attempting to bring these two
+worlds together into a complete practical gpg tutorial following modern
+best-practices.
+
+\textbf{Assumptions:} You are somewhat comfortable using the linux command
+line (or can convert the commands I give to appropriate GUI clicks) and you
+have at least a vague understanding that gpg ``does something relating to
+verifying identities and signing and encrypting documents''.
+
+
+GnuPG is an implementation of the OpenPGP standard as defined by RFC 4880.
+Your OpenPGP keys are really pairs of keys, a \textsl{private key} and a
+\textsl{public key}. You use the private key to digitally sign files, and
+others use the public key to verify the signature. Or, others use the
+public key to encrypt something, and you use the private key to decrypt it.
+
+In practice it is best to use \textsl{subkey} pairs in your regular
+``daily'' life. Subkeys are normal keys, except they are bound to (signed
+by) a master key pair. By default, GnuPG creates a signing-only key pair as
+a master key, and an encryption-only subkey.
+
+\begin{description}
+\item[Master key] Identified on ``sec'' line by |gpg -K|, or ``pub'' line
+  by |gpg --list-keys|. You need to save this secret to secure offline
+  media only. It is used ONLY to:
+  \begin{itemize}\tightitems
+  \item sign someone else's key
+  \item create or revoke subkeys
+  \end{itemize}
+\item[Encrypting subkey] One is created automatically by gpg as initial
+  ``sub'' key; Used for encrypting things to be sent to you; This secret is
+  needed anywhere you will need to decrypt.
+  % \TODO{How do multiple encryption keys work? Is it useful? Will gpg encrypt for all valid subkeys?}
+\item[Signing subkey(s)] Use these keys to sign documents (email, software,
+  \dots). You may wish to have many such subkeys for different purposes or
+  computers (each independently revocable and each with potentially
+  different expirations).
+  % \TODO{What makes sense, one per workstation or one per project, or one
+  % for each or{\dots} or perhaps 1 signing subkey is sufficient?}
+\item[Monkeysphere subkey(s)] Perhaps you are not yet this paranoid, but
+  this is another example subkey use.
+\end{description}
+
+Each master key has a fingerprint which uniquely identifies the key.
+Collisions on this fingerprint represent a breakdown of the OpenPGP system.
+You will also see shorter 8 or 16 character ids (taken from the end of the
+fingerprint). These are displayed when listing keys and are convenient when
+using the gpg command line. However, collisions have ben seen in the wild
+in these shorter ids so they should not be used when scripting or verifying
+keys.
+
+The gpg default is to show 8-character IDs, you can get 16 character IDs
+using: |gpg --list-keys --keyid-format long| and the full fingerprint using
+|gpg --list-keys --fingerprint|.
+
+
+% Key uses:
+% \begin{description}\tightitems
+% \item[S] Sign
+% \item[C] Certify: (Used in web of trust)(?)
+% \item[E] Encrypt
+% \item[A] Authenticate: (Used by linux PAM)(?)
+% \item[T] (Two-factor authentication)(?): Secret key stored on a smart card
+% \end{description}
+
+
+\section{Web of Trust}
+
+% \TODO{man page say ``calculated validity'', does that really mean validity
+%   or does it mean user-chosen trust level?}
+
+I suggest adding |list-options show-uid-validity| to your .gnupg/gpg.conf.
+This will cause |gpg --list-keys| to display your validity level for each
+key.
+
+\begin{code}
+  pub   4096R/E5D0AA3A 2013-11-21
+  uid       [ultimate] Dean Serenevy <dean@serenevy.net>
+  sub   4096R/15D74B65 2013-11-21
+  sub   4096R/6D655C2E 2013-11-21
+  sub   4096R/5287FC0C 2013-11-21
+  sub   4096R/F49E0D25 2013-11-21
+
+  pub   4096R/06C4AE2A 2010-11-20 [expired: 2011-11-20]
+  uid       [ expired] Debian Mozilla team APT archive <pkg-mozilla-maintainers@lists.alioth.debian.org>
+
+  pub   1024R/CE49EC21 2009-01-18
+  uid       [ unknown] Launchpad PPA for Mozilla Team
+\end{code}
+
+Beware, some sources and interfaces use the term ``valid'' to mean
+technical validity of the key data (well-formed, not revoked, not expired,
+\dots). In the web of trust sense we require that a valid key be bound to
+its User ID (name+email) with an acceptable trust path.
+
+Of course, your own keys are considered valid unless they have been
+revoked. Additionally, any keys you sign will be considered valid. Beyond
+that, validity can be propegated further based on the trust you place on
+keys in your keyring.
+
+\begin{description}\tightitems
+\item[Unknown] (default) You don't know how much to trust this user to
+  verify other people's keys.
+
+\item[Never] The owner is known to improperly sign other keys.
+
+\item[Marginal] You don't trust this user's ability to verify the validity
+  of other people's keys enough to to consider keys valid based on his/her
+  sole word. However, provided this key is valid, you will consider a key
+  signed by this user valid if it is also signed by at least two other
+  marginally trusted users with valid keys.
+
+\item[Full] You trust this user's ability to verify the validity of other
+  people's keys so much, that, provided this key is valid, you'll consider
+  valid any key signed by it.
+
+\item[Ultimate] Used only for your own keys.
+\end{description}
+
+These trust levels are completely independent from signing. It can make
+sense to leave a key that you have signed as ``Unknown'' (if you sign a key
+at a keysigning party, but do not know the person personally).
+Additionally, you may choose to alter the trust of keys you have not signed
+(for instance, you may choose to marginally trust but not sign
+\texttt{pub  2048R/00411886 2011-09-20 Linus Torvalds $<$torvalds@transmeta.com$>$})
+
+
+When you sign a key, you may specify a \textsl{certification level}. This
+allows you to indicate what level of verification was performed before
+signing the key. For instance, you might sign using ``level 2'' if you
+perform a casual verification of a photo ID at a keysigning party. However,
+you might sign using ``level 3'' when you do extensive verification of
+multiple photo ids and verification of email addresses, or for someone whom
+you know personally. You would sign using ``level 1'' when you could not,
+or did not verify the key at all. For example, you might sign at level 1
+for a ``persona'' verification, where you sign the key of a pseudonymous
+user.
+
+Your web of trust can be configured by setting the following values in your gpg.conf:
+
+\begin{description}
+\item[completes-needed \textsl{n}] Number of completely trusted users to introduce a
+  new key signer (defaults to 1).
+
+\item[marginals-needed \textsl{n}] Number of marginally trusted users to introduce a
+  new key signer (defaults to 3)
+
+\item[ask-cert-level] When making a key signature, prompt for a
+  certification level. (see gpg manual for more examples of when to use
+  which level)
+
+% \item[list-options show-uid-validity] Display your chosen trust level when keys are listed.
+
+\item[max-cert-depth \textsl{n}] Maximum depth of a certification chain (default is
+  5).
+
+\item[min-cert-level] When building the trust database, treat any
+  signatures with a certification level below this as invalid. Defaults to
+  2, which disregards level 1 signatures. Note that certification levels is
+  a PGP 5.x standard and that older signatures default to level 0 --- ``no
+  particular claim''. For backwards compatibility, these signatures are
+  always accepted.
+\end{description}
+
+
+\section{Creating Keys}
+\subsection{Creating Your Master Key}
+It is recommended to create keys using SHA2 that are at least 2048 bits.
+Further, you should keep your master key on a secure USB drive (not network
+accessible, used for no other purpose, \dots). Supposing your drive is
+mounted at \textsl{/media/thumb},
+
+Create directory with proper permissions: |cd /media/thumb; mkdir gnupg; chmod 700 gnupg|
+
+Optionally, create gnupg/gpg.conf with content in the
+``\zref[title]{gpg.conf-suggestion}'' section below.
+
+
+Execute |gpg --home=/media/thumb/gnupg --gen-key| and choose ``(1) RSA and
+RSA (default)'' and set key size to 4096. Use a long and strong passphrase.
+Once finished, gpg will display something like:
+
+\begin{code}
+  gpg: key \sl{E5D0AA3A} marked as ultimately trusted
+  public and secret key created and signed.
+
+  gpg: checking the trustdb
+  gpg: 3 marginal(s) needed, 1 complete(s) needed, PGP trust model
+  gpg: depth: 0  valid:   1  signed:   0  trust: 0-, 0q, 0n, 0m, 0f, 1u
+  pub   4096R/E5D0AA3A 2013-11-21
+        Key fingerprint = 3A4D 51DF 68FC D20B FC0C  1C5F E4E6 033F \sl{E5D0 AA3A}
+  uid       [ultimate] Dean Serenevy <dean@serenevy.net>
+  sub   4096R/15D74B65 2013-11-21
+\end{code}
+
+
+\subsection{Add a subkey}
+See also: https://wiki.debian.org/subkeys
+\begin{code}
+  $ gpg --home=/media/thumb/gnupg --edit-key \sl{E5D0AA3A}
+  \dots
+  gpg> addkey
+  {\dots} \sl{RSA (sign only), 4096 bits}, \dots
+  gpg> save
+\end{code}
+%$% stupid emacs
+You can also use this to add an encryption-only subkey, though I don't see
+much use for more than the automatically created one. After creating some
+subkeys, your key will now look different (Note: you will need to
+re-publish your key any time you create or revoke a subkey).
+
+\begin{code}
+  $ gpg --list-keys --fingerprint \sl{E5D0AA3A}
+  pub   4096R/E5D0AA3A 2013-11-21
+        Key fingerprint = 3A4D 51DF 68FC D20B FC0C  1C5F E4E6 033F E5D0 AA3A
+  uid       [ultimate] Dean Serenevy <dean@serenevy.net>
+  sub   4096R/15D74B65 2013-11-21
+  sub   4096R/6D655C2E 2013-11-21
+  sub   4096R/5287FC0C 2013-11-21
+  sub   4096R/F49E0D25 2013-11-21
+\end{code}
+%$% stupid emacs
+
+Unfortunately, I could see no way to add useful labels to each subkey to
+explain its purpose --- you will need to keep separate document listing
+what each subkey is meant to be used for (for instance, I am keeping
+|6D655C2E| on my laptop to sign email messages, |5287FC0C| on my home
+desktop to sign debian packages published on my server, and |F49E0D25| on
+my work machine to sign packages for company-internal distribution).
+
+We only want to store the minimal set of subkey secrets required on each
+relevant system (our master secret should remain offline). Thus, we need to
+export individual secrets from our thumb drive to be imported to each
+machine.
+
+\begin{code}
+  \# NOTE: The exclamation mark ! is significant)
+  gpg --home=/media/thumb/gnupg --export-secret-subkeys \keyID[subkey\_id]! > \sl{subkey1}\_secret.gpg
+  gpg --home=/media/thumb/gnupg --export \keyID[master\_key\_id] > pubkeys.gpg
+
+  \# Now import these into your ~/.gnupg directory
+  gpg --import pubkeys.gpg subkey1\_secret.gpg
+\end{code}
+
+Verify that |gpg -K| shows a |sec\#| instead of just |sec| for your private
+key. That means the secret key is not really there.
+
+Also, at this point you probably should change the passphrase used on the
+exported keys (see ``\zref[title]{passwd}'' below).
+
+
+\subsection{Add an additional name or email address to your key}
+\begin{code}
+  $ gpg --home=/media/thumb/gnupg --edit-key E5D0AA3A
+  \dots
+  gpg> adduid
+  \dots
+  gpg> save
+\end{code}
+%$% stupid emacs
+When you add a new uid, it will become the primary uid for your key. To
+edit the primary uid, edit your key again, select the uid you want
+|gpg> uid 2|, mark it primary |gpg> primary|, and finally |gpg> save|.
+
+\subsection{Send new key to key server}
+\begin{code}
+  gpg --keyserver \keyserver --send-key \sl{NEW\_ID}
+\end{code}
+
+You may omit the keyserver option if you specify a keyserver in gpg.conf.
+Keyservers synchronize with each other periodically so uploading to a
+single keyserver is sufficient --- your key will propagate to the others.
+
+\subsection{Revoking a key}
+The process is generate and apply your revocation, then re-publish your modified (revoked) key:
+\begin{code}
+  gpg --output revokedkey.asc --gen-revoke \keyID
+  gpg --import revokedkey.asc
+  gpg --keyserver \keyserver --send-key \keyID
+\end{code}
+
+\subsection{Changing Passphrase}\zlabel{passwd}
+\begin{code}
+  gpg --edit-key \keyID
+  gpg> passwd
+  \dots
+  gpg> save
+\end{code}
+
+\section{Key-Signing}
+If you go to a keysigning party, you should bring slips of paper or business cards with:
+
+\begin{quote}
+  Your Name\\
+  Your GPG Fingerprint\\
+  Your Email Address
+\end{quote}
+
+You should \textsl{NOT} bring your thumb drive containing your private
+secrets! While at the party, trade fingerprints with others. Perform any
+verification necessary (look at IDs, \dots) and note the level of
+verification performed. Then, after you get home, mount your thumb drive
+containing your secret key and sign any keys that you feel comfortable
+signing. This approach protects your secret key and maintains your
+signature integrity by avoiding peer-pressure signatures.
+
+Note: The |signing-party| Debian package provides some tools to help you
+with this process. |gpg-key2ps| turns a GnuPG key into a PostScript file to
+print paper slips with your fingerprint, and |gpg-mailkeys| or |caff| will
+email signed keys to their owners.
+
+\subsection{Signing someone else's key}\zlabel{sign}
+\begin{code}
+  gpg --home=/media/thumb/gnupg --keyserver \keyserver --recv-keys \sl{their\_id}
+  gpg --home=/media/thumb/gnupg --list-keys --fingerprint \sl{their\_id}
+  \# Verify the full fingerprint of their key before proceeding!
+
+  gpg --home=/media/thumb/gnupg --sign-key \sl{their\_id}
+  gpg --home=/media/thumb/gnupg --list-sigs \sl{their\_id}
+  \# Verify your signature appears on the list of signatures
+
+  gpg --home=/media/thumb/gnupg --export --armor \sl{their\_id} > signed\_key.gpg
+\end{code}
+
+Email the signed key to its owner so that they can publish your signature.
+
+\subsection{Sign my new key with my old key}
+If you generate a new key, you should sign the new key with your old key.
+If you have both present in the same keyring, you can select which to sign
+with via the |-u| option:
+\begin{code}
+  gpg --home=/media/thumb/gnupg -u \sl{old\_id} --sign-key \sl{new\_id}
+\end{code}
+
+\subsection{Someone signed my key}
+When someone send you a signature on your key, you need to import their
+signature and then re-upload your key to a public keyserver.
+\begin{code}
+  gpg --home=/media/thumb/gnupg --import signed\_key.gpg
+  gpg --keyserver \keyserver --send-key \keyID
+\end{code}
+
+
+
+
+\section{Using Keys}
+\begin{tabbing}
+List all public keys I have: \= \texttt{gpg --list-keys}\\
+                             \> \texttt{gpg --list-keys --keyid-format long --fingerprint}\\
+Search public keys I have:   \> \texttt{gpg --list-keys \sl{search\_term}}
+\end{tabbing}
+
+Generally search terms can be a key id, a name, or an email address. Due to
+collision of names, generally a key id or email address is preferred.
+
+
+\subsection{Importing Keys}
+Import a key: \texttt{gpg --import user-key.gpg}
+
+Get public key from a public key server (beware collision! --- always
+verify the fingerprint):
+\begin{code}
+  gpg --recv-keys --keyserver \keyserver user@some-email.com
+  gpg --recv-keys --keyserver \keyserver 39a629558da0af10
+\end{code}
+
+Verify the fingerprint of the received key:
+\begin{code}
+  gpg --fingerprint user@some-email.com
+\end{code}
+
+\subsection{Modifying Trust}
+\begin{code}
+  gpg --edit-key \sl{key\_id}
+  pub  \dots
+  gpg> trust
+  Please decide how far you trust this user to correctly verify other users' keys
+  (by looking at passports, checking fingerprints from different sources, etc.)
+
+    1 = I don't know or won't say
+    2 = I do NOT trust
+    3 = I trust marginally
+    4 = I trust fully
+    5 = I trust ultimately
+    m = back to the main menu
+
+  Your decision?
+\end{code}
+
+
+\subsection{Verifying Signatures}
+\begin{code}
+  gpg --verify signedfile.gpg
+  gpg --verify signedfile.sig signedfile
+  gpg -o signedfile --decrypt signedfile.gpg
+\end{code}
+
+\subsection{Signing Documents}
+
+Sign a message: \texttt{gpg -o \sl{filename.gpg} --sign \sl{filename}}\\
+Sign a message in separarte file: \texttt{gpg --detach-sign --armor \sl{filename}}
+
+
+\subsection{Encrypting}
+Encrypt using a public key (and sign it):
+\begin{code}
+  gpg --recipient \sl{their\_username} --sign --encrypt \sl{filename}
+\end{code}
+
+Encrypt using a passphrase: \texttt{gpg --symmetric \sl{filename}}
+
+\subsection{Decrypting}
+Decrypt a file: \texttt{gpg -o decrypted --decrypt filename}\\
+Decrypt a file: \texttt{gpg --decrypt filename >decrypted}\\
+Decrypt STDIN:  \texttt{gpg --decrypt >decrypted}
+
+
+\section{Suggested gpg.conf}
+\zlabel{gpg.conf-suggestion}
+\begin{code}
+  use-agent
+  no-greeting
+  require-secmem
+  ask-cert-level
+
+  # If you have more than 1 secret key in your keyring, you may want
+  # to uncomment the following option and set your preffered keyid
+  # default-key  748BEE343A8B34EE6FB05F741DCFAA536B861770
+
+  ## These are the defaults, but you might want to change them
+  # completes-needed 1
+  # marginals-needed 3
+  # max-cert-depth   5
+
+  display-charset utf-8
+  keyserver \keyserver
+
+  list-options show-uid-validity
+  with-fingerprint
+  keyid-format long
+
+  personal-digest-preferences SHA512
+  cert-digest-algo SHA512
+  default-preference-list SHA512 SHA384 SHA256 SHA224 AES256 AES192 AES CAST5 ZLIB BZIP2 ZIP Uncompressed
+\end{code}
+
+\section{Sources}
+\begin{description}\tightitems
+\item[Creating a new GPG key]                      \url{http://keyring.debian.org/creating-key.html}
+\item[Using OpenPGP subkeys in Debian development] \url{http://wiki.debian.org/subkeys}
+\item[PGP Tools]                                   \url{http://pgp-tools.alioth.debian.org/}
+\item[OpenPGP Trust Models]                        \url{http://web.monkeysphere.info/doc/trust-models/}
+\item[RFC 4880]                                    \url{http://www.ietf.org/rfc/rfc4880.txt}
+\end{description}
+
+\section{See also}
+\begin{description}\tightitems
+\item[GPG Frontends] \url{http://www.gnupg.org/related\_software/frontends.html}
+\end{description}
+
+\end{document}

@@ -1,0 +1,154 @@
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ImpredicativeTypes #-}
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE KindSignatures #-}
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+module Control.Proof.Simple where
+
+import Control.Applicative
+import Control.Arrow
+import Control.Eff
+import Control.Eff.Choose
+import Control.Eff.Lift
+import Control.Eff.State.Lazy
+import Control.Lens
+import Control.Monad
+import Data.Function
+import Data.List
+import Data.Typeable
+import Numeric.Natural
+import qualified Data.Map as M
+import System.IO (hFlush, stdout)
+
+import Data.Name
+import Data.Prop
+import Data.Proof
+import Control.Proof.Common
+
+type Hypotheses = M.Map Name PropS
+type Target = PropS
+
+data Prove' = Prove
+    { _hypotheses :: Hypotheses
+    , _target :: Target
+    } deriving (Typeable)
+makeLenses ''Prove'
+
+instance Show Prove' where
+    show x = hypos x ++ fence ++ trg x where
+        hypos = concatMap (\ (n,p) -> show n ++ "\t" ++ show p ++ "\n") . M.toList . (^. hypotheses)
+        fence = replicate 40 '-' ++ "\n"
+        trg = show . (^. target)
+
+type Prove = State Prove'
+
+getProve :: (Member Prove r) => Eff r Prove'
+getProve = get
+putProve :: (Member Prove r) => Prove' -> Eff r ()
+putProve = put
+modifyProve :: (Member Prove r) => (Prove' -> Prove') -> Eff r ()
+modifyProve = modify
+
+getHypotheses :: (Member Prove r) => Eff r Hypotheses
+getHypotheses = (^. hypotheses) <$> getProve
+putHypotheses :: (Member Prove r) => Hypotheses -> Eff r ()
+putHypotheses = modifyProve . (hypotheses .~)
+modifyHypotheses :: (Member Prove r) => (Hypotheses -> Hypotheses) -> Eff r ()
+modifyHypotheses = modifyProve . (hypotheses %~)
+
+getTarget :: (Member Prove r) => Eff r Target
+getTarget = (^. target) <$> getProve
+putTarget :: (Member Prove r) => Target -> Eff r ()
+putTarget = modifyProve . (target .~)
+modifyTarget :: (Member Prove r) => (Target -> Target) -> Eff r ()
+modifyTarget = modifyProve . (target %~)
+
+intro :: (Member Prove r, Member Choose r) => Eff r ProofS -> Eff r ProofS
+intro cont = do
+    a <- getTarget
+    case a of
+        Prop _ -> mzero'
+        Imply p q -> do
+            name <- newName . M.keys <$> getHypotheses
+            modifyHypotheses (M.insert name p)
+            putTarget q
+            Lambda name <$> cont
+
+intros :: (Member Prove r, Member Choose r) => Eff r ProofS -> Eff r ProofS
+intros cont = intro cont >> (cont `mplus'` intros cont)
+
+chooseHypothesis :: (Member Prove r, Member Choose r) => Eff r (Name, PropS)
+chooseHypothesis = choose . M.toList =<< getHypotheses where
+
+chooseImplyHypothesis :: (Member Prove r, Member Choose r) => Eff r (Name, (PropS, PropS))
+chooseImplyHypothesis = do
+    (n, p) <- chooseHypothesis
+    case p of
+        a `Imply` b -> return (n, (a, b))
+        _ -> mzero'
+
+exact :: (Member Prove r, Member Choose r) => Eff r ProofS
+exact = do
+    (n, p) <- chooseHypothesis
+    q <- getTarget
+    if p == q
+        then return $ Proof n
+        else mzero'
+
+apply :: (Member Prove r, Member Choose r) => Eff r ProofS -> Eff r ProofS
+apply cont = do
+    (n, (p, q)) <- chooseImplyHypothesis
+    (ps, q') <- choose $ split (p ~> q)
+    r <- getTarget
+    if q' == r
+        then do
+            rs <- forM ps $ \ p' -> do
+                putTarget p'
+                cont
+            return . foldr1 Apply $ Proof n : rs
+        else mzero'
+
+auto :: (Member Prove r, Member Choose r) => Eff r ProofS -> Eff r ProofS
+auto cont = join $ choose
+    [ intro cont
+    , apply cont
+    , exact
+    ]
+
+hand :: (SetMember Lift (Lift IO) r, Member Prove r, Member Choose r) => Eff r ProofS -> Eff r ProofS
+hand cont = do
+    lift . print =<< getProve
+    s <- lift $ do
+        putStr "tactic> "
+        hFlush stdout
+        getLine
+    case s of
+        "print" -> getProve >>= (lift . print) >> cont
+        "intro" -> intro cont
+        "intros" -> intros cont
+        "apply" -> apply cont
+        "exact" -> exact
+        "auto" -> auto cont
+        _ -> lift (putStrLn $ "no such command: " ++ s) >> cont
+
+runTactic :: Hypotheses -> Target -> (Eff (Prove :> Choose :> r) ProofS -> Eff (Prove :> Choose :> r) ProofS) -> Eff r [ProofS]
+runTactic x y = ((nubBy alphaEqual . map reduceS) <$>) . runChoice . evalState (Prove x y) . fix
+
+autoSolve :: Hypotheses -> Target -> [ProofS]
+autoSolve x y = run $ runTactic x y auto
+
+handSolve :: Hypotheses -> Target -> IO [ProofS]
+handSolve x y = putStrLn "* handSolve is wroking in progress *" >> runLift (runTactic x y hand)
+
+-- | >>> autoSolve' [] "(a -> b) -> (b -> c) -> a -> c"
+-- [\ x0 x1 . x1 x0]
+-- >>> autoSolve' [] "b -> (a -> b) -> a -> b"
+-- [\ x0 x1 . x1,\ x0 x1 x2 . x0]
+-- >>> autoSolve' [("maybe_case", "maybe_a -> b -> (a -> b) -> b1")] "b -> (a -> b) -> maybe_a -> b1"
+-- [\ x0 x1 x2 . maybe_case (x2 (x0 x1)),\ x0 x1 x2 . maybe_case (x2 (x0 (\ x3 . x0)))]
+autoSolve' :: [(String, String)] -> String -> [ProofS]
+autoSolve' xs y = autoSolve (M.fromList $ map (toName *** readPropS) xs) (readPropS y)

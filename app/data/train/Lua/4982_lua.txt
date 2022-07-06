@@ -1,0 +1,342 @@
+-----------------------------------------------------------------------------------------
+--
+-- Tappit!
+--
+-- main.lua
+--
+-----------------------------------------------------------------------------------------
+local loadsave = require( "loadsave" );
+native.setProperty( "androidSystemUiVisibility", "immersiveSticky" );
+display.setStatusBar(display.HiddenStatusBar);
+
+local ballSpritesheetOptions = {
+  width = 250;
+  height = 250;
+  numFrames = 16;
+}
+
+local sequence_ball = {
+  {
+    name = "ballAnimation",
+    start = 1,
+    count = 16,
+    time = 1000,
+    loopCount = 0,
+    loopDirection = "forward"
+  }
+}
+
+local ball_sprites = graphics.newImageSheet("ball.png", ballSpritesheetOptions);
+
+local resetIcon = {
+    type = "image",
+    filename = "reset.png"
+}
+
+local loadedScore = loadsave.loadTable( "tappitScores.json" )
+
+local scoreRecords = {};
+
+if(loadedScore == nil) then
+  scoreRecords = {
+    _highScore = 0;
+    _averageScore = 0;
+    _gamesPlayed = 0;
+  }
+else
+  scoreRecords = loadedScore;
+end
+
+--[[
+  Stores the state of the game
+  0 = gameEnabled
+  1 = gameOver
+  2 = menu
+]]
+local gameState = 2
+--[[
+  Used to keep track of combos.
+  Increases when ball is tapped succesfully within 0.5 seconds
+  adds to the time added for every successive tap.
+]]
+local numberOfTaps = 0;
+local combo = 0;
+local score = 0;  --Stores the game's score
+local timeRemaining = 50; --The time remaining before game-over (1/10ths of a second)
+local timeAtTap = timeRemaining + 5; --The time when the ball is tapped; used to calculate combos
+local background = display.newRect(display.contentWidth/2, display.contentHeight/2, display.actualContentWidth, display.actualContentHeight);
+background:setFillColor(0,0,0);
+local comboBox = display.newRect(display.contentWidth/2, display.contentHeight/(7/5), 0, display.contentWidth/3.5);
+local comboBoxWidthFactor = 1;
+local title = display.newText("Tappit!", display.contentWidth/2, display.contentHeight/8, "riffic.ttf", display.contentWidth/4);        --The Title
+local scoreboard = display.newText(score, display.contentWidth/2, (6.25*display.contentHeight)/7, "riffic.ttf", display.contentWidth/3);     --The Score
+local comboTextTrans = display.newText("", display.contentWidth/2, display.contentHeight/(7/5), "riffic.ttf", display.contentWidth/3);     --Combo Indicator
+local comboText = display.newText("", display.contentWidth/2, display.contentHeight/(7/5), "riffic.ttf", display.contentWidth/3); --Combo Indicator that will NOT fly up
+local timeText = display.newText(string.format("%.1f", (timeRemaining/10)), display.contentWidth/2, (display.contentHeight*4.75)/10, "riffic.ttf", display.contentWidth/4);
+timeText:setFillColor(0, 0, 0);
+local timeBox = display.newRect(display.contentWidth/2, (display.contentHeight*5.35)/10, 0, display.contentWidth/50);
+local reset = display.newRect(display.contentWidth/2, 0, display.contentWidth/2, display.contentWidth/2);
+reset.fill = resetIcon; reset.isVisible = false; reset.isTouchEnabled = false;
+
+local highScoreText = display.newText("High Score : " .. scoreRecords._highScore, display.contentWidth/2, display.contentHeight/(16.5/4), "riffic.ttf", display.contentWidth/16)
+
+local r = math.random(0.0, 255.0);
+local g = math.random(0.0, 255.0);
+local b = math.random(0.0, 255.0);
+
+local shakable = display.newGroup();
+shakable:insert(scoreboard);
+shakable:insert(title);
+local originalX = shakable.x;
+local originalY = shakable.y;
+local shakeAmount = 0;
+local shake = 0;
+
+local function updateHighScore(_score)
+  if _score > scoreRecords._highScore then
+    scoreRecords._highScore = _score;
+    highScoreText.text = "New High Score!";
+    highScoreText:setFillColor(153/255, 255/255, 102/255);
+  end
+end
+
+local function shakeScreen()
+  if(shakeAmount > 0) then
+    shake = math.random(shakeAmount);
+    shakable.x = originalX + math.random(-shake, shake);
+    shakable.y = originalY + math.random(-shake, shake);
+    shakeAmount = shakeAmount - 1;
+  end
+end
+
+local ball = display.newImageRect("ball2.png", 256, 256); ball.x = display.contentWidth/2; ball.y = display.contentHeight/3; --The ball to tap on
+
+local function rotateResetButton()
+  transition.to(reset, {time = 625000000, rotation = reset.rotation + 36000000, tag = "resetRotate"})
+  reset.isTouchEnabled = true;
+end
+
+local function resetComboText()
+  comboBoxWidthFactor = 1;
+  comboBox.width = 0;
+  comboText.size = display.contentWidth/3;
+  comboText:setFillColor(r/255, g/255, b/255)
+  comboTextTrans.text = "";
+  comboTextTrans.x = display.contentWidth/2;
+  comboTextTrans.y = display.contentHeight/(7/5)
+  comboTextTrans.rotation = 0;
+  comboTextTrans.alpha = 1;
+  comboTextTrans:setFillColor(1,1,1);
+end
+
+local function comboToPoints()
+  if combo > 1 then
+    timeRemaining = timeRemaining + (3 * combo);
+    score = score + combo;
+    scoreboard.text = score;
+  end
+  combo = 0;
+  transition.pause(comboTextTrans);
+  resetComboText();
+  transition.to(comboTextTrans, {time = 600, alpha = 0, y = 0, transition = easing.outQuad, onComplete = resetComboText});
+  comboTextTrans.text = comboText.text;
+  comboTextTrans.size = comboText.size;
+  comboText.text = ""
+  comboText.size = display.contentWidth/3;
+  timeAtTap = timeRemaining + 6;
+end
+
+local function comboLoss()
+  combo = 0;
+  comboTextTrans:setFillColor(240/255, 50/255, 100/255)
+  transition.to(comboTextTrans, {time = 400, rotation = 315, y = 1.5*display.contentHeight, transition = easing.inBack, onComplete = resetComboText});
+  comboTextTrans.text = comboText.text;
+  comboTextTrans.size = comboText.size;
+  comboText.text = ""
+  comboText.size = display.contentWidth/3;
+end
+
+local function comboBoxUpdate()
+  if (combo >= 2) then
+    transition.pause(comboTextTrans);
+    comboText.y = display.contentHeight/(7/5);
+    comboText.alpha = 1;
+    comboBox.width = comboBox.width - (display.contentWidth/20);
+    comboBoxWidthFactor = comboBoxWidthFactor + 1;
+    comboText.text = string.format("x%s", combo);
+  else
+    comboBox.width = 0;
+    comboBoxWidthFactor = 0;
+  end
+end
+
+local function resetGame()
+  if reset.isTouchEnabled == true then
+    reset.isTouchEnabled = false;
+    highScoreText.text = "High Score: " .. scoreRecords._highScore;
+    highScoreText:setFillColor(1,1,1);
+    timeText.text = "";
+
+    transition.to(reset, {time = 800, y = -display.contentHeight/2, tag = "resetOutro", transition = easing.inBack});
+    transition.pause("resetIntro");
+    transition.pause("resetRotate");
+
+    score = 0;  --Stores the game's score
+    timeRemaining = 50; --The time remaining before game-over (1/10ths of a second)
+    timeText.size = display.contentWidth/4;
+    timeBox.width = 0;
+    timeAtTap = timeRemaining; --The time when the ball is tapped; used to calculate combos
+    combo = 0;
+
+    scoreboard.text = score;
+    resetComboText();
+    title:setFillColor(255, 255, 255);
+    scoreboard:setFillColor(255, 255, 255);
+    timeText:setFillColor(0, 0, 0);
+
+    ball.isVisible = true; ball.x = display.contentWidth/2; ball.y = display.contentHeight/3;
+
+    gameState = 2;
+  end
+end
+
+local function onStoppedTime()
+  updateHighScore(score);
+  loadsave.saveTable( scoreRecords, "tappitScores.json");
+  comboBox.width = 0;
+  timeText.text = "Game Over!"
+  timeText.size = display.contentWidth/7;
+  timeText:setFillColor(240/255, 50/255, 100/255);
+  timeBox.width = 0;
+  ball.isVisible = false;
+  comboText.text = "";
+  background:setFillColor(0, 0, 0);
+  reset.isVisible = true;
+  transition.to(reset, {time = 1200, y = (2*display.contentHeight)/3, tag = "resetIntro", transition = easing.outBack});
+  reset.isTouchEnabled = true;
+  rotateResetButton();
+end
+
+local function updateTime()
+  --runs the countdown timer
+  if gameState == 0 then --This ensures countdown doesn't start until after the first tap.
+    if timeRemaining <= 0 then --runs when time runs out.
+      --draws the gameover screen;
+      --waits for reset input.
+      gameState = 1;
+      onStoppedTime();
+    else --counts down by the millisecond. Running out of time results in gameover
+      timeRemaining = timeRemaining - 1;
+      --Sets maximum time to 30 seconds
+      if timeRemaining > 300 then
+        timeRemaining = 300;
+        timeText.text = string.format("%.1f", (300/10));
+      else
+        timeText.text = string.format("%.1f", (timeRemaining/10));
+      end
+
+      timeBox.width = (display.contentWidth/300)*timeRemaining;
+
+      if(score > scoreRecords._highScore) then
+        highScoreText.text = "New High Score!"
+      end
+
+      --resets the combo text when it times out
+      --it is done here because this function is continously running, whereas the
+      --onBallTap() function only runs when the ball is tapped.
+
+      if (timeAtTap - timeRemaining) >= 5 then
+        if (timeAtTap - timeRemaining) == 5 then
+          comboToPoints();
+        end
+        comboText:setFillColor(153/255, 255/255, 102/255);
+      end
+    end
+  end
+end
+
+local function setColor(_r, _g, _b)
+  background:setFillColor((_r/255), (_g/255), (_b/255));
+  comboText:setFillColor((_r/255), (_g/255), (_b/255));
+
+  scoreboard:setFillColor((_r/255)-0.25, (_g/255)-0.25, (_b/255)+0.25);
+  timeText:setFillColor((_r/255)-0.15, (_g/255)-0.15, (_b/255)+0.15);
+  timeBox:setFillColor((_r/255)-0.25, (_g/255)-0.25, (_b/255)+0.25);
+  title:setFillColor((_r/255)-0.25, (_g/255)-0.25, (_b/255)+0.25);
+end
+
+local function onBallTap() --runs whenever the ball is succesfully tapped
+  if gameState == 2 then
+    gameState = 0;
+    onBallTap();
+    highScoreText.text="";
+  elseif gameState == 0 then
+
+    --resets the position of the ball.
+    ball.x = math.random(display.contentWidth/8, display.contentWidth/1.1); ball.y = math.random(display.contentHeight/6, display.contentHeight/1.5);
+    ball.y = ball.y + 10;
+
+    numberOfTaps = numberOfTaps + 1;
+
+    r = math.random(0.0, 255.0);
+    g = math.random(0.0, 255.0);
+    b = math.random(0.0, 255.0);
+    setColor(r, g, b)
+
+    score = score + 1 + combo;
+    timeRemaining = timeRemaining + 6;
+    if (timeRemaining > 300) then
+      timeRemaining = 300;
+    end
+    timeAtTap = timeRemaining;
+    scoreboard.text = score;
+    shakeAmount = 21 + (3 * combo);
+
+    --combos--
+    --  if the last tap was less than 0.6 seconds ago
+    --  then another combo point is added and the combo indicator is updated.
+    --  the time and score are updated based on the value of the combo.
+    if (timeAtTap - timeRemaining) <= 5 then
+      if numberOfTaps > 1 then
+        combo = combo + 1;
+
+        if combo > 1 then
+          resetComboText();
+          comboBoxWidthFactor = 1;
+          comboBox.width = display.contentWidth;
+          if combo <= 20 then
+            comboText.size = comboText.size + 16;
+          end
+        end
+      end
+    else
+      resetComboText();
+    end
+  end
+  return true;
+end
+
+local function onMissedTap()
+  if gameState == 0 then
+    local amountLost = 35;
+    timeRemaining = timeRemaining - amountLost;
+    combo = 0;
+    comboLoss();
+    local minusTime = display.newText("- " .. amountLost/10, display.contentWidth/2, display.contentHeight/2, "riffic.ttf", display.contentWidth/6);
+    minusTime:setFillColor(240/255, 50/255, 100/255);
+    transition.to(minusTime, {time = 600, y = 0, alpha = 0, transition = easing.outQuad, onComplete = function(obj) obj:removeSelf() end });
+  end
+  return true;
+end
+
+local function rotateBall()
+  ball.rotation = ball.rotation - 1;
+end
+
+ball:addEventListener("tap", onBallTap);
+background:addEventListener("tap", onMissedTap);
+reset:addEventListener("tap", resetGame);
+Runtime:addEventListener("enterFrame", shakeScreen);
+Runtime:addEventListener("enterFrame", comboBoxUpdate);
+Runtime:addEventListener("enterFrame", rotateBall);
+local countdown = timer.performWithDelay(80, updateTime, 0);

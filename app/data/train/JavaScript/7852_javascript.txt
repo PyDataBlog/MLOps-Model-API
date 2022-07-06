@@ -1,0 +1,222 @@
+/* jshint node: true */
+(function () {
+	"use strict";
+
+	var APP;
+
+	var utils = require("./utils");
+
+	var fs = require("fs");
+	var path = require("path");
+	var wrench = require("wrench");
+	var colors = require("colors");
+	var supervisor = require("supervisor");
+
+	function server(settingsFile, dir, port, interval) {
+
+		utils.loadSettings(settingsFile, function (settings) {
+
+			var i;
+
+			dir = dir || path.join(path.dirname(settings.file), settings.source_dir);
+			dir = dir.split(",");
+			port = port || 8000;
+
+			var reload = function (e, f) {
+				restartServer(settings, port);
+			};
+
+			for (i = 0; i < dir.length; i++) {
+				fs.watch(dir[i], reload);
+			}
+
+			restartServer(settings, port);
+		});
+	}
+
+	function newProject(folder) {
+		utils.fsCopy(path.join(path.dirname(__dirname), "example"), folder || "example");
+	}
+
+	function restartServer(settings, port) {
+
+		var	rootDir = path.join(settings.source_dir),
+			indexFound = false,
+			express = require("express"),
+			consolidate = require("consolidate"),
+			app = express.createServer();
+
+		if (APP) {
+			APP.close();
+			APP = null;
+		}
+
+		app.configure(function () {
+			app.disable("view cache");
+			app.use(express.bodyParser());
+			app.use(express.methodOverride());
+			app.use(app.router);
+			app.use(express.static(rootDir));
+		});
+
+		if (settings.expressConfig) {
+			app.configure(settings.expressConfig(express, app));
+		}
+
+		app.use(express.errorHandler({dumpExceptions: true, showStack: true}));
+
+		function renderTemplate(page) {
+			return function (req, res, next) {
+				var prop,
+					data = {layout : false};
+
+				for (prop in settings.global_data) {
+					data[prop] = settings.global_data[prop];
+				}
+
+				for (prop in page.data) {
+					data[prop] = page.data[prop];
+				}
+
+				consolidate[settings.template_engine](path.join(rootDir, page.source), data, function (err, html) {
+					if (err) {
+						throw err;
+					}
+					res.send(html);
+				});
+			};
+		}
+
+		var page, i, subdir;
+
+		for (i = 0; i < settings.pages.length; i++) {
+			page = settings.pages[i];
+			if (!indexFound && page.source.indexOf("index") > -1 || page.output.indexOf("index") > -1) {
+				subdir = path.join(path.sep, page.output.substr(0, page.output.indexOf("index") - 1));
+				app.get(subdir, renderTemplate(page));
+				indexFound = true;
+			}
+
+			app.get(path.join(path.sep, page.output), renderTemplate(page));
+		}
+
+		if (!indexFound) {
+			app.get(path.sep, renderTemplate(settings.pages[0]));
+		}
+
+		var running = true;
+
+		app.listen(port);
+
+		console.log("");
+
+		app.on("error", function (e) {
+
+			if (running) {
+				running = false;
+				if (e.code === "EADDRINUSE") {
+					console.error(("Port " + port + " is already in use. Please try with a different port, or exit the process which is tying up the port.").yellow);
+				} else {
+					console.error(e);
+				}
+			}
+		});
+
+		setTimeout(function () {
+			if (running) {
+				console.log("STATIX server is now running on port ".green + port.toString().yellow);
+			}
+		}, 500);
+
+		APP = app;
+	}
+
+
+	function build(settingsFile) {
+
+		utils.loadSettings(settingsFile, function (settings) {
+			var consolidate = require("consolidate"),
+				sourceDir = path.join(settings.source_dir),
+				outputDir = path.join(settings.output_dir);
+
+			console.log("");
+
+			settings.preBuild = settings.preBuild || function (cb) {
+				return cb();
+			};
+
+			settings.preBuild(function () {
+
+				if (fs.existsSync(outputDir)) {
+					wrench.rmdirSyncRecursive(outputDir);
+				}
+
+				utils.copyMatchingFiles(sourceDir, outputDir, settings.include_patterns, settings.exclude_patterns);
+
+				function renderTemplate(page, cb) {
+					consolidate[settings.template_engine](path.join(sourceDir, page.source), data, function (err, html) {
+						var outputFile = path.join(outputDir, page.output);
+
+						if (fs.existsSync(outputFile)) {
+							fs.unlinkSync(outputFile);
+						}
+
+						wrench.mkdirSyncRecursive(path.dirname(path.join(outputDir, page.output)));
+						fs.writeFileSync(path.join(outputDir, page.output), html);
+
+						if (cb) {
+							cb();
+						}
+					});
+				}
+
+				function callback() {
+					settings.postBuild = settings.postBuild || function (cb) {
+						return cb();
+					};
+
+					settings.postBuild(function () {
+						console.log("Statix build complete!".green);
+						console.log("");
+						process.exit();
+					});
+				}
+
+				for (var i = 0; i < settings.pages.length; i ++) {
+
+					var page = settings.pages[i],
+						data = {},
+						cb = null,
+						prop;
+
+					for (prop in settings.global_data) {
+						data[prop] = settings.global_data[prop];
+					}
+
+					for (prop in settings.build_data) {
+						data[prop] = settings.build_data[prop];
+					}
+
+					for (prop in page.data) {
+						data[prop] = page.data[prop];
+					}
+
+					if (i + 1 === settings.pages.length) {
+						cb = callback;
+					}
+
+					renderTemplate(page, cb);
+				}
+			});
+		});
+	}
+
+	module.exports = {
+		utils : utils,
+		server : server,
+		newProject : newProject,
+		restartServer : restartServer,
+		build : build
+	};
+
+}());

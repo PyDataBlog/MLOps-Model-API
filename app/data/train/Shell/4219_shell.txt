@@ -1,0 +1,181 @@
+#!/bin/sh
+################################################################################
+#NAME
+#    <NAME> - contain utility functions for creating LXC containers
+#
+#SYNOPSIS
+#    <NAME>
+#
+#AUTHOR
+#    Written by Florian Barras.
+################################################################################
+
+
+################################################################################
+# BEGIN
+################################################################################
+
+if [ -z "${LEO_LXC:-}" ]
+then
+LEO_LXC="$0"
+
+
+################################################################################
+# IMPORTS
+################################################################################
+
+# Import LEO
+if [ -z "${LEO:-}" ]; then . "$LEO_LIB_DIR"/'seo.sh'; fi
+if [ -z "${LEO_YUM:-}" ]; then . "$LEO_LIB_DIR"/'seo-yum.sh'; fi
+
+
+################################################################################
+# CONSTANTS
+################################################################################
+
+# The LXC directory
+: "${LXC_DIR:=/var/lib/lxc}"
+
+# The default template and backing store
+: "${LXC_DEFAULT_TEMPLATE:=/usr/share/lxc/templates/lxc-centos}"
+: "${LXC_DEFAULT_BACKING_STORE:=overlayfs}"
+
+
+################################################################################
+# FUNCTIONS
+################################################################################
+
+#> installLxc
+installLxc()
+{
+	if ! testYum 'lxc'
+	then
+		list 'Install LXC' &&
+			verb 'Install the EPEL repository' &&
+			# - epel-release: the Extra Packages for Enterprise Linux (EPEL),
+			#                 which provides LXC virtualization
+			installYum 'epel-release' &&
+
+			verb 'Install debootstrap, libvirt and perl' &&
+			# - debootstrap: a tool which will install a Debian base system into
+			#                a subdirectory of another, already installed system
+			# - libvirt: a library which provides a single way to manage
+			#            multiple different virtualization providers/hypervisors
+			# - perl: the Perl language interpreter
+			installYum 'debootstrap' 'libvirt' 'perl' &&
+
+			verb 'Install the LXC virtualization solution' &&
+			installYum 'lxc' 'lxc-templates' &&
+
+			if [ -z "`grep 'overlay' '/proc/filesystems'`" ]
+			then
+				verb 'Enable OverlayFS' &&
+				printn 'overlay' > '/etc/modules-load.d/overlay.conf' &&
+				modprobe 'overlay'
+			fi &&
+		endList
+	fi
+}
+
+#> checkLxc
+checkLxc()
+{
+	systemctl status lxc.service > "$NULL_PATH" 2>&1
+}
+
+#> startLxc
+startLxc()
+{
+	if ! checkLxc
+	then
+		list 'Start the LXC service' &&
+			systemctl start lxc.service &&
+			systemctl start libvirtd &&
+		endList
+	fi
+}
+
+#> stopLxc
+stopLxc()
+{
+	if checkLxc
+	then
+		list 'Stop the LXC service' &&
+			systemctl stop lxc.service &&
+			systemctl stop libvirtd &&
+		endList
+	fi
+}
+
+#> testLxc
+testLxc()
+{
+	list 'Text LXC' &&
+		verb 'Check the LXC configuration' &&
+		lxc-checkconfig &&
+
+		verb 'List the LXC templates' &&
+		ls -alh '/usr/share/lxc/templates' &&
+
+		verb 'List the active LXC containers' &&
+		lxc-ls --active &&
+	endList
+}
+
+#> createContainer NAME [TEMPLATE] [BACKING_STORE]
+createContainer()
+{
+	requireArguments $# 1 &&
+
+	name="$1" &&
+	template="${2:-$LXC_DEFAULT_TEMPLATE}" &&
+	backingStore="${3:-$LXC_DEFAULT_BACKING_STORE}" &&
+
+	list 'Create the LXC container' &&
+		installLxc &&
+
+		verb 'Build the LXC container' &&
+		lxc-create -n "$name" -t "$template" -B "$backingStore" &&
+
+		verb 'Change the apparent root directory of the LXC container' &&
+		chroot "$LXC_DIR/$name/rootfs" passwd &&
+
+		verb 'Test the LXC container' &&
+		lxc-info -n "$name" &&
+	endList
+}
+
+#> startContainer NAME
+startContainer()
+{
+	requireArguments $# 1 &&
+
+	name="$1" &&
+
+	startLxc &&
+
+	list 'Start the LXC container' &&
+		lxc-start -n "$name" &&
+		lxc-info -n "$name" &&
+	endList
+}
+
+#> stopContainer NAME
+stopContainer()
+{
+	requireArguments $# 1 &&
+
+	name="$1" &&
+
+	list 'Stop the LXC container' &&
+		lxc-stop -n "$name" &&
+		lxc-info -n "$name" &&
+	endList
+}
+
+
+################################################################################
+# END
+################################################################################
+
+fi

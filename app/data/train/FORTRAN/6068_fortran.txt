@@ -1,0 +1,4290 @@
+!-----------------------------------------------------------------------------
+! SVN:$Id$
+!> This module calculates all the linear terms and puts them in the matrix
+!> All terms I-XI except III and IX.
+!> only used during the initialisation of the code.
+!> The matrix is stored in matdat.  The matrix vector multiply is
+!> performed during the time integration. The vector is stored in dist.
+!-----------------------------------------------------------------------------
+module linear_terms
+
+  implicit none
+
+  private 
+
+  public :: init_linear_terms, calc_linear_terms, linear_terms_read_nml 
+  public :: linear_terms_bcast_nml, linear_terms_check_params 
+  public :: linear_terms_write_nml, differential_scheme, drift
+  public :: lpoisson, lvpgrphi, lampere, lneorotsource
+
+  !> switches for hard disabling of calls
+  logical, save :: lvpar_grad_df          = .true.
+  logical, save :: lvdgradf               = .true.
+  logical, save :: ltrapdf                = .true.
+  logical, save :: lve_grad_fm            = .true.
+  logical, save :: lvd_grad_phi_fm        = .true.
+  logical, save :: lvpgrphi               = .true.
+  logical, save :: lpoisson               = .true.
+  logical, save :: lg2f_correction        = .true.
+  logical, save :: lpoisson_zf            = .true.
+  logical, save :: lampere                = .true.
+  logical, save :: lneoclassical          = .true.
+  logical, save :: lbpar                  = .true.
+  logical, save :: lneorotsource          = .false.
+  logical, save :: lneo_equil             = .false.
+  logical, save :: lneo_trap              = .true.
+  logical, save :: lneo_rad               = .true.
+  character (len = 3), save ::  neo_fsource = ''
+
+
+  !> Dissipation switch idisp for parallel and v|| derivatives 
+  !> 1: use the absolute value of the velocity
+  !> 2: use the RMS velocity (no velocity space dependence)
+  !> Positive: Use 4th derivative at 2nd order (fourth_order scheme only)
+  !> Negative: Use 2nd derivative at 4th order (fourth_order scheme only)
+  !>
+  !> Early on it was found that option 2 was more stable for EM runs
+  !> However, recently option 1 has proved to be more stable for EM runs at low ky
+  !> when vpmax is large or beta is large (see issue 201)
+  !> The reason is not understood. To test: is there an impact of geometry? 
+  integer, save :: idisp = 2
+ 
+  interface linear_terms_write_nml
+    module procedure linear_terms_read_nml
+  end interface
+
+contains
+
+!------------------------------------------------------------------------------
+!> This subroutine reads (or writes) the linear terms namelist
+!------------------------------------------------------------------------------
+subroutine linear_terms_read_nml(lun,io_stat,lwrite)
+  use io, only : write_run_parameter
+
+  integer, intent(in)  :: lun
+  integer, intent(out) :: io_stat
+
+  logical, optional, intent(in) :: lwrite
+
+  namelist /linear_term_switches/ lvpar_grad_df, lvdgradf, ltrapdf, &
+       & lve_grad_fm, lvd_grad_phi_fm, lvpgrphi, lpoisson, lampere,  & 
+       & lg2f_correction,  lpoisson_zf, lneoclassical, lbpar,  &
+       & lneorotsource, lneo_equil, lneo_trap, neo_fsource, lneo_rad, &
+       & idisp
+
+
+  io_stat = 0
+  if (present(lwrite)) then
+    if (.not. lwrite) then       
+      read(lun,NML=linear_term_switches,IOSTAT=io_stat) 
+    else
+      ! do nothing
+    end if
+  else
+    write(lun,NML=linear_term_switches)
+
+    call write_run_parameter('linear_term_switches', 'lvpar_grad_df', lvpar_grad_df)
+    call write_run_parameter('linear_term_switches', 'lvdgradf', lvdgradf)
+    call write_run_parameter('linear_term_switches', 'ltrapdf', ltrapdf)
+    call write_run_parameter('linear_term_switches', 'lve_grad_fm', lve_grad_fm)
+    call write_run_parameter('linear_term_switches', 'lvd_grad_phi_fm', lvd_grad_phi_fm)
+    call write_run_parameter('linear_term_switches', 'lvpgrphi', lvpgrphi)
+    call write_run_parameter('linear_term_switches', 'lpoisson', lpoisson)
+    call write_run_parameter('linear_term_switches', 'lampere', lampere)
+    call write_run_parameter('linear_term_switches', 'lg2f_correction', lg2f_correction)
+    call write_run_parameter('linear_term_switches', 'lpoisson_zf', lpoisson_zf)
+    call write_run_parameter('linear_term_switches', 'lneoclassical', lneoclassical)
+    call write_run_parameter('linear_term_switches', 'lbpar', lbpar)
+    call write_run_parameter('linear_term_switches', 'lneorotsource', lneorotsource)
+    call write_run_parameter('linear_term_switches', 'lneo_equil', lneo_equil)
+    call write_run_parameter('linear_term_switches', 'lneo_trap', lneo_equil)
+    call write_run_parameter('linear_term_switches', 'lneo_rad', lneo_rad)  
+    call write_run_parameter('linear_term_switches', 'idisp', idisp)
+
+  end if 
+
+end subroutine linear_terms_read_nml
+
+!------------------------------------------------------------------------------
+!> bcast the linear terms namelist params
+!------------------------------------------------------------------------------
+subroutine linear_terms_bcast_nml
+
+  use mpiinterface, only : mpibcast 
+  
+  call mpibcast(lvpar_grad_df,   1)
+  call mpibcast(lvdgradf,        1)
+  call mpibcast(ltrapdf,         1)
+  call mpibcast(lve_grad_fm,     1)
+  call mpibcast(lvd_grad_phi_fm, 1)
+  call mpibcast(lvpgrphi,        1)
+  call mpibcast(lpoisson,        1)
+  call mpibcast(lg2f_correction, 1)
+  call mpibcast(lampere,         1)
+  call mpibcast(lpoisson_zf,     1)
+  call mpibcast(lneoclassical,   1)
+  call mpibcast(lbpar,           1)
+  call mpibcast(lneorotsource,   1)
+  call mpibcast(lneo_equil,      1)
+  call mpibcast(lneo_rad,        1)
+  call mpibcast(neo_fsource,     3)
+  call mpibcast(idisp,           1)
+
+end subroutine linear_terms_bcast_nml
+
+!------------------------------------------------------------------------------
+!> put any checks that can be done before memory allocation in here
+!------------------------------------------------------------------------------
+subroutine linear_terms_check_params
+
+  use components, only : tearingmode 
+  use control,    only : zonal_adiabatic, nlbpar, fullf_wo_Fm 
+  use general,    only : gkw_warn, gkw_exit 
+  use grid,       only : n_s_grid
+  use neoequil,   only : neoequil_check_params 
+ 
+  if (zonal_adiabatic.and.tearingmode) then
+    zonal_adiabatic = .false.
+    call gkw_warn('Zonal adiabatic switched off for tearingmode')
+  end if
+
+  if (lampere.and.tearingmode) then
+    lampere = .false.
+    call gkw_warn('Amperes law disabled with static imposed island')
+  end if 
+
+  if (n_s_grid < 2) then
+    call gkw_warn('Parallel derivative terms switched off for single s point')
+    lvpar_grad_df=.false.
+    lvpgrphi=.false.
+  end if
+  
+  if(lneorotsource .and. .not.lneoclassical) then
+    call gkw_exit('Must be running neoclassical to run Hinton Wong source term')
+  end if
+
+  if(fullf_wo_Fm) then 
+    if (lve_grad_fm.or.lvd_grad_phi_fm.or.lvpgrphi) then 
+      call gkw_exit('Switch of the linear background terms when running with &
+                    & fullf_wo_Fm')
+    endif 
+  endif 
+  if(lneo_equil) call neoequil_check_params
+
+end subroutine linear_terms_check_params
+
+!------------------------------------------------------------------------------
+!> This routine reports the revision 
+!------------------------------------------------------------------------------
+subroutine init_linear_terms
+ 
+use general, only : svn_id 
+
+  call svn_id('$Id$')
+
+return
+end subroutine init_linear_terms
+
+!------------------------------------------------------------------------------
+!> This routine calls in sequence all the subroutines
+!> that put the linear terms in the equation:
+!> First part the linear terms of the perturbed distribution
+!> Second part the Maxwell background
+!> Third part the field equations
+!------------------------------------------------------------------------------
+subroutine calc_linear_terms
+
+  use control,      only : dtim, nlapar, nlbpar
+  use control,      only : lcollisions, vp_trap, neoclassics, disp_par, disp_vp 
+  use control,      only : disp_x, disp_y, ltrapping_arakawa, uniform_mu_grid 
+  use control,      only : fac_dtim_est, method, dtim_input
+  use matdat,       only : finish_matrix_section, abort_if_bad_element, time_est
+  ! use matdat,       only : output_matrix
+  use collisionop,  only : collision_operator_setup, conservation
+  use collisionop,  only : coll_mom_change_int, coll_mom_change_int_numu
+  use general,      only : gkw_warn 
+  use mpiinterface, only : root_processor
+  use mode,         only : mode_box
+  use structures,   only : matrix_element
+  use source_time,  only : source_modulation
+  use neoequil,     only : neoequil_init_grids
+ 
+  real    :: dtim_est, dtim_dum
+  logical :: lreduced_dt = .false.
+  type (matrix_element) :: Edum
+
+  ! To large dissipation at low velocity drives the implicit scheme unstable 
+  if (method == 'IMP') idisp = 1 
+
+  !The sets up the neoclassical distribution function correction
+  !by reading data from NEO or GKW or an analytical form.
+  if(lneo_equil)then
+    call neoequil_init_grids
+    call neof_diagnose
+  end if
+
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+! First part the linear terms of the perturbed distribution
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+  !Add terms I and IV as Possion bracket
+  arakawa: if (ltrapping_arakawa) then 
+    call igh(disp_par,disp_vp)
+
+  !Or add terms I and IV seperately
+  else 
+
+    vpargraddf : if (lvpar_grad_df) then
+
+      ! add the convection parallel to the field (Term I in the manual)
+      call vpar_grd_df
+      ! with v_par dissipation.  Both 2nd order and 4th order.
+      call parallel_dissipation(disp_par) 
+
+    endif vpargraddf
+
+    ! The trapping term 
+    if ((vp_trap.ne.1).and.ltrapdf) then 
+      call dfdvp_trap  
+      call dfdvp_dissipation(disp_vp)
+    endif 
+  
+  end if arakawa
+
+  ! add the part due to the drift in the gradient of the eikonal
+  ! (Term II in the manual)
+  if (lvdgradf) call vdgradf
+
+  ! Perpendicular hyperdissipation
+  if (mode_box.and.(disp_x .ne.0 .or. disp_y .ne. 0)) then
+    call hyper_disp_perp(disp_x,disp_y)
+  end if
+
+  ! The collision opeator
+  if (lcollisions) call collision_operator_setup
+
+  ! the boundary region damping 
+  call krook_bound
+
+  ! store the value of nmat (all left hand side terms)
+  call finish_matrix_section(1)
+
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+! Second part the Maxwell background
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+  
+  ! the ExB in the Maxwell background (Term V in the manual)
+  if (lve_grad_fm) call ve_grad_fm
+  
+  ! The drift in the gradient of phi times the velocity derivative of the 
+  ! Maxwellian. (Term VIII in the manual)
+  if (lvd_grad_phi_fm) then 
+    call vd_grad_phi_fm 
+  end if
+  
+  ! Landau damping (both 4th and 2nd order) (Term VII in the manual)
+  if (lvpgrphi) then 
+    call vpar_grd_phi
+  endif 
+  
+  call source_modulation
+  
+  ! Retrieve minimum timestep estimate for ALL terms (excluding fields), 
+  call time_est(Edum,99,dtim_est)
+  
+  dtim_dum = dtim_input
+
+  ! reduce the timestep to the estimated value times user factor
+  if (fac_dtim_est*dtim_est < dtim   &
+    & .and. (method=='EXP' .or. method == 'EIV')) then
+
+    dtim=min(fac_dtim_est*dtim_est,dtim_input)
+    if (dtim < dtim_input) then
+      call gkw_warn('Linear timestep automatically reduced')
+      lreduced_dt=.true.
+      dtim_input=dtim !Avoid NL estimator resetting to input value
+    end if
+  end if
+
+  if (root_processor) then
+    write(*,*)
+    write(*,'(A,es13.5)') ' Maximum linear timestep estimate:', dtim_est
+    write(*,'(A,es13.5)') ' Input timestep:                  ', dtim_dum
+    write(*,'(A,es13.5)') ' Timestep in use:                 ', dtim
+    write(*,*)
+  end if
+  
+  ! store the value of nmat
+  call finish_matrix_section(2)
+  
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+! Third part: Integral (over the perturbed distribution) part of the 
+! field equations
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+  ! The poisson equation
+  if (lpoisson) call poisson_int
+  
+  ! Electro-magnetic corrections
+  if (nlapar) then
+    ! The correction to be added to fdisi to generate the
+    ! distribution without A|| correction
+    if (lg2f_correction) call g2f_correct
+
+    ! The integral part of ampere's law
+    if (lampere) call ampere_int
+  endif
+
+  if (nlbpar .and. lbpar) call ampere_bpar_int
+
+  ! Initialisation of the integrals required for momentum conservation
+  ! Now go into a seperate matrix.
+  if (lcollisions.and.conservation) then
+    if (uniform_mu_grid)then
+      call coll_mom_change_int
+    else
+      call coll_mom_change_int_numu
+    endif
+  endif
+  
+  ! number of elements after the poisson equation, (n3, nmatm)
+  call finish_matrix_section(3)
+  
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+! Fourth part: Diagonal part of the field equations 
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+  
+  ! diagonal part of the poisson equation
+  if (lpoisson) call poisson_dia
+
+  ! calculate the zonal flow matrices when necessary
+  if (lpoisson_zf) call poisson_zf
+
+  ! diagonal part of Ampere's law
+  if (nlapar .and. lampere) call ampere_dia
+
+  ! number of elements (n4)
+  call finish_matrix_section(4)
+ 
+  ! Finally, if neoclassical effects are to be kept, call the source routine.
+  ! (Term VI in the manual)
+  if (neoclassics .and. lneoclassical) then 
+    call neoclassical
+  end if
+
+  ! uncomment the following line to output the matrix
+  !call output_matrix()
+ 
+  ! Cleanly abort if any bad elements have been put into the matrix.
+  call abort_if_bad_element
+ 
+end subroutine calc_linear_terms
+
+!------------------------------------------------------------------------------
+!> This routine puts the motion along the field line (Term I in the manual)
+!!  \f$
+!! -v_R v_{parallel N} {\cal F} (d f / d s) \f$
+!!
+!! in the matrix. The parallel boundary conditions are implemented throug a 
+!! call to connect_parallel, the differential scheme is set by the routine 
+!! differential_scheme and an estimate of the critial time step is made for 
+!! every species
+!<-----------------------------------------------------------------------------
+subroutine vpar_grd_df
+
+  use structures,     only : matrix_element
+  use matdat,         only : set_indx, add_element, register_term
+  use matdat,         only : pos_par_grid, connect_parallel
+  use grid,           only : nx,ns,nmu,nvpar,nsp,nmod, n_s_grid, gs
+  use velocitygrid,   only : vpgr
+  use geom,           only : ffun, sgr_dist
+  use components,     only : vthrat, rhostar_linear
+  use mode,           only : parallel_phase_shift, ixplus, ixminus
+  use dist,           only : ifdis
+  use rotation,       only : coriolis, cf_drift
+  use rho_par_switch, only : lvdgradf_rhostar
+  use control,        only : lcalc_energetics
+
+  !> The integers for the loop over all grid points
+  integer :: imod, ix, i, j, k ,is
+
+  !> the variables used in the parallel boundary conditions
+  integer :: ist
+  logical :: ingrid
+
+  !> the element to attempt
+  type (matrix_element) :: elem
+
+  !> dummy variables
+  real    :: dum, w(5), drift_x, drift_y, drift_z
+  integer :: ierr, ipw, id, m
+
+  ! if only one parallel grid point (2D case) return
+  if (n_s_grid .lt. 2) return
+
+  ! Identifier of the term 
+  elem%term = 'I: vpar_grad_df'
+  elem%itype = ifdis 
+  elem%itloc = ifdis
+  elem%ideriv = 1
+  
+  call register_term(elem)
+
+  do is = 1, nsp
+
+    do imod=1,nmod ; do ix=1,nx ; do j = 1,nmu ; do k=1,nvpar ; do i=1,ns
+
+      ! parallel velocity
+      dum = -ffun(ix,i)*vthrat(is)*vpgr(i,j,k,is)
+      
+      if ( lvdgradf_rhostar ) then
+        ! parallel derivative part of term II 
+        call drift(ix,i,j,k,is,drift_x,drift_y,drift_z,coriolis,cf_drift,.true.)
+        dum = dum - rhostar_linear * drift_z 
+      endif
+      ! the direction of the parallel motion 
+      if (dum > 0) then 
+        ipw = 1 
+      else 
+        ipw = -1 
+      end if 
+      id = + 1 
+
+      ! select the scheme 
+      ist = pos_par_grid(imod,ix,i,k)
+      call differential_scheme(ist,ipw,id,w) 
+
+      do m = 1, 5
+        
+        if (w(m).ne.0) then 
+          call set_indx(elem,imod,ix,i,j,k,is) 
+          elem%iloc = i + m - 3 
+          elem%val  = w(m) * dum / sgr_dist  
+          elem%val = elem%val * parallel_phase_shift(elem%imod, & 
+             elem%ix,elem%i,elem%iloc)
+          call connect_parallel(elem,ingrid)
+          
+          if (lcalc_energetics) then
+            !------------------------------------------------------------------
+            ! This part of the routine calculates the outflow through the
+            ! open boundary condition at the end of a field line.
+            ! Conceptionally, it should calculate the same advection term
+            ! as vpar_grd_df, but on the first cell *outside* the grid. As
+            ! there are no ghost cells at the global s-boundary this could
+            ! maybe be done via extrapolation,
+            ! resulting in an extreme one-sided upwind differentiation?
+            !
+            !   use values of those cells     +- to calculate the derivative 
+            !                                 |                     here
+            !          *     *     *    *     v
+            !   ... | n-3 | n-2 | n-1 | n | (n+1)
+            !
+            ! Implemented is however:
+            ! Assuming that the solution is rather smooth, the parallel 
+            ! advection term on the last cell of the grid next to an outflow
+            ! boundary is used as an approximation of the outflow.
+            !------------------------------------------------------------------
+            
+            ! FIXME What about outflow in the nonspectral case? This is written
+            ! for the spectral method and won't make sense in nonspectral?
+
+            if ((ixplus(imod,ix) == 0 .and. ipw == 1 .and. gs(i) == n_s_grid) .or. &
+               & (ixminus(imod,ix) == 0 .and. ipw == -1 .and. gs(i) == 1)) then
+              
+              ! Label outflow matrix elements
+              ! add_element can then store it in a separate matrix 
+              ! the outflow can be calculated with.
+              ! See also the energetics diagnostic.
+              elem%outflow = .true.
+               
+             end if
+           end if
+
+           if (ingrid) call add_element(elem,ierr)
+           elem%outflow = .false.
+         end if
+
+      end do
+
+    end do ; end do ; end do ; end do ; end do
+
+  end do
+
+return 
+end subroutine vpar_grd_df
+
+
+!------------------------------------------------------------------------------
+!> This routine calculates the parallel disipation. The differential scheme 
+!> is selected through the use of the routine differential_scheme. 
+!>
+!> Input  disp   : real, the dissipation coefficient 
+!> CLEANUP: This routine replicates subroutine diffus and should be merged
+!------------------------------------------------------------------------------
+subroutine parallel_dissipation(disp)
+
+  use structures,   only : matrix_element
+  use matdat,       only : set_indx, add_element, register_term
+  use matdat,       only : connect_parallel, pos_par_grid  
+  use geom,         only : ffun, sgr_dist
+  use grid,         only : nx,ns,nmu,nvpar,nsp,nmod, n_s_grid
+  use velocitygrid, only : vpgr, vpgr_rms
+  use components,   only : vthrat
+  use general,      only : gkw_abort 
+  use dist,         only : ifdis
+  use mode,         only : parallel_phase_shift
+
+  !> The dissipation coefficient
+  real, intent(in) :: disp
+
+  !> The integers for the loop over all grid points
+  integer :: imod, ix, i, j, k ,is
+
+  !> Variables to deal with the parallel boundary conditions 
+  integer :: ist
+  logical :: ingrid 
+
+  !> the element to attempt
+  type (matrix_element) :: elem
+
+  !> dummy variables
+  real    :: dum, dum2, W(5)
+  integer :: id, ipw, m, ierr  
+
+  ! if only one parallel grid point (2D case) return
+  if (n_s_grid .lt. 2) return
+
+  ! Set the string to identify the term 
+  elem%term  = 'parallel dissipation' 
+
+  ! type of the elements 
+  elem%itype = ifdis
+  elem%itloc = ifdis
+  elem%ideriv = 4
+  
+  call register_term(elem)
+
+  do is = 1, nsp
+
+    do imod=1,nmod ; do ix=1,nx ; do j = 1,nmu ; do k=1,nvpar ; do i=1,ns
+
+      ! the dissipation 
+      dum = -ffun(ix,i)*vthrat(is)*vpgr(i,j,k,is)
+      select case(idisp)
+      case(1,-1) 
+        dum2 = dum 
+      case(2,-2) 
+        dum2  = ffun(ix,i)*vthrat(is)*vpgr_rms      
+      case default 
+        dum2 = 0.
+        call gkw_abort('parallel_dissipation: unknown idisp')
+      end select 
+
+      ! direction of the parallel motion 
+      if (dum > 0) then 
+        ipw = 1 
+      else 
+        ipw = -1 
+      end if 
+      id = + 2                ! use 4th derivative at 2nd order
+      if (idisp < 0) id = -2  ! use 2nd derivative at 4th order
+
+      ! select the scheme 
+      ist = pos_par_grid(imod,ix,i,k)
+      call differential_scheme(ist,ipw,id,w) 
+
+      ! returns (for ist = 0) 
+      ! w = dfoc00   /-1.E0,   4.E0,  -6.E0,   4.E0,  -1.E0 /  12
+      ! second order fourth derivative
+
+      do m = 1, 5 
+
+        if ((w(m).ne.0.).and.((dum.ne.0).or.(ist.eq.0))) then 
+          call set_indx(elem,imod,ix,i,j,k,is)
+          elem%iloc = i + m - 3 
+          elem%val  = w(m) * abs(dum2) * disp / sgr_dist  
+          elem%val = elem%val * parallel_phase_shift(elem%imod, & 
+           & elem%ix,elem%i,elem%iloc)
+          call connect_parallel(elem,ingrid)
+          if (ingrid) call add_element(elem,ierr)
+        endif 
+
+      end do 
+
+    end do ; end do ; end do ; end do ; end do
+
+  end do
+
+return 
+end subroutine parallel_dissipation
+
+!-----------------------------------------------------------------------------
+!> This routine puts the trapping (Term IV in the manual)
+!!
+!! \f$  + v_R \mu_N B_N {\cal G} (d f / d v_{\parallel} N)        \f$
+!!
+!! in the matrix. Boundary conditions are that f is zero outside the parallel
+!! velocity grid - could be made to be "flappy" as in term I
+!<-----------------------------------------------------------------------------
+subroutine dfdvp_trap 
+
+  use structures,     only : matrix_element
+  use matdat,         only : set_indx, add_element, register_term
+  use grid,           only : nx, ns, nmu, nvpar, nsp, nmod
+  use velocitygrid,   only : mugr, dvp, connect_vpar, vpgr
+  use geom,           only : bn, gfun, ffun, dfun, hfun, efun
+  use components,     only : vthrat, tgrid, tmp, rhostar_linear, signz, mas
+  use components,     only : veta_prime
+  use rotation,       only : dcfen_ds, vcor
+  use dist,           only : ifdis
+  use rho_par_switch, only : ltrapdf_rhostar
+
+  character(len=64) :: term='IV: trapdf_4d'
+
+  ! The integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is, ist
+
+  ! element to add
+  type (matrix_element) :: elem
+
+  ! Dummy variables
+  real    :: dum, w(5), drift_z, dBdeps, dBdzeta, dBds
+  integer :: ierr, ipw, id, m 
+  logical :: ingrid
+
+  ! The same for all elements 
+  elem%term  = term 
+
+  dBdzeta=0
+  ! type of the elements 
+  elem%itype = ifdis
+  elem%itloc = ifdis
+  elem%ideriv = 1
+  
+  call register_term(elem)
+
+  do is = 1,nsp
+
+    do imod=1,nmod ; do ix=1,nx ; do i=1,ns ; do j=1,nmu ; do k=1,nvpar
+
+      call set_indx(elem,imod,ix,i,j,k,is)
+
+      dum = vthrat(is)*mugr(j)*bn(ix,i)*gfun(ix,i)
+
+      !Add the centrifugal correction to the trapping
+      !cfen=0 if vcor=0 or cf_trap=.false.
+      dum=dum+0.5*vthrat(is)*tmp(ix,is)*ffun(ix,i)*dcfen_ds(i,is)/tgrid(is)
+
+      if(lneo_equil.and.lneo_trap)then
+        dum=dum+0.5*signz(is)*vthrat(is)*tmp(ix,is)*ffun(ix,i)*dphineods(imod,ix,i)/tgrid(is)
+      endif
+
+      ! add the rhostar term to the trapping
+      if (rhostar_linear.gt.0.and. ltrapdf_rhostar) then
+        dBds = gfun(ix,i)/ffun(ix,i)*bn(ix,i)
+        !use dfun(ix,i,3) to calculate dBdeps
+        dBdeps = dfun(ix,i,3) *bn(ix,i)/efun(ix,i,3,1)
+        ! driftz_over_vpar would be more precise
+        drift_z = (2E0* tmp(ix,is)*vpgr(i,j,k,is)/bn(ix,i)*  &
+                    (efun(ix,i,1,1)*dBdeps*dBdeps + efun(ix,i,2,2)*dBdzeta*dBdzeta &
+                      +efun(ix,i,3,3)*dBds*dBds)&
+                   +(2E0-2E0) * tmp(ix,is)*vpgr(i,j,k,is)/bn(ix,i)* efun(ix,i,1,2)*dBdeps * dBdzeta &
+                   +(2E0-2E0) * tmp(ix,is)*vpgr(i,j,k,is)/bn(ix,i)* efun(ix,i,1,3)*dBdeps * dBds    &
+                   +(2E0-2E0) * tmp(ix,is)*vpgr(i,j,k,is)/bn(ix,i)* efun(ix,i,2,3)*dBdzeta* dBds    &
+                  ) * mugr(j)
+        drift_z = drift_z + tmp(ix,is)/bn(ix,i) * vpgr(i,j,k,is) * veta_prime(ix)/bn(ix,i)**2 &
+                             * efun(ix,i,1,3) * dBds * mugr(j)
+        drift_z = drift_z / signz(is) 
+        drift_z = drift_z + 2.E0*mas(is)*vcor*( hfun(ix,i,1) *dBdeps+hfun(ix,i,3)*dBds  * mugr(j) )
+        dum=dum+rhostar_linear * drift_z
+      end if
+      !Use function to find the value of ist which determines which 
+      !stencil to use.
+      call connect_vpar(elem,ingrid,ist)
+      
+      if (dum > 0) then 
+        ipw = 1 
+      else 
+        ipw = -1 
+      end if 
+      id = + 1 
+
+      ! select the scheme 
+      call differential_scheme(ist,ipw,id,w) 
+
+      do m = 1, 5 
+ 
+        if (w(m).ne.0.) then 
+          call set_indx(elem,imod,ix,i,j,k,is)
+          elem%kloc = k + m - 3 
+          elem%val  = w(m) * dum / dvp
+          call add_element(elem,ierr)
+
+        endif 
+
+      end do 
+
+    end do ; end do ; end do ; end do ; end do
+
+  end do
+
+end subroutine dfdvp_trap
+
+!-----------------------------------------------------------------------------
+!> This routine puts the dissipation on the trapping term (Term IV in the 
+!! manual) in the matrix. Boundary conditions are that f is zero outside the 
+!! parallel velocity grid 
+!> CLEANUP: This routine replicates subroutine diffus and should be merged.
+!<-----------------------------------------------------------------------------
+subroutine dfdvp_dissipation(disp) 
+
+  use structures,   only : matrix_element
+  use matdat,       only : set_indx, add_element, register_term
+  use grid,         only : nx, ns, nmu, nvpar, nsp, nmod
+  use velocitygrid, only : mugr, dvp, mugr_rms, connect_vpar
+  use geom,         only : bn, gfun, ffun
+  use components,   only : vthrat, tgrid, tmp, signz
+  use rotation,     only : dcfen_ds
+  use dist,         only : ifdis
+
+  ! The dissipation coefficient 
+  real, intent(in) :: disp 
+
+  ! The integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is, ist
+
+  ! element to add
+  type (matrix_element) :: elem
+
+  ! Dummy variables
+  real    :: dum, dum2, w(5)
+  integer :: ierr, ipw, id, m 
+  logical :: ingrid
+
+  ! The same for all elements 
+  elem%term  = 'parallel velocity dissipation' 
+
+  ! type of the elements 
+  elem%itype = ifdis 
+  elem%itloc = ifdis
+  elem%ideriv = 4
+  if (disp<0) elem%ideriv = 2
+  
+  call register_term(elem)
+
+  do is = 1,nsp
+
+    do imod=1,nmod ; do ix=1,nx ; do i=1,ns ; do j=1,nmu ; do k=1,nvpar
+
+      call set_indx(elem,imod,ix,i,j,k,is)
+
+      dum = vthrat(is)*mugr(j)*bn(ix,i)*gfun(ix,i)
+
+      !Add the centrifugal correction to the trapping
+      !cfen=0 if vcor=0 or cf_trap=.false.
+      dum=dum+0.5*vthrat(is)*ffun(ix,i)*dcfen_ds(i,is)
+
+      if(lneo_equil.and.lneo_trap)then
+        dum=dum+0.5*signz(is)*vthrat(is)*ffun(ix,i)*dphineods(imod,ix,i)
+      endif
+
+      select case(idisp)
+        case(1,-1)
+          dum2 = dum
+        case(2,-2) ! use the mugr rms value only
+          dum2 = vthrat(is)*bn(ix,i)*gfun(ix,i)*mugr_rms
+          dum2 = dum2+0.5*vthrat(is)*tmp(ix,is)*ffun(ix,i)*dcfen_ds(i,is) & 
+               & / tgrid(is)
+        case default 
+          dum2 = 0. 
+      end select
+
+      !Use function to find the value of ist which determines which 
+      !stencil to use.
+      call connect_vpar(elem,ingrid,ist)
+      
+      if (dum > 0) then 
+        ipw = 1 
+      else 
+        ipw = -1 
+      end if 
+      id = + 2                  ! use 4th derivative at 2nd order
+      if (idisp < 0) id = -2    ! use 2nd derivative at 4th order
+
+      ! select the scheme 
+      call differential_scheme(ist,ipw,id,w) 
+
+      do m = 1, 5 
+ 
+        if (w(m).ne.0.) then 
+
+          call set_indx(elem,imod,ix,i,j,k,is)
+          elem%kloc = k + m - 3 
+          elem%val  = w(m) * disp * abs(dum2) / dvp
+          call add_element(elem,ierr)
+
+        endif 
+
+      end do 
+
+    end do ; end do ; end do ; end do ; end do
+
+  end do
+
+return 
+end subroutine dfdvp_dissipation 
+
+
+
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+!> Add terms I and IV as one term : \f$ v_R {\cal F} \{H,g_N\} \f$
+!! where
+!!         \f$ H  = (1/2) v_{\parallel N}^2 + \mu_N B_N + (1/2) {\cal E}_R = H(s,\mu,v_{\parallel}) \f$,
+!! and
+!!         \f$ \{H,g_N\} = (d H/d s)(d g_N/d v) - (d H/d v)(d g_N/d s). \f$
+!!
+!! At the boundaries in the s-direction, we apply something similar to the
+!! wills=1 scheme to do upwinding. Note that the routines that this calls to
+!! deal with points near the boundaries do not presently work in second order.
+!!
+!! See jhg_interior for the main bit of these terms.
+!!
+!! ( Note that above we dropped the second index with respect to `j'(for \mu)
+!!  in H; the second index is always j. Below we use `HH' for `H')
+!<----------------------------------------------------------------------------
+subroutine igh(disp_par,disp_vp)
+
+  use structures,   only : matrix_element
+  use components,   only : vthrat
+  use grid,         only : nx,ns,nmu,nvpar,nsp,nmod
+  use general,      only : gkw_abort 
+  use geom,         only : ffun, sgr_dist, gfun, bn
+  use velocitygrid, only : dvp,vpgr,mugr,vpgr_rms,mugr_rms
+  use rotation,     only : dcfen_ds
+  use matdat,       only : set_indx, pos_par_grid, register_term 
+  use dist,         only : ifdis
+
+  real, intent(in) :: disp_vp, disp_par
+  real    :: dum, dum2, disp_v_dum, disp_s_dum
+  integer :: is, imod, ix, i ,j ,k, ist
+
+  type (matrix_element) :: elem
+  
+  disp_v_dum =  0.
+  disp_s_dum  =  0.
+
+  ! the term 
+  elem%term  = 'I + IV: Arawaka'
+
+  ! type of the elements 
+  elem%itype = ifdis
+  elem%itloc = ifdis
+  elem%ideriv = 1
+  
+  call register_term(elem)
+  
+  do is = 1, nsp
+
+    do imod=1,nmod ; do ix=1,nx ; do j = 1,nmu ; do k=1,nvpar ; do i=1,ns
+            
+      ! common factor of the mat elements
+      dum = vthrat(is)*ffun(ix,i)/(sgr_dist*dvp)
+
+      ! dum2 is for the advection sign and (standard) diffusion in s
+      dum2 = -ffun(ix,i)*vthrat(is)*vpgr(i,j,k,is)
+
+      ! disp_v_dum is for diffusion in vpar
+      ! See subroutine trapdf_4d for analouge
+      select case(idisp)
+        case(1) ; disp_v_dum = vthrat(is)*(mugr(j)*bn(ix,i)*gfun(ix,i)+0.5*ffun(ix,i)*dcfen_ds(i,is))
+        case(2) ; disp_v_dum = vthrat(is)*(mugr_rms*bn(ix,i)*gfun(ix,i)+0.5*ffun(ix,i)*dcfen_ds(i,is))
+        case default; call gkw_abort('Arakawa does not yet implement this idisp')
+      end select
+
+      ! disp_s_dum is for diffusion in s
+      ! See subroutine vpar_grad_df for analouge
+      select case(idisp)
+        case(1) ; disp_s_dum = dum2
+        case(2) ; disp_s_dum = ffun(ix,i)*vthrat(is)*vpgr_rms
+        case default; call gkw_abort('Arakawa does not yet implement this idisp')
+      end select
+ 
+      ! Check if the point is near the boundary in s; 0 denotes somewhere in
+      ! the middle and +/- 1, +/- 2 correspond to the points nearest the
+      ! boundary.
+      !
+      !      ist:  -2 -1     0    1  2                  
+      ! location:   |  |  -  -  - |  | 
+      !
+      ist = pos_par_grid(imod,ix,i,k) 
+
+
+      ! set the element 
+      call set_indx(elem,imod,ix,i,j,k,is) 
+
+      ! Add different term depending on where the point is on the grid *and*
+      ! the sign of the advection velocity.
+      select case(ist)
+        case(-2,2)
+          
+          if (dum2*ist < 0.) then
+            call igh_zero_two(elem,dum,ist,dum2)
+          else if (dum2*ist > 0.) then
+            call jhg_interior(elem,dum)
+            ! apply any hyperdiffusion at second order only
+            if (disp_par > 0.) call diffus(elem,disp_par,disp_s_dum,'s',2)
+          else
+            ! do nothing; vanishing term
+          end if
+          
+        case(-1,1)
+          
+          if (dum2*ist < 0.) then
+            call igh_two(elem,dum,ist,dum2)
+          else if (dum2*ist > 0.) then
+            call jhg_interior(elem,dum)
+            ! apply any hyperdiffusion at fourth order
+            if (disp_par > 0.) call diffus(elem,disp_par,disp_s_dum,'s',4)
+          else
+            ! do nothing; vanishing term
+          end if
+          
+        case(0)
+          
+          ! original Arakawa differencing of the right order.
+          call jhg_interior(elem,dum)
+          
+          ! apply any hyperdiffusion to the interior part of the grid, only
+          ! for the s-direction (vpar-direction is applied for all cases).
+          if (disp_par > 0.) call diffus(elem,disp_par,disp_s_dum,'s',4)
+          
+        case default
+          
+          call gkw_abort('igh: bad case of ist')
+          
+      end select
+ 
+      ! (any) parallel velocity dissipation is applied everywhere
+      if (disp_vp  > 0.) call diffus(elem,disp_vp, disp_v_dum,'vpar',4)
+      
+    end do ; end do ; end do ; end do ; end do
+
+  end do
+
+end subroutine igh
+
+
+!+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+!> This routine is called from igh in order to deal with points at the end of
+!! the s grid with upwinding.
+!! We difference 
+!!  \f$        \{H,g_N\} = (d H/d s)(d g_N/d v) - (d H/d v)(d g_N/d s)  \f$
+!! as
+!!
+!!  \f$      d Z(i)/d s = 1/(2 \delta s) [3 Z(i) - 4 Z(i-1) + Z(i-2)]
+!!           d Z(j)/d v = 1/(2 \delta v) [Z(i+1) - Z(i-1)]              \f$ 
+!!
+!! For dum = vpgr*vthrat/(d v d s) and case(ist), we have the following;
+!!
+!! case(-2) .and. dum > 0:
+!!
+!!     elems = 0.25*dum*[
+!!          + {  -3.*H(i,k) + 4.*H(i+1,k) - H(i+2,k) }    g(i,k+1)
+!!          - {  -3.*H(i,k) + 4.*H(i+1,k) - H(i+2,k) }    g(i,k-1)
+!!          - {      H(i,k+1) - H(i,k-1)             } -3*g(i,k) 
+!!          - {      H(i,k+1) - H(i,k-1)             }  4*g(i+1,k)
+!!          - {      H(i,k+1) - H(i,k-1)             }   -g(i+2,k)
+!!                       ]
+!!
+!! case(-2) .and. dum < 0 .or. case(2) .and. dum > 0:
+!!
+!!     (apply J_1 or J_2 with regular bcs; this routine is not called)
+!!
+!! case(2) .and. dum < 0:
+!!
+!!     elems = 0.25*dum*[
+!!          + {   3.*H(i,k) - 4.*H(i-1,k) + H(i-2,k) }    g(i,k+1)
+!!          - {   3.*H(i,k) - 4.*H(i-1,k) + H(i-2,k) }    g(i,k-1)
+!!          - {      H(i,k+1) - H(i,k-1)             }  3*g(i,k) 
+!!          - {      H(i,k+1) - H(i,k-1)             } -4*g(i-1,k)
+!!          - {      H(i,k+1) - H(i,k-1)             }    g(i-2,k)
+!!                       ]
+!<----------------------------------------------------------------------------
+subroutine igh_zero_two(elem,dum,ist,dum2)
+
+  use structures,   only : matrix_element
+  use matdat,       only : add_element, connect_parallel 
+  use general,      only : gkw_abort
+  use mode,         only : parallel_phase_shift 
+
+  type (matrix_element), intent(in) :: elem
+  integer, intent(in) :: ist
+  real, intent(in) :: dum,dum2
+
+  type(matrix_element) :: E 
+  integer :: i, j, k, is, ierr
+  real    :: val
+  logical :: ingrid 
+  real, parameter :: fac=0.25
+
+  i = elem%i
+  j = elem%j
+  k = elem%k
+  is = elem%is
+
+  if (ist == 2 .and. dum2 < 0.) then
+    
+    val = fac*dum*(3.*HH(i,j,k,is) - 4.*HH(i-1,j,k,is) + 1.*HH(i-2,j,k,is))
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k-1
+    E%val  = -1.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k+1
+    E%val  =  1.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    val = fac*dum*( 1.*HH(i,j,k+1,is) - 1.*HH(i,j,k-1,is))
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k
+    E%val  = -3.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+  
+    E = elem 
+    E%iloc = i-1
+    E%kloc = k
+    E%val  =  4.* val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc) 
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i-2
+    E%kloc = k
+    E%val  = -1.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+  else if (ist == -2 .and. dum2 > 0) then
+    
+    val = fac*dum*(-3.*HH(i,j,k,is) + 4.*HH(i+1,j,k,is) - 1.*HH(i+2,j,k,is)) 
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k-1
+    E%val  = -1.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k+1
+    E%val  =  1.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    val = fac*dum*(1.*HH(i,j,k+1,is) - 1.*HH(i,j,k-1,is))
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k
+    E%val  = 3.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+  
+    E = elem 
+    E%iloc = i+1
+    E%kloc = k
+    E%val  = -4.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i+2
+    E%kloc = k
+    E%val  = 1.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+  else
+    
+    call gkw_abort('igh_zero_two: bad call to this routine')
+    
+  end if
+
+end subroutine igh_zero_two
+
+
+!+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+!> This is a similar routine to igh_zero_two; differences
+!>   
+!>  \f$     \{H,g_N\} = (d H/d s)(d g_N/d v) - (d H/d v)(d g_N/d s)      \f$ 
+!>
+!> at the *second* from end point of the s direction with upwinds
+!> dum = vpgr*vthrat/(d v d s).
+!>
+!> d Z(i)/d s = 1/(6 \delta s)  [2 Z(i+1) + 3 Z(i)   - 6 Z(i-1) + Z(i-2)]
+!>      *or*    1/(6 \delta s) [- Z(i+2) + 6 Z(i+1) - 3 Z(i)   - 2 z(i-1)]
+!> d Z(j)/d v = 1/(12 \delta v) [Z(i-2) - 8 Z(i-1) + 8 Z(i+1) - Z(i+2) ]
+!>
+!> case(-1) .and. dum > 0:
+!>
+!>   elems = (1/72)*dum*[
+!>     + { - 2.*H(i-1,k) - 3.*H(i,k)   + 6.*H(i+1,k) - H(i+2,k) }    g(i,k-2)
+!>     - { - 2.*H(i-1,k) - 3.*H(i,k)   + 6.*H(i+1,k) - H(i+2,k) }  8*g(i,k-1)
+!>     + { - 2.*H(i-1,k) - 3.*H(i,k)   + 6.*H(i+1,k) - H(i+2,k) }  8*g(i,k+1)
+!>     - { - 2.*H(i-1,k) - 3.*H(i,k)   + 6.*H(i+1,k) - H(i+2,k) }    g(i,k+2)
+!>   -   {      H(i,k-2) - 8.*H(i,k-1) + 8.*H(i,k+1) - H(i,k+2) } -2*g(i-1,k)
+!>   -   {      H(i,k-2) - 8.*H(i,k-1) + 8.*H(i,k+1) - H(i,k+2) } -3*g(i,k)
+!>   -   {      H(i,k-2) - 8.*H(i,k-1) + 8.*H(i,k+1) - H(i,k+2) } +6*g(i+1,k)
+!>   -   {      H(i,k-2) - 8.*H(i,k-1) + 8.*H(i,k+1) - H(i,k+2) } -1*g(i+2,k)
+!>                       ]
+!>
+!> case(-1) .and. dum < 0 .or. case(1) .and. dum > 0:
+!>
+!>   (apply J_1 or J_2 with regular bcs; this routine is not called)
+!>
+!> case(1) .and. dum < 0:
+!>
+!>   elems = (1/72)*dum*[
+!>     + {  H(i-2,k) - 6.*H(i-1,k) + 3.*H(i,k) + 2.*H(i+1,k) }    g(i,k-2)
+!>     - {  H(i-2,k) - 6.*H(i-1,k) + 3.*H(i,k) + 2.*H(i+1,k) }  8*g(i,k-1)
+!>     + {  H(i-2,k) - 6.*H(i-1,k) + 3.*H(i,k) + 2.*H(i+1,k) }  8*g(i,k+1)
+!>     - {  H(i-2,k) - 6.*H(i-1,k) + 3.*H(i,k) + 2.*H(i+1,k) }    g(i,k+2)
+!>   -   {  H(i,k-2) - 8.*H(i,k-1) + 8.*H(i,k+1)  - H(i,k+2) } +1*g(i-2,k)
+!>   -   {  H(i,k-2) - 8.*H(i,k-1) + 8.*H(i,k+1)  - H(i,k+2) } -6*g(i-1,k)
+!>   -   {  H(i,k-2) - 8.*H(i,k-1) + 8.*H(i,k+1)  - H(i,k+2) } +3*g(i,k)
+!>   -   {  H(i,k-2) - 8.*H(i,k-1) + 8.*H(i,k+1)  - H(i,k+2) } +2*g(i+1,k)
+!>                      ]
+!----------------------------------------------------------------------------
+subroutine igh_two(elem,dum,ist,dum2)
+
+  use structures,   only : matrix_element
+  use matdat,       only : add_element, connect_parallel 
+  use general,      only : gkw_abort 
+  use mode,         only : parallel_phase_shift
+
+  type (matrix_element), intent(in) :: elem
+  integer, intent(in) :: ist
+  real, intent(in)    :: dum,dum2
+
+  type (matrix_element) :: E 
+  real    :: val
+  integer :: i, j, k, is, ierr
+  logical :: ingrid 
+  real, parameter :: fac=1./72.
+
+  i = elem%i
+  j = elem%j
+  k = elem%k
+  is = elem%is
+
+  if (ist == -1 .and. dum2 > 0) then
+    
+    val = fac*dum*                                                            &
+      & (-2.*HH(i-1,j,k,is)-3.*HH(i,j,k,is)+6.*HH(i+1,j,k,is)-HH(i+2,j,k,is))
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k-2
+    E%val  = +1.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k-1
+    E%val  = -8.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i
+    E%kloc = k+1
+    E%val  = +8.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+  
+    E = elem 
+    E%iloc = i
+    E%kloc = k+2
+    E%val  = -1.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    val =  -1.*fac*dum*                                                       &
+     & (1.*HH(i,j,k-2,is)-8.*HH(i,j,k-1,is)+8.*HH(i,j,k+1,is)-1.*HH(i,j,k+2,is))
+    
+    E = elem 
+    E%iloc = i-1
+    E%kloc = k
+    E%val  = -2.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i
+    E%kloc = k
+    E%val  = -3.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i+1
+    E%kloc = k
+    E%val  = +6.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i+2
+    E%kloc = k
+    E%val  = -1.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+  else if (ist == 1 .and. dum2 < 0) then
+
+    val = fac*dum*                                                            &
+     &  (HH(i-2,j,k,is)-6.*HH(i-1,j,k,is)+3.*HH(i,j,k,is)+ 2.*HH(i+1,j,k,is))
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k-2
+    E%val  = +1.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+    
+    E = elem 
+    E%iloc = i
+    E%kloc = k-1
+    E%val  = -8.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i
+    E%kloc = k+1
+    E%val  = +8.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+  
+    E = elem 
+    E%iloc = i
+    E%kloc = k+2
+    E%val  = -1.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    val =  -1.*fac*dum*                                                       &
+     & (1.*HH(i,j,k-2,is)-8.*HH(i,j,k-1,is)+8.*HH(i,j,k+1,is)-1.*HH(i,j,k+2,is))
+
+    E = elem 
+    E%iloc = i-2
+    E%kloc = k
+    E%val  = +1.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i-1
+    E%kloc = k
+    E%val  = -6.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i
+    E%kloc = k
+    E%val  = +3.*val
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+
+    E = elem 
+    E%iloc = i+1
+    E%kloc = k
+    E%val  = +2.*val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+  
+  else
+    
+    call gkw_abort('bad something wrong linear terms')
+    
+  end if
+
+end subroutine igh_two
+
+
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+!> Difference {H,g} in the interior, which includes the boundary in the vpar
+!! direction.
+!! For 2nd order we difference {H,g_N} = J as J = J_1 *OR* J = J_2, with
+!! J_1 and J_2 as defined below.  For a 4th order scheme, we combine J_1 and
+!! J_2; J = 2*J_1 - J_2 (Arakawa, JcompPhys,1,1,_119_ 1966).
+!!
+!! J_1 =
+!!   1/3 (1 / (4 \delta s \delta v_{\par}) )
+!!   *[
+!!        {              H(i-1,k)   - H(i,k-1)                } g(i-1,k-1)
+!!      + { H(i-1,k+1) - H(i-1,k-1) - H(i,k-1)   + H(i,k+1)   } g(i-1,k)
+!!      + {              H(i,k+1)   - H(i-1,k)                } g(i-1,k+1)
+!!      + { H(i-1,k-1) + H(i-1,k)   - H(i+1,k-1) - H(i+1,k)   } g(i,k-1)
+!!      + { H(i+1,k)   + H(i+1,k+1) - H(i-1,k)   - H(i-1,k+1) } g(i,k+1)
+!!      + {              H(i,k-1)   - H(i+1,k)                } g(i+1,k-1)
+!!      + { H(i,k-1)   + H(i+1,k-1) - H(i,k+1)   - H(i+1,k+1) } g(i+1,k)
+!!      + {              H(i+1,k)   - H(i,k+1)                } g(i+1,k+1)
+!!    ]
+!! J_2 =
+!!   1/3 (1 / (8 \delta s \delta v_{\par}) )
+!!   *[
+!!        {            - H(i-1,k-1) + H(i-1,k+1)              } g(i-2,k)
+!!      + { H(i-2,k)   + H(i-1,k+1) - H(i,k-2)   - H(i+1,k-1) } g(i-1,k-1)
+!!      + { H(i+1,k+1) - H(i-1,k-1) - H(i-2,k)   + H(i,k+2)   } g(i-1,k+1)
+!!      + {              H(i-1,k-1) - H(i+1,k-1)              } g(i,k-2)
+!!      + {              H(i+1,k+1) - H(i-1,k+1)              } g(i,k+2)
+!!      + { H(i-1,k-1) - H(i+1,k+1) - H(i+2,k)   + H(i,k-2)   } g(i+1,k-1)
+!!      + { H(i+1,k-1) - H(i-1,k+1) + H(i+2,k)   - H(i,k+2)   } g(i+1,k+1)
+!!      + {              H(i+1,k-1) - H(i+1,k+1)              } g(i+2,k)
+!!    ]
+!!
+!! At the boundaries in the s-direction, we apply something similar to the
+!! wills=1 scheme to do upwinding.
+!!
+!! (Above we drop the second index with respect to `j' (for \mu) in H; the
+!!  second index is always j. Below we use `HH' for `H')
+!<----------------------------------------------------------------------------
+
+subroutine jhg_interior(elem,dum,scheme)
+
+  use structures, only : matrix_element
+  use control,    only: order_of_the_scheme
+  use matdat,     only : add_element, connect_parallel 
+  use general,    only : gkw_abort 
+  use mode,       only : parallel_phase_shift
+
+  type (matrix_element), intent(in) :: elem
+  real, intent(in)                  :: dum
+
+  real                  :: d1, d2
+  integer               :: i,j,k,is,ierr
+  logical               :: ingrid 
+  type (matrix_element) :: E 
+
+  character (len=1), optional, intent(in) :: scheme
+  character (len=1) :: second_order_scheme 
+
+  if (present(scheme)) then
+    second_order_scheme = scheme
+  else
+    second_order_scheme = "+" ! or "x"
+  endif
+
+  i=elem%i
+  j=elem%j
+  k=elem%k
+  is=elem%is
+  
+  d1 = 0. ; d2 = 0.
+
+  select case(order_of_the_scheme)
+
+    case('second_order') 
+      select case(second_order_scheme)
+        case("+") ; d1 =  1. ; d2 =  0.
+        case("x") ; d1 =  0. ; d2 =  1.
+        case default ; call gkw_abort('unknown case of second_order_scheme')
+      endselect
+
+    case('fourth_order') 
+      if (present(scheme)) then
+        select case(second_order_scheme)
+          case("+") ; d1 =  1. ; d2 =  0.
+          case("x") ; d1 =  0. ; d2 =  1.
+          case default ; call gkw_abort('unknown case of second_order_scheme')
+        endselect
+      else
+        d1 =  2. ; d2 = -1.
+      endif
+      
+    case default ; call gkw_abort('linear_terms: unknown case for J')
+
+  end select
+
+  d1 = d1*dum/12.
+  d2 = d2*dum/24.
+
+  ! g(i-2,k); J_2
+  E = elem 
+  E%iloc = i-2
+  E%kloc = k
+  E%val  =   d2*(       HH(i-1,j,k+1,is) - HH(i-1,j,k-1,is)      )
+  E%val = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i-1,k-1); J_1, J_2
+  E = elem 
+  E%iloc = i-1
+  E%kloc = k-1
+  E%val  =   d1*(       HH(i-1,j,k,is)   - HH(i,j,k-1,is)         )           &
+   &        +d2*(       HH(i-2,j,k,is) + HH(i-1,j,k+1,is)                     &
+   &                  - HH(i,j,k-2,is) - HH(i+1,j,k-1,is)         )
+  E%val = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i-1,k); J_1
+  E = elem 
+  E%iloc = i-1
+  E%kloc = k
+  E%val  = d1*(         HH(i-1,j,k+1,is) - HH(i-1,j,k-1,is)                   &
+   &                  - HH(i,j,k-1,is) + HH(i,j,k+1,is))
+  E%val  = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i-1,k+1); J_1, J_2
+  E = elem 
+  E%iloc = i-1
+  E%kloc = k+1
+  E%val  =   d1*(       HH(i,j,k+1,is)   - HH(i-1,j,k,is)                 )   &
+   &        +d2*(       HH(i+1,j,k+1,is) - HH(i-1,j,k-1,is)                   &
+   &                  - HH(i-2,j,k,is) + HH(i,j,k+2,is)                   )
+  E%val  = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i,k-2); J_2
+  E = elem 
+  E%iloc = i
+  E%kloc = k-2
+  E%val  =   d2*(       HH(i-1,j,k-1,is) - HH(i+1,j,k-1,is)               )
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i,k-1); J_1
+  E = elem 
+  E%iloc = i
+  E%kloc = k-1
+  E%val  =   d1*(      HH(i-1,j,k-1,is) + HH(i-1,j,k,is)                      &
+   &                 - HH(i+1,j,k-1,is) - HH(i+1,j,k,is)    )  
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i,k+1); J_1
+  E = elem 
+  E%iloc = i
+  E%kloc = k+1
+  E%val  =   d1*( HH(i+1,j,k,is) + HH(i+1,j,k+1,is)  &
+   &            - HH(i-1,j,k,is) - HH(i-1,j,k+1,is)) 
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i,k+2); J_2
+  E = elem 
+  E%iloc = i
+  E%kloc = k+2
+  E%val  =   d2*(       HH(i+1,j,k+1,is) - HH(i-1,j,k+1,is)               )
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i+1,k-1); J_1, J_2
+  E = elem 
+  E%iloc = i+1
+  E%kloc = k-1
+  E%val  =   d1*(       HH(i,j,k-1,is)   - HH(i+1,j,k,is)                 )   &
+   & +       d2*(       HH(i-1,j,k-1,is) - HH(i+1,j,k+1,is)                   &
+   &                  - HH(i+2,j,k,is) + HH(i,j,k-2,is)                   )
+  E%val  = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i+1,k); J_1
+  E = elem 
+  E%iloc = i+1
+  E%kloc = k
+  E%val  = d1*(          HH(i,j,k-1,is)   + HH(i+1,j,k-1,is)                  &
+   &                   - HH(i,j,k+1,is) - HH(i+1,j,k+1,is)      )
+  E%val  = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i+1,k+1); J_1, J_2
+  E = elem 
+  E%iloc = i+1
+  E%kloc = k+1
+  E%val  =   d1*(       HH(i+1,j,k,is)   - HH(i,j,k+1,is)                 )   &
+   &       + d2*(       HH(i+1,j,k-1,is) - HH(i-1,j,k+1,is)                   &
+   &                  + HH(i+2,j,k,is)   - HH(i,j,k+2,is)                 )
+  E%val  = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+  ! g(i+2,k); J_2
+  E = elem 
+  E%iloc = i+2
+  E%kloc = k
+  E%val  =   d2*(       HH(i+1,j,k-1,is) - HH(i+1,j,k+1,is)               )
+  E%val  = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+  call connect_parallel(E,ingrid)
+  if (ingrid) call add_element(E,ierr)
+
+end subroutine jhg_interior
+  
+
+!-----------------------------------------------------------------------------
+!> adds vdrif grad delta f into the matrix
+!! (Term II in the manual)
+!!
+!! \f$ -(1/Z) i [ T_R E_D {\cal D}^\alpha + T_R v_{\parallel N}^2 \beta^\prime x
+!!    {\cal E}^{\psi \alpha} + 2 m_R v_R v_{\parallel N} \Omega {\cal H}^\alpha
+!!     + m_R {\cal I}^\alpha \Omega^2 ] k_\alpha  \f$
+!!
+!!  NB: vcor = \f$ \Omega  \f$
+!!
+!! The parallel term proportional to the parallel derivative is neglected. 
+!< 
+!-----------------------------------------------------------------------------
+
+subroutine vdgradf
+
+  use structures,     only : matrix_element
+  use control,        only : spectral_radius, order_of_the_radial_scheme
+  use grid,           only : nx, ns, nmu, nvpar, nsp, nmod, gx, n_x_grid
+  use mode,           only : krho, kxrh
+  use matdat,         only : add_element, set_indx, register_term 
+  use matdat,         only : connect_rad
+  use constants,      only : ci1
+  use dist,           only : ifdis
+  use geom,           only : dxgr 
+  use rotation,       only : shear_real, shear_rate, coriolis, cf_drift
+  
+  ! integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is
+
+  ! The matrix element 
+  type (matrix_element) :: elem
+
+  ! error variable 
+  integer :: ierr 
+
+  ! dummy 
+  integer :: id, ist, ipw, m 
+  real    :: drift_x, drift_y, drift_z, w(5)
+  logical :: ingrid 
+
+  ! Setting which term 
+  elem%term  = 'II: vdgradf'
+  
+  ! type of the elements 
+  elem%itype = ifdis
+  elem%itloc = ifdis
+
+  if (spectral_radius) then
+   elem%ideriv = 0
+  else
+    elem%ideriv = 1  
+  end if
+  
+  call register_term(elem)
+  
+  do is = 1, nsp
+
+    do imod = 1, nmod ; do ix = 1, nx ; do i = 1, ns ; do j = 1, nmu ; do k = 1, nvpar
+
+        ! store the indices 
+        call set_indx(elem,imod,ix,i,j,k,is) 
+
+        ! calculate the drift 
+        call drift(ix,i,j,k,is,drift_x,drift_y,drift_z,coriolis,cf_drift,.true.)
+
+        ! if spectral 
+        if (spectral_radius) then 
+
+          ! Matrix element : Multiply with -ci1 and wave vectore 
+          elem%val = -ci1*(drift_x*kxrh(ix) + drift_y*krho(imod)) 
+
+          ! store the element 
+          call add_element(elem,ierr) 
+
+        else 
+
+          ! background ExB drift (in spectral case is in nonlinear terms)
+          ! FIX ME FOR EVEN NX ?
+          if (shear_real) then
+            drift_y = drift_y + (gx(ix) - real(n_x_grid)/2.)*shear_rate*dxgr
+          end if
+
+          ! the differential scheme 
+          id  = +1
+          ipw = -1 
+          if (drift_x.lt.0) ipw = +1  
+          ist = 0
+          call differential_scheme(ist,ipw,id,w,order_of_the_radial_scheme) 
+
+          call set_indx(elem,imod,ix,i,j,k,is)
+          elem%val = - ci1 * drift_y * krho(imod) 
+          call add_element(elem,ierr) 
+
+          do m = 1, 5 
+            if (w(m).ne.0) then 
+              call set_indx(elem,imod,ix,i,j,k,is)
+              elem%ixloc = ix + m - 3 
+              elem%val   =  - w(m) * drift_x / dxgr
+              call connect_rad(elem,ingrid)
+              if (ingrid) call add_element(elem,ierr)
+            endif
+          end do 
+ 
+        endif
+
+      end do ; end do ; end do ; end do ; end do
+
+  end do
+
+end subroutine vdgradf
+
+!-----------------------------------------------------------------------------
+!> This routine adds perpendicular (hyper)dissipation, coefficients in control
+!> Dissipation only on f, not on fields.
+!> This dissipation can prevent spectral pile up in nonlinear runs.
+!> Some argue dissipation should be isotropic for a good saturation.
+!> To compare with a finite difference code may need to put dissipation.
+!> In term II, proportional to V_D
+!-----------------------------------------------------------------------------
+subroutine hyper_disp_perp(disp_x,disp_y)
+
+  use structures,     only : matrix_element
+  use control,        only : spectral_radius, order_of_the_radial_scheme
+  use grid,           only : nx, ns, nmu, nvpar, nsp, nmod
+  use mode,           only : krho, kxrh, kxmax, kymax
+  use matdat,         only : add_element, set_indx, register_term 
+  use matdat,         only : connect_rad 
+  use general,        only : gkw_abort
+  use global,         only : r_tiny  
+  use dist,           only : ifdis
+  use geom,           only : metric, dxgr
+  use constants,      only : ci1
+  use mpiinterface,   only : root_processor
+
+  real, intent(in) :: disp_x, disp_y
+
+  ! integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is, kpowx, kpowy
+
+  ! dummies 
+  integer :: ipw, id, ist, m
+  real    :: w(5)
+  logical :: ingrid
+
+  ! the matrix element 
+  type (matrix_element) :: elem 
+
+  ! Dummy variables
+  real    :: dspx, dspy
+  integer :: ierr
+
+  dspx=abs(disp_x)
+  dspy=abs(disp_y)
+
+  ! type of dissipation depends on the sign of the input coefficient
+  if (disp_x < 0.E0) then
+    kpowx = 2   ! dissipation
+  else
+    kpowx = 4   ! hyper-dissipation
+  end if
+  
+  if (disp_y < 0.E0) then
+    kpowy = 2   ! dissipation
+  else
+    kpowy = 4   ! hyper-dissipation
+  end if    
+
+  if (spectral_radius) then 
+    if (kxmax < r_tiny .or. kymax < r_tiny) then
+      call gkw_abort('Invalid call to hyper_disp_perp')
+    end if
+  else 
+    if ((kymax < r_tiny).and.(dspy > r_tiny)) then 
+      call gkw_abort('Invalid call to hyper_disp_perp')
+    endif 
+  endif 
+
+  ! Identifier for the term 
+  elem%term = 'hyper_disp_perp'
+
+  ! type of the elements 
+  elem%itype = ifdis 
+  elem%itloc = ifdis
+  
+  if (spectral_radius) then
+    elem%ideriv = 0
+  else
+    if (disp_x < 0) then
+     elem%ideriv = 2
+    else
+     elem%ideriv = 4
+    end if
+  end if
+  
+  call register_term(elem)
+
+  ! select the scheme 
+  ipw = 1; id = +2; ist = 0 
+  call differential_scheme(ist,ipw,id,w,order_of_the_radial_scheme) 
+
+  if ((root_processor).and.(.not.spectral_radius).and.(disp_x<0.)) &
+    & write(*,*)'WARNING: disp_y is set equal to disp_x'
+
+  do is = 1, nsp; do imod = 1, nmod ; do ix = 1, nx ; do i = 1, ns
+
+    do j = 1, nmu ; do k = 1, nvpar
+
+      ! set the indices of the matrix element 
+      call set_indx(elem,imod,ix,i,j,k,is)
+
+      if (spectral_radius) then ! hyper-dissipation
+      
+        elem%val = -(dspy*(krho(imod)/kymax)**kpowy + dspx*(kxrh(ix)/kxmax)**kpowx)
+ 
+        ! The line below is for normal (not hyper) dissipiation 
+        ! mat_elem = -(disp_y*krho(imod)**2 + disp_x*kxrh(ix)**2)
+        call add_element(elem,ierr) 
+   
+      else ! dissipation
+
+        ! dissipation in the binormal direction 
+        if (dspy.gt.r_tiny) then 
+          elem%val = -dspy*(krho(imod)/kymax)**kpowy 
+          call add_element(elem,ierr) 
+        endif
+
+        ! dissipation in the radial direction 
+        if(disp_x.gt.0) then
+          ! Fourth order dissipation
+          do m = 1, 5 
+            if (w(m).ne.0.) then 
+              call set_indx(elem,imod,ix,i,j,k,is)
+              elem%ixloc = ix + m - 3 
+              elem%val  =  w(m) * dspx   
+              call connect_rad(elem,ingrid)
+              if (ingrid) call add_element(elem,ierr)
+            endif 
+          end do 
+
+        else
+          ! Second order dissipation 
+
+          ! Note: (1) the radial variation of the metric elements is neglected
+          !       (2) the jacobian is set equal to one
+
+          call set_indx(elem,imod,ix,i,j,k,is)
+          elem%ixloc = ix-1
+          elem%val = dspx*dxgr*( metric(ix,i,1,1)/(dxgr**2)         &
+                   & - metric(ix,i,1,2)*ci1*krho(imod)/dxgr )    
+          call connect_rad(elem,ingrid)
+          if (ingrid) call add_element(elem,ierr)
+
+          call set_indx(elem,imod,ix,i,j,k,is)
+          elem%ixloc = ix
+          elem%val = dspx*dxgr*( -2.E0*metric(ix,i,1,1)/(dxgr**2)   &
+                   & - metric(ix,i,2,2)*krho(imod)**2 ) 
+          call connect_rad(elem,ingrid)
+          if (ingrid) call add_element(elem,ierr)
+ 
+          call set_indx(elem,imod,ix,i,j,k,is)
+          elem%ixloc = ix+1
+          elem%val = dspx*dxgr*( metric(ix,i,1,1)/(dxgr**2)         &
+                   & + metric(ix,i,1,2)*ci1*krho(imod)/dxgr )     
+          call connect_rad(elem,ingrid)
+          if (ingrid) call add_element(elem,ierr)
+
+        endif  
+
+      endif 
+
+    end do ; end do ; end do ; end do ; end do ; end do
+
+end subroutine hyper_disp_perp
+
+!------------------------------------------------------------------------------
+!> This routine adds the damping of the solution in the boundary regions into 
+!> the matrix. 
+!------------------------------------------------------------------------------
+subroutine krook_bound
+
+  use structures, only : matrix_element
+  use matdat,     only : add_element, set_indx, register_term 
+  use dist,       only : ifdis 
+  use krook,      only : nlbound, gammab, bwidth 
+  use grid,       only : gx, n_x_grid, nmod, nx, ns, nmu, nvpar, nsp 
+  use mode,       only : iyzero
+
+  ! integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is
+
+  ! the matrix element 
+  type (matrix_element) :: elem 
+
+  ! dummy 
+  integer :: ierr 
+ 
+  if (.not.nlbound) return 
+
+  ! Identifier for the term (not in timestep estimator since no derivative)
+  elem%term = 'Krook operator for boundary'
+
+  ! type of the elements 
+  elem%itype = ifdis 
+  elem%itloc = ifdis
+  elem%ideriv = 0
+  
+  call register_term(elem)
+
+  do ix = 1, nx 
+
+    do imod = 1, nmod; do i = 1, ns; 
+      do j = 1, nmu; do k = 1, nvpar; do is = 1, nsp 
+
+        ! set the indices of the matrix element (diagonal, no derivative)
+        call set_indx(elem,imod,ix,i,j,k,is)
+
+        ! default zero damping 
+        elem%val = 0. 
+
+        if (bwidth > 0) then
+
+          ! inner boundary 
+          if (gx(ix).le.bwidth) then  
+            elem%val = -gammab*(exp(-(gx(ix)-1)/bwidth) - exp(-1.)) / & 
+                     & (1 - exp(-1.)) 
+          endif 
+
+          ! outer boundary 
+          if (gx(ix).gt.n_x_grid-bwidth) then 
+            elem%val = -gammab*(exp(-(n_x_grid-gx(ix))/bwidth) - exp(-1.))/ &
+                     &  (1. - exp(-1.)) 
+          endif
+        
+        else  ! heaviside damping layer on 0 mode only               
+           
+          if ((gx(ix).le.abs(bwidth) .or. gx(ix).gt.n_x_grid-abs(bwidth)).and. imod == iyzero) then  
+            elem%val = -gammab 
+          endif   
+          
+        end if
+
+        ! store the element 
+        call add_element(elem,ierr) 
+
+      end do; end do; end do  
+    end do; end do
+
+  end do 
+
+end subroutine krook_bound
+
+!------------------------------------------------------------------------------
+!> This routine adds the \f$  {\bf v}_\chi \nabla F_M \f$ term
+!! Term V in the manual
+!! This routine would be better named vchi_grad_fm as
+!! it now also includes v_del_B_perp
+!!
+!! \f$  +  {\cal I} E^(\alpha \psi) k_\alpha chi 
+!! [ 1/L_N + E_T 1/L_T + 2 v_{\parallel N} R_N B_t/B u^\prime / v_R   \f$
+!!
+!! in the matrix.
+!!
+!! Note that because the diagonal components of efun are zero, the components
+!! containing kxrh are actually zero, hence for the nonspectral method no 
+!! radial derivatives need to be calculated.
+!< 
+!------------------------------------------------------------------------------
+subroutine ve_grad_fm
+
+  use structures,     only : matrix_element
+  use control,        only : nlapar, nlbpar, spectral_radius
+  use grid,           only : nx,ns,nmu,nvpar,nsp,nmod
+  use grid,           only : gmu
+  use velocitygrid,   only : vpgr, mugr
+  use dist,           only : fmaxwl,falpha, iphi, iphi_ga, iapar, iapar_ga 
+  use dist,           only : ibpar, ibpar_ga, ifdis
+  use components,     only : fp, tp, vthrat, types, pbg, tmp, signz
+  use mode,           only : krho, kxrh
+  use matdat,         only : add_element, set_indx, register_term 
+  use geom,           only : efun, bn
+  use constants,      only : ci1
+  use neoequil,       only : neof, gradneof
+
+  use mode, only : erase_any_drive, no_drive_of_modes
+
+  ! indices integers 
+  integer :: ix, i, j, k, is, imod
+
+  ! The matrix element 
+  type (matrix_element) :: elem, elem2, elem3 
+
+  complex :: mat_elem_electrostatic
+  real    :: dum, b, b1_mod, ekapka, vn, ET, dneofds 
+  integer :: ierr  
+ 
+  ! Switch for correction due to bpar in term V
+  logical :: l_term5_bpar = .true.
+
+  logical :: erase_drive_this_imod 
+
+  ! vE_grad_fm
+  elem%ideriv = 0
+  elem%term  = 'V: ve_grad_fm' 
+  elem%itype = ifdis 
+  if (spectral_radius) then 
+    elem%itloc = iphi 
+  else 
+    elem%itloc = iphi_ga 
+  endif 
+  call register_term(elem)
+
+  ! Electromagnetic correction, v_del_B_perp
+  elem2%ideriv = 0
+  elem2%term  = 'V: v_del_B_perp_grad_fm' 
+  elem2%itype = ifdis 
+  if (spectral_radius) then 
+    elem2%itloc = iapar 
+  else
+    elem2%itloc = iapar_ga
+  endif 
+  call register_term(elem2)
+
+  ! Magnetic field compression correction del_v_gradB 
+  elem3%ideriv = 0
+  elem3%term  = 'V: V_del_gradB_grad_fm'   
+  elem3%itype = ifdis 
+  if (spectral_radius) then 
+    elem3%itloc = ibpar 
+  else 
+    elem3%itloc = ibpar_ga 
+  endif 
+  call register_term(elem3)
+
+  ! calculate the terms due to the Maxwell background
+  binormal_loop: do imod=1,nmod;
+    erase_drive_this_imod = .false.
+    if(erase_any_drive) then
+      ! find out if this imod is in the list of modes which shall not be
+      ! driven
+      do i = 1, size(no_drive_of_modes)
+        ! if it is found, then do not add matrix elements for this
+        ! term
+        if(imod == no_drive_of_modes(i)) erase_drive_this_imod = .true.
+      end do
+    end if
+    
+    do is=1,nsp; do ix=1,nx; do i=1,ns; do j=1,nmu; do k=1,nvpar
+
+    ! E^(alpha psi) k_alpha
+    ! (first component is always zero because diagonal of efun is zero)
+    ekapka = efun(ix,i,1,1)*kxrh(ix) + efun(ix,i,2,1)*krho(imod)
+
+    dum = dmaxwel(ix,i,j,k,is)*fmaxwl(ix,i,j,k,is)*ekapka
+    
+    if(lneo_equil)then
+      !Adds the radial gradient of the neoclassical correction 
+      !to the maxwellian background distribution function
+      !The radial derivative of Fm x h is done in two parts.
+      !This adds hdFm/dr
+      if(lneo_rad) dum = dum*(1.E0 + neof(3,is,i,j,k))
+      !this is Fmdh/dr
+      if(lneo_rad) dum = dum -  efun(ix,i,2,1)*krho(imod)*fmaxwl(ix,i,j,k,is)*gradneof(is,i,j,k)
+        
+      !The i is multiplied below
+      
+      !The neoclassical correction related to the parallel derivative of the
+      !background distribution function
+      ekapka = efun(ix,i,1,3)*kxrh(ix) + efun(ix,i,2,3)*krho(imod)
+      !Calculate the parallel derivative
+      dneofds = dFds(imod,ix,i,j,k,is)
+      dum = dum - ekapka*dneofds
+    endif
+
+    ! for an alpha particle distribution change to
+    if (types(is) .eq. 'alpha') then
+      vn = sqrt(vpgr(i,j,k,is)**2 + 2.E0*mugr(j)*bn(ix,i))
+      ET =   3.E0 / 2.E0 * (1.E0 / (log(1.E0 + 27.E0*pbg(ix,is)**(-1.5))*        &
+          & (1.E0+pbg(ix,is)**(1.5)/27E0)) - pbg(ix,is)**1.5/ (pbg(ix,is)**1.5 + &
+          & vn**3))
+      ekapka = efun(ix,i,1,1)*kxrh(ix) + efun(ix,i,2,1)*krho(imod) 
+      dum = (fp(ix,is) + ET*tp(ix,is))*falpha(i,j,k)*ekapka
+    endif
+
+    ! common factor of the matrix elements 
+    mat_elem_electrostatic = ci1*dum
+
+    ! the bessel functions 
+    b = wrap_beslj0_gkw(imod,ix,i,j,is)
+    b1_mod = wrap_mod_besj1_gkw(imod,ix,i,j,is)
+
+
+    ! vE_grad_fm
+    ! WARNING THIS IF STATEMENT ERASES ALSO nlapar but not nlbpar
+    if(.not. erase_drive_this_imod) then
+      call set_indx(elem,imod,ix,i,j,k,is) 
+      elem%val   = mat_elem_electrostatic*b
+      call add_element(elem,ierr)
+    end if
+
+    ! Electromagnetic correction, v_del_B_perp
+    if (nlapar) then     
+      call set_indx(elem2,imod,ix,i,j,k,is) 
+      elem2%val = -2.*elem%val*vthrat(is)*vpgr(i,j,k,is)
+      call add_element(elem2,ierr)
+    endif
+
+    ! Magnetic field compression correction del_v_gradB 
+    if (nlbpar .and. l_term5_bpar) then
+      call set_indx(elem3,imod,ix,i,j,k,is)
+      elem3%val = mat_elem_electrostatic*b1_mod*2.0*mugr(j)*tmp(ix,is)/signz(is)
+      call add_element(elem3,ierr)
+    end if     
+    
+    end do;end do; end do ; end do ; end do ;
+  end do binormal_loop
+
+end subroutine ve_grad_fm
+
+!------------------------------------------------------------------------------
+!> This routine puts the drift in the gradient of phi times the maxwel
+!! Term VIII in the manual
+!! \f$
+!! - [E_D {\cal D}^\alpha + \beta^\prime v_{\parallel N}^2 {\cal E}^{\psi \alpha}
+!! + 2 (m_R v_R / T_R) v_{\parallel N} {\cal H}^\alpha \Omega + m_R/T_R 
+!!  {\cal I}^\alpha \Omega^2 ] k_\alpha \chi_N F_{MN}  \f$
+!<-----------------------------------------------------------------------------
+subroutine vd_grad_phi_fm
+
+  use structures, only : matrix_element
+  use control,        only : nlbpar, spectral_radius, order_of_the_radial_scheme 
+  use grid,           only : nx, ns, nmu, nvpar, nsp, nmod
+  use velocitygrid,   only : mugr, vpgr 
+  use geom,           only : bn 
+  use dist,           only : fmaxwl, falpha
+  use dist,           only : f_EP, df_EPdv_sinhc
+  use dist,           only : iphi, iphi_ga 
+  use dist,           only : ibpar, ibpar_ga, ifdis
+  use mode,           only : krho, kxrh
+  use components,     only : types, signz, pbg, tmp, mas, vthrat
+  use matdat,         only : add_element, set_indx, register_term
+  use matdat,         only : connect_rad 
+  use constants,      only : ci1
+  use rotation,       only : coriolis, cf_drift
+  use geom,           only : dxgr 
+  use neoequil,       only : neof
+
+  ! integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is
+
+  ! the matrix element 
+  type (matrix_element) :: elem, elem2 
+
+  ! reference values and matrix element
+  complex :: mat_elem_electrostatic
+
+  ! Dummy variables
+  integer :: ipw, id, ist, m 
+  real    :: b, b1_mod, dum, vn, drift_x, drift_y, drift_z, w(5) 
+  real    :: dneofdv
+  integer :: ierr 
+
+  !Switch for the correction due to bpar in term VIII
+  logical :: l_term8_bpar = .true.
+  logical :: ingrid 
+
+  ! identifier of the terms 
+  elem%term  = 'VIII: vd_grad_phi_fm'
+  elem%itype = ifdis   
+  if (spectral_radius) then 
+    elem%ideriv = 0
+    elem%itloc = iphi 
+  else 
+    elem%ideriv = 1
+    elem%itloc = iphi_ga
+  endif
+  call register_term(elem)
+
+  !Correction due to bpar
+  elem2%term  = 'XI: vd_grad_bpar_fm'
+  elem2%itype = ifdis 
+  if (spectral_radius) then 
+    elem2%ideriv = 0
+    elem2%itloc = ibpar
+  else 
+    elem2%ideriv = 1
+    elem2%itloc = ibpar_ga
+  endif   
+  call register_term(elem2)
+
+  do imod = 1, nmod ; do is = 1, nsp ; do ix = 1, nx ; do i = 1, ns
+    do j = 1, nmu ; do k = 1, nvpar
+
+      ! The bessel function for gyro-averaging
+      b = wrap_beslj0_gkw(imod,ix,i,j,is)
+      b1_mod = wrap_mod_besj1_gkw(imod,ix,i,j,is)
+
+      ! calculate the drift 
+      call drift(ix,i,j,k,is,drift_x,drift_y,drift_z,coriolis,cf_drift,.true.) 
+
+      ! the matrix elements 
+      call set_indx(elem,imod,ix,i,j,k,is) 
+      call set_indx(elem2,imod,ix,i,j,k,is) 
+
+      if (spectral_radius) then 
+
+        dum = signz(is)*(drift_x*kxrh(ix) + drift_y*krho(imod))
+
+        mat_elem_electrostatic = - ci1*dum*fmaxwl(ix,i,j,k,is)/tmp(ix,is)
+
+        if(lneo_equil)then
+          call drift(ix,i,j,k,is,drift_x,drift_y,drift_z,coriolis,cf_drift,.false.) 
+          dum = signz(is)*(drift_x*kxrh(ix) + drift_y*krho(imod))
+
+          dneofdv = dFdvpar(imod,ix,i,j,k,is)
+          mat_elem_electrostatic = mat_elem_electrostatic  &
+            & + ci1*dum*dneofdv/(mas(is)*vpgr(i,j,k,is))
+        endif
+        !if (energetic_particles) then
+        !  mat_elem_electrostatic = mat_elem_electrostatic &
+        !                       & - ci1*dum*f_EP(ix,i,j,k,is)/T_EP &
+        !                       & + ci1*dum*df_EPdv_sinhc(ix,i,j,k,is)/T_EP
+        !end if
+        elem%val = b*mat_elem_electrostatic
+
+        if (types(is) .eq. 'EP') then
+          elem%val = b*(-ci1*dum*f_EP(ix,i,j,k,is) &
+                               & + ci1*dum*df_EPdv_sinhc(ix,i,j,k,is))
+        endif
+        if (types(is) .eq. 'alpha') then
+          vn = sqrt(vpgr(i,j,k,is)**2+2.E0*mugr(j)*bn(ix,i))
+          elem%val = -ci1*dum*b*falpha(i,j,k)*(3./2.)*vn / (pbg(ix,is)**1.5 + vn**3)
+        endif
+
+        call add_element(elem,ierr)
+
+      else
+
+        ! the differential scheme 
+        id  = +1
+        ipw = -1 
+        if (drift_x.lt.0) ipw = +1  
+        ist = 0 
+        call differential_scheme(ist,ipw,id,w,order_of_the_radial_scheme) 
+
+        call set_indx(elem,imod,ix,i,j,k,is)
+        elem%val = - ci1 * signz(is) *  drift_y * krho(imod) * fmaxwl(ix,i,j,k,is) & 
+                 &   / tmp(ix,is)
+
+        if (types(is) .eq. 'EP') then
+           elem%val = &
+                 & - ci1 * signz(is) *  drift_y * krho(imod) * f_EP(ix,i,j,k,is) &
+                 &   / tmp(ix,is) &
+                 & + ci1 * signz(is) *  drift_y * krho(imod) * df_EPdv_sinhc(ix,i,j,k,is) &
+                 &   / tmp(ix,is)
+        end if
+
+        call add_element(elem,ierr)
+
+        do m = 1, 5 
+          if (w(m).ne.0) then 
+            call set_indx(elem,imod,ix,i,j,k,is)      
+            elem%ixloc = ix + m - 3 
+            elem%val   =  - w(m) * drift_x / dxgr 
+            elem%val   =  elem%val * signz(is) * &
+                           &  fmaxwl(ix,i,j,k,is) / tmp(ix,is)
+            if (types(is) .eq. 'EP') then
+              elem%val = &
+                       &  - w(m) * drift_x / dxgr * ( &
+                       &  f_EP(ix,i,j,k,is) &
+                       &  - df_EPdv_sinhc(ix,i,j,k,is)) &
+                       &  / tmp(ix,is)
+            end if
+            call connect_rad(elem,ingrid)
+            if (ingrid) call add_element(elem,ierr)
+          endif
+        end do 
+
+      endif 
+
+      if (spectral_radius) then 
+
+        !Correction due to bpar
+        if (nlbpar .and. l_term8_bpar) then
+          elem2%val = mat_elem_electrostatic*b1_mod*2.0*tmp(ix,is)*mugr(j)/signz(is)
+          call add_element(elem2,ierr)
+        endif
+
+      else 
+
+        if (nlbpar.and.l_term8_bpar) then
+          write(*,*) 'This hasnt been programmed correctly yet'
+          stop 1
+    
+          ! the differential scheme 
+          id  = +1
+          ipw = -1 
+          if (drift_x.lt.0) ipw = +1  
+          ist = 0 
+          call differential_scheme(ist,ipw,id,w,order_of_the_radial_scheme) 
+
+          do m = 1, 5 
+            if (w(m).ne.0) then 
+              call set_indx(elem2,imod,ix,i,j,k,is)
+              elem2%ixloc = ix + m - 3 
+              elem2%val   =  - w(m) * drift_x / dxgr 
+              ! if (m.eq.3) elem2%val = elem2%val - ci1 * drift_y*krho(imod) 
+              elem2%val   =  2.0 * elem2%val * fmaxwl(ix,i,j,k,is) * mugr(j) 
+              call connect_rad(elem2,ingrid)
+              if (ingrid) call add_element(elem2,ierr)
+            endif
+          end do 
+
+        endif 
+
+      endif 
+
+    end do ; end do ; end do
+
+  end do ; end do ; end do
+
+end subroutine vd_grad_phi_fm
+
+!------------------------------------------------------------------------------
+!> This routine puts the Landau damping term (Term VII in the manual)
+!! \f$ 
+!!
+!! - (Z/T_R) v_R v_{\parallel N} {\cal F} (d <\phi> / d s) F_{MN}      \f$ 
+!!
+!! in the matrix. As well as the trapping term due to the perturbed parallel 
+!! magnetic field.  
+!!
+!! The differential scheme is set through the use of the differential_scheme
+!! routine.  
+!! The paralllel boundary conditions are implemented through calls to
+!! connect_parallel (which are made from add_element), and the time step is
+!! estimated through a call to time_est (via add_element).
+!<------------------------------------------------------------------------------
+subroutine vpar_grd_phi
+
+  use structures,     only : matrix_element
+  use control,        only : nlbpar, nlapar, spectral_radius 
+  use dist,           only : fmaxwl, f_EP, df_EPdv, df_EPdv_sinhc
+  use dist,           only : falpha, iphi, iphi_ga
+  use dist,           only : iapar, iapar_ga, ibpar, ibpar_ga, ifdis
+  use geom,           only : ffun, bn, sgr_dist,efun
+  use matdat,         only : set_indx, add_element, register_term 
+  use matdat,         only : connect_parallel, pos_par_grid
+  use grid,           only : nx,ns,nmu,nvpar,nsp,nmod,gmu
+  use velocitygrid,   only : vpgr, mugr
+  use components,     only : tmp, signz, vthrat, types, pbg
+  use components,     only : rhostar_linear, mas
+  use dist,           only : ifdis
+  use mode,           only : parallel_phase_shift
+  use rotation,       only : coriolis, cf_drift
+  use rho_par_switch, only : lvdgrad_phi_fm_rhostar, lve_grad_fm_rhostar
+
+  ! integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is
+
+  ! variables for the parallel boundary conditions
+  integer :: ist, ierr
+  logical :: ingrid
+
+  ! element to test/add to the matrix
+  type (matrix_element) :: elem, elem2, elem3
+
+  ! Dummy variables
+  real    :: b, b1_mod, dum, vn, w(5), drift_x, drift_y, drift_z
+  real    :: term7, term8, term5, type_alpha, efem, dneofdv
+  integer :: ipw, id, m 
+
+  if (ns .lt. 2) return
+
+  elem%term = 'VII: vpar_grd_phi (Landau damping)'
+  if (spectral_radius) then 
+    elem%itloc = iphi
+  else 
+    elem%itloc = iphi_ga
+  endif
+  elem%itype = ifdis
+  elem%ideriv = 1
+  call register_term(elem)
+
+  elem2%term = 'X: Trapping due to the perturbed magnetic field'
+  if (spectral_radius) then 
+    elem2%itloc = ibpar
+  else 
+    elem2%itloc = ibpar_ga
+  endif 
+  elem2%itype = ifdis   
+  elem2%ideriv = 1
+  call register_term(elem2)
+
+  elem3%term = 'V: v_del_B_perp_grad_fm (rhostar)'
+  if (spectral_radius) then 
+    elem3%itloc = iapar
+  else 
+    elem3%itloc = iapar_ga
+  endif 
+  elem3%itype = ifdis 
+  elem3%ideriv = 1
+  call register_term(elem3)
+
+  do is = 1,nsp
+
+    do imod = 1,nmod ; do ix = 1,nx ; do j = 1,nmu ; do k = 1,nvpar ; do i = 1,ns
+
+      ! parallel derivative part of term VII vpar grad phi FM
+      efem = fmaxwl(ix,i,j,k,is)
+
+      term7 = -signz(is)*ffun(ix,i)*vthrat(is)*vpgr(i,j,k,is)*efem/tmp(ix,is)
+
+      if(lneo_equil)then
+        dneofdv = dFdvpar(imod,ix,i,j,k,is)
+        term7 = term7 + signz(is)*ffun(ix,i)*vthrat(is)*dneofdv/mas(is)
+      endif
+
+      if (types(is) .eq. 'EP') then
+        term7 = signz(is)*ffun(ix,i)*vthrat(is)*df_EPdv(ix,i,j,k,is)
+      end if
+
+      ! parallel derivative part of term VIII vd grad phi FM
+      call drift(ix,i,j,k,is,drift_x,drift_y,drift_z,coriolis,cf_drift,.true.)
+      if ( lvdgrad_phi_fm_rhostar ) then
+        term8 = - drift_z * rhostar_linear * signz(is) * fmaxwl(ix,i,j,k,is) / tmp(ix,is)
+        if (types(is) .eq. 'EP') then
+          term8 = &
+              & - drift_z * rhostar_linear * signz(is) * f_EP(ix,i,j,k,is) / (tmp(ix,is)) &
+              & + drift_z * rhostar_linear * signz(is) * df_EPdv_sinhc(ix,i,j,k,is) / (tmp(ix,is))
+        end if
+      else
+        term8=0
+      endif
+      ! common factor of parallel derivative part of term V vchi grad FM
+      if (lve_grad_fm_rhostar ) then
+        term5 = rhostar_linear * dmaxwel(ix,i,j,k,is) * fmaxwl(ix,i,j,k,is) * efun(ix,i,3,1)
+      else
+        term5=0
+      endif
+
+      dum = term5 + term7 + term8
+
+      ! for an alpha particle distribution replace
+      if (types(is) .eq. 'alpha') then
+        vn = sqrt(vpgr(i,j,k,is)**2 + 2.E0*mugr(j)*bn(ix,i))
+        dum = -signz(is)*ffun(ix,i)*vthrat(is)*vpgr(i,j,k,is)*falpha(i,j,k) &
+              & *3.E0*vn/(2.E0*tmp(ix,is)*(pbg(ix,is)**1.5+vn**3))
+        type_alpha = dum
+      endif
+
+      ! dum * dphi/ds 
+      ! direction of the parallel motion 
+      if (dum < 0) then 
+        ipw = 1 
+      else 
+        ipw = -1 
+      end if 
+      id = + 1 
+
+      ! select the scheme 
+      ist = pos_par_grid(imod,ix,i,k)
+      call differential_scheme(ist,ipw,id,w) 
+
+      do m = 1, 5 
+ 
+        if (w(m).ne.0.) then 
+ 
+          ! grd_phi 
+          call set_indx(elem,imod,ix,i,j,k,is)       
+ 
+          elem%iloc  = i + m - 3
+          elem%val   = w(m) * dum / sgr_dist  
+          elem%val   = elem%val * parallel_phase_shift(elem%imod, & 
+             elem%ix,elem%i,elem%iloc)
+          call connect_parallel(elem,ingrid)
+          if (ingrid) then 
+            b = wrap_beslj0_gkw(elem%imloc,elem%ixloc,elem%iloc,elem%jloc,elem%isloc)
+            elem%val   = elem%val * b 
+            call add_element(elem,ierr)
+          endif
+        endif
+      end do 
+
+      if ( nlbpar ) then
+
+        dum = 2 * mugr(j) * tmp(ix,is) * term5 / signz(is)
+        dum =  dum + term7 + term8
+
+        ! for an alpha particle distribution replace
+        if (types(is) .eq. 'alpha') then
+          dum = type_alpha
+        endif
+
+
+        ! dum * dB1par/ds 
+        ! direction of the parallel motion 
+        if (dum < 0) then 
+          ipw = 1 
+        else 
+          ipw = -1 
+        end if 
+        id = + 1 
+
+        ! select the scheme 
+        ist = pos_par_grid(imod,ix,i,k)
+        call differential_scheme(ist,ipw,id,w) 
+
+        ! parallel rho* effects - electromagnetic compressional
+        ! somehow it would be nice to make it clear that these 
+        ! terms are not generally in use - perhaps hide them 
+        ! their own wrapper function
+        do m = 1, 5 
+          if (w(m).ne.0.) then 
+
+            ! trapping due to magnetic field compression 
+            call set_indx(elem2,imod,ix,i,j,k,is)
+                  
+            elem2%iloc  = i + m - 3 
+            elem2%val   = w(m) * dum / sgr_dist 
+            elem2%val   = elem2%val * parallel_phase_shift(elem2%imod, & 
+               elem2%ix,elem2%i,elem2%iloc)
+            call connect_parallel(elem2,ingrid)
+
+            if (ingrid) then 
+              b1_mod = wrap_mod_besj1_gkw(elem2%imloc,elem2%ixloc,elem2%iloc,elem2%jloc,elem2%isloc)
+              b          = 2.0*b1_mod*mugr(j)*tmp(ix,is)/signz(is)
+              elem2%val   = elem2%val * b
+              call add_element(elem2,ierr)
+            endif 
+
+          endif 
+        end do
+      end if 
+
+      ! parallel rho* effects - electromagnetic
+      ! somehow it would be nice to make it clear that these 
+      ! terms are not generally in use - perhaps hide them 
+      ! their own wrapper function
+      if ( nlapar .and. rhostar_linear > 0.) then
+        !parallel derivation of term V (electrodynamik potential)
+        dum= -2 * tmp(ix,is) / vthrat(is) / mas(is) * vpgr(i,j,k,is) * term5 / signz(is)
+
+        ! for an alpha particle distribution replace
+        if (types(is) .eq. 'alpha') then
+          dum = type_alpha
+        endif
+
+        ! dum * dapar/ds
+        ! direction of the parallel motion 
+        if (dum < 0) then 
+          ipw = 1 
+        else 
+          ipw = -1 
+        end if 
+        id = + 1 
+
+        ! select the scheme 
+        ist = pos_par_grid(imod,ix,i,k)
+        call differential_scheme(ist,ipw,id,w) 
+
+        if ( nlapar ) then   
+
+        ! select the scheme 
+        ist = pos_par_grid(imod,ix,i,k)
+        call differential_scheme(ist,ipw,id,w)
+
+        do m = 1, 5 
+          if (w(m).ne.0.) then 
+
+            ! rho_star effect term V 
+            call set_indx(elem3,imod,ix,i,j,k,is)
+
+            elem3%iloc  = i + m - 3 
+            elem3%val   = w(m) * dum / sgr_dist 
+            elem3%val   = elem3%val * parallel_phase_shift(elem3%imod, & 
+               elem3%ix,elem3%i,elem3%iloc)
+            call connect_parallel(elem3,ingrid)
+            if (ingrid) then 
+              b = wrap_beslj0_gkw(elem3%imloc,elem3%ixloc,elem3%iloc,elem3%jloc,elem3%isloc)
+              elem3%val   = elem3%val * b 
+              call add_element(elem3,ierr)
+            endif 
+
+          endif 
+        end do
+      endif
+    end if 
+
+    end do ; end do ; end do ; end do ; end do  
+  end do 
+
+return
+end subroutine vpar_grd_phi
+
+!------------------------------------------------------------------------------
+!> This routine adds the integral part of the Poisson equation in the matrix
+!> for the spectral case
+!------------------------------------------------------------------------------
+subroutine poisson_int
+
+  use structures,     only : matrix_element
+  use grid,           only : nx,ns,nmu,nvpar,nsp,nmod, number_of_species 
+  use mpicomms,       only : COMM_SP_NE
+  use components,     only : de, signz, tmp, veta
+  use geom,           only : bn
+  use matdat,         only : add_element, set_indx, register_term  
+  use velocitygrid,   only : intvp, intmu, mugr
+  use control,        only : nlbpar, spectral_radius
+  use mode,           only : krloc
+  use rotation,       only : cfen
+  use dist,           only : ifdis, iphi 
+  use functions,      only : gamma1_gkw, gamma_gkw, besselj0_gkw, mod_besselj1_gkw 
+  use mpiinterface,   only : mpiallreduce_sum
+
+  real :: gamma_diff, bes_j0, mod_bes_j1
+
+  !coefficients used if bpar is on:
+  real :: I_sp1, I_sp2, B_sp1, B_sp2
+
+  !dummy for the mpi allreduce
+  real :: rdum, dum
+
+  ! indices for the distribution 
+  integer :: imod, ix, i, j, k, is
+
+  ! the matrix element 
+  type (matrix_element) :: elem 
+
+  ! error variable 
+  integer :: ierr
+
+  ! non spectral case is done elsewhere (in gyro_average)
+  if (.not. spectral_radius) return
+
+  ! The term 
+  elem%term = 'poisson_int' 
+
+  ! type of the elements 
+  elem%itype = iphi 
+  elem%itloc = ifdis 
+  elem%ideriv = 0
+  
+  call register_term(elem)
+
+  if (nlbpar) then 
+
+    do imod = 1, nmod ; do ix = 1, nx ; do i = 1, ns ; do j = 1, nmu ; do k = 1, nvpar
+
+      I_sp1 = 0.E0
+      I_sp2 = 0.E0
+      B_sp1 = 0.E0
+      B_sp2 = 0.E0
+
+      !calculating coefficients B_sp1, B_sp2, F_sp1, F_sp2 locally:
+      !in case of zero mode the coefficients are simplified since gamma(0)=1
+      !and gamma_diff(0)=1.
+
+      do is = 1, nsp
+
+        if (abs(krloc(imod,ix,i)) < 1.0E-5) then !zero mode
+          !Gamma functions together with correction due to high rotation
+          gamma_diff = 1.0*exp(-cfen(i,is))
+        else !non-zero modes
+          !Gamma functions together with correction due to high rotation
+          gamma_diff = (gamma_gkw(imod,ix,i,is) - gamma1_gkw(imod,ix,i,is))*exp(-cfen(i,is))
+        end if
+
+        B_sp1 = B_sp1 + signz(is)*de(ix,is)*gamma_diff/(bn(ix,i))
+        B_sp2 = B_sp2 + tmp(ix,is)*de(ix,is)*veta(ix)*gamma_diff/(bn(ix,i)**2)
+
+      end do
+
+      ! calculating coefficients B_sp1, B_sp2, F_sp1, F_sp2 globally
+      if (number_of_species > nsp) then
+
+        call MPIALLREDUCE_SUM(B_sp1,rdum,1,COMM_SP_NE)
+        B_sp1 = rdum
+
+        call MPIALLREDUCE_SUM(B_sp2,rdum,1,COMM_SP_NE)
+        B_sp2 = rdum
+
+      end if
+
+      do is = 1, nsp
+
+        !calculating coefficients I_sp1, I_sp2. Their sum over velocity space and species
+        !is done in exp_integration.
+
+        call set_indx(elem,imod,ix,i,j,k,is)
+
+        bes_j0 = besselj0_gkw(imod,ix,i,j,is)
+        !modified J_1 Bessel fundtion: mod_bes_j1 = 2*J_1(k_perp rho)/(k_perp rho):
+        !the limit in case of zero mode is dealt with in functions
+        mod_bes_j1 = mod_besselj1_gkw(imod,ix,i,j,is)
+
+        I_sp1 = signz(is)*de(ix,is)*bn(ix,i)*bes_j0*intvp(i,j,k,is)*intmu(j)
+        I_sp2 = veta(ix)*bn(ix,i)*tmp(ix,is)*de(ix,is)*intvp(i,j,k,is)*intmu(j)*   &
+&               mugr(j)*mod_bes_j1
+
+        elem%val = I_sp1*(1.+B_sp2) - I_sp2*B_sp1
+        call add_element(elem,ierr)
+
+      end do
+
+    end do ; end do ; end do ; end do; end do
+
+  else !bpar is off
+
+    do is = 1, nsp ; do imod = 1, nmod ; do ix = 1, nx ; do i = 1, ns
+
+      do j = 1, nmu ; do k = 1, nvpar
+
+      dum = besselj0_gkw(imod,ix,i,j,is)
+      call set_indx(elem,imod,ix,i,j,k,is) 
+      elem%val = signz(is)*de(ix,is)*intmu(j)*intvp(i,j,k,is)*dum*bn(ix,i)
+      if (intvp(i,j,k,is).ne.0) then 
+        call add_element(elem,ierr)
+      endif 
+
+      end do ; end do
+
+    end do ; end do ; end do ; end do
+
+  end if 
+
+end subroutine poisson_int
+
+!------------------------------------------------------------------------------
+!> Adds the part of the Ampere's equation that is related with the
+!> integral over the distribution function
+!------------------------------------------------------------------------------
+subroutine ampere_int
+
+  use structures,     only : matrix_element
+  use control,        only : nlapar, spectral_radius
+  use grid,           only : nx,ns,nmu,nvpar,nsp,nmod
+  use components,     only : de, signz, vthrat, veta
+  use matdat,         only : add_element, set_indx, register_term  
+  use geom,           only : bn
+  use velocitygrid,   only : vpgr, intvp, intmu
+  use dist,           only : ifdis, iapar 
+  use functions,      only : besselj0_gkw 
+
+  real                  :: bes
+  integer               :: ix, i, j, k, is, imod, ierr 
+  type (matrix_element) :: elem 
+
+  ! non spectral case is done elsewhere (in gyro_average)
+  if (.not. spectral_radius) return
+
+  ! Indentifier for the term 
+  elem%term = 'ampere_int'
+
+  ! Type of iih and jjh 
+  elem%itype = iapar 
+  elem%itloc = ifdis 
+  elem%ideriv = 0
+ 
+  if (.not. nlapar) return
+
+  call register_term(elem)
+
+  do imod = 1, nmod ; do ix = 1, nx ; do i = 1, ns
+
+    do j = 1, nmu ; do k = 1, nvpar ; do is = 1, nsp
+      
+      call set_indx(elem,imod,ix,i,j,k,is) 
+
+      ! Bessel function for gyro-average
+      bes = besselj0_gkw(imod,ix,i,j,is)
+
+      elem%val = signz(is)*de(ix,is)*veta(ix)*intvp(i,j,k,is)*intmu(j)      &
+          &     *vthrat(is)*bn(ix,i)*vpgr(i,j,k,is)*bes
+
+      call add_element(elem,ierr)
+
+    end do ; end do ; end do
+
+  end do ; end do ; end do
+end subroutine ampere_int
+
+!------------------------------------------------------------------------------
+!> This routine adds the integral part of the perpendicular Ampere's law.
+!------------------------------------------------------------------------------
+subroutine ampere_bpar_int
+
+  use structures,     only : matrix_element
+  use grid,           only : nx,ns,nmu,nvpar,nsp,nmod, number_of_species
+  use mpicomms,       only : COMM_SP_NE
+  use components,     only : de, signz, tmp, adiabatic_electrons, iadia, veta
+  use geom,           only : bn
+  use matdat,         only : add_element, set_indx, register_term 
+  use velocitygrid,   only : intvp, intmu, mugr
+  use control,        only : nlbpar, spectral_radius
+  use mode,           only : krloc
+  use rotation,       only : cfen
+  use dist,           only : ifdis, ibpar 
+  use functions,      only : gamma1_gkw, gamma_gkw, mod_besselj1_gkw 
+  use functions,      only : besselj0_gkw  
+  use mpiinterface,   only : mpiallreduce_sum
+
+  real :: gamma, gamma_diff, bes_j0, mod_bes_j1
+  real :: I_sp1, I_sp2, F_sp1, F_sp2
+
+  !dummy for the mpi allreduce
+  real :: rdum
+
+  integer :: ix, i, j, k, is, imod, ierr
+  type (matrix_element) :: elem 
+
+  ! non spectral case is done elsewhere (in gyro_average)
+  if (.not. spectral_radius) return
+
+  ! Identifier of the term 
+  elem%term = 'ampere_bpar_int' 
+
+  ! type of iih and jjh 
+  elem%itype = ibpar 
+  elem%itloc = ifdis
+  elem%ideriv = 0
+  
+  call register_term(elem)
+
+  if (nlbpar) then
+
+    do imod = 1, nmod ; do ix = 1, nx ; do i = 1, ns ; do j = 1, nmu ; do k = 1, nvpar
+
+      I_sp1 = 0.E0
+      I_sp2 = 0.E0
+      F_sp1 = 0.E0
+      F_sp2 = 0.E0
+
+      !calculating coefficients B_sp1, B_sp2, F_sp1, F_sp2 locally:
+      !in case of zero mode the coefficients are simplified since gamma(0)=1
+      !and gamma_diff(0)=1.
+
+      do is = 1, nsp
+
+        if (abs(krloc(imod,ix,i)) < 1.0E-5) then !zero mode
+          !Gamma functions together with correction due to high rotation
+          gamma_diff = 1.0*exp(-cfen(i,is))
+          gamma = 1.0*exp(-cfen(i,is))
+        else !non-zero modes
+          !Gamma functions together with correction due to high rotation
+          gamma_diff = (gamma_gkw(imod,ix,i,is) - gamma1_gkw(imod,ix,i,is))*exp(-cfen(i,is))
+          gamma = gamma_gkw(imod,ix,i,is)*exp(-cfen(i,is))
+        end if
+
+        F_sp1 = F_sp1 + signz(is)**2*de(ix,is)*(gamma-1)/tmp(ix,is)
+        F_sp2 = F_sp2 + signz(is)*veta(ix)*de(ix,is)*gamma_diff/(2.0*bn(ix,i))
+
+      end do
+
+      ! calculating coefficients F_sp1, F_sp2 globally
+      if (number_of_species > nsp) then
+
+        call MPIALLREDUCE_SUM(F_sp1,rdum,1,COMM_SP_NE)
+        F_sp1 = rdum
+
+        call MPIALLREDUCE_SUM(F_sp2,rdum,1,COMM_SP_NE)
+        F_sp2 = rdum
+
+      end if
+
+      !if one of the species is adiabatic there is an extra term in F_sp1
+      if (adiabatic_electrons) then 
+        F_sp1 = F_sp1 - signz(nsp+iadia)*de(ix,nsp+iadia)/tmp(ix,nsp+iadia)
+      end if
+
+      do is = 1, nsp
+
+        !calculating coefficients I_sp1, I_sp2. Their sum over velocity space and species
+        !is done in exp_integration.
+
+        bes_j0 = besselj0_gkw(imod,ix,i,j,is)
+        !modified j_1 bessel function: mod_bes_j1 = 2*j_1(k_perp rho)/(k_perp rho):
+        !the limit in case of zero mode is dealt with in functions
+        mod_bes_j1 = mod_besselj1_gkw(imod,ix,i,j,is)
+
+        i_sp1 = signz(is)*de(ix,is)*bn(ix,i)*bes_j0*intvp(i,j,k,is)*intmu(j)
+        i_sp2 = veta(ix)*bn(ix,i)*tmp(ix,is)*de(ix,is)*intvp(i,j,k,is)*intmu(j)*   &
+&               mugr(j)*mod_bes_j1
+
+        elem%val = i_sp2*f_sp1 - i_sp1*f_sp2
+
+        call set_indx(elem,imod,ix,i,j,k,is) 
+        call add_element(elem,ierr)
+
+      end do
+
+    end do ; end do ; end do ; end do; end do
+
+  else
+     return
+  end if
+
+end subroutine ampere_bpar_int
+
+!-----------------------------------------------------------------------------
+!> add the diagonal part of the poisson equation (and the perpendicular
+!> ampere's law if bpar is on) into the matrix
+!-----------------------------------------------------------------------------
+subroutine poisson_dia
+
+  use structures,     only : matrix_element
+  use grid,           only : nx,ns,nsp,nmod,number_of_species
+  use mpicomms,       only : comm_sp_ne
+  use control,        only : nlbpar, spectral_radius
+  use mode,           only : krloc, ixzero, iyzero
+  use geom,           only : bn
+  use components,     only : de, tmp, signz, adiabatic_electrons, iadia, veta
+  use matdat,         only : add_element, set_indx, register_term  
+  use rotation,       only : cfen
+  use dist,           only : ibpar, iphi 
+  use functions,      only : gamma1_gkw, gamma_gkw
+  use mpiinterface,   only : mpiallreduce_sum
+
+  integer :: imod, ix, i, is, idum, ierr
+  complex :: cdum
+  real    :: gamma, gamma_diff, rdum
+  type (matrix_element) :: elem, elem2 
+
+  ! coefficients used if bpar is on:
+  real :: f_sp1, f_sp2, b_sp1, b_sp2
+
+  ! non spectral case is done elsewhere (in gyro_average - polarisation term)
+  if (.not. spectral_radius) return
+
+  ! identifier of the term 
+  elem%term = 'poisson_dia'
+  elem%ideriv = 0
+  ! type of iih and jjh and indices 
+  elem%itype = iphi 
+  elem%itloc = iphi   
+  call register_term(elem)
+
+  ! NOTE: Before r4094, the B|| itloc was iphi
+  ! which meant the diagonal terms for B|| had the wrong
+  ! jj value in the matrix.  This did not cause problems 
+  ! since in explicit integration the diagonal terms 
+  ! use only the ii value under the assumption they are diagonal
+  ! However, it would have been a bug if used by the implict scheme
+  elem2%term = 'poisson_bpar'
+  elem2%ideriv = 0
+  ! type of iih and jjh and indices 
+  elem2%itype = ibpar
+  elem2%itloc = ibpar
+  call register_term(elem2)
+
+  ! set the dummy 
+  idum = 0 
+
+  if (nlbpar) then
+
+    do i = 1, ns; do imod = 1, nmod; do ix = 1, nx
+
+      f_sp1 = 0.e0
+      f_sp2 = 0.e0
+      b_sp1 = 0.e0
+      b_sp2 = 0.e0
+
+      ! calculating coefficients b_sp1, b_sp2, f_sp1, f_sp2 locally
+      ! in case of zero mode the coefficients are simplified since gamma(0)=1
+      ! and gamma_diff(0)=1.
+
+      do is = 1, nsp
+
+        if (abs(krloc(imod,ix,i)) < 1e-5) then !zero mode
+          ! gamma functions together with correction due to high rotation
+          gamma_diff = 1.0*exp(-cfen(i,is))
+          gamma = 1.0*exp(-cfen(i,is))
+        else ! non-zero modes
+          ! gamma functions together with correction due to high rotation
+          gamma_diff = (gamma_gkw(imod,ix,i,is) - gamma1_gkw(imod,ix,i,is))*exp(-cfen(i,is))
+          gamma = gamma_gkw(imod,ix,i,is)*exp(-cfen(i,is))
+        end if
+
+          f_sp1 = f_sp1 + signz(is)**2*de(ix,is)*(gamma-1)/tmp(ix,is)
+          b_sp1 = b_sp1 + signz(is)*de(ix,is)*gamma_diff/(bn(ix,i))
+          f_sp2 = f_sp2 + signz(is)*veta(ix)*de(ix,is)*gamma_diff/(2.0*bn(ix,i))
+          b_sp2 = b_sp2 + tmp(ix,is)*de(ix,is)*veta(ix)*gamma_diff/(bn(ix,i)**2)
+
+      end do
+
+      ! calculating coefficients b_sp1, b_sp2, f_sp1, f_sp2 globally
+      ! (The same reductions are repeated and could be moved out of this loop -
+      ! but it is has not been demonstrated to date that initialisation ever
+      ! takes too long on many cores)
+      if (number_of_species > nsp) then
+
+        call mpiallreduce_sum(b_sp1,rdum,1,comm_sp_ne)
+        b_sp1 = rdum
+
+        call mpiallreduce_sum(b_sp2,rdum,1,comm_sp_ne)
+        b_sp2 = rdum
+
+        call mpiallreduce_sum(f_sp1,rdum,1,comm_sp_ne)
+        f_sp1 = rdum
+
+        call mpiallreduce_sum(f_sp2,rdum,1,comm_sp_ne)
+        f_sp2 = rdum
+
+      end if
+
+      ! if one of the species is adiabatic there is an extra term in f_sp1
+      if (adiabatic_electrons) then 
+        f_sp1 = f_sp1 - signz(nsp+iadia)*de(ix,nsp+iadia)                &
+                        * exp(-cfen(i,nsp+iadia))/tmp(ix,nsp+iadia)
+      end if
+
+      call set_indx(elem,imod,ix,i,idum,idum,idum)
+
+      elem%val = f_sp1*(1+b_sp2) - f_sp2*b_sp1
+
+      if (imod==iyzero.and.ix==ixzero .and. .not. adiabatic_electrons) then
+        elem%val = 1.
+      end if
+
+      ! put the element to iphi position
+      call add_element(elem,ierr)
+
+      ! the diagonal part of the perpendicular ampere's law is the same,
+      ! if bpar is calculated, put the same element to ibpar position, too.
+      if (lbpar) then 
+        call set_indx(elem2,imod,ix,i,idum,idum,idum)
+        elem2%val = elem%val
+        call add_element(elem2,ierr)
+      end if
+
+    end do; end do; end do
+
+  else !bpar is off
+
+    do imod = 1, nmod ; do ix = 1, nx ; do i = 1, ns
+
+      ! reference the element of the potential
+      call set_indx(elem,imod,ix,i,idum,idum,idum)
+
+      ! initialize the mat_element
+      elem%val = (0.,0.)
+   
+      ! detect the (0,0) mode
+      if (imod==iyzero.and.ix==ixzero) then
+        ! the (0,0) mode does not contain any turbulent physics, but 
+        ! for adiabatic electrons can still be considered for the 
+        ! neoclassical physics.
+        if (adiabatic_electrons) then 
+          elem%val = elem%val + signz(nsp+iadia)* exp(-cfen(i,nsp+iadia))  &
+                                          *de(ix,nsp+iadia)/tmp(ix,nsp+iadia)
+        else
+          elem%val = elem%val + 1.
+        endif 
+      else
+  
+        ! sum local species contributions, then non-local
+        do is = 1, nsp
+          elem%val = elem%val + exp(-cfen(i,is))*                           &
+            & (signz(is)**2)*de(ix,is)*(gamma_gkw(imod,ix,i,is)-1)/tmp(ix,is)
+      end do
+
+      if (number_of_species > nsp) then
+        call MPIALLREDUCE_SUM(elem%val,cdum,1,COMM_SP_NE)
+        elem%val = cdum
+      end if
+      
+      ! add adiabatic electrons contribution
+      if (adiabatic_electrons) then
+        elem%val = elem%val + signz(nsp+iadia)*exp(-cfen(i,nsp+iadia))  &
+                                     *de(ix,nsp+iadia) / tmp(ix,nsp+iadia)
+      end if
+      
+    end if
+    
+    ! put the element
+    call add_element(elem,ierr)
+
+  end do ; end do ; end do
+
+  end if
+
+end subroutine poisson_dia
+
+!------------------------------------------------------------------------------
+!> add the zonal flow corrections
+!------------------------------------------------------------------------------
+subroutine poisson_zf
+
+  use control,        only : zonal_adiabatic, spectral_radius
+  use grid,           only : nx,ns,nsp,number_of_species, parallel_s
+  use mpicomms,       only : COMM_SP_NE, COMM_S_NE
+  use index_function, only : indx
+  use mode,           only : iyzero, ixzero
+  use components,     only : de, tmp, signz, adiabatic_electrons, iadia
+  use matdat,         only : set_indx, add_element, register_term
+  use geom,           only : ints
+  use rotation,       only : cfen
+  use dist,           only : iphi 
+  use general,        only : gkw_abort 
+  use functions,      only : gamma_gkw
+  use mpiinterface,   only : mpiallreduce_sum
+  use structures,     only : matrix_element
+
+  real     :: dum2
+  integer  :: ix, i, is, imod, ierr, il 
+  complex  :: cdum, dum_elem
+
+  type (matrix_element) :: elem, elem2 
+  
+  ! non spectral case is done elsewhere (in gyro_average - polarisation term)
+  if (.not. spectral_radius) return
+
+  ! If zonal_adiabatic = F then no zonal flow correction is used
+  if (.not. zonal_adiabatic) return
+
+  ! The correction is of importance only for adiabatic electrons
+  if (.not.adiabatic_electrons) return
+
+  if (iadia.eq.0) call gkw_abort('severe error in possion_zf')
+    
+  ! No krho = 0 mode, i.e. no zonal flow correction
+  if (iyzero == 0) return
+
+  ! Only put the correction in the zonal mode
+  imod = iyzero
+
+  ! Counting integer for the normalizing element. 
+  il=0
+
+  ! from and to the potential 
+  elem%itype = iphi 
+  elem%itloc = iphi 
+
+  elem2%itype = iphi 
+  elem2%itloc = iphi 
+
+  elem%term = 'poisson_zf_int'
+  elem2%term = 'poisson_zf_dia'
+
+  elem%ideriv = 0
+  elem2%ideriv = 0
+
+  call register_term(elem)
+  call register_term(elem2)
+    
+  x_grid : do ix = 1, nx
+
+    ! initialize the dummy element
+    dum_elem = (0.E0,0.E0)
+
+    s_grid : do i = 1, ns
+      
+      ! set the index and indentify the term 
+      call set_indx(elem,imod,ix,i,1,1,1)
+      
+      ! initialize the matrix element to zero
+      elem%val = (0.E0,0.E0)
+
+      do is = 1, nsp
+        dum2 = signz(is)*(gamma_gkw(imod,ix,i,is)-1.)*exp(-cfen(i,is))/tmp(ix,is) & 
+                         -exp(-cfen(i,nsp+iadia))/tmp(ix,nsp+iadia)
+        elem%val = elem%val + signz(is)*de(ix,is)*dum2
+      end do
+
+      ! sum all the diagonal contributions
+      if (nsp < number_of_species) then
+        call MPIALLREDUCE_SUM(elem%val,cdum,1,COMM_SP_NE)
+        elem%val = cdum
+      endif
+
+      elem%val = -ints(i) / elem%val
+      
+      ! put first element in matz
+      ! -{ds /A}, summation in exp int
+      call add_element(elem,ierr)  
+      
+      !Also keep {exp(-Ee)/A}
+      dum_elem = dum_elem - elem%val*exp(-cfen(i,nsp+iadia))
+
+    end do s_grid
+
+    ! sum all the dum elements over the s-direction?
+    if (parallel_s) then
+      call MPIALLREDUCE_SUM(dum_elem,cdum,1,COMM_S_NE)
+      dum_elem = cdum
+    endif
+
+    s_grid2 : do i = 1, ns
+
+      elem2%val = tmp(ix,nsp+iadia) / (de(ix,nsp+iadia)*exp(-cfen(i,nsp+iadia)))  &
+                 + dum_elem / exp(-cfen(i,nsp+iadia))
+      
+      ! reference the element of the maty array
+      il=il+1
+
+      ! Set the index and identify the term. il is transered through ix, although 
+      ! it is not technically speaking an ix point 
+      call set_indx(elem2,imod,ix,i,1,1,1) 
+      elem2%ix = il       
+                  
+      ! Ignore zero zero mode
+      if (ix==ixzero) then
+        elem2%val = (1.E0,0.E0)
+      endif
+  
+      ! put element in the matrix maty
+      !call put_elem_zonal(term,iih,jjh,mat_elem,2)
+      call add_element(elem2,ierr)
+      
+    end do s_grid2
+
+  end do x_grid
+
+end subroutine poisson_zf
+
+!-----------------------------------------------------------------------------
+!> Add the diagonal part of the Ampere's equation
+!-----------------------------------------------------------------------------
+subroutine ampere_dia
+
+  use structures,     only : matrix_element
+  use control,        only : nlapar, spectral_radius
+  use grid,           only : nx,ns,nsp,nmod,nmu,nvpar
+  use mpicomms,       only : COMM_S_EQ
+  use dist,           only : fmaxwl, iapar 
+  use components,     only : de, signz, mas, veta
+  use matdat,         only : add_element, set_indx, register_term
+  use geom,           only : bn
+  use mode,           only : krloc
+  use rotation,       only : cfen
+  use velocitygrid,   only : intvp, intmu
+  use functions,      only : gamma_gkw, besselj0_gkw 
+  use mpiinterface,   only : mpiallreduce_sum
+
+  real    :: gamma, gamma_num, b, dum, dums
+  integer :: imod, ix, i, j, k, is, idum, ierr
+  complex :: mat_elem
+  type (matrix_element) :: elem 
+
+  ! non spectral case is done elsewhere (in gyro_average - integral term)
+  if (.not. spectral_radius) return
+
+  if (.not. nlapar) return
+
+  ! indentifier of the term 
+  elem%term = 'ampere_dia' 
+  elem%itype = iapar 
+  elem%itloc = iapar
+  elem%ideriv = 0
+
+  call register_term(elem)
+ 
+  ! set the dummy 
+  idum = 0 
+
+  do imod = 1, nmod ; do ix = 1, nx ; do i = 1, ns
+
+    ! reference Apar
+    call set_indx(elem,imod,ix,i,idum,idum,idum)
+
+    ! The nabla^2 term
+    mat_elem =  - krloc(imod,ix,i)**2
+
+    ! calculate the Maxwell correction
+    dum = 0.
+    do is = 1, nsp
+
+      ! The gamma function of the species
+      gamma = gamma_gkw(imod,ix,i,is)*exp(-cfen(i,is))
+
+      ! numerical calculation of the gamma function 
+      !(includes the strong rotation correction implictly in the maxwellian)
+      gamma_num = 0.
+      do j = 1, nmu ; do k = 1, nvpar
+        b = besselj0_gkw(imod,ix,i,j,is)
+        gamma_num = gamma_num + bn(ix,i)*intmu(j)*intvp(i,j,k,is)*b**2*fmaxwl(ix,i,j,k,is)
+!       The implementation below is perhaps more consistent (stability issues?) 
+!       gamma_num = gamma_num + 2.E0*bn(ix,i)*intmu(j)*intvp(i,j,k,is)*b**2* &
+!                 & vpgr(i,j,k,is)**2*fmaxwl(ix,i,j,k,is)
+      end do ; end do
+
+      ! The 'Maxwell correction'
+      dum = dum - veta(ix)*signz(is)**2*de(ix,is)*gamma_num / mas(is)
+
+    end do !nsp
+
+    ! MPI sum of the Maxwell correction, over species, mu and vpar.
+    call MPIALLREDUCE_SUM(dum,dums,1,COMM_S_EQ)
+    dum = dums
+
+    elem%val = mat_elem + dum
+    call add_element(elem,ierr)
+
+  end do ; end do ; end do
+end subroutine ampere_dia
+
+
+!------------------------------------------------------------------------------
+!> Routine that implements a boundary damping 
+!------------------------------------------------------------------------------
+subroutine boundary_damping 
+
+end subroutine boundary_damping
+
+
+!------------------------------------------------------------------------------
+!> This routine adds the neoclassical terms
+!! Term VI in the manual
+!!
+!! \f$ (1/Z)(T_R E_D {\cal D}^\psi + 2 m_R v_R v_\parallel {\cal H}^\psi
+!! \Omega + m_R \Omega^2 {\cal I}^\psi)*
+!! (1/L_n + E_T 1/L_T + 2 v_par u_{\parallel}^\prime / v_R)    \f$
+!!
+!! in the matrix.
+!<-----------------------------------------------------------------------------
+subroutine neoclassical
+
+  use grid,           only : nx, ns, nmu, nvpar, nsp, nmod
+  use geom,           only : ints, bn
+  use dist,           only : fmaxwl, ifdis
+  use index_function, only : indx
+  use mode,           only : ixzero, iyzero
+  use matdat,         only : put_source
+  use velocitygrid,   only : intvp, intmu, vpgr, mugr
+  use geom,           only : ints, bn, bt_frac, rfun
+  use rotation,       only : coriolis, cf_drift
+  use mpiinterface,   only : mpiallreduce_sum_r_scalar, root_processor 
+  use mpicomms,       only : COMM_SP_EQ
+  use control,        only : spectral_radius
+  use neoequil,       only : gradneof
+
+  character(len=64) :: term='VI: neoclassical'
+  
+  ! integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is
+  complex :: mat_elem
+  real :: dum1, dum2, dum3
+  real :: dum1_G, dum2_G, dum3_G
+  
+  ! dummy variables
+  integer :: iih
+  real    :: drift_x, drift_y, drift_z
+  
+  dum1 = 0.E0
+  dum2 = 0.E0
+  dum3 = 0.E0
+ 
+  !call register_term(term)
+
+  ! calculate the terms due to the Maxwell background
+  do is=1,nsp ; do imod = 1, nmod ; do ix=1,nx ; do i=1,ns ; do j=1,nmu ; do k=1,nvpar
+
+    ! Neoclassical terms only for the (0,0) mode in the spectral case, and only for 
+    ! the imod = iyzero mode for the nonspectral case 
+    if ( (spectral_radius.and.(ixzero==ix).and.(iyzero==imod)) .or. &
+      &  ((.not.spectral_radius).and.(iyzero==imod)) ) then
+
+      ! calculate the drift 
+      if(lneorotsource)then
+        !This version simply removes the coriolis drift from the source drift as
+        !per Hinton Wong derivation
+        call drift(ix,i,j,k,is,drift_x,drift_y,drift_z,.false.,cf_drift,.true.) 
+      else
+        call drift(ix,i,j,k,is,drift_x,drift_y,drift_z,coriolis,cf_drift,.true.) 
+      end if
+
+      ! the matrix element 
+      iih = indx(ifdis,imod,ix,i,j,k,is)
+      mat_elem = dmaxwel(ix,i,j,k,is)*fmaxwl(ix,i,j,k,is)*drift_x
+
+      if(lneo_equil)then
+        !Adds the radial gradient of the neoclassical correction 
+        !to the maxwellian background distribution function
+        !Not 100% sure it makes ordering sense.
+        mat_elem = mat_elem + drift_x*gradneof(is,i,j,k)
+        !TO DO:  The s derivative also?
+      endif  
+   
+      !To avoid confusion.  These are just integral checks and are not
+      !placed into the matrix.  The reduction is done below and output.
+      dum1 = dum1 + mat_elem*intvp(i,j,k,is)*intmu(j)*ints(i)*bn(ix,i)
+      dum2 = dum2 + mat_elem*rfun(ix,i)*bt_frac(ix,i)*vpgr(i,j,k,is)* &
+        & intvp(i,j,k,is)*intmu(j)*ints(i)*bn(ix,i)
+      dum3 = dum3 + mat_elem*(vpgr(i,j,k,is)**2 + 2.E0*bn(ix,i)*mugr(j))* &
+        &  intvp(i,j,k,is)*intmu(j)*ints(i)*bn(ix,i)
+
+      ! put the element 
+      call put_source(iih,mat_elem)
+
+    endif
+
+  end do ; end do ; end do ; end do  ; end do ; end do
+
+  call mpiallreduce_sum_r_scalar(dum1,dum1_G,1,COMM_SP_EQ)
+  call mpiallreduce_sum_r_scalar(dum2,dum2_G,1,COMM_SP_EQ)
+  call mpiallreduce_sum_r_scalar(dum3,dum3_G,1,COMM_SP_EQ)
+  if(root_processor)then
+    write(*,*)'Neoclassical source integrals', dum1_G, dum2_G, dum3_G
+  endif
+
+  if(lneorotsource)then
+    call calc_correction_fluxes
+  end if 
+
+end subroutine neoclassical
+
+!-----------------------------------------------------------------------------
+!> This routine adds the neoclassical source terms as outlined by Hinton and Wong
+!! WORK IN PROGRESS
+!<-----------------------------------------------------------------------------
+subroutine neoclassical_rot
+
+  use grid,           only : nx, ns, nmu, nvpar, nsp, nmod
+  use dist,           only : fmaxwl, ifdis
+  use index_function, only : indx
+  use mode,           only : ixzero, iyzero
+  use matdat,         only : put_source
+  use velocitygrid,   only : vpgr, mugr
+  use geom,           only : bn, gfun, bt_frac, rfun
+  use components,     only : signz, tmp, tgrid, tp, vp
+  use rotation,       only : cfen, dcfen_ds, toroidal_shear, ts_uprim
+  
+  character(len=64) :: term='VI: neoclassical_rot'
+  
+  ! integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is
+  complex :: mat_elem
+  real :: dum, dum2, dum3, vel, ET
+ 
+  ! dummy variables
+  integer :: iih
+  real    :: up_prim, prefac1
+
+  !elem%itloc = ifdis
+  !elem%term  = term
+  dum = 0.E0
+  dum2 = 0.E0
+  dum3 = 0.E0
+  
+  !call register_term(term)
+  
+  ! calculate the terms due to the Maxwell background
+  do is=1,nsp ; do imod = 1, nmod ; do ix=1,nx ; do i=1,ns ; do j=1,nmu ; do k=1,nvpar
+
+    ! Neoclassical terms only for the (0,0) mode
+    if (ixzero==ix.and.iyzero==imod) then
+
+      ! the matrix element 
+      iih = indx(ifdis,imod,ix,i,j,k,is)
+      
+      ! term in front of the temperature gradient
+      ET = (vpgr(i,j,k,is)**2 + mugr(j)*bn(ix,i)) / (tmp(ix,is) / tgrid(is) ) &
+      &  - 1.5E0 + cfen(i,is)
+      
+      if (toroidal_shear.eq.'use_shear_rate') then
+        up_prim=bt_frac(ix,i)*ts_uprim * rfun(ix,i)
+      else !vp is uprim
+        up_prim=bt_frac(ix,i)*vp(ix,is) * rfun(ix,i)
+      end if
+
+      vel = vpgr(i,j,k,is)**2 + bn(ix,i)*mugr(j)
+      prefac1 = bt_frac(ix,i) * rfun(ix,i)/(signz(is)*tmp(ix,is))
+      
+      ! return the final value
+      !The prefactor before the temperature gradient
+      mat_elem = prefac1*ET*tp(ix,is)*(vel*gfun(ix,i) + dcfen_ds(i,is))
+      !Add the prefactor before the rotation gradient term1
+      mat_elem = mat_elem + prefac1*up_prim*vpgr(i,j,k,is)*(vel*gfun(ix,i) + dcfen_ds(i,is))
+      !Note there is no density (or pressure) gradient contribution as
+      !that is removed by the transformation.  This gives only two drives
+      !terms.     
+      mat_elem = -mat_elem*fmaxwl(ix,i,j,k,is)
+
+      ! put the element 
+      call put_source(iih,mat_elem)
+
+    endif
+
+  end do ; end do ; end do ; end do  ; end do ; end do
+
+end subroutine neoclassical_rot
+
+!------------------------------------------------------------------------------
+!>If Hinton Wong transformation is used, this section calculates the correction 
+!!in the fluxes due to the transformation
+!<------------------------------------------------------------------------------
+subroutine calc_correction_fluxes
+
+  use grid,           only : nx, ns, nmu, nvpar, nsp, nmod
+  use grid,           only : gsp, gx
+  use geom,           only : ints, bn, bt_frac, jfun, rfun, jfun
+  use dist,           only : fmaxwl
+  use velocitygrid,   only : intvp, intmu, vpgr, mugr
+  use geom,           only : ints, bn, signB
+  use rotation,       only : coriolis, cf_drift, vcor, cf_trap, cfen
+  use components,     only : vthrat, signz
+  use mpiinterface,   only : mpiallreduce_sum_r_scalar, root_processor
+  use mpicomms,       only : COMM_SP_EQ
+
+  ! integers for the loop over all grid points
+  integer :: imod, ix, i, j, k, is
+  real :: dum, dum3
+  real :: dum_cor, dum2_cor, dum3_cor
+  real :: sum1, sum2, sum3
+  real :: sum1_G, sum2_G, sum3_G
+  
+  ! dummy variables
+  integer :: isglb, ixg
+  real    :: drift_x, drift_y, drift_z, dumnc
+
+  sum1 = 0.E0
+  sum2 = 0.E0
+  sum3 = 0.E0
+      
+  sum1_G = 0.E0
+  sum2_G = 0.E0
+  sum2_G = 0.E0
+
+  nmod1: do imod = 1, nmod 
+    nx1:   do ix = 1, nx 
+      nsp1:  do is = 1, nsp
+ 
+       ! the actual (global) species index 
+       isglb = gsp(is)
+       ! the acutal (global) x index
+       ixg = gx(ix)!
+        
+       !Neoclassical fluxes old version
+       ! check if this is the 0,0 mode for which the neoclassical
+       ! fluxes are calculated 
+       ! FJC_NON_SPECTRAL: ix /= ixzero has no meaning
+       ns1: do i = 1, ns 
+           nmu1:do j = 1, nmu 
+             nvpar1: do k = 1, nvpar 
+              
+               call drift(ix,i,j,k,is,drift_x,drift_y,drift_z,coriolis,cf_drift,.true.)                
+               ! common factors 
+               dumnc = drift_x * (bn(ix,i)*intmu(j)*intvp(i,j,k,is)/signz(is))*     &
+                     & fmaxwl(ix,i,j,k,is)*ints(i)
+
+               dum_cor = signB*vpgr(i,j,k,is)*rfun(ix,i)*bt_frac(ix,i) + vcor*jfun(ix,i)
+               dum2_cor = vcor*jfun(ix,i)*(vpgr(i,j,k,is)**2 +  2.E0*mugr(j)*bn(ix,i) - 5.E0/2.E0)
+               dum3_cor = (vcor*jfun(ix,i)/vthrat(is)**2)*(vpgr(i,j,k,is)* &
+                     & rfun(ix,i)*bt_frac(ix,i) + vcor*jfun(ix,i))
+               
+               dum = (vpgr(i,j,k,is)**2 +  2.E0*mugr(j)*bn(ix,i) - 5.E0/2.E0)
+               !Correction for when the centrifugal drift is included.
+               if(cf_drift.or.cf_trap)then
+                 dum = dum + cfen(i,is)
+               endif
+               dum3 = vpgr(i,j,k,is)*Rfun(ix,i)*bt_frac(ix,i)*signB
+
+               sum1 = sum1 + dum_cor*dumnc
+               sum1 = sum1 + dum2_cor*dumnc
+               sum1 = sum1 + dum3_cor*dumnc
+
+               sum2 = sum2 + dum_cor*dumnc*dum
+               sum2 = sum2 + dum2_cor*dumnc*dum
+               sum2 = sum2 + dum3_cor*dumnc*dum
+
+               sum3 = sum3 + dum_cor*dumnc*dum3
+               sum3 = sum3 + dum2_cor*dumnc*dum3
+               sum3 = sum3 + dum3_cor*dumnc*dum3
+    
+             end do nvpar1 
+           end do nmu1
+         end do ns1          
+
+       end do nsp1 
+     end do nx1
+   end do nmod1
+
+   call mpiallreduce_sum_r_scalar(sum1,sum1_G,1,COMM_SP_EQ)
+   call mpiallreduce_sum_r_scalar(sum2,sum2_G,1,COMM_SP_EQ)
+   call mpiallreduce_sum_r_scalar(sum3,sum3_G,1,COMM_SP_EQ)
+   if(root_processor)then
+     write(*,*) 'Neo correction - Particle',sum1_G
+     write(*,*) 'Neo correction - Energy',sum2_G
+     write(*,*) 'Neo correction - Parallel Momentum',sum3_G
+   endif
+
+end subroutine calc_correction_fluxes
+
+!------------------------------------------------------------------------------
+! The subroutine below calculates the drift due to the magnetic field 
+! inhomogeneity as well as the plasma rotation 
+!------------------------------------------------------------------------------
+subroutine drift(ix,i,j,k,is,drift_x,drift_y,drift_z,lcoriolis,lcf_drift,lgradb) 
+
+  use components,     only : signz, vthrat, mas, tgrid, veta_prime
+  use geom,           only : dfun, efun, hfun, bn, ifun, dpfdpsi, signB,    &
+                      &  gradp_type, dpds_rot, dpdpsi_rot, beta_miller,     &
+                      &  curv_effect, de_miller, mas_miller_i
+  use velocitygrid,   only : vpgr, mugr
+  use rotation,       only : vcor!, coriolis, cf_drift
+  use rotation,       only : dcfphi_ds, dcfphi_dpsi
+
+  logical, intent(in)  :: lcoriolis, lcf_drift, lgradb
+  integer, intent(in)  :: ix,i,j,k,is  ! Index for radial-, s-, mu-, vpar-direction and species, respectively.
+  real,    intent(out) :: drift_x, drift_y, drift_z
+
+  real :: ED, grdp1, grdp2, grdp3
+
+  ED = vpgr(i,j,k,is)**2
+  if(lgradb)then
+    ED = ED + bn(ix,i)*mugr(j)
+  endif
+
+  ! the B\times \nabla B component of the drift
+  drift_x = tgrid(is)*ED*dfun(ix,i,1)
+  drift_y = tgrid(is)*ED*dfun(ix,i,2) 
+  drift_z = tgrid(is)*ED*dfun(ix,i,3) 
+
+  
+  if (gradp_type == 'rota_miller' .and. curv_effect) then
+    ! change for vcor =/= 0 (used with miller)
+   
+    ! Derivative of the pressure toward psi            
+    grdp1 = 2.*dpdpsi_rot(ix,i) * dpfdpsi(ix)   
+
+    ! Derivative of the pressure toward s
+    grdp2 = dpds_rot(ix,i)*signB
+
+    ! Additionnal term due to non zero toroidal velocities
+    grdp3 = mas_miller_i*de_miller(ix,1)*vcor**2.*signB*beta_miller
+
+    !Terms due to toroidal rotation in pressure gradient
+    drift_x = drift_x + tgrid(is)*vpgr(i,j,k,is)**2*grdp1*efun(ix,i,1,1)/ bn(ix,i)**2
+    drift_y = drift_y + tgrid(is)*vpgr(i,j,k,is)**2*grdp1*efun(ix,i,1,2)/ bn(ix,i)**2
+    drift_z = drift_z + tgrid(is)*vpgr(i,j,k,is)**2*grdp1*efun(ix,i,1,3)/ bn(ix,i)**2
+
+    ! Terms due to modification of force balance equation for a 
+    ! two fluid model
+    drift_x = drift_x + tgrid(is)*vpgr(i,j,k,is)**2*(grdp3-grdp2)*ifun(ix,i,1)/ bn(ix,i)**2
+    drift_y = drift_y + tgrid(is)*vpgr(i,j,k,is)**2*(grdp3-grdp2)*ifun(ix,i,2)/ bn(ix,i)**2
+    drift_z = drift_z + tgrid(is)*vpgr(i,j,k,is)**2*(grdp3-grdp2)*ifun(ix,i,3)/ bn(ix,i)**2
+
+   else
+
+    ! The finite beta correction of the curvature
+    drift_x = drift_x + tgrid(is)*vpgr(i,j,k,is)**2*veta_prime(ix)*efun(ix,i,1,1)/ bn(ix,i)**2
+    drift_y = drift_y + tgrid(is)*vpgr(i,j,k,is)**2*veta_prime(ix)*efun(ix,i,1,2)/ bn(ix,i)**2
+    drift_z = drift_z + tgrid(is)*vpgr(i,j,k,is)**2*veta_prime(ix)*efun(ix,i,1,3)/ bn(ix,i)**2  
+
+   end if   
+
+  ! The coriolis drift correction (uses m_R v_R = T_R / v_R)
+  if (lcoriolis) then 
+    drift_x = drift_x + 2.E0*mas(is)*vthrat(is)*vpgr(i,j,k,is)*vcor*hfun(ix,i,1)
+    drift_y = drift_y + 2.E0*mas(is)*vthrat(is)*vpgr(i,j,k,is)*vcor*hfun(ix,i,2)
+    drift_z = drift_z + 2.E0*mas(is)*vthrat(is)*vpgr(i,j,k,is)*vcor*hfun(ix,i,3)
+  endif 
+
+  ! The centrifugal drift
+  if (lcf_drift) then 
+    drift_x = drift_x + vcor*vcor*mas(is)*ifun(ix,i,1)
+    drift_y = drift_y + vcor*vcor*mas(is)*ifun(ix,i,2)
+    drift_z = drift_z + vcor*vcor*mas(is)*ifun(ix,i,3)
+  endif   
+
+  ! common factor (1/Z)
+  drift_x = drift_x / signz(is)
+  drift_y = drift_y / signz(is)
+  drift_z = drift_z / signz(is)
+
+  ! drift from centrifugal potential
+  drift_x = drift_x + efun(ix,i,1,1)*dcfphi_dpsi(i)+efun(ix,i,3,1)*dcfphi_ds(i)
+  drift_y = drift_y + efun(ix,i,1,2)*dcfphi_dpsi(i)+efun(ix,i,3,2)*dcfphi_ds(i)
+  drift_z = drift_z + efun(ix,i,1,3)*dcfphi_dpsi(i)+efun(ix,i,3,3)*dcfphi_ds(i)
+
+end subroutine drift 
+
+
+!++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+!> For the arakawa scheme
+!> \f$   (1/2) v_{\parallel}^2 + \mu B_N + (1/2) {\cal E}_R  \f$ 
+!> Note H is periodic in n_s_grid
+!----------------------------------------------------------------------------
+function HH(i,j,k,is)
+
+  use grid, only : ns
+  use geom, only : bn
+  use velocitygrid, only : vpgr, mugr
+  use rotation, only : cfen
+
+  real :: HH
+  integer, intent(in) :: i,j,k,is
+  integer :: iref, ix
+  
+  ! warning works only for a local grid 
+  ix = 1 
+
+  iref = i
+  ! this only will work if there is no dependence of vpar on s?
+  !if velcity grid depends on s, will need ghost points in that too.
+  if (i < 1 )  iref = 1
+  if (i > ns)  iref = ns
+
+  !cfen and bn are periodic in n_s_grid and have ghost points as needed.
+  HH = 0.5*vpgr(iref,j,k,is)**2 + mugr(j)*bn(ix,i) + 0.5*cfen(i,is)
+
+end function HH
+
+
+!------------------------------------------------------------------------------
+!> This routine determines the differential scheme used. The selection is 
+!> based on the order of the scheme, the position of the point on the  
+!> field line (i.e. end point or not), and up or down wind differentiation 
+!------------------------------------------------------------------------------
+subroutine differential_scheme(ist,ipw,id,w,optscheme) 
+
+  use control,  only : order_of_the_scheme
+  use global,   only : lenswitch
+  use general,  only : gkw_abort
+
+  integer, intent(in) :: ist  ! position on the field line 
+  integer, intent(in) :: ipw  ! +1 / -1 up / down wind
+  integer, intent(in) :: id   ! parallel derivative or dissipation term  
+  real,     intent(out) :: w(5) 
+  character (len = lenswitch), optional :: optscheme
+  character (len = lenswitch) :: scheme_order
+
+  real :: vfocm2pd(5), dfocm2pd(5), vfocm2nd(5), dfocm2nd(5)
+  real :: vfocm1pd(5), dfocm1pd(5), vfocm1nd(5), dfocm1nd(5)  
+  real :: vfoc00(5), dfoc00(5) 
+  real :: vfocp1pd(5), dfocp1pd(5), vfocp1nd(5), dfocp1nd(5) 
+  real :: vfocp2pd(5), dfocp2pd(5), vfocp2nd(5), dfocp2nd(5) 
+  real :: vsocm2pd(5), dsocm2pd(5), vsocm2nd(5), dsocm2nd(5)
+  real :: vsoc00(5), dsoc00(5) 
+  real :: vsocp2pd(5), dsocp2pd(5), vsocp2nd(5), dsocp2nd(5) 
+  real :: d2foc00(5) 
+
+!---- Fourth order scheme (with treatment of end points) -------
+
+  ! Second order backwinded difference scheme
+  data vfocm2pd / 0.E0,   0.E0, -18.E0,  24.E0,  -6.E0 / 
+  data dfocm2pd / 0.E0,   0.E0,   0.E0,   0.E0,   0.E0 / 
+  ! Centre differenced second order scheme with a zero ghost cell
+  data vfocm2nd / 0.E0,   0.E0,   0.E0,   6.E0,   0.E0 / 
+  data dfocm2nd / 0.E0,   0.E0, -24.E0,  12.E0,   0.E0 / 
+  ! Third order backwinded difference scheme
+  data vfocm1pd / 0.E0,  -4.E0,  -6.E0,  12.E0,  -2.E0 / 
+  data dfocm1pd / 0.E0,   0.E0,   0.E0,   0.E0,   0.E0 / 
+  ! Fourth order central difference with a ghost cell
+  data vfocm1nd / 0.E0,  -8.E0,   0.E0,   8.E0,  -1.E0 /  
+  data dfocm1nd / 0.E0,   4.E0,  -6.E0,   4.E0,  -1.E0 / 
+  ! Fourth order 5 point stencil 
+  data vfoc00   / 1.E0,  -8.E0,   0.E0,   8.E0,  -1.E0 /   ! 4th order 1st deriv
+  data dfoc00   /-1.E0,   4.E0,  -6.E0,   4.E0,  -1.E0 /   ! 2nd order 4th deriv (* -1)
+  data d2foc00  /-1.E0,  16.E0, -30.E0,  16.E0,  -1.E0 /   ! 4th order 2nd deriv
+    
+  ! Fourth order central difference with a ghost cell
+  data vfocp1pd / 1.E0,  -8.E0,   0.E0,   8.E0,   0.E0 / 
+  data dfocp1pd /-1.E0,   4.E0,  -6.E0,   4.E0,   0.E0 / 
+  ! Third order backwinded scheme
+  data vfocp1nd / 2.E0, -12.E0,   6.E0,   4.E0,   0.E0 / 
+  data dfocp1nd / 0.E0,   0.E0,   0.E0,   0.E0,   0.E0 / 
+  ! Second order central difference with a zero ghost cell
+  data vfocp2pd / 0.E0,  -6.E0,   0.E0,   0.E0,   0.E0 / 
+  data dfocp2pd / 0.E0,  12.E0, -24.E0,   0.E0,   0.E0 / 
+  ! Second order backwinded scheme
+  data vfocp2nd / 6.E0, -24.E0,  18.E0,   0.E0,   0.E0 / 
+  data dfocp2nd / 0.E0,   0.E0,   0.E0,   0.E0,   0.E0 / 
+
+!---- Second order scheme (with treatment of end points) ------ 
+  ! Second order 3 point stencil 
+  data vsoc00   / 0.E0,  -6.E0,   0.E0,   6.E0,   0.E0 / 
+  data dsoc00   / 0.E0,  12.E0, -24.E0,  12.E0,   0.E0 /  ! 2nd order 2nd deriv
+  data vsocm2pd / 0.E0,   0.E0, -12.E0,  12.E0,   0.E0 /  ! check sign 
+  data dsocm2pd / 0.E0,   0.E0,   0.E0,   0.E0,   0.E0 / 
+  data vsocm2nd / 0.E0,   0.E0,   0.E0,   6.E0,   0.E0 / 
+  data dsocm2nd / 0.E0,   0.E0,   0.E0,   0.E0,   0.E0 / 
+  data vsocp2pd / 0.E0,  -6.E0,   0.E0,   0.E0,   0.E0 / 
+  data dsocp2pd / 0.E0,   0.E0,   0.E0,   0.E0,   0.E0 / 
+  data vsocp2nd / 0.E0, -12.E0,  12.E0,   0.E0,   0.E0 / ! check sign 
+  data dsocp2nd / 0.E0,   0.E0,   0.E0,   0.E0,   0.E0 / 
+
+  scheme_order = order_of_the_scheme
+  if (present(optscheme)) scheme_order = optscheme
+
+  if (id.eq.1) then     ! First derivatives (s, v||, x)
+
+    select case(scheme_order) 
+
+    case('fourth_order')
+
+      select case(ist) 
+      case(-2) 
+        if (ipw.eq.1) w  = vfocm2pd
+        if (ipw.eq.-1) w = vfocm2nd 
+      case(-1)
+        if (ipw.eq.1) w  = vfocm1pd
+        if (ipw.eq.-1) w = vfocm1nd 
+      case(0)
+        if (ipw.eq.1) w  = vfoc00
+        if (ipw.eq.-1) w = vfoc00 
+      case(1)
+        if (ipw.eq.1) w  = vfocp1pd
+        if (ipw.eq.-1) w = vfocp1nd 
+      case(2) 
+        if (ipw.eq.1) w  = vfocp2pd
+        if (ipw.eq.-1) w = vfocp2nd 
+      end select 
+
+    case('second_order') 
+  
+      select case(ist) 
+      case(-2) 
+        if (ipw.eq.1) w  = vsocm2pd
+        if (ipw.eq.-1) w = vsocm2nd 
+      case(-1,0,1) 
+        if (ipw.eq.1) w  = vsoc00
+        if (ipw.eq.-1) w = vsoc00 
+      case(2) 
+        if (ipw.eq.1) w  = vsocp2pd
+        if (ipw.eq.-1) w = vsocp2nd 
+      end select 
+      
+    case default
+    
+       call gkw_abort('linear_terms: unknown differential scheme_order')  
+
+    end select
+    
+  else if (id == 2) then     ! standard numerical (hyper)dissipation 
+
+    select case(scheme_order) 
+
+    case('fourth_order')     ! 4th derivatives at 2nd order
+
+      select case(ist) 
+      case(-2) 
+        if (ipw.eq.1) w  = dfocm2pd
+        if (ipw.eq.-1) w = dfocm2nd 
+      case(-1)
+        if (ipw.eq.1) w  = dfocm1pd
+        if (ipw.eq.-1) w = dfocm1nd 
+      case(0)
+        if (ipw.eq.1) w  = dfoc00
+        if (ipw.eq.-1) w = dfoc00 
+      case(1)
+        if (ipw.eq.1) w  = dfocp1pd
+        if (ipw.eq.-1) w = dfocp1nd 
+      case(2) 
+        if (ipw.eq.1) w  = dfocp2pd
+        if (ipw.eq.-1) w = dfocp2nd 
+      end select 
+
+    case('second_order')     ! 2nd derivatives at 4th order
+ 
+      select case(ist) 
+      case(-2) 
+        if (ipw.eq.1) w  = dsocm2pd
+        if (ipw.eq.-1) w = dsocm2nd 
+      case(-1,0,1) 
+        if (ipw.eq.1) w  = dsoc00
+        if (ipw.eq.-1) w = dsoc00 
+      case(2) 
+        if (ipw.eq.1) w  = dsocp2pd
+        if (ipw.eq.-1) w = dsocp2nd 
+      end select 
+      
+    case default
+    
+      call gkw_abort('linear_terms: unknown differential scheme_order')  
+
+    end select
+    
+  else if (id == -2) then  
+  
+    select case(scheme_order)  ! alternative numerical dissipation
+
+    case('fourth_order')  ! 2nd derivatives at 4th order
+  
+      select case(ist) 
+
+        case(-2)  
+          if (ipw.eq.1) w  = dfocm2pd
+          if (ipw.eq.-1) w = dfocm2nd     
+        case(-1)      
+          if (ipw.eq.1) w  = dfocm1pd
+          if (ipw.eq.-1) w = dfocm1nd
+        case(0)  
+          if (ipw.eq.1)  w = d2foc00
+          if (ipw.eq.-1) w = d2foc00     
+        case(1)       
+          if (ipw.eq.1) w  = dfocp1pd
+          if (ipw.eq.-1) w = dfocp1nd          
+        case(2)            
+          if (ipw.eq.1) w  = dfocp2pd
+          if (ipw.eq.-1) w = dfocp2nd
+
+      end select    
+        
+    case('second_order')
+    
+       call gkw_abort('linear_terms: Use positive idisp for second_order scheme')   
+    
+    case default
+    
+       call gkw_abort('linear_terms: unknown differential scheme_order')  
+
+    end select 
+    
+  else  
+  
+    call gkw_abort('linear_terms: unknown differential derivative')  
+
+  end if 
+
+  ! Do the proper normalization 
+  w = w / 12.E0  
+
+return 
+end subroutine differential_scheme 
+
+
+!-----------------------------------------------------------------------------
+!> This routine calculates the correction necessary to go from the
+!> distribution g (which includes the correction of the parallel
+!> vector potential) to the distribution f
+!-----------------------------------------------------------------------------
+subroutine g2f_correct
+
+  use control,        only : spectral_radius
+  use index_function, only : indx,index_invert,index_reorder
+  use dist,           only : fmaxwl, iapar, iapar_ga
+  use components,     only : signz, vthrat, tmp
+  use matdat,         only : put_element_correct_apar
+  use velocitygrid,   only : vpgr
+
+  character(len=64) :: term='g2f_correct'
+
+  integer :: jjh
+  real :: b0
+  complex :: mat_elem
+
+  integer, dimension(6) :: starts,ends
+  integer :: i,j,k,l,m,n
+  integer :: i_mod, i_x, i_s, i_mu, i_vpar, i_sp
+  
+  call index_invert(starts,ends)
+  do n=starts(6),ends(6)
+    do m=starts(5),ends(5)
+      do l=starts(4),ends(4)
+        do k=starts(3),ends(3)
+          do j=starts(2),ends(2)
+            do i=starts(1),ends(1)
+              call index_reorder(i,j,k,l,m,n,i_mod,i_x,i_s,i_mu,i_vpar,i_sp)
+              b0 = wrap_beslj0_gkw(i_mod,i_x,i_s,i_mu,i_sp)
+              mat_elem = -2.E0*signz(i_sp)*vthrat(i_sp)*vpgr(i_s,i_mu,i_vpar,i_sp)*&
+                       &  b0*fmaxwl(i_x,i_s,i_mu,i_vpar,i_sp)/tmp(i_x,i_sp)
+              if (spectral_radius) then 
+                jjh = indx(iapar,i_mod,i_x,i_s)
+              else 
+                jjh = indx(iapar_ga,i_mod,i_x,i_s,i_mu,i_sp) 
+              endif 
+              call put_element_correct_apar(term,jjh,mat_elem)
+            end do
+          end do
+        end do
+      end do
+    end do
+  end do
+              
+end subroutine g2f_correct
+
+! !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+! 
+! THE ROUTINE BELOW COULD BE REMOVED AFTER SOME CODING 
+!
+! DIFFUS : used for dissipation in Arakawa scheme
+!          could be replaced by the implementation of the parallel and velocity
+!          space dissipation which should be the same 
+! 
+! !++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+
+!------------------------------------------------------------------------------
+!> add 4th or 2nd order diffusion in s or vpar (dx = dvp or sgr_dist)
+!> CLEANUP: This routine replicates parallel_dissipation and should be merged
+!------------------------------------------------------------------------------
+subroutine diffus(E_in,kdiff,dum,direction,iorder)
+
+  use geom,         only : sgr_dist
+  use velocitygrid, only : dvp
+  use structures,   only : matrix_element
+  use matdat,       only : add_element, connect_parallel, register_term
+  use general,      only : gkw_abort 
+  use mode,         only : parallel_phase_shift
+
+  type(matrix_element), intent(in) :: E_in
+  real, intent(in) :: kdiff,dum
+  character (len=*), intent(in) :: direction
+  integer, intent(in) :: iorder
+
+  logical, save :: registered_v = .false.
+  logical, save :: registered_s = .false.
+  
+  type(matrix_element) :: E
+  real :: d,dx
+  real, dimension(5) :: st
+  integer :: ierr, jj
+  logical :: ingrid 
+
+  dx = 1. ; d = 0.
+
+  E%ideriv = 4
+  E%itloc = E_in%itloc
+  E%itype = E_in%itype
+
+  select case(direction)
+    case('vpar')
+      dx = dvp
+      E%term='parallel velocity dissipation (ARA)'
+      if (.not. registered_v) call register_term(E)
+      registered_v = .true. 
+    case('s')
+      dx = sgr_dist
+      E%term='parallel dissipation (ARA)'
+      if (.not. registered_S) call register_term(E)
+      registered_S = .true. 
+    case default
+      call gkw_abort('diffus: bad case of direction')
+  end select
+  
+  select case (iorder)
+    case (4)
+      st = (/ 1., -4., 6., -4., 1./)
+      d=-kdiff*abs(dum)/(12.*dx)
+    case (2)
+      st = (/ 0., -1., 2., -1., 0./)
+      d=-kdiff*abs(dum)/(dx)
+    case default
+      call gkw_abort('diffus: bad case of scheme order')
+  end select
+       
+  do jj=1,5
+ 
+    E     = E_in  
+    E%val = d*st(jj)
+
+    select case(direction)
+      case('vpar')
+        E%iloc = E%i
+        E%kloc = E%k + (jj - 3)
+      case('s')
+        E%iloc = E%i + (jj - 3)
+        E%kloc = E%k
+        E%val  = E%val * parallel_phase_shift(E%imod,E%ix,E%i,E%iloc)
+    end select
+    
+    call connect_parallel(E,ingrid)
+    if (ingrid) call add_element(E,ierr)
+    
+  end do
+
+end subroutine diffus
+
+!-----------------------------------------------------------------------------
+!> returns the terms appearing in front of the the radial derivative 
+!> of the maxwellian for a given local species input 
+!-----------------------------------------------------------------------------
+function dmaxwel(ix,i,j,k,is)
+
+ use velocitygrid, only : vpgr, mugr
+ use components, only : tgrid, tmp, fp, vp, mas, vthrat, tp, tm_drive, signz, ecurx
+ use geom,       only : jfun, lfun, bt_frac, bn, rfun
+ use rotation,   only : vcor, cfen, ts_uprim, cf_trap, cf_upsrc, toroidal_shear
+  
+ real :: dmaxwel
+ integer, intent(in) :: ix, i,j,k,is !< local species number
+
+ real :: ET, cf_dum, up_prim !< dummies
+ 
+  ! term in front of the temperature gradient
+  ET = (vpgr(i,j,k,is)**2 + 2.E0*mugr(j)*bn(ix,i) + cfen(i,is) )                &
+       / (tmp(ix,is) / tgrid(is) ) - 1.5E0 
+
+  !calculate u_parallel^prime
+  if (toroidal_shear.eq.'use_shear_rate') then
+    up_prim=bt_frac(ix,i)*ts_uprim * rfun(ix,i)
+  else !vp is uprim
+    up_prim=bt_frac(ix,i)*vp(ix,is) * rfun(ix,i)
+  end if
+
+  if(tm_drive)then
+    !Exact form of drive goes here -> Only present in electrons
+    if(signz(is).lt.0)then
+      !Negative sign here 
+      up_prim = up_prim + ecurx(ix)
+      !write(*,*) is,ix,ecurx(ix)
+    endif
+  endif
+
+  ! correction for cf_trap (radial derivative in density gradient)
+  ! EXPERIMENTAL
+  if (cf_trap) then
+    cf_dum=mas(is)*vcor*vcor*lfun
+    if (cf_upsrc)then
+      if(lneorotsource)then
+        cf_dum=cf_dum
+      else
+        cf_dum=cf_dum+2.*vp(ix,is)*mas(is)*vcor*jfun(ix,i)
+      end if
+    end if
+    cf_dum=cf_dum/tmp(ix,is)
+  else 
+    cf_dum=0.0
+  end if
+
+  ! return the final value
+  dmaxwel=fp(ix,is)+ET*tp(ix,is)+2.E0*sqrt(mas(is)*tgrid(is))*up_prim*vpgr(i,j,k,is) &
+         & /tmp(ix,is) + cf_dum
+
+end function
+
+!--------------------------------------------------------------------------
+!> Wrapper function for the bessel functions. In the case of the spectral
+!> method this function returns the Bessel function and the product with 
+!> the potential gives the gyro-averaged potential. In the case of 
+!> spectral_radius = .false. the function returns 1 since all elements 
+!> refer directly to the gyro-averaged potential, not the potential 
+!--------------------------------------------------------------------------
+function wrap_beslj0_gkw(imod,ix,i,j,is) 
+
+  use control,   only : spectral_radius
+  use functions, only : besselj0_gkw 
+
+  integer, intent(in) :: imod, ix, i, j, is 
+  real                :: wrap_beslj0_gkw 
+
+  if (spectral_radius) then 
+    wrap_beslj0_gkw = besselj0_gkw(imod,ix,i,j,is) 
+  else 
+    wrap_beslj0_gkw = 1.0E0 
+  endif 
+
+end function wrap_beslj0_gkw 
+
+!--------------------------------------------------------------------------
+!> Similar to the wrapper function wrap_beslj0_gkw. For spectral_radius = 
+!> .false. this function returns 1., since the elements refer directly to 
+!> the gyro-average of Bpar
+!--------------------------------------------------------------------------
+function wrap_mod_besj1_gkw(imod,ix,i,j,is) 
+
+  use control,   only : spectral_radius 
+  use functions, only : mod_besselj1_gkw 
+
+  integer, intent(in) :: imod, ix, i, j, is
+  real                :: wrap_mod_besj1_gkw 
+
+  if (spectral_radius) then 
+    wrap_mod_besj1_gkw = mod_besselj1_gkw(imod,ix,i,j,is) 
+  else 
+    wrap_mod_besj1_gkw = 1.0E0 
+  endif 
+ 
+end function wrap_mod_besj1_gkw 
+
+!-------------------------------------------------------------------------
+!> Calculates the parallel (s) derivative of the neo background
+!> distribution function
+!> At the moment assumes the local model. -> Possible expanded in future
+!-------------------------------------------------------------------------
+function dFds(imod,ix,i,j,k,is)
+
+  use neoequil, only : neof, mid_r_point
+  use geom, only : ffun, sgr_dist
+  use matdat, only : pos_par_grid, connect_parallel
+  use grid,   only : gs
+  use dist,   only : fmaxwl
+
+  integer :: ist, m, ii
+  integer, intent(in) :: imod,ix, i, j, k, is
+  real    :: dum, w(5), dFds
+
+  dFds = 0.E0
+  if(.not.lneo_equil)return
+
+  dum = 0.E0
+  ! select the scheme 
+  ist = 0!Always in the grid as it is periodic !pos_par_grid(1,ix,i,k)
+  call differential_scheme(ist,1,1,w) 
+  do m = 1, 5
+    !Only ix=2 in neof as it is local 
+    ii = i + m - 3
+    dum = dum + w(m)*ffun(ix,i)* &
+      & fmaxwl(ix,i,j,k,is)*neof(mid_r_point,is,ii,j,k)/sgr_dist
+  enddo
+  dFds = dum
+  
+end function dFds
+
+!-------------------------------------------------------------------------
+!> Calculates the parallel (s) derivative of the neo background
+!> distribution function
+!> At the moment assumes the local model. -> Possible expanded in future
+!-------------------------------------------------------------------------
+function dphineods(imod,ix,i)
+
+  use neoequil, only : neophi, mid_r_point
+  use geom, only : ffun, sgr_dist
+  use matdat, only : pos_par_grid, connect_parallel
+   
+  integer :: ist, m, ii
+  integer, intent(in) :: imod, i, ix
+  real    :: dum, w(5), dphineods
+
+  dphineods = 0.E0
+  if(.not.lneo_equil)return
+
+  dum = 0.E0
+  ! select the scheme 
+  ist = 0!Always in the grid as it is periodic !pos_par_grid(1,ix,i,k)
+  call differential_scheme(ist,1,1,w) 
+  do m = 1, 5
+    !Only ix=2 in neof as it is local 
+    ii = i + m - 3
+    dum = dum + w(m)* &
+      & neophi(mid_r_point,ii)/sgr_dist
+  enddo
+  dphineods = dum 
+  
+end function dphineods
+
+!--------------------------------------------------------------------
+!> Calculates the parallel velocity (vpar) derivative of the
+!> neo background distribution function 
+!--------------------------------------------------------------------
+function dFdvpar(imod,ix,i,j,k,is)
+
+  use neoequil, only : neof, mid_r_point
+  use velocitygrid, only : dvp
+  use grid,     only : gvpar, n_vpar_grid
+  use dist,   only : fmaxwl
+  
+  integer :: ist, m, ii
+  integer, intent(in) :: imod, ix, i, j, k, is
+  real    :: dum, w(5),dFdvpar
+
+  dFdvpar = 0.E0
+  if(.not.lneo_equil)return  
+
+  dum = 0.E0
+
+  ist = 0
+  call differential_scheme(ist,1,1,w)    
+  do m = 1, 5
+    ii = k + m - 3
+    dum = dum + w(m)*fmaxwl(ix,i,j,k,is)*neof(mid_r_point,is,i,j,ii)/dvp
+  enddo
+  dFdvpar = dum
+
+end function dFdvpar
+
+subroutine neof_diagnose
+
+  use grid,      only : nmod, nvpar, ns, nmu, nperiod, n_s_grid, nsp
+  use grid,      only : n_vpar_grid, n_mu_grid, nmu, number_of_species
+  use grid,      only : n_x_grid
+  use geom,      only : bn, rfun, signB, bt_frac, ints 
+  use velocitygrid,   only : vpgr, mugr, intvp, intmu
+  use io,     only : get_free_file_unit
+  use mpiinterface, only : root_processor, number_of_processors
+  use mpiinterface, only : mpiallreduce_sum
+  use components,   only : vthrat, mas, de
+  use dist,      only : fmaxwl
+  use neoequil, only : neof, mid_r_point, gradneof
+
+
+  real :: dum, dum2,commf,dum3, commfgrad, commfgrad2, dum2grad
+  real :: fluxsum1,fluxsum2,rmean,fluxsum3,densum,fluxsum2grad
+  real :: fluxsum1_2,fluxsum2_2,rmean_2,fluxsum3_2,densum_2,fluxsum2grad_2
+  real :: den
+  integer :: i,j,k,is,ix,freelun  
+
+  if(root_processor)then
+    call get_free_file_unit(freelun)
+    open(freelun, status='unknown',action='write', file='neof_flows.dat')  
+  endif
+
+  if(root_processor)write(freelun,*) 'Flux average', '  Species', '  Radial', &
+     &  '  <Bu_{||}>',  '  <Bu_{||}> NEOunits'
+  if(root_processor)write(freelun,*) 'All outputs are in GKW normalised units'
+  
+  ix = 3
+  
+  fluxsum2 = 0.E0;fluxsum2grad=0.E0;fluxsum3 = 0.E0
+  rmean = 0.E0;fluxsum1 = 0.E0;densum = 0.E0
+  do is=1,1
+    do i = 1,ns
+      dum = 0.E0;dum2 = 0.E0;dum3 = 0.E0;den = 0.E0;dum2grad=0.E0
+      do j = 1,nmu
+        do k = 1,nvpar
+          commf = fmaxwl(1,i,j,k,is)*neof(ix,is,i,j,k)* &
+              & intvp(i,j,k,is)*intmu(j)*bn(1,i)
+          commfgrad = fmaxwl(1,i,j,k,is)*gradneof(is,i,j,k)* &
+              & intvp(i,j,k,is)*intmu(j)*bn(1,i) 
+          commfgrad2 =  dmaxwel(1,i,j,k,is)*fmaxwl(1,i,j,k,is)* &
+              & neof(ix,is,i,j,k)*intvp(i,j,k,is)*intmu(j)*bn(1,i)
+         
+          !Integrated density
+          den = den + commf
+          !Parallel flow
+          dum = dum +  vthrat(is)*vpgr(i,j,k,is)*commf
+          !Toroidal diamagnetic flow  
+          dum2 = dum2 + commf*vthrat(is)*vpgr(i,j,k,is)*Rfun(1,i)*bt_frac(1,i)*signB
+          dum2grad = dum2grad +  commfgrad*vthrat(is)*vpgr(i,j,k,is)*Rfun(1,i)*bt_frac(1,i)*signB
+          dum2grad = dum2grad -  commfgrad2*vthrat(is)*vpgr(i,j,k,is)*Rfun(1,i)*bt_frac(1,i)*signB
+          dum3 = dum3 + commf*vthrat(is)*sqrt(2*mugr(j)*bn(1,i))*sqrt(1-bt_frac(1,i)**2)/Rfun(1,i)
+        enddo
+      enddo
+      densum = densum + den*ints(i)
+      fluxsum1 = fluxsum1 + bn(1,i)*dum*ints(i)
+      fluxsum2 = fluxsum2 + mas(is)*dum2*ints(i)
+      fluxsum2grad = fluxsum2grad + mas(is)*dum2grad*ints(i)
+      fluxsum3 = fluxsum3 + dum3*ints(i)
+      rmean = rmean + mas(is)*de(1,is)*ints(i)*Rfun(1,i)**2
+
+    enddo
+  enddo
+ 
+  !Reduced over all directions 
+  call mpiallreduce_sum(densum,densum_2,1)
+  call mpiallreduce_sum(fluxsum1,fluxsum1_2,1)
+  call mpiallreduce_sum(fluxsum2,fluxsum2_2,1)
+  call mpiallreduce_sum(fluxsum3,fluxsum3_2,1)
+  call mpiallreduce_sum(fluxsum2grad,fluxsum2grad_2,1)
+  call mpiallreduce_sum(rmean,rmean_2,1)
+
+  !Only output the middle flux tube
+  if(root_processor)write(freelun,*) 'Flux average parflow', fluxsum1_2, fluxsum1_2*sqrt(2.E0)
+  if(root_processor)write(freelun,*) 'Flux average density', densum_2
+  if(root_processor)write(freelun,*) 'Diamagnetic toroidal flow', fluxsum2_2/rmean_2,fluxsum3_2/rmean_2
+  if(root_processor)write(freelun,*) 'Radial flow gradient', fluxsum2grad_2/rmean_2 
+ 
+  write(*,*) 'Flux average parflow', fluxsum1_2, fluxsum1_2*sqrt(2.E0)
+  write(*,*) 'Flux average density', densum_2
+  write(*,*) 'Diamagnetic toroidal flow', fluxsum2_2/rmean_2,fluxsum3_2/rmean_2
+  write(*,*) 'Radial flow gradient', fluxsum2grad_2/rmean_2
+
+  if(root_processor)close(freelun) 
+
+end subroutine neof_diagnose
+
+end module linear_terms

@@ -1,0 +1,164 @@
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Tests.Simple
+-- Copyright   :  (c)2011, Texas Instruments France
+-- License     :  BSD-style (see the file LICENSE)
+-- 
+-- Maintainer  :  c-favergeon-borgialli@ti.com
+-- Stability   :  provisional
+-- Portability :  portable
+--
+-- QuickCheck tests
+--
+-----------------------------------------------------------------------------
+module Tests.Simple(
+ -- * Validation tests
+  runSimpleTests
+ ) where
+
+import Test.QuickCheck.Monadic
+import Benchmark
+import Test.QuickCheck
+import TestTools
+import Kernels
+import Data.Bits(shiftL)
+import Data.List(findIndex)
+import Data.Int
+
+{-
+
+Properties to test
+
+-}
+
+
+
+  
+-- | Test addition of a constant to a list of one float
+floatTest :: Options  -> Float -> Property
+floatTest opts l = monadicIO $ do
+  run $ gpuRoundingMode opts 
+  let a = l -- 4.384424 --a = -1.565178
+      c = 10.0
+  r <- run $ onBoardOnlyData opts (simpleNDRange (size1D 1)) (simpleAdd (CLFloatArray [a]) c 1 (clFloatArrayOO 1))
+  let result = head . fromFloatResult $ (head r)
+  assert $ result ~= (a + c)
+
+-- | Test addition of a constant to a list of float
+add4Test :: Options -> [Float4] -> Property
+add4Test opts l = (not . null) l ==>  monadicIO $ do
+  run $ gpuRoundingMode opts
+  let nb = length l 
+      d = (10.0,5.0,1.0,8.0)
+  r <- run $ onBoardOnlyData opts (simpleNDRange (size1D nb)) (simpleAdd4 (CLFloat4Array l) d nb (clFloat4ArrayOO nb))
+  assert $ fromFloat4Result (head r) ~= map (vecAdd d) l
+ where
+   vecAdd (x0,y0,z0,t0) (x1,y1,z1,t1) = (x0+x1,y0+y1,z0+z1,t0+t1)
+
+-- | Test addition of a constant to a list of float
+addTest :: Options -> [Float] -> Property
+addTest opts l = (not . null) l ==>  monadicIO $ do
+  run $ gpuRoundingMode opts
+  let nb = length l 
+  r <- run $ onBoardOnlyData opts (simpleNDRange (size1D nb)) (simpleAdd (CLFloatArray l) 10.0 nb (clFloatArrayOO nb))
+  assert $ fromFloatResult (head r) ~= map (+ 10.0) l
+
+-- | Test addition of a constant to a list of float
+moveIntTest :: Options -> Property
+moveIntTest opts = 
+  forAll (choose (1,60))  $ \num -> do
+    let randomInt32 = (choose (-200,200) :: Gen Int) >>= return . fromIntegral
+    forAll (vectorOf (num*4) (randomInt32)) $ \l -> monadicIO $ do
+      let nb = num*4
+      r <- run $ onBoardOnlyData opts (simpleNDRange (size1D num)) (simpleIntMove (CLIntArray l) nb (clIntArrayOO nb))
+      assert $ fromIntResult (head r) ==  l
+
+
+-- | Test copy of a vector
+moveTest :: Options -> [Float] -> Property
+moveTest opts l = (not . null) l ==>  monadicIO $ do
+  let nb = length l 
+  r <- run $ onBoardOnlyData opts (simpleNDRange (size1D nb)) (simpleMove (CLFloatArray l)  nb (clFloatArrayOO nb))
+  assert $ fromFloatResult (head r) ~= l
+
+complexMoveTest :: Options -> Property
+complexMoveTest opts =  do
+   forAll (choose (0,5))  $ \num -> do
+       let copiesInKernel = 1 `shiftL` num
+           i = 320 `div` copiesInKernel
+       forAll (vectorOf (copiesInKernel*i) (choose (-200.0,200.0))) $ \l -> do
+         let a = CLFloatArray l
+         monadicIO $ do
+           r <- run $ onBoardOnlyData opts (simpleNDRange (size1D i)) (complexMove a num (clFloatArrayOO (copiesInKernel*i)))
+           assert $ fromFloatResult (head r) ~= l
+
+
+-- | Test atensor product of two vectors
+tensorTest :: Options -> [Float] -> Property
+tensorTest opts l = (not . null) l ==>  monadicIO $ do
+  run $ gpuRoundingMode opts
+  let nb = length l 
+  r <- run $ onBoardOnlyData opts (simpleNDRange (size1D nb)) (simpleTensor nb (CLFloatArray l)  (CLFloatArray l) (clFloatArrayOO nb))
+  --reference <- run $ mapM  (withGPURounding . (\x -> x * x) . gpuF) $ l
+  assert $ fromFloatResult (head r) ~= map (\x -> x * x) l
+
+-- | Test addition of a constant to a matrix
+-- We generate a random width between 2 and 20
+-- A random height between 2 and 20
+-- A random list of width*height elements with the elements being random between -200 and 200.
+addConstantMatrixTest :: Options ->  Property
+addConstantMatrixTest opts = 
+    forAll (choose (2,20))  $ \cols ->
+    forAll (choose (2,20))  $ \rows -> 
+    forAll (vectorOf (cols * rows) (choose (-200.0,200.0))) $ \l -> 
+    classify (cols > rows) "cols > rows" $
+    classify (cols < rows) "cols < rows" $
+    classify (cols == rows) "cols == rows" $
+    monadicIO $ do
+        run $ gpuRoundingMode  opts
+        let nb = length l 
+        r <- run $ onBoardOnlyData opts (simpleNDRange (size2D cols rows)) 
+             (simpleAddConstantToMatrix cols (CLFloatArray l)  10.0 (clFloatArrayOO nb))
+        assert $ fromFloatResult (head r) ~= map (+ 10.0) l
+
+{-
+
+Test Driver
+
+-}
+
+-- | Test an OpenCL kernel
+test :: Testable prop
+     => Int -- ^ Max nb of tests
+     -> (Options -> prop) -- ^ Property to test
+     -> (Options -> IO ()) -- ^ Test
+test n a = \opts -> quickCheckWith  (stdArgs {maxSuccess=n}) (a opts)
+
+-- | List of test categories and the tests
+tests = [("SIMPLE TEST",[
+            ("floatTest", test 20 floatTest)
+          , ("simpleIntAddTest",test 20 moveIntTest)
+          , ("addTest",test 20 addTest)
+          , ("add4Test",test 20 add4Test)
+          , ("moveTest",test 20 moveTest)
+          , ("complexMoveTest",test 20 complexMoveTest)
+          , ("tensorTest",test 20 tensorTest)
+          , ("addConstantMatrixTest",test 20 addConstantMatrixTest)
+         ])
+        ]
+
+-- | Run a test with given title and options to connect to the server
+runATest opts (title,a) = do
+  putStrLn title
+  a opts
+  putStrLn ""
+
+-- | Run a test category
+runACategory opts (title,tests) = do
+  putStrLn title
+  putStrLn ""
+  mapM_ (runATest opts) tests
+
+-- | Run all tests
+runSimpleTests opts = mapM_ (runACategory opts) tests
+  

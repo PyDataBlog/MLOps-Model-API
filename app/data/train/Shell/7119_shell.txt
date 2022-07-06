@@ -1,0 +1,84 @@
+#!/usr/bin/env bash
+NVM_INSTALL_URL="https://raw.githubusercontent.com/creationix/nvm/v0.31.2/install.sh"
+
+parse_yaml() {
+    prefix=$2
+    s='[[:space:]]*'
+    w='[a-zA-Z0-9_]*'
+    fs="$(echo @|tr @ '\034')"
+    sed -ne "s|^\($s\)\($w\)$s:$s\"\(.*\)\"$s\$|\1$fs\2$fs\3|p" \
+        -e "s|^\($s\)\($w\)$s[:-]$s\(.*\)$s\$|\1$fs\2$fs\3|p" "$1" |
+    awk -F"$fs" '{
+      indent = length($1)/2;
+      if (length($2) == 0) { conj[indent]="+"; d[indent]=";";} else {conj[indent]=""; d[indent]="";}
+      vname[indent] = $2;
+      for (i in vname) {if (i > indent) {delete vname[i]}}
+      if (length($3) > 0) {
+              vn=""; for (i=0; i<indent; i++) {vn=(vn)(vname[i])("_")}
+              printf("%s%s%s%s=\"%s%s\"\n", "'"$prefix"'", vn, $2, conj[indent-1], $3, d[indent]);
+      }
+    }' | sed 's/_=/+=/g'
+}
+
+check_circle_yml() {
+    if [ ! -e circle.yml ]; then
+        echo 'circle.yml is not exists.'
+    fi
+}
+
+install_node() {
+    ver=$1
+    if [ "$NVM_DIR" = "" ]; then
+        curl -o- $NVM_INSTALL_URL | bash
+    fi
+    . $NVM_DIR/nvm.sh
+    nvm install $ver
+    echo $ver >> .nvmrc
+}
+
+install_ruby() {
+    ver=$1
+    project_name='test'
+    RVM_PATH=`which rvm`
+    if [ "$RVM_PATH" == "" ]; then
+        curl -sSL https://rvm.io/mpapis.asc | gpg2 --import -
+        curl -sSL https://get.rvm.io | bash -s stable
+    fi
+    source ~/.rvm/scripts/rvm
+    export PATH="$PATH:$HOME/.rvm/bin" # Add RVM to PATH for scripting
+    rvm install $ver
+    rvm gemset create $project_name
+    rvm --ruby-version use "$ver@$project_name"
+
+}
+
+install_python() {
+    ver=$1
+    project_name='test'
+    if [ "$PYENV_ROOT" = "" ]; then
+        git clone https://github.com/yyuu/pyenv.git ~/.pyenv
+        git clone https://github.com/yyuu/pyenv-virtualenv.git ~/.pyenv/plugins/pyenv-virtualenv
+        curl -o- $NVM_INSTALL_URL | bash
+    fi
+    export PYENV_ROOT="$HOME/.pyenv"
+    export PATH="$PYENV_ROOT/bin:$PATH"
+    pyenv install "$ver"
+    pyenv virtualenv "$ver" "$project_name"
+    pyenv local $project_name
+    if [ ! -e requirements.txt ]; then
+        pip install -r requirements.txt # just like CircleCI, we find requirements.txt and install it
+    fi
+}
+
+main() {
+    check_circle_yml
+    eval $(parse_yaml circle.yml)
+    install_node $machine_node_version
+    install_python $machine_python_version
+    install_ruby "2.1"
+    eval $dependencies_pre
+    eval $dependencies_override
+    eval $dependencies_post
+}
+
+main

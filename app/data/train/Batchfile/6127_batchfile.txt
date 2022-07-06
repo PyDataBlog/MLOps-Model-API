@@ -1,0 +1,1 @@
+cmd_drivers/ata/built-in.o :=  /home/chiehyang/PandaBoard-LinuxKernel/stable-kernel/dl/gcc-linaro-arm-linux-gnueabihf-4.7-2013.04-20130415_linux/bin/arm-linux-gnueabihf-ld -EL    -r -o drivers/ata/built-in.o drivers/ata/libata.o drivers/ata/ahci_platform.o drivers/ata/libahci.o 

@@ -1,0 +1,443 @@
+/*
+ * Copyright (c) 2016 Lee A. Stripp <leestripp@gmail.com>
+ *
+ * This file is part of qBot
+ *
+ * qBot is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * qBot is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with qBot.  If not, see <http://www.gnu.org/licenses/>
+ */
+
+// datablocks
+#include "../datablocks/lslinkedlist.h"
+#include "../datablocks/lslistitem_pollentry.h"
+
+#include "bangpoll.h"
+
+bangPoll::bangPoll(QObject *parent) : qBotCmd(parent)
+{
+    poll_entries = new lsLinkedList();
+    if(! poll_entries  )
+    {
+        // ERROR
+        cout << "ERROR: Could not create poll_entries instance." << endl;
+    }
+
+    // defaults
+    poll_length = 5;   // minutes
+    // Timer
+    poll_timer.stop();
+    connect( &poll_timer, SIGNAL(timeout()), this, SLOT(pollTimeout()) );
+}
+
+bangPoll::~bangPoll()
+{
+    if( poll_entries ) delete poll_entries;
+
+    // debug
+    cout << "Delete bangPoll command..." << endl;
+}
+
+
+QString bangPoll::command() const
+{
+    return "!poll";
+}
+
+void bangPoll::Get(const QString &data)
+{
+    // Stats
+    setCalls( getCalls() + 1 );
+
+    lsListItem_PollEntry *entry;
+    QString res;
+    QString convert;
+
+    // No options, display list
+    if( data.isEmpty() )
+    {
+        // check if a poll is running
+        if( poll_timer.isActive() )
+        {
+            int i = 0;
+
+            res = "PRIVMSG " + getChannel() + " :";
+            res += poll_title + " > ";
+            // Calc remaining time
+            qint64 duration = poll_timer.remainingTime() / 1000; // in seconds
+            int seconds = (int) (duration % 60);
+            duration /= 60;
+            int minutes = (int) (duration % 60);
+            duration /= 60;
+            int hours = (int) (duration % 24);
+            if( hours > 0 )
+                res += convert.sprintf( "%d hour(s) ", hours );
+            if( minutes > 0 )
+                res += convert.sprintf( "%d minutes ", minutes );
+            if( seconds > 0 )
+                res += convert.sprintf( "%d seconds ", seconds );
+            res += "left.";
+
+            // Stats
+            setPosts( getPosts() + 1 );
+            emit( dataReady( res ) );
+
+            res = "";
+            entry = (lsListItem_PollEntry*)poll_entries->getItem_list();
+            while( entry )
+            {
+                i++;
+
+                res += "PRIVMSG " + getChannel() + " :";
+                res += QString::number(i) + ": ";
+                res += entry->title() + " -- Score :";
+                res += QString::number(entry->score());
+                if( entry->getNext_item() ) res += "\r\n";
+
+                entry = (lsListItem_PollEntry*)entry->getNext_item();
+            }
+
+            // Stats
+            setPosts( getPosts() + 1 );
+            emit( dataReady( res ) );
+
+            // Check i
+            if( i == 0 )
+            {
+                res = "PRIVMSG " + getChannel() + " :";
+                res += "No entries - use s to add one.";
+
+                // Stats
+                setPosts( getPosts() + 1 );
+                emit( dataReady( res ) );
+            }
+            return;
+        } else
+        {
+            // No poll running
+            res += "PRIVMSG " + getChannel() + " :";
+            res += "No poll running.";
+
+            // Stats
+            setPosts( getPosts() + 1 );
+            emit( dataReady( res ) );
+            return;
+        }
+        return;
+    }
+
+    // Split the data
+    QStringList list = data.split( ' ', QString::SkipEmptyParts );
+
+    // n # : New Poll
+    if( list[0] == "n" )
+    {
+        // check if a poll is running
+        if( poll_timer.isActive() )
+        {
+            // Admin can overtide poll
+            if( getUser() == getAdmin() )
+            {
+                // Clear old poll
+                poll_entries->Clear();
+
+                // Set the poll length
+                if( list.size() > 1 )
+                {
+                    bool OK;
+                    poll_length = list[1].toInt( &OK );
+                    if( OK )
+                    {
+                        if( poll_length > 60 ) poll_length = 60;
+                        if( poll_length <= 0 ) poll_length = 1;
+
+                    } else
+                    {
+                        // output one event
+                        poll_length = 5;
+                    }
+                }
+
+                // Title
+                if( list.size() > 2 )
+                {
+                    poll_title = data.mid( data.indexOf( list[2] ) );
+                } else
+                {
+                    poll_title = "No title set.";
+                }
+
+                // Start new Poll, convert to milisecs
+                poll_timer.start( poll_length * 60 * 1000 );
+
+                res = "PRIVMSG " + getChannel() + " :";
+                res += "Starting Poll for " + QString::number(poll_length) + " minutes -- Title :" + poll_title;
+
+                // Stats
+                setPosts( getPosts() + 1 );
+                emit( dataReady( res ) );
+                return;
+
+            } else
+            {
+                // A poll is running
+                res += "PRIVMSG " + getChannel() + " :";
+                res += "A poll is running.";
+
+                // Stats
+                setPosts( getPosts() + 1 );
+                emit( dataReady( res ) );
+                return;
+            }
+        } else
+        {
+            // Clear old poll
+            poll_entries->Clear();
+
+            // Set the poll length
+            if( list.size() > 1 )
+            {
+                bool OK;
+                poll_length = list[1].toInt( &OK );
+                if( OK )
+                {
+                    if( poll_length > 60 ) poll_length = 60;
+                    if( poll_length <= 0 ) poll_length = 1;
+
+                } else
+                {
+                    // output one event
+                    poll_length = 5;
+                }
+
+            }
+
+            // title
+            if( list.size() > 2 )
+            {
+                poll_title = data.mid( data.indexOf( list[2] ) );
+            } else
+            {
+                poll_title = "No title set.";
+            }
+
+            // Start new Poll, convert to milisecs
+            poll_timer.start( poll_length * 60 * 1000 );
+
+            res = "PRIVMSG " + getChannel() + " :";
+            res += "Starting Poll for " + QString::number(poll_length) + " minutes -- Title :" + poll_title;
+
+            // Stats
+            setPosts( getPosts() + 1 );
+            emit( dataReady( res ) );
+        }
+
+        return;
+    }// if( list[0] == "n" )
+
+    // s : Suggest
+    if( data.left(1) == "s" )
+    {
+        // check if a poll is running
+        if( poll_timer.isActive() )
+        {
+            // Check empty string
+            if( data.mid(2).isEmpty() )
+            {
+                return;
+            }
+
+            // Check for duplicates
+            lsListItem_PollEntry *entry;
+            entry = (lsListItem_PollEntry*)poll_entries->getItem_list();
+            while( entry )
+            {
+                if( entry->title() == data.mid(2) )
+                {
+                    break;
+                }
+                entry = (lsListItem_PollEntry*)entry->getNext_item();
+            }
+
+            // found double
+            if( entry )
+            {
+                res = "PRIVMSG " + getChannel() + " :";
+                res += "Suggestion already exsists. Try again.";
+
+                // Stats
+                setPosts( getPosts() + 1 );
+                emit( dataReady( res ) );
+                return;
+            }
+
+            // Add new item at end
+            lsListItem_PollEntry *item;
+            item = new lsListItem_PollEntry();
+            if( item )
+            {
+                item->setTitle( data.mid(2) );
+                item->setScore( 1 );
+                poll_entries->Add_itematEnd( item );
+
+                // Give user feedback
+                res = "PRIVMSG " + getChannel() + " :";
+                res += "Suggestion " + item->title() + " added!";
+
+                // Stats
+                setPosts( getPosts() + 1 );
+                emit( dataReady( res ) );
+            }
+        }
+        return;
+    }
+
+    // +# : Score
+    if( data.left(1) == "+" )
+    {
+        // check if a poll is running
+        if( poll_timer.isActive() )
+        {
+            // Add one point to selected entry
+            bool OK;
+            int h = 0;
+            int i = data.mid(1).toInt( &OK );
+            if( OK )
+            {
+                // Find entry
+                lsListItem_PollEntry *entry;
+                entry = (lsListItem_PollEntry*)poll_entries->getItem_list();
+                while( entry )
+                {
+                    h++;
+                    if( h == i )
+                    {
+                        // Add 1 to score
+                        entry->setScore( entry->score() + 1 );
+
+                        res = "PRIVMSG " + getChannel() + " :";
+                        res += "1 point added to " + entry->title();
+
+                        // Stats
+                        setPosts( getPosts() + 1 );
+                        emit( dataReady( res ) );
+                        break;
+                    }
+                    entry = (lsListItem_PollEntry*)entry->getNext_item();
+                }
+            } else
+            {
+                res = "PRIVMSG " + getChannel() + " :";
+                res += "Invalid number";
+
+                // Stats
+                setPosts( getPosts() + 1 );
+                emit( dataReady( res ) );
+            }
+
+        }// if( poll_timer.isActive() )
+
+        return;
+    }// if( data.left(1) == "+" )
+}
+
+void bangPoll::help()
+{
+    QString res;
+
+    res = "PRIVMSG " + getChannel() + " :!poll [option] [data] [title] : ";
+    res += "Poll the audience";
+
+    // Stats
+    setPosts( getPosts() + 1 );
+    emit( dataReady( res ) );
+}
+
+void bangPoll::help_options()
+{
+    QString res;
+
+    res = "PRIVMSG " + getChannel() + " :!poll [option] [data] [title]";
+    res += "\r\n";
+    res += "PRIVMSG " + getChannel() + " :    ";
+    res += "No options = List the current poll entries\r\n";
+    res += "PRIVMSG " + getChannel() + " :    ";
+    res += "n 30 Title = Start a New poll for 30 minutes called Title\r\n";
+    res += "PRIVMSG " + getChannel() + " :    ";
+    res += "s example = Suggest a poll entry of example\r\n";
+    res += "PRIVMSG " + getChannel() + " :    ";
+    res += "+3 = Add 1 point to the entry numbered 3";
+
+    // Stats
+    setPosts( getPosts() + 1 );
+    emit( dataReady( res ) );
+}
+
+void bangPoll::stats()
+{
+    QString res;
+
+    res = "PRIVMSG " + getAdmin() + " :Stats >> " + command() + " ";
+    res += "calls:" + QString::number( getCalls() ) + " ";
+    res += "posts:" + QString::number( getPosts() );
+
+    // Stats
+    setPosts( getPosts() + 1 );
+    emit( dataReady( res ) );
+}
+
+void bangPoll::pollTimeout()
+{
+    // End the Poll
+    poll_timer.stop();
+
+    // Doisplay results
+    QString res;
+    lsListItem_PollEntry *entry;
+
+    res = "PRIVMSG " + getChannel() + " :";
+    res += poll_title + " > Poll finished...";
+
+    // Stats
+    setPosts( getPosts() + 1 );
+    emit( dataReady( res ) );
+
+    res = "";
+    entry = (lsListItem_PollEntry*)poll_entries->getItem_list();
+    if( entry )
+    {
+        while( entry )
+        {
+            res += "PRIVMSG " + getChannel() + " :";
+            res += "Score " + QString::number( entry->score() ) + " : ";
+            res += entry->title();
+            if( entry->getNext_item() ) res += "\r\n";
+
+            entry = (lsListItem_PollEntry*)entry->getNext_item();
+        }
+
+        // Stats
+        setPosts( getPosts() + 1 );
+        emit( dataReady( res ) );
+
+    } else
+    {
+        // No entries
+        res = "PRIVMSG " + getChannel() + " :";
+        res += "Poll had no entries.";
+
+        // Stats
+        setPosts( getPosts() + 1 );
+        emit( dataReady( res ) );
+    }
+}
+

@@ -1,0 +1,109 @@
+#include "AppDX11.h"
+#include "CloudsDX11.h"
+
+Clouds* Clouds::CreateClouds()
+{
+    return new CloudsDX11(AppDX11::Get());
+}
+
+CloudsDX11::~CloudsDX11()
+{
+    if (VertexShader) VertexShader->Release();
+    if (PixelShader) PixelShader->Release();
+    if (VertexLayout) VertexLayout->Release();
+}
+
+CloudsDX11::CloudsDX11(AppDX11* app) : App(app), Device(app->Device)
+{
+    DetailCubeWidth = 1024;
+    BinCubeWidth = 256;
+
+    //D3DObjects to create
+    ID3D11Texture2D* m_cubeTexture = NULL;
+    ID3D11ShaderResourceView* m_shaderResourceView = NULL;
+
+    //Description of each face
+    D3D11_TEXTURE2D_DESC texDesc = { 0 };
+    texDesc.Width = DetailCubeWidth;
+    texDesc.Height = DetailCubeWidth;
+    texDesc.MipLevels = 1;
+    texDesc.ArraySize = 6;
+    texDesc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    texDesc.CPUAccessFlags = 0;
+    texDesc.SampleDesc.Count = 1;
+    texDesc.SampleDesc.Quality = 0;
+    texDesc.Usage = D3D11_USAGE_DEFAULT;
+    texDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+    texDesc.CPUAccessFlags = 0;
+    texDesc.MiscFlags = D3D11_RESOURCE_MISC_TEXTURECUBE;
+
+    //The Shader Resource view description
+    D3D11_SHADER_RESOURCE_VIEW_DESC SMViewDesc;
+    SMViewDesc.Format = texDesc.Format;
+    SMViewDesc.ViewDimension = D3D11_SRV_DIMENSION_TEXTURECUBE;
+    SMViewDesc.TextureCube.MipLevels = texDesc.MipLevels;
+    SMViewDesc.TextureCube.MostDetailedMip = 0;
+
+    std::vector<uint32_t> rgba(DetailCubeWidth*DetailCubeWidth);
+    for (int y = 0; y < DetailCubeWidth; y++)
+        for (int x = 0; x < DetailCubeWidth; x++)
+            rgba[x + y*DetailCubeWidth] = ((x / 8) ^ (y / 8)) % 2 ? 0xffffffff : 0x00000000;
+
+    //Array to fill which we will use to point D3D at our loaded CPU images.
+    D3D11_SUBRESOURCE_DATA pData[6] = { 0 };
+    for (int cubeMapFaceIndex = 0; cubeMapFaceIndex < 6; cubeMapFaceIndex++)
+    {
+        pData[cubeMapFaceIndex].pSysMem = rgba.data();
+        pData[cubeMapFaceIndex].SysMemPitch = DetailCubeWidth * sizeof(rgba[0]);
+    }
+
+    //Create the Texture Resource
+    HRESULT hr = Device->CreateTexture2D(&texDesc, &pData[0], &m_cubeTexture);
+    if (hr != S_OK)
+    {
+        throw std::exception("Couldn't CreateTexture2D");
+    }
+
+    //If we have created the texture resource for the six faces 
+    //we create the Shader Resource View to use in our shaders.
+    hr = Device->CreateShaderResourceView(m_cubeTexture, &SMViewDesc, &m_shaderResourceView);
+    if (hr != S_OK)
+    {
+        throw std::exception("Couldn't CreateShaderResourceView");
+    }
+
+    ID3DBlob* vsBlob;
+    ID3DBlob* psBlob;
+
+    VertexShader = App->CreateVertexShader(L"Clouds.vs.hlsl", "VS", "vs_4_0", &vsBlob);
+    PixelShader = App->CreatePixelShader(L"Clouds.ps.hlsl", "PS", "ps_4_0", &psBlob);
+
+    if (!VertexShader || !PixelShader)
+    {
+        vsBlob->Release();
+        psBlob->Release();
+        throw std::exception("Couldn't create shaders");
+    }
+
+    struct VertLayout
+    {
+        float x, y, z;
+        float rayx, rayy, rayz;
+    };
+    
+    D3D11_INPUT_ELEMENT_DESC vertLayout[] = 
+    {
+      //LPCSTR SemanticName; UINT SemanticIndex; DXGI_FORMAT Format;          UINT InputSlot; UINT AlignedByteOffset;     D3D11_INPUT_CLASSIFICATION InputSlotClass; UINT InstanceDataStepRate;
+        {"POSITION",         0,                  DXGI_FORMAT_R32G32B32_FLOAT, 0,              offsetof(VertLayout, x),    D3D11_INPUT_PER_VERTEX_DATA,               0},
+        {"TEXCOORD",         0,                  DXGI_FORMAT_R32G32B32_FLOAT, 1,              offsetof(VertLayout, rayx), D3D11_INPUT_PER_VERTEX_DATA,               0}
+    };
+
+    hr = Device->CreateInputLayout(vertLayout, _countof(vertLayout), vsBlob->GetBufferPointer(), vsBlob->GetBufferSize(), &VertexLayout);
+    if (FAILED(hr))
+    {
+        throw std::exception("Couldn't create input layout");
+    }
+
+    vsBlob->Release();
+    psBlob->Release();
+}

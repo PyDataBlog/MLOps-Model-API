@@ -1,0 +1,279 @@
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE FlexibleContexts     #-}
+{-# LANGUAGE FlexibleInstances    #-}
+{-# LANGUAGE StandaloneDeriving   #-}
+{-# LANGUAGE TypeFamilies         #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module Finance.Exchange.OrderBook
+    ( OrderBook
+    -- , BookedOrder (..)
+    , MatchedOrder (..)
+
+    , emptyBook
+    , bookOrder
+    , drain
+    ) where
+
+import           Data.Heap                    as H
+import           Finance.Exchange.Types
+
+class MarketPrice offerPrice where
+    -- | Adjust order price based on available offer. Returns Nothing if offer price can not be matched.
+    matchPrice :: offerPrice -> OrderPrice (Market offerPrice) -> Maybe (OrderPrice (Market offerPrice))
+
+-- | Price asked by seller
+newtype AskPrice market = AskPrice (OrderPrice market)
+
+type instance Market (AskPrice market) = market
+
+deriving instance Show (OrderPrice market) => Show (AskPrice market)
+
+deriving instance (Eq (OrderPrice market)) => Eq (AskPrice market)
+
+-- | Ask price is ordered from lower to higher value with market price on the bottom (indicating that market will always match first)
+instance (Ord (Money market)) => Ord (AskPrice market) where
+    (AskPrice Market)    `compare` (AskPrice Market)    = EQ
+    (AskPrice Market)    `compare`                    _ = LT
+    _                    `compare` (AskPrice Market)    = GT
+    (AskPrice (Limit a)) `compare` (AskPrice (Limit b)) = a `compare` b
+
+-- | Matching ask price against order will return ask price if it lower or Nothing if ask price is higher than limit.
+instance (Ord (Money market)) => MarketPrice (AskPrice market) where
+    (AskPrice      Market) `matchPrice`      Market = Just Market
+    (AskPrice         ask) `matchPrice`      Market = Just ask
+    (AskPrice      Market) `matchPrice`         lim = Just lim
+    (AskPrice (Limit ask)) `matchPrice` (Limit lim) = if ask <= lim then Just (Limit ask) else Nothing
+
+-- | Price offered by buyer
+newtype BidPrice market = BidPrice (OrderPrice market)
+
+type instance Market (BidPrice market) = market
+
+deriving instance Show (OrderPrice market) => Show (BidPrice market)
+
+deriving instance (Eq (OrderPrice market)) => Eq (BidPrice market)
+
+-- | Big is ordered from lower to higher value with market price on the top (indicating that market will always match first)
+instance (Ord (Money market)) => Ord (BidPrice market) where
+    (BidPrice Market)    `compare` (BidPrice Market)    = EQ
+    (BidPrice Market)    `compare`                    _ = GT
+    _                    `compare` (BidPrice Market)    = LT
+    (BidPrice (Limit a)) `compare` (BidPrice (Limit b)) = a `compare` b
+
+-- | Matching bid price against order will return bid price if it higher or Nothing if bid price is lower than limit.
+instance (Ord (Money market)) => MarketPrice (BidPrice market) where
+    -- | Calculate execution price if favor to seller
+    (BidPrice      Market) `matchPrice`      Market = Just Market
+    (BidPrice         bid) `matchPrice`      Market = Just bid
+    (BidPrice      Market) `matchPrice`         lim = Just lim
+    (BidPrice (Limit bid)) `matchPrice` (Limit lim) = if bid >= lim then Just (Limit bid) else Nothing
+
+-- | Booked order parametrized by price (can be either buing or selling order depending on price type)
+data BookedOrder price = BookedOrder
+    { _bookedId     :: OrderId (Market price)
+    , _bookedAmount :: Amount (Market price)
+    , _bookedPrice  :: price
+    }
+
+deriving instance (Eq (OrderId (Market price)), Eq (Amount (Market price)), Eq price) => Eq (BookedOrder price)
+
+deriving instance (Show (OrderId (Market price)), Show (Amount (Market price)), Show price) => Show (BookedOrder price)
+
+instance (Eq (BookedOrder (AskPrice market)), Ord (OrderId market), Ord (Money market)) => Ord (BookedOrder (AskPrice market)) where
+    a `compare` b = case _bookedPrice a `compare` _bookedPrice b of
+        EQ -> (_bookedId a) `compare` (_bookedId b)
+        other -> other
+
+instance (Eq (BookedOrder (BidPrice market)), Ord (OrderId market), Ord (Money market)) => Ord (BookedOrder (BidPrice market)) where
+    -- price comparison reversed to place order with highest bid price on a top of priority queue
+    a `compare` b = case _bookedPrice b `compare` _bookedPrice a of
+        EQ -> (_bookedId a) `compare` (_bookedId b)
+        other -> other
+
+data MatchedOrder market = MatchedOrder
+    { _matchedId1    :: OrderId market
+    , _matchedId2    :: OrderId market
+    , _matchedAmount :: Amount market
+    , _matchedPrice  :: OrderPrice market
+    }
+
+deriving instance (Show (OrderId market), Show (Amount market), Show (OrderPrice market)) => Show (MatchedOrder market)
+
+data OrderBook market = OrderBook
+    { _asking  :: Heap (BookedOrder (AskPrice market)) -- TODO: rename to _bying/_selling
+    , _bidding :: Heap (BookedOrder (BidPrice market))
+    }
+
+emptyBook :: OrderBook market
+emptyBook = OrderBook { _asking = H.empty
+                      , _bidding = H.empty
+                      }
+
+deriving instance (Show (OrderId market), Show (Money market), Show (Amount market), Show (InstrumentId market)) => Show (OrderBook market)
+
+-- | Provide generic interface for booking bid and ask ordres
+-- TODO: needs better name
+-- основное назначение:
+-- 1. разобрать deal book на orders offers
+-- 2. конвертировать OrderPrice в OrderPriceOf book (чтобы добавлять его в нужную кучу)
+-- 3. собрать deal book из orders offers (вот это пока не очень получается)
+class ( -- FuckingProlog (OrderPriceOf book) (OfferPriceOf book) ~ book
+      -- , DealBookOf (OrderPriceOf book) ~ book
+      -- , Market (OrderPriceOf book) ~ Market book
+      -- , Market (OfferPriceOf book) ~ Market book
+        Market orderPrice ~ Market book
+      , Market offerPrice ~ Market book
+      --, DealBookOf (orderPrice) ~ book
+      ) => DealBook book orderPrice offerPrice | book -> orderPrice, book -> offerPrice, orderPrice -> book, offerPrice -> book where
+    -- | Order price (Bid for buyind Ask for selling)
+    -- type OrderPriceOf book :: *
+    -- | Offer price (Ask for buyind Bid for selling)
+    -- type OfferPriceOf book :: *
+
+    -- | Construct order book from offers and orders halves (depending on order type can be either buy/sell or sell/buy)
+    -- эта штука не тайпчекается на ghc 7.10 потому что параметры не определяют тип буки
+    -- хотя он нам и не нужен, нам market нужен
+    -- короче на фундепах работает, но надо будет потом переделать этот ёбаный ужас 
+    orderBook :: Heap (BookedOrder orderPrice) -> Heap (BookedOrder offerPrice) -> OrderBook (Market book)
+    -- | Get offers from book (sell offers when buying or buy offers when selling)
+    offers    :: book -> Heap (BookedOrder offerPrice)
+    -- | Get orders from book (buy orderd when buying of sell orders when selling)
+    orders    :: book -> Heap (BookedOrder orderPrice)
+    -- | Wrap order price to Bid or Ask price depending on deal
+    dealPrice :: OrderPrice (Market book) -> orderPrice
+
+type family DealBookOf orderPrice :: *
+
+type family FuckingProlog orderPrice offerPrice :: *
+
+newtype Buying market = Buying { unBuying :: OrderBook market }
+
+type instance Market (Buying market) = market
+
+instance DealBook (Buying market) (BidPrice market) (AskPrice market) where
+    -- type OrderPriceOf (Buying market) = BidPrice market
+    -- type OfferPriceOf (Buying market) = AskPrice market
+
+    orderBook bidding asking = OrderBook { _asking = asking, _bidding = bidding }
+    offers    = _asking  . unBuying
+    orders    = _bidding . unBuying
+    dealPrice = BidPrice
+
+type instance DealBookOf (BidPrice market) = Buying market
+
+type instance FuckingProlog (BidPrice market) (AskPrice market) = Buying market
+
+newtype Selling market = Selling { unSelling :: OrderBook market }
+
+type instance Market (Selling market) = market
+
+instance DealBook (Selling market) (AskPrice market) (BidPrice market) where
+    -- type OrderPriceOf (Selling market) = AskPrice market
+    -- type OfferPriceOf (Selling market) = BidPrice market
+
+    orderBook asking bidding = OrderBook { _asking = asking, _bidding = bidding }
+    offers    = _bidding . unSelling
+    orders    = _asking  . unSelling
+    dealPrice = AskPrice
+
+type instance DealBookOf (AskPrice market) = Selling market
+
+type instance FuckingProlog (AskPrice market) (BidPrice market) = Selling market
+
+bookOrder :: (Num (Amount market), Ord (Amount market), Ord (Money market), Ord (OrderId market))
+          => OrderId market -- replace with order tag (market agnostic depends on upstream engine)
+          -> BuyOrSell
+          -> OrderPrice market
+          -> Amount market
+          -> OrderBook market
+          -> ([MatchedOrder market], OrderBook market)
+bookOrder orderId buyOrSell price amount = case buyOrSell of
+    Buy  -> bookOrder' orderId price amount . Buying
+    Sell -> bookOrder' orderId price amount . Selling
+
+bookOrder' :: forall book orderPrice offerPrice . ( DealBook book orderPrice offerPrice
+              , Num (Amount (Market book))
+              , Ord (Amount (Market book))
+              --, Ord (BookedOrder (OrderPriceOf book))
+              --, Ord (BookedOrder (OfferPriceOf book))
+              --, MarketPrice (OfferPriceOf book)
+              , Ord (BookedOrder (orderPrice))
+              , Ord (BookedOrder (offerPrice))
+              , MarketPrice (offerPrice)
+              )
+           => OrderId (Market book)
+           -> OrderPrice (Market book)
+           -> Amount (Market book)
+           -> book
+           -> ([MatchedOrder (Market book)], OrderBook (Market book))
+bookOrder' orderId price amount book = go [] amount (offers book)
+    where
+        --go :: [MatchedOrder (Market (OfferPriceOf book))]
+        --   -> Amount (Market (OfferPriceOf book))
+        --   -> Heap (BookedOrder (OfferPriceOf book))
+        --   -> ([MatchedOrder (Market (OfferPriceOf book))], OrderBook (Market book))
+        go matchedOrders      0 xs = (matchedOrders, orderBook (orders book) xs)
+        go matchedOrders remain xs = case tryGetPrice price xs of
+            Just (execPrice, offer, otherOffers) ->
+                let matchedOrder matchedamount = MatchedOrder { _matchedId1    = orderId
+                                                              , _matchedId2    = _bookedId offer
+                                                              , _matchedAmount = matchedamount
+                                                              , _matchedPrice  = execPrice
+                                                              }
+                    orderAmount = _bookedAmount offer
+                in case remain - orderAmount of
+                    shortage | shortage > 0 -> go (matchedOrder orderAmount : matchedOrders) shortage otherOffers
+                             | otherwise    -> ( matchedOrder remain : matchedOrders
+                                               , orderBook (orders book) (H.insert offer { _bookedAmount = -shortage } otherOffers) )
+            Nothing ->
+                let newOrder = BookedOrder { _bookedId     = orderId
+                                           , _bookedAmount = remain
+                                           , _bookedPrice  = dealPrice price
+                                           }
+                in (matchedOrders, orderBook (H.insert newOrder $ orders book) xs)
+
+tryGetPrice :: ( Ord (BookedOrder offerPrice)
+               , MarketPrice offerPrice )
+            => OrderPrice (Market offerPrice)
+            -> Heap (BookedOrder offerPrice)
+            -> Maybe (OrderPrice (Market offerPrice), BookedOrder offerPrice, Heap (BookedOrder offerPrice))
+tryGetPrice lim xs = do
+    (offer, heap) <- H.uncons xs
+    execPrice <- matchPrice (_bookedPrice offer) lim
+    return (execPrice, offer, heap)
+
+drain :: (Num (Amount market), Ord (Amount market), Ord (Money market), Ord (OrderId market))
+      => OrderId market -- replace with order tag (market agnostic depends on upstream engine)
+      -> BuyOrSell
+      -> OrderPrice market
+      -> OrderBook market
+      -> ([MatchedOrder market], OrderBook market)
+drain orderId buyOrSell price = case buyOrSell of
+    Buy  -> drain' orderId price . Buying
+    Sell -> drain' orderId price . Selling
+
+drain' :: ( DealBook book orderPrice offerPrice
+          --, Ord (BookedOrder (OrderPriceOf book))
+          --, Ord (BookedOrder (OfferPriceOf book))
+          --, MarketPrice (OfferPriceOf book )
+          , Ord (BookedOrder (orderPrice))
+          , Ord (BookedOrder (offerPrice))
+          , MarketPrice (offerPrice )
+          )
+       => OrderId (Market book)
+       -> OrderPrice (Market book)
+       -> book
+       -> ([MatchedOrder (Market book)], OrderBook (Market book))
+drain' orderId price book = go [] (offers book)
+    where
+        go matchedOrders xs = case tryGetPrice price xs of
+            Just (execPrice, offer, otherOffers) ->
+                let matchedOrder = MatchedOrder { _matchedId1    = orderId
+                                                , _matchedId2    = _bookedId offer
+                                                , _matchedAmount = _bookedAmount offer
+                                                , _matchedPrice  = execPrice
+                                                }
+                 in go (matchedOrder : matchedOrders) otherOffers
+            Nothing -> (matchedOrders, orderBook (orders book) xs)

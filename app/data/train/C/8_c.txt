@@ -1,0 +1,130 @@
+
+#include <stdarg.h>
+#include <stddef.h>
+#include <stdlib.h>
+#include <string.h>
+
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <errno.h>
+#include <sys/endian.h>
+#include <sysexits.h>
+
+#include <mpg123.h>
+
+#include "audio.h"
+#include "mp3.h"
+
+struct mp3 {
+	mpg123_handle *h;
+	int fd;
+	int first;
+	int rate;
+	int channels;
+	int endian;
+	int octets;
+	int sign;
+};
+
+struct mp3 *
+mp3_open(const char *file) {
+	struct mp3 *m = NULL;
+	char magic[3];
+	long rate;
+	int chan;
+	int enc;
+	if ((m = malloc(sizeof(struct mp3))) == NULL)
+		goto err;
+	m->h = NULL;
+	if ((m->fd = open(file, O_RDONLY)) < 0)
+		goto err;
+	if (read(m->fd, magic, 3) != 3)
+		goto err;
+	if (strncmp(magic, "\xFF\xFB", 2) != 0 &&
+	    strncmp(magic, "ID3", 3) != 0)
+		goto err;
+	if (lseek(m->fd, -3, SEEK_CUR) == -1)
+		goto err;
+	if (mpg123_init() != MPG123_OK)
+		return NULL;
+	if ((m->h = mpg123_new(NULL, NULL)) == NULL ||
+	    mpg123_param(m->h, MPG123_ADD_FLAGS, MPG123_QUIET, 0)
+	    != MPG123_OK || mpg123_open_fd(m->h, m->fd) != MPG123_OK)
+		goto err;
+	if (mpg123_getformat(m->h, &rate, &chan, &enc)
+	    != MPG123_OK || rate > (int)(~0U >> 1)) {
+		mpg123_close(m->h);
+		goto err;
+	}
+	m->first = 1;
+	/* Does mpg123 always output in host byte-order? */
+	m->endian = BYTE_ORDER == LITTLE_ENDIAN;
+	m->rate	= rate;
+	m->sign = !!(enc & MPG123_ENC_SIGNED);
+	if (chan & MPG123_STEREO)
+		m->channels = 2;
+	else /* MPG123_MONO */
+		m->channels = 1;
+	if (enc & MPG123_ENC_FLOAT) {
+		mpg123_close(m->h);
+		goto err;
+	}
+	if (enc & MPG123_ENC_32)
+		m->octets = 4;
+	else if (enc & MPG123_ENC_24)
+		m->octets = 3;
+	else if (enc & MPG123_ENC_16)
+		m->octets = 2;
+	else /* MPG123_ENC_8 */
+		m->octets = 1;
+	return m;
+err:
+	if (m != NULL) {
+		if (m->h != NULL)
+			mpg123_delete(m->h);
+		if (m->fd >= 0)
+			close(m->fd);
+		free(m);
+	}
+	mpg123_exit();
+	return NULL;
+}
+
+int
+mp3_copy(struct mp3 *m, void *buf, size_t size, struct audio *out) {
+	size_t r;
+	if (m == NULL || buf == NULL || size == 0 || out == NULL)
+		return EX_USAGE;
+	if (m->first) { /* setup audio output */
+		m->first = 0;
+		a_setrate(out, m->rate);
+		a_setchan(out, m->channels);
+		a_setend(out,  m->endian);
+		a_setbits(out, m->octets << 3);
+		a_setsign(out, m->sign);
+	}
+	if (mpg123_read(m->h, buf, size, &r) != MPG123_OK)
+		return EX_SOFTWARE;
+	if (r == 0)
+		return 1;
+	if (a_write(out, buf, r) != r && errno != EINTR
+	    && errno != EAGAIN)
+		return EX_IOERR;
+	return EX_OK;
+}
+
+void
+mp3_close(struct mp3 *m) {
+	if (m == NULL)
+		return;
+	if (m->fd >= 0)
+		close(m->fd);
+	if (m->h != NULL) {
+		mpg123_close(m->h);
+		mpg123_delete(m->h);
+	}
+	mpg123_exit();
+	free(m);
+}
+

@@ -1,0 +1,120 @@
+\clearpage
+\section{Cautionary Tale on Filtering}
+\label{filtering}
+
+It is tempting to insert standard filtering techniques from signal processing 
+after creating a Gaussian process model but prior to any dynamic time warping 
+calculations. The temptation comes from the fact that DTW is a signal 
+processing technique and so, hypothetically, using other well-known algorithms
+before DTW would clean the signal and result in a smoother DTW comparison.
+A fast Fourier transform (FFT) based low-pass filter 
+\cite{merletti1999standards,moreland2003fft} or 
+Mel-frequency cepstral coefficients (MFCC) \cite{muda2010voice,imai1983cepstral} 
+could potentially be used to reduce error in the model itself, 
+and thus make the contribution FOM more precise. Unfortunately, most 
+fuel cycle metrics are not well-formed candidates for such filtering strategies.
+Including such filters as part of the analysis can easily lead to wildly unphysical
+models.
+
+Consider a simple low-pass filter where a 256 channel real-valued FFT frequency 
+transform is taken.  All but lowest 32 channels are discarded prior to the applying 
+the inverse transform. This algorithm removes the
+high frequency jitter in the original signal, and 
+potentially allows for a better signal-to-noise ratio. Different values
+for the number of total channels and the number of channels kept could be 
+used to create alternative low-pass filters. These values represent the 
+resolution of the transformation to and from the frequency domain. Keeping
+only the coarsest eighth of the total number of channels should retain only
+the general trends from the original time series.
+
+\begin{figure}[htb]
+\centering
+\includegraphics[width=0.9\textwidth]{fft-lwr-model.eps}
+\caption{Low-pass FFT filter of LWR Gaussian process model $m_*^\LWR$ alongside
+the unfiltered model itself.}
+\label{fft-lwr-model}
+\end{figure}
+
+Figure \ref{fft-lwr-model} shows the results of applying the low-pass filter 
+described above to the Gaussian process model of the LWR generated power, 
+$m_*^\LWR(t)$.  The filtered curve demonstrates at least three major problems.  The
+first is that the values of the curve are allowed to be negative, which is 
+impossible for this (and many other) fuel cycle metrics.  The second is that 
+near the time boundaries ($t=2010$ and $t=2210$), the amplitude of the filtered model
+is significantly higher than the unfiltered model. At $t=2210$, the metric 
+should be zero but
+instead is 36.5 GWe. This is because of the oscillations in the filter that 
+begin around 2150 and grow in amplitude. These oscillations themselves 
+come from the fact that the FFT is attempting to model a flat line as a sum
+of only 32 sinusoidal basis functions. 
+Thirdly, the shape of the curve itself is skewed to lower 
+times. The time at which the metric goes to zero should be near year 2150 but is 
+instead closer to year 2115.  All of these issues would severely distort any 
+DTW calculations that follow.
+
+The reason behind these inconsistencies is that the FFT process is fundamentally 
+periodic.  However, using the annual time grid here, the LWR generated power metric
+is not periodic. Neither is the modeling error for most fuel cycle metrics periodic
+on an annual basis. 
+Thus, while well-intentioned, a low-pass filter is not generally applicable.
+
+Alternatively, MFCCs provide a mechanism for converting a time series into a 
+set of power spectrum coefficient curves. In practice, many audio processing
+libraries contain an out-of-the-box MFCC algorithm. For this paper, 
+the MFCC implementation provided by the librosa package v0.4.1
+\cite{mcfee2015librosa} was used.
+Since the dynamic time warping procedure
+uses an $L_1$ norm to form the cost matrix, the MFCCs of two signals can be directly 
+compared. Each coefficient should roughly correspond in shape and amplitude to some
+feature in the original signal.  Noisy, high frequency coefficients tend to be 
+very similar and so their contribution to a DTW distance is correspondingly less 
+than the contribution for lower mode coefficients. Coupling MFCC to DTW is an 
+extremely common method employed in speech recognition systems 
+\cite{muda2010voice,milner2002speech,sato2007emotion}.  
+
+\begin{figure}[htb]
+\centering
+\includegraphics[width=0.9\textwidth]{mfcc-lwr-model.eps}
+\caption{Representative Mel-frequency cepstral coefficients (solid lines) of 
+an LWR Gaussian process model $m_*^\LWR$ alongside the model itself (dashed 
+line). The first seven coefficients are labeled in order of decreasing 
+significance.  The remaining, least-significant coefficients are visible
+near the time axis.}
+\label{mfcc-lwr-model}
+\end{figure}
+
+Figure \ref{mfcc-lwr-model} displays the MFCC curves of the LWR Gaussian 
+process model as well as the model itself. None of these curves, not even the 
+major coefficient (MFCC 0), resembles the actual model.
+As with the low-pass filter, the MFCCs also have 
+uncharacteristic negative components.  Moreover, 
+the metric data is not sampled frequently enough to have meaningful
+time windows. For the fuel cycle metrics here, there is only one data point per year 
+and the signal itself may change in a meaningful way each year. By comparison, 
+in speech recognition, audio is sampled on the order of 22050 Hz 
+\cite{EBUTECH3285,juang1991hidden}. 
+The data volume for fuel cycle benchmark metrics
+is simply too low for MFCC transformations to capture the desired features. 
+
+Proceeding anyways, suppose the contribution measure is computed for the MFCCs 
+of LWR, FR, and 
+total generated power models.  In this case the LWR contribution is found to be 
+0.572 while the FR contribution is 0.899. Using the models directly as was done 
+in \S\ref{contribution}, the contribution values were 0.298 and 0.859 respectively.
+This implies that using the MFCCs had the opposite effect as desired.  The MFCCs
+added error to the FOM and made the LWR and FR contributions seem more alike 
+than the analysis without such filtering indicated.
+
+Therefore filtering the models prior to dynamic time warping is a dubious practice
+in the general case. In all likelihood, the metric does not meet the underlying 
+assumptions of the filter. The metric may not be periodic or may not be sampled 
+frequently enough. Sometimes it may be possible to construct a metric that does
+meet these qualifications. For instance, the generated power could be sampled monthly  
+such that seasonal demand behavior is noticeable. Even in such a case, it is instead recommended
+to pick a different kernel for the Gaussian process model such that these 
+periodic behaviors are captured.  The regression itself then takes on the role of 
+minimizing model uncertainty. Further filtering to this end becomes redundant and
+dangerous.  Additionally, it is unlikely that 
+the majority of the simulators would be able to calculate such a high-fidelity metric.
+That alone should disqualify such metrics or FOMs from any benchmarking study or
+inter-code comparison.

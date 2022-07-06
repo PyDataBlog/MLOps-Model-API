@@ -1,0 +1,207 @@
+﻿# load the snappin if it's not already loaded (step 1)
+if (!(Get-PSSnapin | Where-Object { $_.Name -eq "SwisSnapin" })) {
+    Add-PSSnapin "SwisSnapin"
+}
+
+#####-----------------------------------------------------------------------------------------#####  
+  
+#region Functions  
+  
+# Create a function to connect to the SolarWinds Information Service (SWIS)  
+Function Set-SwisConnection {  
+      
+    Param(  
+        [ Parameter( Mandatory = $true, HelpMessage = "What SolarWinds server are you connecting to (Hostname or IP)?" ) ] [ string ] $SolarWindsServer,  
+        [ Parameter( Mandatory = $true, HelpMessage = "Do you want to use the credentials from PowerShell (Trusted), or a new login (Explicit)?" ) ] [ ValidateSet( 'Trusted', 'Explicit' ) ] [ string ] $ConnectionType  
+    )  
+  
+  
+    # Connect to SWIS  
+    IF ( $ConnectionType -eq 'Trusted'  ) {  
+  
+        $swis = Connect-Swis -Trusted -Hostname $SolarWindsServer  
+      
+    }  
+  
+    ELSE {  
+      
+        $creds = Get-Credential -Message "Please provide a Domain or Local Login for SolarWinds"  
+  
+        $swis = Connect-Swis -Credential $creds -Hostname $SolarWindsServer  
+  
+    }  
+  
+RETURN $swis  
+  
+}  
+
+  
+#endregion Functions  
+  
+#####-----------------------------------------------------------------------------------------#####  
+
+#region Variables  
+  
+# Connect to SWIS  
+$hostname = "142.136.251.21" #Read-Host -Prompt "Hostname or IP Address of your SolarWinds server"  
+$swis = Set-SwisConnection -SolarWindsServer $hostname -ConnectionType Explicit  
+
+
+#endregion Variables  
+  
+#####-----------------------------------------------------------------------------------------#####  
+
+#region Execution  
+
+#get list of ibm nodes
+$nodesquery = @"
+SELECT n.nodeid
+, n.uri
+, n.caption
+, n.IP
+, cpa.CustomPollerID
+, cpa.CustomPollerName
+, app.ApplicationID
+, app.Name
+, app.ApplicationTemplateID
+
+from orion.nodes n
+left join orion.npm.CustomPollerAssignment cpa on cpa.NodeID=n.NodeID and cpa.CustomPollerName = 'hrFSMountPoint'
+left join orion.apm.Application app on app.NodeID =n.NodeID and app.name = 'AIX Stats'
+where vendor = 'IBM'
+"@
+
+$Nodes = Get-SwisData $swis $nodesquery 
+
+$CustomPollerID = ($nodes.custompollerid | select-object -unique).guid
+
+$AppTemplateID = $nodes.applicationtemplateid | select-object -unique
+
+foreach($Node in $Nodes)  {  
+    "Checking node: $($Node.Caption)..."
+    
+    while (!$Node.CustomPollerID) { #undp not assigned
+        " - Missing hrFSMountPoint poller, adding now"
+        $cpresult = New-SwisObject $swis –EntityType 'Orion.NPM.CustomPollerAssignmentOnNode' -Properties @{CustomPollerID=$CustomPollerID;NodeID=$Node.Nodeid;} 
+        
+        if ($cpresult) {
+            $Node.CustomPollerID = $CustomPollerID
+        }
+
+        sleep -Seconds 60 # wait allows for first poll completion before moving on
+    }
+
+    while (!$Node.ApplicationID) { #AIX Stats template not assigned
+        " - Missing AIX Stats monitor, adding now"
+        $appresult = (Invoke-SwisVerb $swis "Orion.APM.Application" "CreateApplication" @($Node.NodeId, $AppTemplateID, -4,"true")).InnerText
+        
+        if ($appresult) {
+            $Node.ApplicationID = $appresult
+        }
+
+        sleep -Seconds 60 # wait allows for first poll completion before moving on
+    }
+
+    #make sure all drives are added to app monitor 
+    $LabelQuery = @"
+SELECT distinct cpl.Label
+
+from orion.nodes n
+join orion.npm.CustomPollerAssignment cpa on cpa.NodeID=n.NodeID and cpa.CustomPollerName = 'hrFSMountPoint'
+join orion.npm.CustomPollerLabels cpl on cpl.CustomPollerAssignmentID = cpa.CustomPollerAssignmentID
+left join (SELECT at.ApplicationID, at.Name, ct.Name, replace(replace(ct.Name,'Space on ',''),' partition (MB)','') as Drive
+FROM Orion.APM.Application at
+join orion.apm.Component ct on ct.ApplicationID = at.ApplicationID and ct.name like 'Space on%'
+where at.name = 'AIX Stats') ct on ct.Drive = cpl.label
+
+
+where vendor = 'IBM' and ct.drive is null and n.nodeid = $($Node.Nodeid)
+"@
+    
+    $Labels = Get-SwisData $swis $LabelQuery 
+
+    foreach($Label in $Labels)  { 
+        " - Adding component for $Label"
+        
+        $CTQuery = @"
+SELECT replace(c.Name,'/',labels.label) as Name, c.componenttype, c.applicationid, c.componentorder
+
+FROM [APM_Component] c
+join apm_application a on a.id=c.applicationid
+cross join (select distinct Label, c.name as matchingcomponent, n.nodeid
+from custompollerlabels cpl
+join custompollerassignmentview cpa on cpl.custompollerassignmentid=cpa.custompollerassignmentid and cpa.custompollername = 'hrFSMountPoint'
+join nodes n on n.nodeid=cpa.nodeid and n.vendor = 'IBM' and n.nodeid = $($Node.Nodeid)
+left join apm_component c on cpl.label = replace(replace(c.Name,'Space on ',''),' partition (MB)','') and c.templateid = 14356
+) labels
+
+where c.templateid=14356 
+and a.nodeid= $($Node.Nodeid)
+and c.name like 'Space on / partition (MB)' 
+and labels.matchingcomponent is null 
+and labels.label = '$($Label)'
+"@
+        $CT = (Invoke-SwisVerb $swis 'Orion.Reporting' 'ExecuteSQL' $CTQuery).diffgram.DocumentElement.ExecuteSQLResults
+        
+        $ctresult = Invoke-SwisVerb $swis 'Orion.Reporting' 'ExecuteSQL' "insert into [APM_Component] (name, componenttype, applicationid, shortname, componentorder) SELECT '$($ct.name)', $($ct.componenttype), $($ct.applicationid), '$($ct.name)', $($ct.componentorder)"
+
+        $ComponentID = Get-SwisData $swis "select componentid from orion.apm.Component where name = '$($ct.name)' and applicationid = $($ct.applicationid) "
+
+        " - Adding component settings for $Label"
+        $CTSInsert = @"
+Insert into APM_ComponentSetting (Componentid, [key], value, valuetype, required)
+SELECT '$($ComponentID)' as componentid, cts.[key]
+, case when cts.[key]= 'CommandLineToPass' then replace(cts.value,'\/',replace('$($Label)','/','\/')) else cts.value end as value
+, cts.valuetype, cts.required
+
+FROM [APM_Component] ct
+join apm_componenttemplatesetting cts on cts.componenttemplateid=ct.templateid
+
+where ct.applicationid=$($ct.applicationid) 
+and ct.name like 'Space on / partition (MB)'
+"@
+        $ctsresult = Invoke-SwisVerb $swis 'Orion.Reporting' 'ExecuteSQL' $CTSInsert
+
+        " - Adding component thresholds for $Label"
+        $ColInsert = @"
+insert into APM_DynamicEvidenceColumnSchema (parentid,componentid, componenttemplateid, type, isdisabled, name, label, islabeloverridden, thresholdoperator, thresholdwarning, thresholdcritical, isthresholdoverridden, computebaseline)
+values (NULL,$($ComponentID),NULL,1,'false','Total_Space','Total_Space','true',null,null,null,'true','true')
+insert into APM_DynamicEvidenceColumnSchema (parentid,componentid, componenttemplateid, type, isdisabled, name, label, islabeloverridden, thresholdoperator, thresholdwarning, thresholdcritical, isthresholdoverridden, computebaseline)
+values (NULL,$($ComponentID),NULL,1,'false','Available_Space','Available_Space','true',null,null,null,'true','true')
+insert into APM_DynamicEvidenceColumnSchema (parentid,componentid, componenttemplateid, type, isdisabled, name, label, islabeloverridden, thresholdoperator, thresholdwarning, thresholdcritical, isthresholdoverridden, computebaseline)
+values (NULL,$($ComponentID),NULL,1,'false','Percent_Used_Space','Percent_Used_Space','true',0,90,95,'true','true')
+"@
+        $ColResult = Invoke-SwisVerb $swis 'Orion.Reporting' 'ExecuteSQL' $ColInsert
+
+    }
+
+"Raising Default Memory Threshold"
+
+$memcheck = Invoke-SwisVerb $swis 'Orion.Reporting' 'ExecuteSQL' @"
+select * from thresholds
+where thresholdtype=1
+and instanceid=$($Node.nodeid)
+"@
+
+if ($memcheck) {
+    $MemSQL = @"
+update thresholds
+set warning =101 , critical = 102
+where thresholdtype=1
+and instanceid=$($Node.nodeid)
+"@
+
+    $MemResult = Invoke-SwisVerb $swis 'Orion.Reporting' 'ExecuteSQL' $MemSQL
+} else {
+    $MemSQL = @"
+insert into thresholds (instanceid,thresholdtype,thresholdnameid,thresholdoperator,warning,critical)
+select $($Node.nodeid),1,1,0,101,102
+"@
+    $MemResult = Invoke-SwisVerb $swis 'Orion.Reporting' 'ExecuteSQL' $MemSQL
+}
+
+
+}  
+
+"Complete"
+

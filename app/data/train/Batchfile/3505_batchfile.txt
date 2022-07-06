@@ -1,0 +1,1 @@
+cmd_drivers/i2c/chips/built-in.o :=  /home/hacker/codesourcery/lite/bin/arm-none-linux-gnueabi-ld -EL    -r -o drivers/i2c/chips/built-in.o drivers/i2c/chips/tpa2051d3.o drivers/i2c/chips/adp1650_flashlight.o drivers/i2c/chips/isl29028.o drivers/i2c/chips/isl29029.o drivers/i2c/chips/tps65200.o 

@@ -1,0 +1,75 @@
+<?php
+namespace Users;
+use Zend\EventManager\EventInterface as Event;
+use Users\Model\AuthorisationClass as AuthorisationClass;
+
+class Module
+{
+    public function onBootstrap(Event $e)
+    {
+        // This method is called once the MVC bootstrapping is complete
+        $application = $e->getApplication();
+        $services    = $application->getServiceManager();
+        
+        $e -> getApplication() -> getEventManager() -> getSharedManager() -> attach('Zend\Mvc\Controller\AbstractActionController', 'dispatch', function($e) {
+            $controller = $e -> getTarget();
+            $full_controller_name = $controller -> params('controller');            
+            $id=0;
+
+             if ($user = $controller -> identity()) {
+                $role = $user -> getRoleName()->getName();
+                 $id = $user->getId();
+            } else {
+                    $role = 'guest';
+            }
+            
+            $routeMatch = $e->getRouteMatch();
+            $checkId = $routeMatch->getParam('param0',0);
+            $controllerClass = $routeMatch->getParam('controller',0);
+            $controllerClassArray = explode('\\', $controllerClass);
+            $controllerName = $controllerClassArray['2'];
+            $moduleName = $controllerClassArray['0'];
+            $role = strtolower($role);
+            $routeCheck = $moduleName.'\\'.$controllerName;
+            $acl = new AuthorisationClass($id,$checkId);
+            if (!$acl->isAuthorised($role,$routeCheck,$routeMatch->getParam('action'))) {
+                $response = $e -> getResponse();
+                $response -> getHeaders() -> addHeaderLine('Location', '/users/auth/failure/Please log in as an authorised user to view that page');
+                $response -> setStatusCode(302);
+                $response -> sendHeaders();
+                exit ;
+            }
+        }, 100);
+    }
+        
+    public function getConfig()
+    {
+        return include __DIR__ . '/config/module.config.php';
+    }
+    
+    public function getServiceConfig()
+    {
+        return array(
+            'factories' => array(
+                'Zend\Authentication\AuthenticationService' => function($serviceManager) {
+                    // If you are using DoctrineORMModule:
+                    return $serviceManager->get('doctrine.authenticationservice.orm_default');
+
+                    // If you are using DoctrineODMModule:
+                    return $serviceManager->get('doctrine.authenticationservice.odm_default');
+                }
+            )
+        );
+    }
+
+    public function getAutoloaderConfig()
+    {
+        return array(
+            'Zend\Loader\StandardAutoloader' => array(
+                'namespaces' => array(
+                    __NAMESPACE__ => __DIR__ . '/src/' . __NAMESPACE__,
+                ),
+            ),
+        );
+    }
+}

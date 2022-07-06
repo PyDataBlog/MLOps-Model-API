@@ -1,0 +1,60 @@
+function hoo_binary(
+        objective::Function, horizon::Int, nu::Float64, rho::Float64,
+        max_depth::Int)
+    tree = Tree()
+    add_depth(tree, [tree.root])
+    for t=1:horizon
+        tree = hoo_step(objective, tree, tree, max_depth, nu, rho, t)
+    end
+    (best_arm, max_mean) = get_best(tree)
+    return (tree, best_arm, max_mean)
+end
+
+function hoo_step(
+        objective::Function, tree::Tree, bigger_tree::Tree, max_depth::Int,
+        nu::Float64, rho::Float64, t::Int)
+    current_node_id = tree.root
+    current_children = children(tree, current_node_id)
+    nb_children = length(current_children)
+    while nb_children > 0
+        vals = [tree.nodes[current_children[i]].b_value for i=1:nb_children]
+        if vals[1] > vals[2]
+            selected = 1
+        elseif vals[1] < vals[2]
+            selected = 2
+        else
+            selected = rand(1:2)
+        end
+        current_node_id = 10 * current_node_id + selected
+        current_children = children(tree, current_node_id)
+        nb_children = length(current_children)
+    end
+
+    # if there is already a sample from the chosen node, take it, else sample
+    if (current_node_id in keys(bigger_tree.nodes)
+        && bigger_tree.nodes[current_node_id].sample < Inf64)
+        reward = bigger_tree.nodes[current_node_id].sample
+    else
+        reward = evaluate_function(
+            objective, tree, current_node_id, method="middle")
+        bigger_tree.nodes[current_node_id].sample = reward
+    end
+
+    if tree.nodes[current_node_id].depth < max_depth
+        addchild(tree, current_node_id, 1)
+        addchild(tree, current_node_id, 2)
+        if length(children(bigger_tree, current_node_id)) == 0
+            addchild(bigger_tree, current_node_id, 1)
+            addchild(bigger_tree, current_node_id, 2)
+        end
+    end
+
+    root_parent = tree.nodes[tree.root].parent
+    while current_node_id != root_parent
+        incr_pull(tree, current_node_id)
+        update_mean(tree, current_node_id, reward)
+        current_node_id = tree.nodes[current_node_id].parent
+    end
+    update_b_and_u_values(tree, tree.root, nu, rho, t)
+    return tree
+end

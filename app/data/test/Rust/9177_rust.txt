@@ -1,0 +1,226 @@
+extern crate diesel;
+extern crate dotenv;
+
+use std::env;
+use std::sync::Arc;
+
+use crate::models::*;
+use crate::result::{
+    Action, DataError, DataReadyResult, DataResult, IntoDataReadyResult, IntoDataResult, SpokenOk,
+};
+use crate::schema::logs::dsl::*;
+use crate::schema::rides::dsl::*;
+use crate::schema::routes::dsl::*;
+use crate::spoken::SpokenData;
+use async_trait::async_trait;
+use diesel::prelude::*;
+use diesel::r2d2;
+use diesel::sqlite::SqliteConnection;
+use dotenv::dotenv;
+use futures::{executor::ThreadPool, future::lazy, task::SpawnExt};
+use serde::Serialize;
+
+impl<T> IntoDataResult<T, diesel::result::Error> for Result<T, diesel::result::Error> {
+    fn data_result(self) -> DataResult<T> {
+        self.map_err(|e| e.into())
+    }
+}
+
+impl<T> IntoDataResult<T, r2d2::Error> for Result<T, r2d2::PoolError> {
+    fn data_result(self) -> DataResult<T> {
+        self.map_err(|e| e.into())
+    }
+}
+
+impl<T: Serialize> IntoDataReadyResult<T, diesel::result::Error>
+    for Result<T, diesel::result::Error>
+{
+    fn data_ready_result(self, action: Action) -> DataReadyResult<T> {
+        self.map(|r| SpokenOk::new(action, r)).map_err(|e| e.into())
+    }
+}
+
+impl From<r2d2::PoolError> for DataError {
+    fn from(from: r2d2::PoolError) -> Self {
+        Self::DbConn(Box::new(from))
+    }
+}
+
+impl From<diesel::result::Error> for DataError {
+    fn from(from: diesel::result::Error) -> Self {
+        use diesel::result::DatabaseErrorKind::*;
+        use diesel::result::Error::*;
+        match &from {
+            DatabaseError(kind, _err_info) => match kind {
+                UniqueViolation => Self::InvalidQuery(Box::new(from)),
+                ForeignKeyViolation => Self::InvalidQuery(Box::new(from)),
+                UnableToSendCommand => Self::InvalidQuery(Box::new(from)),
+                SerializationFailure => Self::InvalidQuery(Box::new(from)),
+                __Unknown => Self::Unknown,
+            },
+            NotFound => Self::NotFound(Box::new(from)),
+            QueryBuilderError(_) => Self::InvalidQuery(Box::new(from)),
+            DeserializationError(_) => Self::InvalidQuery(Box::new(from)),
+            SerializationError(_) => Self::InvalidQuery(Box::new(from)),
+            _ => Self::InvalidQuery(Box::new(from)),
+        }
+    }
+}
+
+type ConnectionManager = diesel::r2d2::ConnectionManager<SqliteConnection>;
+
+#[derive(Clone)]
+pub struct DieselSqlite {
+    db_pool: Arc<diesel::r2d2::Pool<ConnectionManager>>,
+    worker_pool: ThreadPool,
+}
+
+impl DieselSqlite {
+    pub fn open() -> DieselSqlite {
+        dotenv().ok();
+
+        let database_url = env::var("DATABASE_URL").expect("DATABASE_URL must be set");
+        let db_pool = Arc::new(
+            r2d2::Pool::builder()
+                .build(r2d2::ConnectionManager::new(&database_url))
+                .unwrap(),
+        );
+        let worker_pool = ThreadPool::builder()
+            .pool_size(4)
+            .name_prefix("spoken-")
+            .create()
+            .expect("thread pool");
+
+        DieselSqlite {
+            db_pool,
+            worker_pool,
+        }
+    }
+
+    pub fn get_conn(
+        &self,
+    ) -> Result<diesel::r2d2::PooledConnection<ConnectionManager>, diesel::r2d2::PoolError> {
+        Ok(self.db_pool.get()?)
+    }
+
+    pub async fn get_conn_async(
+        &self,
+    ) -> Result<diesel::r2d2::PooledConnection<ConnectionManager>, diesel::r2d2::PoolError> {
+        let pool = Arc::clone(&self.db_pool);
+
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| pool.get()))
+            .unwrap_or_else(|e| panic!("failed to spawn for a new connection; {:?}", e))
+            .await
+    }
+}
+
+#[async_trait]
+impl SpokenData for DieselSqlite {
+    async fn list_logs(&self) -> DataReadyResult<Vec<Log>> {
+        let conn = self.get_conn_async().await.data_result()?;
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| logs.load::<Log>(&conn)))
+            .unwrap_or_else(|e| panic!("failed to spawn; {:?}", e))
+            .await
+            .data_ready_result(Action::List)
+    }
+
+    async fn get_log(&self, log_name: &str) -> DataReadyResult<Log> {
+        let conn = self.get_conn_async().await.data_result()?;
+        let log_name = log_name.to_owned();
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| {
+                logs.filter(crate::schema::logs::name.eq(log_name))
+                    .first::<Log>(&conn)
+            }))
+            .unwrap_or_else(|e| panic!("failed to spawn; {:?}", e))
+            .await
+            .data_ready_result(Action::Get)
+    }
+
+    async fn post_log(&self, new_log: NewLog) -> DataReadyResult<()> {
+        let conn = self.get_conn_async().await.data_result()?;
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| {
+                diesel::insert_into(logs).values(&new_log).execute(&conn)
+            }))
+            .unwrap_or_else(|e| panic!("failed to spawn; {:?}", e))
+            .await
+            .map(|_| ())
+            .data_ready_result(Action::Create)
+    }
+
+    async fn list_routes(&self) -> DataReadyResult<Vec<Route>> {
+        let conn = self.get_conn_async().await.data_result()?;
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| routes.load::<Route>(&conn)))
+            .unwrap_or_else(|e| panic!("failed to spawn; {:?}", e))
+            .await
+            .data_ready_result(Action::List)
+    }
+
+    async fn post_route(&self, new_route: NewRoute) -> DataReadyResult<()> {
+        let conn = self.get_conn_async().await.data_result()?;
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| {
+                diesel::insert_into(routes)
+                    .values(&new_route)
+                    .execute(&conn)
+            }))
+            .unwrap_or_else(|e| panic!("failed to spawn; {:?}", e))
+            .await
+            .map(|_| ())
+            .data_ready_result(Action::Create)
+    }
+
+    async fn list_rides_in_log(&self, log: Log) -> DataReadyResult<Vec<Ride>> {
+        let conn = self.get_conn_async().await.data_result()?;
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| {
+                Ride::belonging_to(&log)
+                    .order(timestamp.desc())
+                    .load::<Ride>(&conn)
+            }))
+            .unwrap_or_else(|e| panic!("failed to spawn; {:?}", e))
+            .await
+            .data_ready_result(Action::List)
+    }
+
+    async fn get_route_avgs_in_log(
+        &self,
+        log: Log,
+        route_name: &str,
+    ) -> DataReadyResult<Vec<RideAverage>> {
+        let conn = self.get_conn_async().await.data_result()?;
+        let route_name = route_name.to_owned();
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| {
+                RideAverage::belonging_to(&log)
+                    .select((
+                        crate::schema::rides::id,
+                        log_id,
+                        route,
+                        crate::schema::rides::average,
+                    ))
+                    .filter(route.eq(route_name))
+                    .load::<RideAverage>(&conn)
+            }))
+            .unwrap_or_else(|e| panic!("failed to spawn; {:?}", e))
+            .await
+            .data_ready_result(Action::List)
+    }
+
+    async fn post_ride(&self, log: Log, mut ride: NewRide) -> DataReadyResult<()> {
+        let conn = self.get_conn_async().await.data_result()?;
+        ride.log_id = log.id;
+        self.worker_pool
+            .spawn_with_handle(lazy(move |_| {
+                diesel::insert_into(rides).values(&ride).execute(&conn)
+            }))
+            .unwrap_or_else(|e| panic!("failed to spawn; {:?}", e))
+            .await
+            .map(|_| ())
+            .data_ready_result(Action::Create)
+    }
+}

@@ -1,0 +1,176 @@
+CREATE OR REPLACE FUNCTION SQL_CALCULATE_GRAVITY(thisxpos real, thisypos real, thiszpos real, thismass real, 
+                                                 otherxpos real, otherypos real, otherzpos real, othermass real, 
+						 OUT gravx real, OUT gravy real, OUT gravz real) AS $$
+DECLARE
+    gravitational_constant real := 0.0000000000667;
+    acceleration real;
+    x real;
+    y real;
+    z real;
+    radius real;
+    inclination real;
+    azimuth real;
+BEGIN
+    x := thisxpos - otherxpos;
+    y := thisypos - otherypos;
+    z := thiszpos - otherzpos;
+
+    radius := sqrt(x*x + y*y + z*z);
+    if radius = 0 then
+       radius = 0.00000000000000000001;
+    end if;
+    inclination := acos(z/(radius));
+    azimuth := atan2(y, x);
+
+    acceleration := (gravitational_constant*othermass)/(radius*radius);
+
+    gravx := acceleration * sin(inclination) * cos(azimuth);
+    gravy := acceleration * sin(inclination) * sin(azimuth);
+    gravz := acceleration * cos(inclination);
+END;
+$$ LANGUAGE plpgsql;
+
+--#############################################
+--CREATE OR REPLACE FUNCTION SQL_CARTESIAN_TO_SPHERICAL(x real, y real, z real, OUT radius real, OUT inclination real, OUT azimuth real) AS $$
+--DECLARE
+--    gravitational_constant real := 0.0000000000667;
+--BEGIN
+--    radius := sqrt(x*x + y*y + z*z);
+--    inclination := acos(z/(radius));
+--    azimuth := atan2(y, x);
+--END;
+--$$ LANGUAGE plpgsql;
+
+--#############################################
+--CREATE OR REPLACE FUNCTION SQL_SPHERICAL_TO_CARTESIAN(radius real, inclination real, azimuth real, OUT x real, OUT y real, OUT z real) AS $$
+--DECLARE
+--    gravitational_constant real := 0.0000000000667;
+--BEGIN
+--    x := radius * sin(inclination) * cos(azimuth);
+--    y := radius * sin(inclination) * sin(azimuth);
+--    z := radius * cos(inclination);
+--END;
+--$$ LANGUAGE plpgsql;
+
+--#############################################
+CREATE OR REPLACE FUNCTION SQL_UPDATE_BODIES_IN_UNIVERSE() RETURNS VOID AS $$
+DECLARE
+	l_rec RECORD;
+	gv RECORD;
+BEGIN
+
+	-- update velocity: velocity = velocity + thrust + gravpull
+	perform SQL_UPDATE_GRAVITATIONAL_VECTORS();
+	FOR l_rec IN 
+	SELECT *
+	FROM bodies 
+	LOOP
+		execute 'select sum(x) as x, sum(y) as y, sum(z) as z from gravitational_relations where thisbodyid = ' || l_rec.bodyid into gv;
+		update bodies
+		set 
+		xvelocity = l_rec.xvelocity + l_rec.xthrust + gv.x,
+		yvelocity = l_rec.yvelocity + l_rec.ythrust + gv.y,
+		zvelocity = l_rec.zvelocity + l_rec.zthrust + gv.z
+		where bodyid = l_rec.bodyid;
+	END LOOP; 
+
+	-- update position: position = position + velocity
+	perform SQL_UPDATE_GRAVITATIONAL_VECTORS();
+	FOR l_rec IN 
+	SELECT *
+	FROM bodies 
+	LOOP
+		update bodies
+		set 
+		xposition = l_rec.xvelocity + l_rec.xposition,
+		yposition = l_rec.yvelocity + l_rec.yposition,
+		zposition = l_rec.zvelocity + l_rec.zposition
+		where bodyid = l_rec.bodyid;
+	END LOOP; 
+
+END;
+$$ LANGUAGE plpgsql;
+
+
+--#############################################
+CREATE OR REPLACE FUNCTION SQL_REBUILD_GRAVITATIONAL_RELATIONS_TABLE() RETURNS VOID AS $$
+BEGIN
+	insert into 
+	       gravitational_relations (thisbodyid, thisbodyname, otherbodyid, otherbodyname, starsystemid) 
+	       select t1.bodyid, t1.bodyname, t2.bodyid, t2.bodyname, t1.starsystemid 
+	       from bodies as t1, bodies as t2 
+	       where t1.bodyname <> t2.bodyname and t1.starsystemid = t2.starsystemid;
+END;
+$$ LANGUAGE plpgsql;
+
+--#############################################
+--DROP FUNCTION logger;
+CREATE OR REPLACE FUNCTION logger(logtxt text) RETURNS VOID AS $$
+DECLARE
+	curtime timestamp;
+BEGIN
+	curtime := 'now';
+        INSERT INTO logtable VALUES (logtxt, curtime);
+END;
+$$ LANGUAGE plpgsql;
+
+--#############################################
+CREATE OR REPLACE FUNCTION SQL_UPDATE_GRAVITATIONAL_VECTORS() RETURNS VOID AS $$
+DECLARE
+	l_rec RECORD;
+	num integer;
+	gr RECORD;
+	thisb RECORD;
+	otherb RECORD;
+BEGIN
+	num := 1;
+	FOR l_rec IN 
+	SELECT *
+	FROM GRAVITATIONAL_RELATIONS 
+	LOOP
+-- FIXME
+		execute 'select * from bodies where bodyid = ' || l_rec.thisbodyid into thisb;
+		execute 'select * from bodies where bodyid = ' || l_rec.otherbodyid into otherb;
+                execute 'select * from 
+			SQL_CALCULATE_GRAVITY(' || thisb.xposition ||','|| thisb.yposition ||','|| thisb.zposition || ',' || thisb.mass || ','
+			|| otherb.xposition ||','|| otherb.yposition ||','|| otherb.zposition || ',' || otherb.mass ||')' into gr;
+	        UPDATE gravitational_relations 
+	        SET x = gr.gravx, y = gr.gravy, z = gr.gravz
+	        WHERE thisbodyid = l_rec.thisbodyid and otherbodyid = l_rec.otherbodyid;
+	        num := num + 1;
+	END LOOP;
+END;
+$$ LANGUAGE plpgsql;
+
+--#############################################
+create or replace function sql_save_positions() returns void as $$
+begin
+	insert into bodieslog (bodyid, bodyname, starsystemid, xposition, yposition, zposition, asciisprite) 
+	       select bodyid, bodyname, starsystemid, xposition, yposition, zposition, asciisprite 
+	         from bodies;
+end;
+$$ language plpgsql;
+
+--#############################################
+create or replace function sql_select_bodies_from_starsystem(starsystem int) returns 
+TABLE(bid int, bname varchar, xpos numeric, ypos numeric, zpos numeric, sprite char) as $$
+begin
+	RETURN QUERY 
+	select bodyid, bodyname, xposition, yposition, zposition, asciisprite 
+	from bodies
+	where starsystemid = starsystem;
+end;
+$$ language plpgsql;
+
+--#############################################
+--create or replace function sql_select_bodies_from_starsystem_zoomed(starsystem int) returns 
+--TABLE(bid int, bname varchar, xpos numeric, ypos numeric, zpos numeric, sprite char) as $$
+--declare
+--	minandmax RECORD;
+--begin
+--	RETURN QUERY 
+--	select bodyid, bodyname, xposition, yposition, zposition, asciisprite 
+--	from bodies
+--	where starsystemid = starsystem;
+--end;
+--$$ language plpgsql;

@@ -1,0 +1,1009 @@
+#ifdef __cplusplus	  
+extern "C" {
+#endif
+
+#include "project.h"
+#include "managerment.h"
+#include "CPrintf.h"
+#include "stdio.h"
+#include "stdint.h"
+	
+#include "../HARDWARE/DCMotor/DCMotor.h"
+#include "../HARDWARE/StepMotor/StepMotor.h"
+#include "../HARDWARE/Beep/beep.h"
+#include "../HARDWARE/NTCResistor/NTCResistor.h"
+#include "../HARDWARE/RelayMOS/RelayMOS.h"
+#include "../HARDWARE/24CXX/24cxx.h"
+#include "../HARDWARE/LED/led.h"
+	
+/* Scheduler includes. */
+#include "FreeRTOS.h"
+#include "task.h"
+#include "timers.h"
+
+//¼Ð½ô1
+//action : 0,¼Ð½ôËÉ¿ª; !=0,¼Ð½ô
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void Clamp1(uint8_t action, uint8_t *pStopFlag)
+{
+	PhSensorEnum_TypeDef sensor;
+	Direction_TypeDef dir;
+	
+	if(action)
+	{
+		dir = CW;
+		sensor = CLAMP1_SENSOR_L;
+	}
+	else
+	{
+		dir = CCW;
+		sensor = CLAMP1_SENSOR_R;
+	}
+	
+	PhSensor_SingleScan(sensor);
+	if(!PhSensor_SingleCheck(sensor) || *pStopFlag)
+		return;
+	
+	DCMotor_Run(CLAMP1_MOTOR, dir, 100);
+	while(1)
+	{
+		PhSensor_SingleScan(sensor);
+		if((!PhSensor_SingleCheck(sensor)) || *pStopFlag)
+		{
+			if(action && !*pStopFlag)
+				vTaskDelay(pProjectMan->clamp1Delay);//80
+			DCMotor_Stop(CLAMP1_MOTOR);
+			break;
+		}
+		
+		vTaskDelay(5);
+	}
+}
+
+//¼Ð½ô2
+//action : 0,¼Ð½ôËÉ¿ª; !=0,¼Ð½ô
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void Clamp2(uint8_t action, uint8_t *pStopFlag)
+{
+	PhSensorEnum_TypeDef sensor;
+	Direction_TypeDef dir;
+	
+	if(action)
+	{
+		dir = CW;
+		sensor = CLAMP2_SENSOR_L;
+	}
+	else
+	{
+		dir = CCW;
+		sensor = CLAMP2_SENSOR_R;
+	}
+	
+	PhSensor_SingleScan(sensor);
+	if(!PhSensor_SingleCheck(sensor) || *pStopFlag)
+		return;
+	
+	DCMotor_Run(CLAMP2_MOTOR, dir, 100);
+	while(1)
+	{
+		PhSensor_SingleScan(sensor);
+		if((!PhSensor_SingleCheck(sensor)) || *pStopFlag)
+		{
+			if(action && !*pStopFlag)
+				vTaskDelay(pProjectMan->clamp2Delay);//80
+			DCMotor_Stop(CLAMP2_MOTOR);
+			break;
+		}
+		
+		vTaskDelay(5);
+	}
+}
+
+//ÇÐ¶Ï1
+//action : 0,ÇÐ¶ÏËÉ¿ª; !=0,ÇÐ¶Ï
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void Cutoff1(uint8_t action, uint8_t *pStopFlag)
+{
+	PhSensorEnum_TypeDef sensor;
+	Direction_TypeDef dir;
+	uint8_t sensorFlag;
+	
+	if(action)
+	{
+		dir = CW;
+		sensor = CUTOFF1_SENSOR_L;
+		
+		PhSensor_SingleScan(sensor);
+		if(PhSensor_SingleCheck(sensor) || *pStopFlag)
+			return;
+	}
+	else
+	{
+		dir = CCW;
+		sensor = CUTOFF1_SENSOR_R;
+		
+		PhSensor_SingleScan(sensor);
+		if(!PhSensor_SingleCheck(sensor) || *pStopFlag)
+			return;
+	}
+	
+	DCMotor_Run(CUTOFF1_MOTOR, dir, 100);
+	while(1)
+	{
+		PhSensor_SingleScan(sensor);
+		if(action)
+			sensorFlag = PhSensor_SingleCheck(sensor);
+		else
+		{
+			//sensorFlag = !PhSensor_SingleCheck(sensor);
+			
+			pProjectMan->timerExpireFlag[0] = 0;
+			xTimerChangePeriod( pProjectMan->xTimerUser[0], pProjectMan->cutoffReturnDelay, 0);//4000/portTICK_PERIOD_MS
+		
+			while(!*pStopFlag && !pProjectMan->timerExpireFlag[0])
+			{
+				vTaskDelay(5);
+			}
+			if(*pStopFlag)
+				xTimerStop( pProjectMan->xTimerUser[0], 0);
+			
+			sensorFlag = 1;
+		}
+		
+		if(sensorFlag || *pStopFlag)//Õâ¸ö´«¸ÐÆ÷ÌØ±ðÒ»µã
+		{
+			if(action && !*pStopFlag)//µ¶Æ¬ÖáÓÐµãËÉ£¬ÇÐ¶ÏÊ±ÒªÑÓ³ÙÒ»µãÔÙÍ£
+			{
+				vTaskDelay(pProjectMan->cutoff1Delay);//330
+			}
+			
+			DCMotor_Stop(CUTOFF1_MOTOR);
+			break;
+		}
+		
+		vTaskDelay(5);
+	}
+}
+
+//ÇÐ¶Ï2
+//action : 0,ÇÐ¶ÏËÉ¿ª; !=0,ÇÐ¶Ï
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void Cutoff2(uint8_t action, uint8_t *pStopFlag)
+{
+	PhSensorEnum_TypeDef sensor;
+	Direction_TypeDef dir;
+	uint8_t sensorFlag;
+
+	if(action)
+	{
+		dir = CW;
+		sensor = CUTOFF2_SENSOR_L;
+	}
+	else
+	{
+		dir = CCW;
+		sensor = CUTOFF2_SENSOR_R;
+	}
+	
+	PhSensor_SingleScan(sensor);
+	if(!PhSensor_SingleCheck(sensor) || *pStopFlag)
+		return;
+	
+	DCMotor_Run(CUTOFF2_MOTOR, dir, 100);
+	while(1)
+	{
+		PhSensor_SingleScan(sensor);
+		if(action)
+			sensorFlag = !PhSensor_SingleCheck(sensor);
+		else
+		{
+			//sensorFlag = !PhSensor_SingleCheck(sensor);
+			
+			pProjectMan->timerExpireFlag[1] = 0;
+			xTimerChangePeriod( pProjectMan->xTimerUser[1], pProjectMan->cutoffReturnDelay, 0);//4000/portTICK_PERIOD_MS
+		
+			while(!*pStopFlag && !pProjectMan->timerExpireFlag[1])
+			{
+				vTaskDelay(5);
+			}
+			if(*pStopFlag)
+				xTimerStop( pProjectMan->xTimerUser[1], 0);
+			
+			sensorFlag = 1;
+		}
+		
+		if(sensorFlag || *pStopFlag)
+		{
+			if(action && !*pStopFlag)//µ¶Æ¬ÖáÓÐµãËÉ£¬ÇÐ¶ÏÊ±ÒªÑÓ³ÙÒ»µãÔÙÍ£
+			{
+				vTaskDelay(pProjectMan->cutoff2Delay);//420
+			}
+			DCMotor_Stop(CUTOFF2_MOTOR);
+			break;
+		}
+		
+		vTaskDelay(5);
+	}
+}
+
+#if 0
+//¼ÓÈÈÆ¬¼ÓÈÈ
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void HeatingCutoff(uint8_t *pStopFlag)
+{
+	uint8_t flag1, flag2;
+	flag1 = 0;
+	flag2 = 0;
+	
+	DCMotor_Run(CUTOFF1HEATDCMOTOR1, CW, 100);
+	DCMotor_Run(CUTOFF1HEATDCMOTOR2, CW, 100);
+	DCMotor_Run(CUTOFF2HEATDCMOTOR1, CW, 100);
+	DCMotor_Run(CUTOFF2HEATDCMOTOR2, CW, 100);
+	flag1 = 0;
+	flag2 = 0;
+	while(1)
+	{
+		if((!flag1 && (adcTemp[0].temperature >= pProjectMan->cutoff1Temperature)) || *pStopFlag)
+		{
+			DCMotor_Stop(CUTOFF1HEATDCMOTOR1);
+			DCMotor_Stop(CUTOFF1HEATDCMOTOR2);
+			flag1 = 1;
+		}
+		if((!flag2 && (adcTemp[1].temperature >= pProjectMan->cutoff2Temperature)) || *pStopFlag)
+		{
+			DCMotor_Stop(CUTOFF2HEATDCMOTOR1);
+			DCMotor_Stop(CUTOFF2HEATDCMOTOR2);
+			flag2 = 1;
+		}
+		if(flag1 && flag2)
+			break;
+		
+		if(flag1 && !flag2)
+		{
+			if(adcTemp[0].temperature <= pProjectMan->cutoff1Temperature)
+			{
+				DCMotor_Run(CUTOFF1HEATDCMOTOR1, CW, 100);
+				DCMotor_Run(CUTOFF1HEATDCMOTOR2, CW, 100);
+				flag1 = 0;
+			}
+		}
+		else if(!flag1 && flag2)
+		{
+			if(adcTemp[1].temperature <= pProjectMan->cutoff2Temperature)
+			{
+				DCMotor_Run(CUTOFF2HEATDCMOTOR1, CW, 100);
+				DCMotor_Run(CUTOFF2HEATDCMOTOR2, CW, 100);
+				flag2 = 0;
+			}
+		}
+		
+		vTaskDelay(5);
+	}
+}
+
+//¼ÓÈÈÆ¬¼ÓÈÈ
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void HeatingCutoff1(uint8_t *pStopFlag)
+{
+	DCMotor_Run(CUTOFF1HEATDCMOTOR1, CW, 100);
+	DCMotor_Run(CUTOFF1HEATDCMOTOR2, CW, 100);
+	while(1)
+	{
+		if((adcTemp[0].temperature >= pProjectMan->cutoff1Temperature) || *pStopFlag)
+		{
+			DCMotor_Stop(CUTOFF1HEATDCMOTOR1);
+			DCMotor_Stop(CUTOFF1HEATDCMOTOR2);
+			break;
+		}
+		vTaskDelay(5);
+	}
+}
+
+//¼ÓÈÈÆ¬¼ÓÈÈ
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void HeatingCutoff2(uint8_t *pStopFlag)
+{
+	DCMotor_Run(CUTOFF2HEATDCMOTOR1, CW, 100);
+	DCMotor_Run(CUTOFF2HEATDCMOTOR2, CW, 100);
+	while(1)
+	{
+		if((adcTemp[1].temperature >= pProjectMan->cutoff2Temperature) || *pStopFlag)
+		{
+			DCMotor_Stop(CUTOFF2HEATDCMOTOR1);
+			DCMotor_Stop(CUTOFF2HEATDCMOTOR2);
+			break;
+		}
+		vTaskDelay(5);
+	}
+}
+#endif
+
+//·ÖÀë
+//action : 0,·ÖÀë; !=0,·ÖÀë±ÕºÏ
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void Separation(uint8_t action, uint8_t *pStopFlag)
+{
+	PhSensorEnum_TypeDef sensor;
+	Direction_TypeDef dir;
+	
+	if(action)
+	{
+		dir = CCW;
+		sensor = SAPERATE_SENSOR_L;
+	}
+	else
+	{
+		dir = CW;
+		sensor = SAPERATE_SENSOR_R;
+	}
+	
+	PhSensor_SingleScan(sensor);
+	if(!PhSensor_SingleCheck(sensor))
+		return;
+	
+	DCMotor_Run(SAPERATE_MOTOR, dir, 100);
+	while(1)
+	{
+		PhSensor_SingleScan(sensor);
+		if(!PhSensor_SingleCheck(sensor) || *pStopFlag)
+		{
+			DCMotor_Stop(SAPERATE_MOTOR);
+			break;
+		}
+		vTaskDelay(5);
+	}
+}
+
+//´íÎ»
+//action : 0,´íÎ»»ØÎ»; !=0,´íÎ»
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void Dislocation(uint8_t action, uint8_t *pStopFlag)
+{
+	PhSensorEnum_TypeDef sensor;
+	Direction_TypeDef dir;
+	
+	if(action)
+	{
+		dir = CCW;
+		sensor = DISPOS_SENSOR_L;
+	}
+	else
+	{
+		dir = CW;
+		sensor = DISPOS_SENSOR_R;
+	}
+	
+	PhSensor_SingleScan(sensor);
+	if(!PhSensor_SingleCheck(sensor))
+		return;
+	
+	StepMotor_SetDir(DISPOS_MOTOR, dir);
+	StepMotor_SetSpeed(DISPOS_MOTOR, 9);
+	StepMotor_SetCMD(DISPOS_MOTOR, ENABLE);
+	while(1)
+	{
+		PhSensor_SingleScan(sensor);
+		if(!PhSensor_SingleCheck(sensor) || *pStopFlag)
+		{
+			StepMotor_Stop(DISPOS_MOTOR);
+			break;
+		}
+		vTaskDelay(5);
+	}
+}
+
+//´íÎ»Ò»¶¨¾àÀë
+//action : 0,´íÎ»»ØÎ»; !=0,´íÎ»
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void DislocationDistance(uint8_t action, uint32_t distance, uint8_t *pStopFlag)
+{
+	Direction_TypeDef dir;
+	
+	if(action)
+		dir = CCW;
+	else
+		dir = CW;
+	
+	StepMotor_SetDir(DISPOS_MOTOR, dir);
+	StepMotor_SetSpeed(DISPOS_MOTOR, 9);
+	StepMotor_SetPluse(DISPOS_MOTOR, distance);
+	StepMotor_SetCMD(DISPOS_MOTOR, ENABLE);
+	while(1)
+	{
+		if(!StepMotor_IsStop(DISPOS_MOTOR) || *pStopFlag)
+			break;
+		
+		vTaskDelay(5);
+	}
+}
+
+//ÈÛ½Ó¼ÓÈÈ
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void Heating(uint8_t *pStopFlag)
+{
+	//ÈÛ½Ó¼ÓÈÈ
+	pProjectMan->fusingTempControlFlag = 0;
+	pProjectMan->fusingRaisingTempControlFlag = 1;
+	RELAY = 1;
+	while(1)
+	{
+		if(adcTemp[2].temperature >= pProjectMan->fusingTemperature || *pStopFlag)
+			break;
+		vTaskDelay(5);
+	}
+	RELAY = 0;
+	pProjectMan->fusingRaisingTempControlFlag = 0;
+	pProjectMan->fusingTempControlFlag = 1;//ÍË³öÎÂ¶È¿ØÖÆ£¬×¼±¸½µÎÂ
+}
+
+//¼ÓÈÈÆ¬Ì§Æð
+//action : 0,¼ÓÈÈÆ¬»ØÎ»; !=0,¼ÓÈÈÆ¬Ì§Æð
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void HeatingUp(uint8_t action, uint8_t *pStopFlag)
+{
+	if(action)
+	{
+		DCMotor_Run(HEATING_MOTOR, CW, pProjectMan->heatingUpSpeed);//30
+		
+		pProjectMan->timerExpireFlag[2] = 0;
+		xTimerChangePeriod( pProjectMan->xTimerUser[2], pProjectMan->heatingUpDelay, 0);
+		while(!pProjectMan->timerExpireFlag[2] && !*pStopFlag)
+			vTaskDelay(5);
+		if(*pStopFlag)
+		{
+			xTimerStop( pProjectMan->xTimerUser[2], 0 );
+		}
+		
+		DCMotor_Stop(HEATING_MOTOR);
+	}
+	else
+	{
+		PhSensor_SingleScan(HEATING_SENSOR_R);
+		if(!PhSensor_SingleCheck(HEATING_SENSOR_R))
+			return;
+		
+		DCMotor_Run(HEATING_MOTOR, CCW, pProjectMan->heatingDownSpeed);//30
+		while(1)
+		{
+			PhSensor_SingleScan(HEATING_SENSOR_R);
+			if(!PhSensor_SingleCheck(HEATING_SENSOR_R) || *pStopFlag)
+			{
+				vTaskDelay(pProjectMan->heatingDownDelay);
+				
+				DCMotor_Stop(HEATING_MOTOR);
+				break;
+			}
+			vTaskDelay(5);
+		}
+	}
+}
+
+//°ë¸´Î»£¬ÓÃÓÚÔÚ¼±Í£×´Ì¬ÏÂ
+void HalfResetOriginStatus(void)
+{
+	uint32_t cutoffReturnDelay = pProjectMan->cutoffReturnDelay;
+	pProjectMan->cutoffReturnDelay = 500;
+	
+	//ÇÐ¶Ï»ØÎ»
+	pProjectMan->cutoff1Action = 0;
+	pProjectMan->cutoff2Action = 0;
+	vTaskResume( pProjectMan->cutoff1TaskHandle );
+	vTaskResume( pProjectMan->cutoff2TaskHandle );
+	
+	//¼Ð½ôËÉ¿ª
+	pProjectMan->clamp1Action = 0;
+	pProjectMan->clamp2Action = 0;
+	vTaskResume( pProjectMan->clamp1TaskHandle );
+	vTaskResume( pProjectMan->clamp2TaskHandle );
+	
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP2, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF2, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	pProjectMan->cutoffReturnDelay = cutoffReturnDelay;
+}
+
+//»Ö¸´ÎªÔ­Ê¼×´Ì¬
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void ResetOriginStatus(uint8_t *pStopFlag)
+{
+	pProjectMan->projectCurrentStatus = 10;
+	
+	//·ÖÀë
+	pProjectMan->separationAction = 0;
+	vTaskResume( pProjectMan->separationTaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_SEPATATION, pdTRUE, pdFALSE, portMAX_DELAY);
+
+	//·ÅÏÂ¼ÓÈÈÆ¬
+	pProjectMan->heatingUpAction = 0;
+	vTaskResume( pProjectMan->heatingUpTaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_HEATINGUP, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//´íÎ»»ØÎ»
+	pProjectMan->dislocationAction = 0;
+	vTaskResume( pProjectMan->dislocationTaskHandle );
+
+	//ÇÐ¶Ï
+	pProjectMan->cutoff1Action = 1;
+	pProjectMan->cutoff2Action = 1;
+	vTaskResume( pProjectMan->cutoff1TaskHandle );
+	vTaskResume( pProjectMan->cutoff2TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF2, pdTRUE, pdFALSE, portMAX_DELAY);
+
+	//ÇÐ¶Ï»ØÎ»
+	pProjectMan->cutoff1Action = 0;
+	pProjectMan->cutoff2Action = 0;
+	vTaskResume( pProjectMan->cutoff1TaskHandle );
+	vTaskResume( pProjectMan->cutoff2TaskHandle );
+
+	//¼Ð½ôËÉ¿ª
+	pProjectMan->clamp1Action = 0;
+	pProjectMan->clamp2Action = 0;
+	vTaskResume( pProjectMan->clamp1TaskHandle );
+	vTaskResume( pProjectMan->clamp2TaskHandle );
+	
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_DISLOCATION, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//·ÖÀë±ÕºÏ
+	pProjectMan->separationAction = 1;
+	vTaskResume( pProjectMan->separationTaskHandle );
+	
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP2, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF2, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_SEPATATION, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	pProjectMan->projectCurrentStatus = 0;
+}
+
+//×Ô¶¯ÔËÐÐ1¸öÖÜÆÚ
+//stopFlag : 0,¼ÌÐø¶¯×÷; !=0,Ö÷¶¯ÍË³ö¶¯×÷
+void AutoRun(uint8_t *pStopFlag)
+{
+	//¼Ð½ô
+	pProjectMan->projectCurrentStatus = 1;
+	pProjectMan->clamp1Action = 1;
+	pProjectMan->clamp2Action = 1;
+	vTaskResume( pProjectMan->clamp1TaskHandle );
+	vTaskResume( pProjectMan->clamp2TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP2, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÇÐ¶Ï¼ÓÈÈÆ¬´ïµ½Ö¸¶¨ÎÂ¶È	
+	//ÇÐ¶Ï£¬²¢ÑÓÊ±Ò»¶¨Ê±¼ä×Ô¶¯»ØÎ»
+	pProjectMan->projectCurrentStatus = 2;
+	pProjectMan->cutoff1Action = 2;
+	pProjectMan->cutoff2Action = 2;
+	vTaskResume( pProjectMan->cutoff1TaskHandle );
+	vTaskResume( pProjectMan->cutoff2TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF2, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÈÛ½Ó¼ÓÈÈ
+	pProjectMan->fusingTempControlFlag = 0;
+	pProjectMan->fusingRaisingTempControlFlag = 1;//¼ÓÈÈµ½ÈÛ½ÓÎÂ¶Èµã
+	
+	vTaskDelay(1000);
+	
+	//·ÖÀë
+	pProjectMan->projectCurrentStatus = 3;
+	pProjectMan->separationAction = 0;
+	vTaskResume( pProjectMan->separationTaskHandle );
+	
+	//´íÎ»
+	pProjectMan->projectCurrentStatus = 4;
+	pProjectMan->dislocationAction = 1;
+	vTaskResume( pProjectMan->dislocationTaskHandle );
+	
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_SEPATATION, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_DISLOCATION, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÊÇ·ñ¼ÓÈÈµ½Ö¸¶¨ÎÂ¶È
+	pProjectMan->projectCurrentStatus = 5;
+#if !TEMPERATURE_MASK
+	while(!pProjectMan->heatingUpFlag && !pProjectMan->projectStopFlag)
+		vTaskDelay(5);
+#endif
+//	pProjectMan->fusingTempControlFlag = 0;
+//	pProjectMan->fusingRaisingTempControlFlag = 0;//·µ»ØÎ¬³ÖÎÂ¶Èµã
+	
+	//Ì§Æð¼ÓÈÈÆ¬
+	pProjectMan->projectCurrentStatus = 6;
+	pProjectMan->heatingUpAction = 1;
+	vTaskResume( pProjectMan->heatingUpTaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_HEATINGUP, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÑÓÊ±ÈÛ½ÓÊ±¼ä
+	pProjectMan->timerExpireFlag[2] = 0;
+	xTimerChangePeriod( pProjectMan->xTimerUser[2], pProjectMan->fusingTime, 0);
+	while(!pProjectMan->timerExpireFlag[2] && !pProjectMan->projectStopFlag)
+		vTaskDelay(5);
+	if(pProjectMan->projectStopFlag)
+		xTimerStop( pProjectMan->xTimerUser[2], 0 );
+
+	pProjectMan->fusingTempControlFlag = 0;
+	pProjectMan->fusingRaisingTempControlFlag = 0;//·µ»ØÎ¬³ÖÎÂ¶Èµã
+	
+	//·ÅÏÂ¼ÓÈÈÆ¬
+	pProjectMan->heatingUpAction = 0;
+	vTaskResume( pProjectMan->heatingUpTaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_HEATINGUP, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//·ÖÀë±ÕºÏ
+	pProjectMan->projectCurrentStatus = 7;
+	pProjectMan->separationAction = 1;
+	vTaskResume( pProjectMan->separationTaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_SEPATATION, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÑÓÊ±½ÓºÏÊ±¼ä
+	pProjectMan->timerExpireFlag[2] = 0;
+	xTimerChangePeriod( pProjectMan->xTimerUser[2], pProjectMan->jointTime, 0);
+	while(!pProjectMan->timerExpireFlag[2] && !pProjectMan->projectStopFlag)
+		vTaskDelay(5);
+	if(pProjectMan->projectStopFlag)
+		xTimerStop( pProjectMan->xTimerUser[2], 0 );
+	
+	//¼Ð½ôËÉ¿ª
+	pProjectMan->projectCurrentStatus = 8;
+	pProjectMan->clamp1Action = 0;
+	pProjectMan->clamp2Action = 0;
+	vTaskResume( pProjectMan->clamp1TaskHandle );
+	vTaskResume( pProjectMan->clamp2TaskHandle );
+	
+	//´íÎ»Ò»µã
+	pProjectMan->dislocationAction = 2;
+	vTaskResume( pProjectMan->dislocationTaskHandle );
+	
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP2, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_DISLOCATION, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÌáÊ¾È¡×ßÁ¬Í¨¹Ü
+	xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+	SetTextValue(TIPS1PAGE_INDEX, TIPS_TIPS_EDIT, (uint8_t*)"1 Çë¾¡¿ìÈ¡×ßÁ¬Í¨¹Ü£»\r\n2 ²¢¾¡¿ìÓÃË«ÊÖ½«¹ÜÄóÍ¨£¡");
+	SetScreen(TIPS1PAGE_INDEX);
+	SetTextValue(TIPS1PAGE_INDEX, TIPS_TIPS_EDIT, (uint8_t*)"1 Çë¾¡¿ìÈ¡×ßÁ¬Í¨¹Ü£»\r\n2 ²¢¾¡¿ìÓÃË«ÊÖ½«¹ÜÄóÍ¨£¡");
+	pProjectMan->tipsBuzzeFlag = 1;
+	xSemaphoreGive(pProjectMan->lcdUartSem);
+	
+	//µÈ´ýÇÐ¶Ï»ØÎ»
+	pProjectMan->projectCurrentStatus = 9;
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF1, pdTRUE, pdFALSE, portMAX_DELAY);
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF2, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÌáÊ¾È¡×ßÊ£ÓàµÄ¹Ü
+	xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+	SetTextValue(TIPS1PAGE_INDEX, TIPS_TIPS_EDIT, (uint8_t*)"1 Çë¾¡¿ìÈ¡×ßÊ£ÓàµÄ¹Ü£»\r\n2 ×¢Òâ:ÔÚÀäÈ´Ç°²»ÒªÓÃÊÖÄó£¡");
+	SetScreen(TIPS1PAGE_INDEX);
+	SetTextValue(TIPS1PAGE_INDEX, TIPS_TIPS_EDIT, (uint8_t*)"1 Çë¾¡¿ìÈ¡×ßÊ£ÓàµÄ¹Ü£»\r\n2 ×¢Òâ:ÔÚÀäÈ´Ç°²»ÒªÓÃÊÖÄó£¡");
+	pProjectMan->tipsBuzzeFlag = 1;
+	xSemaphoreGive(pProjectMan->lcdUartSem);
+	
+	pProjectMan->projectCurrentStatus = 80;
+}
+
+void AutoRun_Cutoff1(uint8_t *pStopFlag)
+{
+	//¼Ð½ô
+	pProjectMan->clamp2Action = 1;
+	vTaskResume( pProjectMan->clamp2TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP2, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÇÐ¶Ï£¬²¢ÑÓÊ±Ò»¶¨Ê±¼äÔÙ»ØÎ»
+	pProjectMan->cutoff1Action = 2;
+	vTaskResume( pProjectMan->cutoff1TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF1, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	vTaskDelay(1000);
+	
+	//·ÖÀë
+	pProjectMan->separationAction = 0;
+	vTaskResume( pProjectMan->separationTaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_SEPATATION, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//µÈ´ý½µÎÂÑÓÊ±Íê³É£¬ÕâÊ±ÇÐ¶ÏÒÑ¾­»ØÎ»
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF1, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//¼Ð½ôËÉ¿ª
+	pProjectMan->clamp2Action = 0;
+	vTaskResume( pProjectMan->clamp2TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP2, pdTRUE, pdFALSE, portMAX_DELAY);
+}
+
+void AutoRun_Cutoff2(uint8_t *pStopFlag)
+{
+	//¼Ð½ô
+	pProjectMan->clamp1Action = 1;
+	vTaskResume( pProjectMan->clamp1TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP1, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//ÇÐ¶Ï£¬²¢ÑÓÊ±Ò»¶¨Ê±¼äÔÙ»ØÎ»
+	pProjectMan->cutoff2Action = 2;
+	vTaskResume( pProjectMan->cutoff2TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF2, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	vTaskDelay(1000);
+	
+	//·ÖÀë
+	pProjectMan->separationAction = 0;
+	vTaskResume( pProjectMan->separationTaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_SEPATATION, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//µÈ´ý½µÎÂÑÓÊ±Íê³É£¬ÕâÊ±ÇÐ¶ÏÒÑ¾­»ØÎ»
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CUTOFF2, pdTRUE, pdFALSE, portMAX_DELAY);
+	
+	//¼Ð½ôËÉ¿ª
+	pProjectMan->clamp1Action = 0;
+	vTaskResume( pProjectMan->clamp1TaskHandle );
+	xEventGroupWaitBits(pProjectMan->projectEventGroup, 1UL<<PROJECT_EVENTPOS_CLAMP1, pdTRUE, pdFALSE, portMAX_DELAY);
+}
+
+void ProjectTask(void)
+{
+	uint32_t j;
+	static uint8_t systemPreheatingFlag = 0;
+	
+//	while(!pProjectMan->lcdNotifyResetFlag)
+//		vTaskDelay(100);
+//	
+//	pProjectMan->lcdNotifyResetFlag = 0;
+	ResetDevice();//¸´Î»´®¿ÚÆÁ
+	ResetDevice();//¸´Î»´®¿ÚÆÁ
+	
+	for(j=0;j<336;j++);
+	//for(j=0;j<65536;j++);
+	//for(j=0;j<65536;j++);
+	
+	//·¢ËÍÎÕÊÖÃüÁî
+	SetHandShake();//·¢ËÍÎÕÊÖÃüÁî
+	SetHandShake();//·¢ËÍÎÕÊÖÃüÁî£¬µÚÒ»¸öÎÕÊÖÃüÁî»á¶ªÊ§
+	SetHandShake();//·¢ËÍÎÕÊÖÃüÁî
+	
+	while(!pProjectMan->lcdNotifyResetFlag)
+		vTaskDelay(100);
+	
+	while(1)
+	{
+		if(!GPIO_ReadInputDataBit(GPIOE, GPIO_Pin_0))
+		{
+			static uint8_t flag = 0;
+			if(!flag)
+			{
+				flag = 1;
+				xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+				SetTextValue(TIPSPAGE_INDEX, TIPS_TIPS_EDIT, (uint8_t*)"ÇëËÉ¿ª¼±Í£ÐýÅ¥£¡");
+				SetScreen(TIPSPAGE_INDEX);
+				xSemaphoreGive(pProjectMan->lcdUartSem);
+			}
+		}
+		else
+			break;
+		
+		vTaskDelay(10);
+	}
+	
+	//Èç¹ûÉÏ´Î¹Ø»úÇ°ÓÐ°´¼±Í££¬ÔòËÉ¿ª¼Ð½ôºÍÇÐ¶Ï»ØÎ»
+	if(pProjectMan->systemEmergencyFlag)
+	{
+		xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+		SetTextValue(TIPS1PAGE_INDEX, TIPS_TIPS_EDIT, (uint8_t*)"1 Çë½«Éè±¸ÉÏµÄ¹ÜÇåÀí×ß£»\r\n2 ÇåÀíÍêºóÇëÊÖ¶¯¸´Î»£¡");
+		SetScreen(TIPS1PAGE_INDEX);
+		xSemaphoreGive(pProjectMan->lcdUartSem);
+
+		HalfResetOriginStatus();
+		
+		pProjectMan->tipsBuzzeFlag = 2;//¿ª·äÃùÆ÷
+		
+		pProjectMan->systemEmergencyFlag = 0;
+		AT24CXX_Write(EMERGENCYFLAG_BASEADDR, (uint8_t*)&pProjectMan->systemEmergencyFlag, 1);
+		pProjectMan->autoButtonFlag = 1;
+		
+		//vTaskDelay(1000);
+	}
+	else
+	{
+		xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+		SetTextValue(LOGOPAGE_INDEX, LOGO_STATUS_EDIT, (uint8_t*)"ÏµÍ³¸´Î»ÖÐ¡­¡­");
+		SetScreen(LOGOPAGE_INDEX);
+		xSemaphoreGive(pProjectMan->lcdUartSem);
+		ResetOriginStatus(&pProjectMan->projectStopFlag);
+		pProjectMan->autoButtonFlag = 0;
+		
+		xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+		SetTextValue(LOGOPAGE_INDEX, LOGO_STATUS_EDIT, (uint8_t*)"ÏµÍ³Ô¤ÈÈÖÐ¡­¡­");
+		SetScreen(LOGOPAGE_INDEX);
+		xSemaphoreGive(pProjectMan->lcdUartSem);
+	}
+	
+	pProjectMan->systemPowerUpFlag = 2;
+	
+//	while(1)
+//	{
+//		if((adcTemp[0].temperature >= pProjectMan->cutoff1Temperature)
+//			&& (adcTemp[1].temperature >= pProjectMan->cutoff2Temperature)
+//			&& (adcTemp[2].temperature >= pProjectMan->fusingHoldingTemperature))
+//		{
+//			xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+//			SetTextInt32(MAINPAGE_INDEX, MAIN_OUTPUT_EDIT, pProjectMan->totalOutput, 0, 0);
+//			SetScreen(MAINPAGE_INDEX);
+//			xSemaphoreGive(pProjectMan->lcdUartSem);	
+//			break;
+//		}
+//		else
+//			vTaskDelay(10);
+//	}
+	
+	while(1)
+	{
+#if 1	
+		if((pProjectMan->systemPowerUpFlag == 2) && (pProjectMan->tipsBuzzeFlag == 0))
+		{
+			if(!systemPreheatingFlag)
+			{
+				xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+				SetTextValue(LOGOPAGE_INDEX, LOGO_STATUS_EDIT, (uint8_t*)"ÏµÍ³Ô¤ÈÈÖÐ¡­¡­");
+				SetScreen(LOGOPAGE_INDEX);
+				xSemaphoreGive(pProjectMan->lcdUartSem);
+				
+				systemPreheatingFlag = 1;
+			}
+			
+			if((adcTemp[0].temperature >= pProjectMan->cutoff1Temperature)
+				&& (adcTemp[1].temperature >= pProjectMan->cutoff2Temperature)
+				&& (adcTemp[2].temperature >= pProjectMan->fusingHoldingTemperature))
+			{
+				xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+				SetTextInt32(MAINPAGE_INDEX, MAIN_OUTPUT_EDIT, pProjectMan->totalOutput, 0, 0);
+				SetScreen(MAINPAGE_INDEX);
+				xSemaphoreGive(pProjectMan->lcdUartSem);
+
+				pProjectMan->systemPowerUpFlag = 1;
+			}
+		}
+		
+		if(pProjectMan->projectStatus&PROJECT_RUNNING)
+		{
+			switch(pProjectMan->projectStatus&0x7F)
+			{
+				case PROJECT_MANUAL_CLAMP1CW:
+					Clamp1(1, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_CLAMP1CW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);				
+				break;
+				case PROJECT_MANUAL_CLAMP1CCW:
+					Clamp1(0, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_CLAMP1CCW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_CLAMP2CW:
+					Clamp2(1, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_CLAMP2CW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_CLAMP2CCW:
+					Clamp2(0, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_CLAMP2CCW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_CUTOFF1CW:
+					Cutoff1(1, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_CUTOFF1CW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_CUTOFF1CCW:
+					Cutoff1(0, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_CUTOFF1CCW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_CUTOFF2CW:
+					Cutoff2(1, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_CUTOFF2CW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_CUTOFF2CCW:
+					Cutoff2(0, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_CUTOFF2CCW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_HEATINGUP:
+					HeatingUp(1, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_HEATINGUP_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_HEATINGDOWN:
+					HeatingUp(0, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_HEATINGDOWN_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_SEPATATIONCW:
+					Separation(1, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_SEPARATECW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_SEPATATIONCCW:
+					Separation(0, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_SEPARATECCW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_DISLOCATIONCW:
+					Dislocation(1, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_DISLOCATECW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_MANUAL_DISLOCATIONCCW:
+					Dislocation(0, &(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(MANUALPAGE_INDEX, MANUAL_DISLOCATECCW_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				
+				case PROJECT_STATUS_CUTOFF1:
+					AutoRun_Cutoff1(&(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(STATUSPAGE_INDEX, STATUS_CUTOFF1_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_STATUS_CUTOFF2:
+					AutoRun_Cutoff2(&(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(STATUSPAGE_INDEX, STATUS_CUTOFF2_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				
+				case PROJECT_STATUS_RESET:
+					ResetOriginStatus(&(pProjectMan->projectStopFlag));
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(STATUSPAGE_INDEX, STATUS_RESET_BUTTON, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+				break;
+				case PROJECT_STATUS_AUTO:
+					AutoRun(&(pProjectMan->projectStopFlag));
+					pProjectMan->totalOutput++;
+					if(pProjectMan->totalOutput > 0xFFFFFFFF)
+						pProjectMan->totalOutput = 0;
+					
+					xSemaphoreTake(pProjectMan->lcdUartSem, portMAX_DELAY);
+					SetButtonValue(STATUSPAGE_INDEX, STATUS_AUTO_BUTTON, 0);
+					SetTextInt32(MAINPAGE_INDEX, MAIN_OUTPUT_EDIT, pProjectMan->totalOutput, 0, 0);
+					xSemaphoreGive(pProjectMan->lcdUartSem);
+					
+					AT24CXX_Write(TOTALOUTPUT_BASEADDR, (uint8_t*)&pProjectMan->totalOutput, 4);
+				break;
+			}
+			xSemaphoreTake(pProjectMan->projectStatusSem, portMAX_DELAY);
+			if((pProjectMan->projectStatus&0x7F) != PROJECT_STATUS_RESET)
+				pProjectMan->autoButtonFlag = 1;
+			else
+				pProjectMan->autoButtonFlag = 0;
+			pProjectMan->projectStatus = 0;
+			pProjectMan->projectStopFlag = 0;
+			pProjectMan->autoNResetFlag = 0;
+			xSemaphoreGive(pProjectMan->projectStatusSem);
+		}
+		else
+			vTaskDelay(10);
+#endif
+		
+		LED2Task(); //LED2ÉÁË¸Ö¸Ê¾PROJECTÏß³ÌÕýÔÚÔËÐÐ	
+	}
+}
+
+#ifdef __cplusplus
+}
+#endif

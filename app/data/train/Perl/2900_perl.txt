@@ -1,0 +1,107 @@
+#!/usr/bin/perl
+#
+# check_rabbitmq.pl - A simple script to check queue size, callable from Icinga or Nagios
+# Copyright (C) 2014 Matthew B. Gray
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+
+
+# There are a couple of deps...
+# sudo apt-get install libjson-xs-perl libgetopt-mixed-perl
+
+# Usage
+# ./check_rabbitmq.pl -w $warning -c $critical
+
+
+use 5.010;
+use strict;
+use warnings;
+
+use JSON::XS;
+use Data::Dumper;
+use LWP;
+use LWP::UserAgent;
+use Getopt::Long qw(GetOptions);
+
+my %opt;
+if ( not GetOptions(\%opt, 'warning|w=s', 'critical|c=s') ) {
+  say "Please specify warning and critical levels with -w and -c";
+  exit 3;
+}
+
+my $warning_level = $opt{warning};
+my $critical_level = $opt{critical};
+
+if ( not $warning_level or not $critical_level ) {
+  say "Please specify warning and critical levels with -w and -c";
+  exit 3;
+}
+if ( $warning_level > $critical_level ) {
+  say "Er, warn after we've gone critical? What a silly you are.";
+  exit 3;
+}
+
+my $user = 'nagios';
+my $pass = 'nagios';
+
+my $queue_api_url = "http://${user}:${pass}\@127.0.0.1:15672/api/queues";
+
+# Create a user agent object
+my $ua = LWP::UserAgent->new;
+$ua->agent("nagios-rabbit-checker/0.1 ");
+
+# Create a request
+my $req = HTTP::Request->new(GET => $queue_api_url);
+$req->content_type('application/x-www-form-urlencoded');
+
+# Pass request to the user agent and get a response back
+my $res = $ua->request($req);
+
+# If not success, bail
+if (not $res->is_success) {
+  say "Cannot get to rabbitmq on $queue_api_url";
+  exit 3;
+}
+
+# If non json, bail
+my $data = eval { decode_json($res->content); };
+if ( $@ ) {
+  say "Malformed response from rabbitmq on $queue_api_url";
+  say "==================================================";
+  say $res->content;
+  exit 3;
+}
+
+# If too many queues, bail
+my $number_of_queues = scalar @$data;
+if ( $number_of_queues != 1 ) {
+  say "There's more than one queue, please rewrite this script ;-)";
+  exit 3;
+}
+
+# Check if message count is critical, warning or ok
+my $message_count = $data->[0]{messages};
+
+if ( $message_count > $critical_level ) {
+  say "Critical ==> $message_count in queue";
+  exit 2;
+}
+if ( $message_count > $warning_level ) {
+  say "Warning ==> $message_count in queue";
+  exit 1;
+}
+
+say "OK ==> $message_count in queue";
+exit 0;

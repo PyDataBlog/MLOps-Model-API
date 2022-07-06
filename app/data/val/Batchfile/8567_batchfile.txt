@@ -1,0 +1,1 @@
+cmd_drivers/input/misc/adxl34x.ko := ../tools/arm-bcm2708/arm-bcm2708hardfp-linux-gnueabi/bin/arm-bcm2708hardfp-linux-gnueabi-ld -EL -r  -T ./scripts/module-common.lds --build-id  -o drivers/input/misc/adxl34x.ko drivers/input/misc/adxl34x.o drivers/input/misc/adxl34x.mod.o

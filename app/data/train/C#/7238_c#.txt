@@ -1,0 +1,422 @@
+﻿using OpenTK.Graphics;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace FreeDF
+{
+    interface IDrawable
+    {
+        int GetWidth();
+        int GetHeight();
+        int GetX();
+        int GetY();
+        Color4 GetFG();
+        Color4 GetBG();
+        void Draw();
+        void SetHost(IDrawable host);
+        void SetForegroundColor(Color4 fg);
+        void SetBackgroundColor(Color4 bg);
+    }
+
+    abstract class Gadget : IDrawable
+    {
+        protected int x, y;
+        protected IDrawable host;
+        protected Color4 fgcolor;
+        protected Color4 bgcolor;
+
+        public int GetX()
+        {
+            return x;
+        }
+        public int GetY()
+        {
+            return y;
+        }
+        public abstract int GetWidth();
+        public abstract int GetHeight();
+
+        public abstract void Draw();
+        
+        public virtual void SetHost(IDrawable host)
+        {
+            this.host = host;
+            GUI.Change();
+        }
+
+        public virtual Color4 GetFG()
+        {
+            if ((fgcolor == new Color4()) && (host != null)) return host.GetFG();
+            else return fgcolor;
+        }
+
+        public virtual Color4 GetBG()
+        {
+            if ((bgcolor == new Color4()) && (host != null)) return host.GetBG();
+            else return bgcolor;
+        }
+
+        public virtual void SetForegroundColor(Color4 fg)
+        {
+            fgcolor = fg;
+            GUI.Change();
+        }
+
+        public virtual void SetBackgroundColor(Color4 bg)
+        {
+            bgcolor = bg;
+            GUI.Change();
+        }
+    }
+
+    class Label : Gadget
+    {
+        string text;
+
+        public Label(int x, int y, string text, IDrawable host=null)
+        {
+            this.text = text;
+            this.x = x;
+            this.y = y;
+            SetHost(host);
+        }
+
+        public override int GetWidth() {
+            return text.Length;
+        }
+        public override int GetHeight()
+        {
+            return 1;
+        }
+
+        public override void Draw()
+        {
+            ConsoleWindowManager.Write(y + host.GetY(), x + host.GetX(), text, GetFG(), GetBG());
+        }
+    }
+
+    enum AlignmentType { left, center, right};
+
+    class Selector : Gadget, IControllable
+    {
+        List<Button> buttons = new List<Button>();
+        int selectedButton = 0;
+
+        public Selector(int x, int y, Dictionary<string, Action> buttons, IDrawable host=null)
+        {
+            int i = 0;
+            foreach(string s in buttons.Keys)
+            {
+                int w = buttons.Max((kvp) => kvp.Key.Length);
+                Button but = new Button(x, y + i, s, w, buttons[s]);
+                but.SetHost(this);
+                this.buttons.Add(but);
+                i += 2;
+            }
+            SetHost(host);
+            InvertActiveLabel();
+        }
+
+        public void SetTextAlignment(AlignmentType align)
+        {
+            foreach(Button b in buttons)
+            {
+                b.SetTextAlignment(align);
+            }
+        }
+
+        public override void SetHost(IDrawable host)
+        {
+            base.SetHost(host);
+            InvertActiveLabel();
+        }
+
+        void InvertActiveLabel()
+        {
+            buttons[selectedButton].SetBackgroundColor(GetFG());
+            buttons[selectedButton].SetForegroundColor(GetBG());
+        }
+
+        void NormalizeActiveLabel()
+        {
+            buttons[selectedButton].SetBackgroundColor(GetBG());
+            buttons[selectedButton].SetForegroundColor(GetFG());
+        }
+
+        public override void SetForegroundColor(Color4 fg)
+        {
+            base.SetForegroundColor(fg);
+            InvertActiveLabel();
+        }
+
+        public override void SetBackgroundColor(Color4 bg)
+        {
+            base.SetBackgroundColor(bg);
+            InvertActiveLabel();
+        }
+
+        public override void Draw()
+        {
+            foreach (Button b in buttons) b.Draw();
+        }
+
+        public override int GetHeight()
+        {
+            return 2 * buttons.Count - 1;
+        }
+
+        public override int GetWidth()
+        {
+            return buttons.Max((label) => label.GetWidth());
+        }
+
+        void Back()
+        {
+            NormalizeActiveLabel();
+            selectedButton--;
+            if (selectedButton < 0) selectedButton += buttons.Count;
+            InvertActiveLabel();
+            GUI.Change();
+        }
+
+        void Forward()
+        {
+            NormalizeActiveLabel();
+            selectedButton++;
+            if (selectedButton >= buttons.Count) selectedButton -= buttons.Count;
+            InvertActiveLabel();
+            GUI.Change();
+        }
+
+        public void KeyPress(string key)
+        {
+            switch (key)
+            {
+                case "enter":
+                    buttons[selectedButton].Act();
+                    break;
+                case "up":
+                    Back();
+                    break;
+                case "down":
+                    Forward();
+                    break;
+                default:
+                    throw new Exception("WTF, don't know what to do with key " + key);
+            }
+        }
+
+        public bool AcceptsKey(string key)
+        {
+            return (key == "enter") || (key == "up") || (key == "down");
+        }
+    }
+
+    class Button : Gadget
+    {
+        string text;
+        Action action;
+        AlignmentType textAlign = AlignmentType.left;
+        int width;
+
+        public void SetTextAlignment(AlignmentType align)
+        {
+            if (align != textAlign) GUI.Change();
+            textAlign = align;
+        }
+
+        public Button(int x, int y, string text, int width, Action action, IDrawable host=null)
+        {
+            this.text = text;
+            this.x = x;
+            this.y = y;
+            SetHost(host);
+            this.action = action;
+            this.width = width;
+        }
+
+        public void Act()
+        {
+            action();
+        }
+
+        public override int GetWidth()
+        {
+            return width;
+        }
+        public override int GetHeight()
+        {
+            return 1;
+        }
+
+        public void SetAction(Action action)
+        {
+            this.action = action;
+        }
+
+        public override void Draw()
+        {
+            switch (textAlign)
+            {
+                case AlignmentType.left:
+                    int pos_x = x + host.GetX();
+                    int pos_space = pos_x + text.Length;
+
+                    ConsoleWindowManager.Write(y + host.GetY(), pos_x, text, GetFG(), GetBG());
+                    ConsoleWindowManager.Write(y + host.GetY(), pos_space, new string(' ', width - text.Length), GetFG(), GetBG());
+                    break;
+                case AlignmentType.right:
+                    pos_x = x + host.GetX() + GetWidth() - text.Length;
+                    pos_space = x + host.GetX();
+
+                    ConsoleWindowManager.Write(y + host.GetY(), pos_x, text, GetFG(), GetBG());
+                    ConsoleWindowManager.Write(y + host.GetY(), pos_space, new string(' ', width - text.Length), GetFG(), GetBG());
+                    break;
+
+                case AlignmentType.center:
+                    pos_x = x + host.GetX() + (GetWidth() - text.Length) / 2;
+                    pos_space = x + host.GetX();
+
+                    ConsoleWindowManager.Write(y + host.GetY(), pos_space, new string(' ', width), GetFG(), GetBG());
+                    ConsoleWindowManager.Write(y + host.GetY(), pos_x, text, GetFG(), GetBG());
+                    break;
+            }
+        }
+    }
+
+    class SymbolMatrix : Gadget, IControllable
+    {
+        int width, height;
+        char[,] matrix;
+        Color4[,] foreground;
+        Color4[,] background;
+
+        public override void Draw()
+        {
+            for (int i = 0; i< width; i++)
+                for (int j = 0; j < height; j++)
+                    ConsoleWindowManager.Write(x + i, y + j, matrix[i, j], foreground[i, j], background[i, j]);
+        }
+
+        public SymbolMatrix(int width, int height)
+        {
+            this.width = width;
+            this.height = height;
+            matrix = new char[width, height];
+            foreground = new Color4[width, height];
+            background = new Color4[width, height];
+        }
+
+        public void SetPixel(int x, int y, char c, Color4 fg, Color4 bg)
+        {
+            matrix[x, y] = c;
+            foreground[x, y] = fg;
+            background[x, y] = bg;
+            GUI.Change();
+        }
+
+        public void SetRectangle(int x, int y, string[] lines, Color4[,] fgs, Color4[,] bgs)
+            // NB! Despite the fact that the chars in lines are numbered like [y, x],
+            // the colors should be numbered like [x, y]
+        {
+            for (int i = 0; i < lines.Length; i++)
+                for (int j = 0; j < lines[i].Length; j++)
+                {
+                    matrix[j, i] = lines[i][j];
+                    foreground[j, i] = fgs[j, i];
+                    background[j, i] = bgs[j, i];
+                }
+            GUI.Change();
+        }
+
+        public void SetRectangle(int x, int y, ColoredSymbolMatrix CSM)
+        {
+            SetRectangle(x, y, Misc.ConvertChar2DToString1D(CSM.symbols, CSM.width, CSM.height), CSM.foreground, CSM.background);
+        }
+
+        public void SetRectangle(int x, int y, string[] lines, Color4 fg, Color4 bg)
+        {
+            for (int i = 0; i < lines.Length; i++)
+                for (int j = 0; j < lines[i].Length; j++)
+                {
+                    matrix[j, i] = lines[i][j];
+                    foreground[j, i] = fg;
+                    background[j, i] = bg;
+                }
+            GUI.Change();
+        }
+
+        public override int GetHeight()
+        {
+            return height;
+        }
+
+        public override int GetWidth()
+        {
+            return width;
+        }
+
+        public virtual void KeyPress(string key)
+        {
+            
+        }
+
+        public virtual bool AcceptsKey(string key)
+        {
+            return false;
+        }
+    }
+
+    class SymbolMatrixWithCursor : SymbolMatrix
+    {
+        public SymbolMatrixWithCursor(int width, int height) : base(width, height)
+        {
+        }
+
+        int cursorX = 0, cursorY = 0;
+        public Action upAction = () => { }, leftAction = () => { }, rightAction = () => { }, downAction = () => { };
+        public Dictionary<string, Action> bindings = new Dictionary<string, Action>();
+
+        public int CursorX { get { return cursorX; } }
+        public int CursorY { get { return cursorY; } }
+
+        public override bool AcceptsKey(string key)
+        {
+            return bindings.ContainsKey(key);
+        }
+
+        public override void KeyPress(string key)
+        {
+            bindings[key]();
+        }
+
+        public Pair<int> GetCursorPosition()
+        {
+            return new Pair<int>(cursorX, cursorY);
+        }
+
+        public void On(string key, Action action)
+        {
+            if (!bindings.ContainsKey(key)) bindings[key] = () => { };
+            bindings[key] += action;
+        }
+
+        public override void Draw()
+        {
+            base.Draw();
+            ConsoleWindowManager.Write(host.GetX() + cursorX, host.GetY() + y + cursorY, 'X', Color4.Red, Color4.Black);
+        }
+
+        public void BindDirectionKeysToCursor()
+        {
+            On("left", () => { cursorX--; });
+            On("right", () => { cursorX++; });
+            On("up", () => { cursorY--; });
+            On("down", () => { cursorY++; });
+        }
+
+    }
+}

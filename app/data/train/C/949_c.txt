@@ -1,0 +1,195 @@
+/*
+ * gtpm-mgr
+ *
+ * Version 1.00
+ * Copyright (C) 2012-2014 Nicolas Provost dev AT doronic DOT fr
+ *
+ * This program is free software; you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation; either version 2 of the License, or
+ * (at your option) any later version.
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ * You should have received a copy of the GNU General Public License
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA
+ */
+
+#include <gtk/gtk.h>
+#include "llib_tpm.h"
+#include "llib_opt.h"
+#include "llib_print.h"
+#include "llib_gtk.h"
+#include "gtpm_mgr.h"
+#include "gtpm_ui.h"
+#include "gtpm_tpm.h"
+#include "gtpm_uio.h"
+
+static void gtpm_mgr_reset_vars(gtpm_config_t* gmgr)
+{
+	llib_data_free(&gmgr->args.output);
+	llib_data_free(&gmgr->args.data);
+	llib_data_free(&gmgr->args.data2);
+	llib_data_free(&gmgr->args.encdata);
+	gmgr->args.set = 0;
+	llib_tpm_keystore_release_one_shot_key(gmgr->args.keystore);
+}
+
+/* run a command from the label of the clicked item */
+void gtpm_mgr_run (gtpm_config_t* gmgr, const char* label)
+{
+	lbool res;
+	const struct gtpm_menu_action_t* entry = &gtpm_tpm_menu_entries[0];
+
+	/* find the command from the label */
+	while (entry && entry->label && entry->job)
+	{
+		if (llib_str_equ(entry->label, label,0))
+			break;
+		entry++;
+	}
+	if (!entry || !entry->label || !entry->job)
+	{
+		gmgr->tpm.last_error = LLIB_TPM_ERROR_UNIMPLEMENTED;
+		llib_tpm_uio_error (&gmgr->args, "Unable to run command");
+		llib_print_f(2, "[gtpm-mgr] unknown command label '%s'\n", label);
+		return;
+	}
+	/* get descriptor */
+	gmgr->args.desc = llib_tpm_find_descriptor (entry->job);
+	if (!gmgr->args.desc)
+	{
+		gmgr->tpm.last_error = LLIB_TPM_ERROR_UNIMPLEMENTED;
+		llib_tpm_uio_error (&gmgr->args, "Unable to run command");
+		llib_print_f(2, "[gtpm-mgr] unknown descriptor '%s'\n",
+						gmgr->args.desc);
+		return;
+	}
+	/* set standard output if no other choice */
+	if ((gmgr->args.desc->in & LLIB_TPM_FOUTPUT) &&
+		!gmgr->args.cargs->output &&
+		!(gmgr->args.desc->sin & LLIB_TPM_FSOUTPUTNODEF))
+	{
+		gmgr->args.output = llib_data_create_text_buffer();
+		if (!gmgr->args.output)
+		{
+			llib_tpm_uio_printf (&gmgr->args, LLIB_TPM_UIO_ERR,
+								 "unable to open standard output\n");
+			return;
+		}
+		gmgr->args.set |= LLIB_TPM_FOUTPUT;
+	}
+	/* run the command */
+	llib_gtku_set_cursor (GTK_WIDGET(gmgr->ui.gWindow), GDK_CIRCLE);
+	llib_gtku_process_signals ();
+	if (llib_tpm_run (&gmgr->tpm, entry->job, &gmgr->args, &res) && res)
+	{
+		llib_gtku_set_cursor (GTK_WIDGET(gmgr->ui.gWindow), GDK_ARROW);
+		llib_tpm_keystore_add_one_shot_key (gmgr->args.keystore);
+		if (gmgr->args.output &&
+			(gmgr->args.output->type == LLIB_DATA_TYPE_BUFFER) &&
+			(llib_buffer_type(&gmgr->args.output->data.buffer)
+												 == LLIB_BUFFER_TEXT))
+		{
+			gtpmuio_output_text (&gmgr->args, "command result",
+								 &gmgr->args.output->data.buffer);
+		}
+	}
+	else
+	{
+		llib_gtku_set_cursor (GTK_WIDGET(gmgr->ui.gWindow), GDK_ARROW);
+		llib_tpm_uio_error (&gmgr->args, "Unable to run command");
+	}
+	gtpm_mgr_reset_vars(gmgr);
+	llib_gtku_set_cursor(GTK_WIDGET(gmgr->ui.gWindow), GDK_ARROW);
+}
+
+static void gtpm_mgr_clean(gtpm_config_t* gmgr) {
+	llib_tpm_free(&gmgr->tpm);
+	llib_tpm_store_free(gmgr->args.store);
+	llib_tpm_keystore_free(gmgr->args.keystore);
+	llib_tpm_uio_free(&gmgr->uio);
+}
+
+int main(int argc, char* argv[])
+{
+	gtpm_config_t gmgr;
+	int retcode = EXIT_FAILURE;
+	char c;
+	char* arg = NULL;
+	char* devpath = NULL;
+
+	llib_mem_zero(&gmgr, sizeof(gtpm_config_t));
+	gmgr.args.cargs = &gmgr.cargs;
+	gmgr.args.store = gmgr.cargs.store = &gmgr.cargs.st.store;
+	llib_tpm_key_init(&gmgr.cargs.st.store_key);
+	llib_tpm_store_init(gmgr.args.store, &gmgr.tpm, NULL);
+	gmgr.cargs.st.store.key = &gmgr.cargs.st.store_key;
+	gmgr.args.uio = &gmgr.uio;
+	gmgr.cargs.st.ui = &gmgr.ui;
+	gmgr.args.tpm = &gmgr.tpm;
+	gmgr.args.keystore = &gmgr.cargs.st.keystore;
+	gmgr.args.o = gmgr.cargs.o = &gmgr.cargs.st.o;
+	llib_tpm_store_object_init(gmgr.args.o, NULL, NULL);
+	gtpmuio_init(&gmgr.uio, &gmgr.args);
+	llib_tpm_keystore_init(gmgr.args.keystore);
+
+	llib_print_f(1, "gtpm-mgr v" VERSION "\n");
+	llib_print_f(1, "usage: [-dtpm|store|all (debug)] [-v (verbose)] "
+					"[-tTPM_DEV_PATH (default is /dev/tpm0)]\n");
+
+	while ((c = llib_opt_get_short(argc, argv, "vd::t::", &arg)) != -1)
+	{
+    	switch (c)
+		{
+			case 'v':
+				gmgr.args.verbose = TRUE;
+				break;
+			case 'd':
+				if (llib_str_equ(arg, "all", 0) ||
+					llib_str_equ(arg, "store", 0))
+				{
+					gmgr.args.debug = TRUE;
+					gmgr.args.store->debug = TRUE;
+				}
+				if (llib_str_equ(arg, "all", 0) ||
+					llib_str_equ(arg, "tpm",0))
+					gmgr.tpm.debug = TRUE;
+				break;
+      		case 't':
+				if (!arg)
+				{
+					llib_print_f(2, "[gtpm-mgr] FATAL: missing TPM device path\n");
+ 					return EXIT_FAILURE;
+				}
+        		devpath = llib_str_dup(arg);
+				llib_print_f(2, "[gtpm-mgr] using TPM at %s\n", arg);
+	        	break;
+	    }
+		llib_str_release(&arg);
+	}
+
+	gtk_init(&argc, &argv);
+	if (!gtpm_ui_build(&gmgr))
+	{
+		llib_print_f(2, "[gtpm-mgr] FATAL: unable to build graphical "
+						"interface, aborting\n");
+	}
+	else
+	{
+		if (!llib_tpm_init(&gmgr.tpm, devpath, 30, gmgr.tpm.debug))
+			llib_tpm_uio_error(&gmgr.args, "TPM initialization error");
+		else
+		{
+			gtk_widget_show_all(GTK_WIDGET(gmgr.ui.gWindow));
+			gtk_main();
+			retcode = EXIT_SUCCESS;
+		}
+	}
+	llib_mem_free(devpath);
+	gtpm_mgr_clean(&gmgr);
+	return retcode;
+}
+

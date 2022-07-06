@@ -1,0 +1,63 @@
+{-# LANGUAGE StandaloneDeriving, FlexibleInstances, BangPatterns #-}
+{-# LANGUAGE MultiParamTypeClasses, TypeFamilies #-}
+module Data.Array.Matryoshka.PArray.Unboxed (
+  U.Unbox,
+  U,
+  fromVector,
+  toVector
+)
+where
+
+import Control.DeepSeq
+import Data.Array.Matryoshka.PArray.Base
+import qualified Data.Vector.Unboxed as U
+import qualified Data.Vector.Unboxed.Mutable as UM
+
+data U
+
+instance U.Unbox a => PArrayIn U a where
+  data PArray U a = PArrayU !(U.Vector a)
+  fromList !xs = PArrayU $! U.fromList xs
+  toMPArray (PArrayU xs) = U.unsafeThaw xs >>= (\ x -> return $! MPArrayU x)
+  toList (PArrayU xs) = U.toList xs
+  length (PArrayU xs) = let len = U.length xs in len `seq` len
+  empty (PArrayU xs) = let x = U.null xs in x `seq` x
+  emptyP = PArrayU U.empty
+  postscanl f ne (PArrayU xs) = PArrayU $! U.postscanl' f ne xs
+  splitAt n (PArrayU xs) = let (l, r) = U.splitAt n xs
+                               !res = l `seq` r `seq` (PArrayU l, PArrayU r) 
+                           in res
+  (++) (PArrayU xs) (PArrayU ys) = PArrayU $! xs U.++ ys
+  -- should most likely be changed to regular index
+  (!) (PArrayU xs) n = U.unsafeIndex xs n
+  generate !n !f = PArrayU $! U.generate n f
+  cons a (PArrayU xs) = PArrayU $! U.cons a xs
+  snoc (PArrayU xs) a = PArrayU $! U.snoc xs a
+  filter !p (PArrayU xs) = PArrayU $! U.filter p xs
+  singleton e = PArrayU $! U.singleton e
+  slice s n (PArrayU xs) = PArrayU $!  U.slice s n xs
+
+fromVector :: U.Unbox a => U.Vector a -> PArray U a
+fromVector !a = let x = PArrayU a in x `seq` x
+
+toVector :: PArray U a -> U.Vector a
+toVector (PArrayU a) = a
+
+-- mutable parallel array. only used as internal data structure
+instance U.Unbox a => PArrayOut U a where
+  data MPArray U a = MPArrayU !(UM.IOVector a)
+  unsafeNew !n = UM.unsafeNew n >>= (\ x -> return $! MPArrayU x)
+  unsafeFreeze (MPArrayU a) = U.unsafeFreeze a >>=
+                                  (\ x -> return $! PArrayU x)
+  unsafeWrite (MPArrayU a) i e = UM.unsafeWrite a i e
+  unsafeRead (MPArrayU a) i = UM.unsafeRead a i
+  toPArray = unsafeFreeze
+  emptyMP = unsafeNew 0
+  unsafeSlice s e (MPArrayU xs) = MPArrayU $! UM.unsafeSlice s e xs
+
+deriving instance (Show a, U.Unbox a) => Show (PArray U a)
+instance NFData xs => NFData (PArray U xs) where
+  rnf (PArrayU xs) = rnf xs
+instance NFData xs => NFData (MPArray U xs) where
+  rnf (MPArrayU xs) = rnf xs
+

@@ -1,0 +1,253 @@
+import * as modPath from "path";
+import * as modFS from "fs";
+import * as modPFS from "../promise-fs";
+import * as modLog from "../log";
+import * as modUtil from "./helper";
+
+const getFixturePath = modUtil.getFixturePath;
+const normalizePath = modUtil.normalizePath;
+
+function resolvePath(path: string): string {
+    return normalizePath(modPath.resolve(path));
+}
+
+describe("promise-fs", () => {
+    describe("promisify", () => {
+        function removeSpacesFailOnTabs(text: string, cb: modPFS.INodeCallback<string>): void {
+            function doAction() {
+                if (/\t/.test(text)) {
+                    cb(new Error("i hate tabs"), null);
+                } else {
+                    cb(null, text.replace(/\s+/g, ""));
+                }
+            }
+            setTimeout(doAction);
+        }
+        it("converts callback fn to a promise factory", () => {
+            const remove = modPFS.promisify<string, string>(removeSpacesFailOnTabs);
+            expect(remove.constructor).toBe(Function);
+            expect(remove("test").then).toBe(Promise.prototype.then);
+        });
+        it("processes resolve callback correctly", (done) => {
+            const fn = {
+                removeSpacesFailOnTabs: removeSpacesFailOnTabs
+            };
+            spyOn(fn, "removeSpacesFailOnTabs").and.callThrough();
+            const remove = modPFS.promisify<string, string>(fn.removeSpacesFailOnTabs);
+            remove("s o m e t h i n g")
+                .then(text => {
+                    expect(text).toBe("something");
+                    expect(fn.removeSpacesFailOnTabs).toHaveBeenCalled();
+                    done();
+                })
+                .catch(err => {
+                    fail("catch callback should not fire");
+                    done();
+                });
+        });
+        it("processes reject callback correctly", (done) => {
+            const fn = {
+                removeSpacesFailOnTabs: removeSpacesFailOnTabs
+            };
+            spyOn(fn, "removeSpacesFailOnTabs").and.callThrough();
+            const remove = modPFS.promisify<string, string>(fn.removeSpacesFailOnTabs);
+            remove("s o m e \t h i n g")
+                .then(text => {
+                    fail("then callback should not fire");
+                    done();
+                })
+                .catch(err => {
+                    expect(err.constructor).toBe(Error);
+                    expect(err.message).toBe("i hate tabs");
+                    expect(fn.removeSpacesFailOnTabs).toHaveBeenCalled();
+                    done();
+                });
+        });
+    });
+    describe("readDir", () => {
+        it("returns items from the directory", (done) => {
+            const path = getFixturePath("dir");
+            const expected = [
+                getFixturePath("dir/file1"),
+                getFixturePath("dir/file2"),
+                getFixturePath("dir/subdir")
+            ];
+            modPFS.readDir(path)
+                .then(items => {
+                    expect(items.map(normalizePath))
+                        .toEqual(expected);
+                    done();
+                })
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+        });
+        it("returns items from the directory / relative", (done) => {
+            const path = getFixturePath("dir");
+            modPFS.readDir(path, true)
+                .then(items => {
+                    expect(items)
+                        .toEqual(["file1", "file2", "subdir"]);
+                    done();
+                })
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+        });
+    });
+    describe("stat", () => {
+        it("returns Stats of given item", (done) => {
+            const path = getFixturePath("dir");
+            modPFS.stat(path)
+                .then(stat => {
+                    expect(stat.isDirectory())
+                        .toBe(true);
+                    done();
+                })
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+        });
+    });
+    describe("statAll", () => {
+        it("returns Stats of all given items", (done) => {
+            const path = getFixturePath("dir");
+            const paths = ["subdir", "file1"].map(name => modPath.join(path, name));
+            modPFS.statAll(paths)
+                .then(stats => {
+                    expect(stats[paths[0]].isDirectory())
+                        .toBe(true);
+                    expect(stats[paths[1]].isFile())
+                        .toBe(true);
+                    done();
+                })
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+        });
+    });
+    describe("access", () => {
+        it("returns path when has access", (done) => {
+            const path1 = getFixturePath("dir/file1");
+            const path3 = getFixturePath("dir/file3");
+            modPFS.access(path1)
+                .then(path => {
+                    expect(path)
+                        .toBe(path1);
+                    done();
+                })
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+            modPFS.access(path3)
+                .then(path => {
+                    fail(`${path3} should not have access`);
+                    done();
+                })
+                .catch(err => {
+                    expect(err)
+                        .toBe(path3);
+                    done();
+                });
+        });
+    });
+    describe("getAccessible", () => {
+        it("returns list of accesible paths", (done) => {
+            const path = getFixturePath("dir");
+            const paths = ["file1", "file2", "file3"].map(name => modPath.join(path, name));
+            modPFS.getAccessible(paths)
+                .then(existingPaths => {
+                    expect(existingPaths)
+                        .toEqual([paths[0], paths[1]]);
+                    done();
+                })
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+        });
+    });
+    describe("readFile", () => {
+        it("fails on nonexistent file", (done) => {
+            const path = getFixturePath("dir/file3");
+            modPFS.readFile(path)
+                .then(buf => {
+                    fail("should not succeed");
+                    done();
+                })
+                .catch(err => {
+                    expect(err.code)
+                        .toBe("ENOENT");
+                    expect(normalizePath(err.path))
+                        .toBe(resolvePath(path));
+                    done();
+                });
+        });
+        it("reads existing file content", (done) => {
+            const path = getFixturePath("dir/file1");
+            modPFS.readFile(path)
+                .then(buf => buf.toString())
+                .then(text => {
+                    expect(text)
+                        .toBe("1");
+                    done();
+                })
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+        });
+    });
+    describe("writeFile", () => {
+        it("fails on existing directory", (done) => {
+            const path = getFixturePath("dir");
+            modPFS.writeFile(path, "test")
+                .then(buf => {
+                    fail("should not succeed");
+                    done();
+                })
+                .catch(err => {
+                    expect(err.code)
+                        .toBe("EISDIR");
+                    expect(normalizePath(err.path))
+                        .toBe(resolvePath(path));
+                    done();
+                });
+        });
+        it("creates new file if it does not exist", (done) => {
+            const path = getFixturePath("dir/file4");
+            const text = "test";
+            modPFS.writeFile(path, text)
+                .then(path2 => expect(path2).toBe(path))
+                .then(() => modPFS.readFile(path))
+                .then(buf => buf.toString())
+                .then(text2 => expect(text2).toBe(text))
+                .then(() => modPFS.unlinkFile(path))
+                .then(path2 => expect(path2).toBe(path))
+                .then(() => done())
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+        });
+        it("modifies existing file", (done) => {
+            const path = getFixturePath("dir/file2");
+            const text = "2";
+            modPFS.writeFile(path, text)
+                .then(path2 => expect(path2).toBe(path))
+                .then(() => modPFS.readFile(path))
+                .then(buf => buf.toString())
+                .then(text2 => expect(text2).toBe(text))
+                .then(() => done())
+                .catch(err => {
+                    fail(err);
+                    done();
+                });
+        });
+    });
+});

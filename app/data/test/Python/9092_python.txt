@@ -1,0 +1,161 @@
+import twe_lite
+import json
+import queue
+import sys
+import time
+import traceback
+import yaml
+from threading import Thread
+from datetime import datetime
+from pytz import timezone
+from iothub_client import IoTHubClient, IoTHubClientError, IoTHubTransportProvider, IoTHubClientResult, IoTHubClientStatus
+from iothub_client import IoTHubMessage, IoTHubMessageDispositionResult, IoTHubError, DeviceMethodReturnValue 
+
+SECRETS_FILE_NAME = "secrets.yml"
+DEFAULT_PORT_NAME = '/dev/ttyUSB0'
+TIME_ZONE = timezone('Asia/Tokyo')
+
+def print_usage():
+    print('Usage: python gateway.py DEVICE_ID [SERIAL_PORT_NAME]')
+    print("if SERIAL_PORT_NAME is omitted, port name is '/dev/ttyUSB0' by default")
+
+secrets = None
+with open(SECRETS_FILE_NAME, 'r') as f:
+    secrets = yaml.load(f)
+
+device_id = None
+port_name = DEFAULT_PORT_NAME
+
+if len(sys.argv) == 2:
+    device_id = sys.argv[1]
+elif len(sys.argv) == 3:
+    device_id = sys.argv[1]
+    port_name = sys.argv[2]
+else:
+    print_usage()
+    sys.exit(1)
+
+print("Device ID: " + device_id)
+print("Port name: " + port_name)
+
+continues = True
+
+class MonoStickTread(Thread):
+    def __init__(self, mono_stick, parser, queue):
+        super().__init__()
+
+        self.__mono_stick = mono_stick
+        self.__parser = parser
+        self.__queue = queue
+
+    def run(self):
+        print("Start reading data from monostick.")
+
+        while continues:
+            try:
+                data = mono_stick.read_line()
+                if len(data) == 0:
+                    continue
+
+                print('Data: {0}'.format(data))
+
+                received_message = self.__parser.parse(data)
+
+                self.__queue.put(received_message, timeout=0.1)
+            except queue.Full as _:
+                print('Message queue is full')
+            except twe_lite.InvalidMessageFormatError as e:
+                print(traceback.format_exc())
+
+class SendMessageThread(Thread):
+    def __init__(self, iothub_client, queue):
+        super().__init__()
+
+        self.__iothub_client = iothub_client
+        self.__queue = queue
+
+    def run(self):
+        print("Start sending data to Azure IoT Hub.")
+
+        while continues:
+            try:
+                try:
+                    status_notification_message = self.__queue.get(timeout=0.1)
+                except queue.Empty as _:
+                    continue
+                
+                self.__queue.task_done()
+
+                print(str(status_notification_message))
+
+                if not status_notification_message.di1.changed:
+                    continue
+                if status_notification_message.di1.state == twe_lite.DigitalPinState.HIGH:
+                    continue
+
+                self.__send_message()
+            except IoTHubError as iothub_error:
+                print("Unexpected error %s from IoTHub" % iothub_error)
+
+                time.sleep(1)
+            except Exception as e:
+                print(traceback.format_exc())
+
+    def __send_message(self):
+        detected_json = self.__make_detected_json()
+        sending_message = IoTHubMessage(bytearray(detected_json, 'utf8'))
+
+        self.__iothub_client.send_event_async(sending_message, self.__event_confirmation_callback, None)
+
+        while True:
+            status = self.__iothub_client.get_send_status()
+            if status == IoTHubClientStatus.IDLE:
+                break
+
+    def __event_confirmation_callback(self, message, result, _):
+        print("Confirmation received for message with result = %s" % (result))
+
+    def __make_detected_json(self):
+        now = datetime.now(TIME_ZONE)
+
+        return json.dumps({
+            'MessageType': 'DeviceEvent',
+            'DeviceId': device_id,
+            'EventType': 'HumanDetected',
+            'EventTime': now.isoformat()
+        })
+
+def iothub_client_init():
+    connection_string = secrets['iothub']['connection_string']
+
+    client = IoTHubClient(connection_string, IoTHubTransportProvider.MQTT)
+    client.set_option("messageTimeout", 10000)
+    client.set_option("logtrace", 0)
+    client.set_option("product_info", "TweLiteGateway")
+
+    return client
+
+with twe_lite.MonoStick(port_name, 0.1, 0.1) as mono_stick:
+    client = iothub_client_init()
+    parser = twe_lite.Parser()
+    message_queue = queue.Queue()   
+
+    threads = []
+    try:
+        threads.append(MonoStickTread(mono_stick, parser, message_queue))
+        threads.append(SendMessageThread(client, message_queue))
+
+        for thread in threads:
+            thread.start()
+
+        while continues:
+            print("Quit if 'q is entered.")
+            c = input()
+            if c == 'q':
+                continues = False
+                break
+    finally:
+        for thread in threads:
+            thread.join()
+
+sys.exit(0)

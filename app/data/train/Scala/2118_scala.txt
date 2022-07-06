@@ -1,0 +1,134 @@
+/*
+ * Copyright 2013 Akiyoshi Sugiki, University of Tsukuba
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package kumoi.impl.vm.vdisk
+
+import kumoi.shell.event._
+import kumoi.shell.aaa._
+import kumoi.shell.or._
+import kumoi.shell.vm.vdisk._
+import kumoi.core.or._
+import kumoi.core.Command._
+import java.io.File
+	
+
+/**
+ * 
+ * @author Akiyoshi SUGIKI
+ */
+class VirtualDiskImpl(ppath: String, cloneFmt: String) extends ORObject[VirtualDisk] with VirtualDisk {
+	//private val map = Map("qcow" -> ("tap2", "qcow"), "vpc" -> ("tap2", "vhd"), "raw" -> ("tap2", "aio"))
+	
+	private val PImage       = """image:\s+(\S+)""".r
+	private val PFormat      = """file format:\s+(\S+)""".r
+	private val PVirtualSize = """virtual size:\s+\d+(?:\.\d+)?[PTGMK]?\s+\((\d+)\s+bytes\)""".r
+	private val PDiskSize    = """disk size:\s+(\d+(?:\.\d+)?)([PTGMK]?)""".r
+	private val PClusterSize = """cluster_size:\s+(\d+)""".r
+	private val PBackingFile = """backing file:\s+(\S+)\s+\(actual path:\s+(\S+)\)""".r
+		
+	private def parse(lines: List[String]) = {
+		var result = List[UInfo]()
+		
+		for (l <- lines) {
+			l match {
+				case PImage(img) => result = Image(img) :: result 
+				case PFormat(fmt) => result = Format(fmt) :: result
+				case PVirtualSize(size) => result = VirtualSize(size.toLong) :: result
+				case PDiskSize(size, unit) => result = PhysicalSize((new File(ppath)).length) :: result
+				case PClusterSize(size) => result = ClusterSize(size.toLong) :: result
+				case PBackingFile(file, ppath) => result = BackingFile(ppath) :: result
+				case m => println("unhandled: " + m)
+			}
+		}
+		result.reverse
+	}
+	
+	def path(implicit auth: AAA) = ppath
+	
+	def exists(implicit auth: AAA) = new File(ppath).exists
+	
+	def format(implicit auth: AAA) = {
+		/*
+		var ret: String = null
+		for (l <- info) {
+			l match {
+				case Format(name) => ret = name
+				case _ =>
+			}
+		}
+		ret
+		*/
+		"raw"
+	}
+	def cloneFormat(implicit auth: AAA) = "raw" // readop(this, auth) { cloneFmt }
+
+	def virtualSize(implicit auth: AAA) = {
+		var ret = 0L
+		for (l <- info) {
+			l match {
+				case VirtualSize(size) => ret = size
+				case _ =>
+			}
+		}
+		ret
+	}
+	
+	def size(implicit auth: AAA) = {
+		var ret = 0L
+		for (l <- info) {
+			l match {
+				case PhysicalSize(size) => ret = size
+				case _ =>
+			}
+		}
+		ret
+	}
+	
+	def parent(implicit auth: AAA) = {
+		var ret: VirtualDisk = null
+		for (l <- info) {
+			l match {
+				case BackingFile(path) =>
+					// TODO: Is cloneFmt right for the parent?
+					ret = new VirtualDiskImpl(path, cloneFmt)
+				case _ =>
+			}
+		}
+		ret
+	}
+	
+	override def info(implicit auth: AAA) = parse(exec3("qemu-img", "info", path)._2)
+
+	
+	def clone(newPath: String)(implicit auth: AAA) = {
+		val fmt = format
+		fmt match {
+			case "raw" => clone(newPath, cloneFmt)
+			case _ => clone(newPath, fmt)
+		}
+	}
+	
+	def clone(newPath: String, fmt: String)(implicit auth: AAA) = {
+		// TODO: implementation for VHD
+		//exec3("qemu-img", "create", "-b", ppath, "-f", fmt, newPath)
+		//exec3("cp", ppath, newPath)
+		println("**** PRE COPIED ****")
+		new VirtualDiskImpl(newPath, fmt)
+	}
+	
+	override def genEvent(e: Exception) = VirtualMachineDiskError(null, e)
+	
+	override def toString = ppath
+}

@@ -1,0 +1,79 @@
+package admin
+import (
+	"time"
+	"strings"
+	"github.com/astaxie/beego"
+	"github.com/caliven/go-space/models"
+	. "github.com/caliven/go-space/utils"
+)
+
+/**
+ * 用户登录Controller
+ */
+type LoginController struct {
+	beego.Controller
+}
+
+// 后台首页路径
+const ADMIN_HOME = "/admin/home"
+
+
+// 跳转到登录页面
+func (this *LoginController) Get() {
+	// 查看session是否已经登录,若登录则直接跳转到后台
+	userInfo := this.GetSession(SESSION_USER)
+	if userInfo != nil {
+		this.Ctx.Redirect(302, ADMIN_HOME)
+	}
+	this.TplName = "admin/login.tpl"
+}
+
+// 登录
+func (this *LoginController) Post() {
+	username := strings.Trim(this.GetString("username"), " ")
+	password := strings.Trim(this.GetString("password"), " ")
+	if len(username) <= 0 || len(password) <= 0 {
+		this.Data["username"] = username
+		this.Data["error"] = "用户名或密码为空"
+		this.TplName = "admin/login.tpl"
+		return
+	}
+
+	// 检测用户名密码
+	var user models.User
+	user.Username = username
+	err := user.Read("Username")
+	if err != nil || user.Password != Md5(password + user.Slat) {
+		this.Data["error"] = "用户名或密码错误"
+	} else if user.IsActive == 0 {
+		this.Data["error"] = "用户已禁用"
+	} else {
+		// 更新登录信息
+		user.LoginCount += 1
+		user.LastLoginIp = this.getClientIP()
+		user.LastLoginTime = time.Now()
+		user.Update()
+
+		// 将user信息放入session中,不存放密码相关数据
+		user.Slat = ""
+		user.Password = ""
+		this.SetSession(SESSION_USER, user)
+
+		// 重定向到后台首页
+		this.Ctx.Redirect(302, ADMIN_HOME)
+	}
+	this.Data["username"] = username
+	this.TplName = "admin/login.tpl"
+}
+
+// 登出
+func (this *LoginController) Logout() {
+	this.DelSession(SESSION_USER)
+	this.Ctx.Redirect(302, "/login")
+}
+
+//获取客户端IP地址
+func (this *LoginController) getClientIP() string {
+	ra := strings.Split(this.Ctx.Request.RemoteAddr, ":")
+	return ra[0]
+}

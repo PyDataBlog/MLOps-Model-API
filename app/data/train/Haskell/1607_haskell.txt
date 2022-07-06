@@ -1,0 +1,161 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE FlexibleContexts #-}
+
+module Main where
+
+import Lib
+import Resources
+import Authentication
+import Control.Applicative (Applicative)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Logger (runNoLoggingT, runStdoutLoggingT)
+import Control.Monad.Reader (MonadReader, ReaderT, asks, runReaderT)
+import Control.Monad.Trans.Class (MonadTrans, lift)
+import Data.Aeson (Value (Null), (.=), object)
+import Data.Default (def)
+import qualified Data.Text as T
+import Data.Text.Encoding (encodeUtf8)
+import Data.Text.Lazy (Text, unpack)
+import qualified Database.Persist as DB
+import qualified Database.Persist.Postgresql as DB
+import Network.Wai
+import Network.Wai.Handler.Warp (Settings, defaultSettings, setFdCacheDuration, setPort)
+import Network.Wai.Middleware.RequestLogger (logStdout, logStdoutDev)
+import System.Environment (lookupEnv)
+import System.Directory (createDirectory)
+import Web.Heroku (parseDatabaseUrl)
+import Web.Scotty.Trans
+import Codec.MIME.Base64 (decodeToString)
+import Network.Wai.Middleware.Cors (simpleCors)
+import Data.CaseInsensitive (CI)
+import Data.ByteString as B
+import Web.ClientSession
+
+main :: IO ()
+main = do
+  c <- getConfig
+  migrateSchema c
+  runApplication c
+
+migrateSchema :: Config -> IO ()
+migrateSchema c =
+  liftIO $ flip DB.runSqlPersistMPool (pool c) $ DB.runMigration migrateAll
+
+getConfig :: IO Config
+getConfig = do
+  e <- getEnvironment
+  p <- getPool e
+  key <- getDefaultKey
+  return Config
+    { environment = e
+    , pool = p
+    , key = key
+    }
+
+getEnvironment :: IO Environment
+getEnvironment =
+  fmap (maybe Development read) (lookupEnv "SCOTTY_ENV")
+
+getPool :: Environment -> IO DB.ConnectionPool
+getPool e = do
+  s <- getConnectionString e
+  let n = getConnectionSize e
+  case e of
+    Development -> runStdoutLoggingT
+      (DB.createPostgresqlPool s n)
+    Production -> runStdoutLoggingT
+      (DB.createPostgresqlPool s n)
+    Test -> runNoLoggingT
+      (DB.createPostgresqlPool s n)
+
+getConnectionString :: Environment -> IO DB.ConnectionString
+getConnectionString e = do
+  m <- lookupEnv "DATABASE_URL"
+  let s = case m of
+        Nothing -> getDefaultConnectionString e
+        Just u -> createConnectionString (parseDatabaseUrl u)
+  return s
+
+getDefaultConnectionString :: Environment -> DB.ConnectionString
+getDefaultConnectionString e =
+  let n = case e of
+        Development -> "lift_development"
+        Production -> "lift_production"
+        Test -> "lift_test"
+  in createConnectionString
+     [ ("host", "localhost")
+     , ("port", "5432")
+     , ("user", "postgres")
+     , ("dbname", n)
+     ]
+
+createConnectionString :: [(T.Text, T.Text)] -> DB.ConnectionString
+createConnectionString l =
+  let f (k, v) = T.concat [k, "=", v]
+  in encodeUtf8 (T.unwords (Prelude.map f l))
+
+getConnectionSize :: Environment -> Int
+getConnectionSize Development = 1
+getConnectionSize Production = 8
+getConnectionSize Test = 1
+
+runApplication :: Config -> IO ()
+runApplication c = do
+  o <- getOptions (environment c)
+  let r m = runReaderT (runConfigM m) c
+      app = application c
+  scottyOptsT o r app
+
+getOptions :: Environment -> IO Options
+getOptions e = do
+  s <- getSettings e
+  return def
+    { settings = s
+    , verbose = case e of
+        Development -> 1
+        Production -> 0
+        Test -> 0
+    }
+
+getSettings :: Environment -> IO Settings
+getSettings e = do
+  let s = defaultSettings
+      s' = case e of
+        Development -> setFdCacheDuration 0 s
+        Production -> s
+        Test -> s
+  m <- getPort
+  let s'' = case m of
+        Nothing -> s'
+        Just p -> setPort p s'
+  return s''
+
+getPort :: IO (Maybe Int)
+getPort = (fmap . fmap) read (lookupEnv "SCOTTY_PORT")
+
+application :: Config -> ScottyT Error ConfigM ()
+application c = do
+  let e = environment c
+  middleware (loggingM e)
+  let headerName = "Access-Control-Allow-Headers"
+  middleware $ modifyResponse $ mapResponseHeaders (\headers -> headers ++ [(headerName, "Content-Type, authorization"), ("Access-Control-Allow-Methods", "GET, POST, OPTIONS"), ("Access-Control-Allow-Origin", "*")]) 
+  defaultHandler (defaultH e)
+  get "/" home
+  post "/signin" $ authenticate >>= signinA
+  get "/logout" logoutA
+  get "/lifts" $ authenticate >>= getLiftsA
+  post "/lifts" $ authenticate >>= postLiftsA
+  post "/users" postUsersA
+  options "/users" optionsA
+  options (regex "/lifts") optionsA  
+  notFound notFoundA
+
+loggingM :: Environment -> Middleware
+loggingM Development = logStdoutDev
+loggingM Production = logStdout
+loggingM Test = id
+
+toKey :: DB.ToBackendKey DB.SqlBackend a =>
+         Integer -> DB.Key a
+toKey i = DB.toSqlKey (fromIntegral (i :: Integer))
+

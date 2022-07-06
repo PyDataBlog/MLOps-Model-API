@@ -1,0 +1,1345 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+{-# OPTIONS_GHC -fno-warn-unused-binds #-}
+{-# OPTIONS_GHC -fno-warn-unused-matches #-}
+---------------------------------------------------------------
+-- |
+-- Module        : Data.Minecraft.Release17.Protocol
+-- Copyright     : (c) 2016 Michael Carpenter
+-- License       : BSD3
+-- Maintainer    : Michael Carpenter <oldmanmike.dev@gmail.com>
+-- Stability     : experimental
+-- Portability   : portable
+--
+---------------------------------------------------------------
+module Data.Minecraft.Release17.Protocol
+  ( ServerBoundHandshakingPacket (..)
+  , ClientBoundStatusPacket (..)
+  , ServerBoundStatusPacket (..)
+  , ClientBoundLoginPacket (..)
+  , ServerBoundLoginPacket (..)
+  , ClientBoundPlayPacket (..)
+  , ServerBoundPlayPacket (..)
+  ) where
+
+
+import Data.Attoparsec.ByteString
+import Data.ByteString as B
+import Data.ByteString.Builder as BB
+import Data.Int
+import Data.Fixed
+import Data.Minecraft.Types
+import Data.NBT
+import Data.Serialize hiding (putByteString,getByteString)
+import Data.Text as T
+import Data.UUID
+import Data.Word
+
+
+data ServerBoundHandshakingPacket
+  = ServerBoundSetProtocol VarInt Text Word16 VarInt
+  | ServerBoundLegacyServerListPing Word8
+  deriving (Show,Eq)
+
+
+data ClientBoundStatusPacket
+  = ClientBoundServerInfo Text
+  | ClientBoundPing Int64
+  deriving (Show,Eq)
+
+
+data ServerBoundStatusPacket
+  = ServerBoundPingStart
+  | ServerBoundPing Int64
+  deriving (Show,Eq)
+
+
+data ClientBoundLoginPacket
+  = ClientBoundDisconnect Text
+  | ClientBoundEncryptionBegin Text Buffer Buffer
+  | ClientBoundSuccess Text Text
+  deriving (Show,Eq)
+
+
+data ServerBoundLoginPacket
+  = ServerBoundLoginStart Text
+  | ServerBoundEncryptionBegin Buffer Buffer
+  deriving (Show,Eq)
+
+
+data ClientBoundPlayPacket
+  = ClientBoundKeepAlive Int32
+  | ClientBoundLogin Int32 Word8 Int8 Word8 Word8 Text
+  | ClientBoundChat Text
+  | ClientBoundUpdateTime Int64 Int64
+  | ClientBoundEntityEquipment Int32 Int16 Slot
+  | ClientBoundSpawnPosition PositionIII
+  | ClientBoundUpdateHealth Float Int16 Float
+  | ClientBoundRespawn Int32 Word8 Word8 Text
+  | ClientBoundPosition Double Double Double Float Float Bool
+  | ClientBoundHeldItemSlot Int8
+  | ClientBoundBed Int32 PositionIBI
+  | ClientBoundAnimation VarInt Word8
+  | ClientBoundNamedEntitySpawn VarInt Text Text Array Int32 Int32 Int32 Int8 Int8 Int16 EntityMetadata
+  | ClientBoundCollect Int32 Int32
+  | ClientBoundSpawnEntity VarInt Int8 Int32 Int32 Int32 Int8 Int8 Container
+  | ClientBoundSpawnEntityLiving VarInt Word8 Int32 Int32 Int32 Int8 Int8 Int8 Int16 Int16 Int16 EntityMetadata
+  | ClientBoundSpawnEntityPainting VarInt Text PositionIII Word8
+  | ClientBoundSpawnEntityExperienceOrb VarInt Int32 Int32 Int32 Int16
+  | ClientBoundEntityVelocity Int32 Int16 Int16 Int16
+  | ClientBoundEntityDestroy Array
+  | ClientBoundEntity Int32
+  | ClientBoundRelEntityMove Int32 Int8 Int8 Int8
+  | ClientBoundEntityLook Int32 Int8 Int8
+  | ClientBoundEntityMoveLook Int32 Int8 Int8 Int8 Int8 Int8
+  | ClientBoundEntityTeleport Int32 Int32 Int32 Int32 Int8 Int8
+  | ClientBoundEntityHeadRotation Int32 Int8
+  | ClientBoundEntityStatus Int32 Int8
+  | ClientBoundAttachEntity Int32 Int32 Bool
+  | ClientBoundEntityMetadata Int32 EntityMetadata
+  | ClientBoundEntityEffect Int32 Int8 Int8 Int16
+  | ClientBoundRemoveEntityEffect Int32 Int8
+  | ClientBoundExperience Float Int16 Int16
+  | ClientBoundUpdateAttributes Int32 Array
+  | ClientBoundMapChunk Int32 Int32 Bool Word16 Word16 Buffer
+  | ClientBoundMultiBlockChange Int32 Int32 (Count Int16) Int32 Array
+  | ClientBoundBlockChange PositionIBI VarInt Word8
+  | ClientBoundBlockAction PositionISI Word8 Word8 VarInt
+  | ClientBoundBlockBreakAnimation VarInt PositionIII Int8
+  | ClientBoundMapChunkBulk (Count Int16) (Count Int32) Bool Buffer Array
+  | ClientBoundExplosion Float Float Float Float Array Float Float Float
+  | ClientBoundWorldEvent Int32 PositionIBI Int32 Bool
+  | ClientBoundNamedSoundEffect Text Int32 Int32 Int32 Float Word8
+  | ClientBoundWorldParticles Text Float Float Float Float Float Float Float Int32
+  | ClientBoundGameStateChange Word8 Float
+  | ClientBoundSpawnEntityWeather VarInt Int8 Int32 Int32 Int32
+  | ClientBoundOpenWindow Word8 Word8 Text Word8 Bool (Maybe Int32)
+  | ClientBoundCloseWindow Word8
+  | ClientBoundSetSlot Int8 Int16 Slot
+  | ClientBoundWindowItems Word8 Array
+  | ClientBoundCraftProgressBar Word8 Int16 Int16
+  | ClientBoundTransaction Word8 Int16 Bool
+  | ClientBoundUpdateSign PositionISI Text Text Text Text
+  | ClientBoundMap VarInt Buffer
+  | ClientBoundTileEntityData PositionISI Word8 CompressedNBT
+  | ClientBoundOpenSignEntity PositionIII
+  | ClientBoundStatistics Array
+  | ClientBoundPlayerInfo Text Bool Int16
+  | ClientBoundAbilities Int8 Float Float
+  | ClientBoundTabComplete Array
+  | ClientBoundScoreboardObjective Text Text Int8
+  | ClientBoundScoreboardScore Text Int8 Text (Maybe Int32)
+  | ClientBoundScoreboardDisplayObjective Int8 Text
+  | ClientBoundScoreboardTeam Text Int8 (Maybe Text) (Maybe Text) (Maybe Text) (Maybe Int8) (Maybe Text) (Maybe Int8) (Maybe Array)
+  | ClientBoundCustomPayload Text Buffer
+  | ClientBoundKickDisconnect Text
+  deriving (Show,Eq)
+
+
+data ServerBoundPlayPacket
+  = ServerBoundKeepAlive Int32
+  | ServerBoundChat Text
+  | ServerBoundUseEntity Int32 Int8 (Maybe Float) (Maybe Float) (Maybe Float)
+  | ServerBoundFlying Bool
+  | ServerBoundPosition Double Double Double Double Bool
+  | ServerBoundLook Float Float Bool
+  | ServerBoundPositionLook Double Double Double Double Float Float Bool
+  | ServerBoundBlockDig Int8 PositionIBI Int8
+  | ServerBoundBlockPlace PositionIBI Int8 Slot Int8 Int8 Int8
+  | ServerBoundHeldItemSlot Int16
+  | ServerBoundArmAnimation Int32 Int8
+  | ServerBoundEntityAction Int32 Int8 Int32
+  | ServerBoundSteerVehicle Float Float Bool Bool
+  | ServerBoundCloseWindow Word8
+  | ServerBoundWindowClick Int8 Int16 Int8 Int16 Int8 Slot
+  | ServerBoundTransaction Int8 Int16 Bool
+  | ServerBoundSetCreativeSlot Int16 Slot
+  | ServerBoundEnchantItem Int8 Int8
+  | ServerBoundUpdateSign PositionISI Text Text Text Text
+  | ServerBoundAbilities Int8 Float Float
+  | ServerBoundTabComplete Text
+  | ServerBoundSettings Text Int8 Int8 Bool Word8 Bool
+  | ServerBoundClientCommand Int8
+  | ServerBoundCustomPayload Text Buffer
+  deriving (Show,Eq)
+
+
+instance Serialize ServerBoundHandshakingPacket where
+  put (ServerBoundSetProtocol protocolVersion serverHost serverPort nextState) = do
+    putWord8 0x00
+    putVarInt protocolVersion
+    putText serverHost
+    putWord16 serverPort
+    putVarInt nextState
+  put (ServerBoundLegacyServerListPing payload) = do
+    putWord8 0xfe
+    putWord8 payload
+
+
+  get = do
+    packetId <- getWord8
+    case packetId of
+      0x00 -> do
+        protocolVersion <- getVarInt
+        serverHost <- getText
+        serverPort <- getWord16
+        nextState <- getVarInt
+        return $ ServerBoundSetProtocol protocolVersion serverHost serverPort nextState
+      0xfe -> do
+        payload <- getWord8
+        return $ ServerBoundLegacyServerListPing payload
+
+
+instance Serialize ClientBoundStatusPacket where
+  put (ClientBoundServerInfo response) = do
+    putWord8 0x00
+    putText response
+  put (ClientBoundPing time) = do
+    putWord8 0x01
+    putInt64 time
+
+
+  get = do
+    packetId <- getWord8
+    case packetId of
+      0x00 -> do
+        response <- getText
+        return $ ClientBoundServerInfo response
+      0x01 -> do
+        time <- getInt64
+        return $ ClientBoundPing time
+
+
+instance Serialize ServerBoundStatusPacket where
+  put (ServerBoundPingStart ) = do
+    putWord8 0x00
+  put (ServerBoundPing time) = do
+    putWord8 0x01
+    putInt64 time
+
+
+  get = do
+    packetId <- getWord8
+    case packetId of
+      0x00 -> do
+        return $ ServerBoundPingStart
+      0x01 -> do
+        time <- getInt64
+        return $ ServerBoundPing time
+
+
+instance Serialize ClientBoundLoginPacket where
+  put (ClientBoundDisconnect reason) = do
+    putWord8 0x00
+    putText reason
+  put (ClientBoundEncryptionBegin serverId publicKey verifyToken) = do
+    putWord8 0x01
+    putText serverId
+    putBuffer publicKey
+    putBuffer verifyToken
+  put (ClientBoundSuccess uuid username) = do
+    putWord8 0x02
+    putText uuid
+    putText username
+
+
+  get = do
+    packetId <- getWord8
+    case packetId of
+      0x00 -> do
+        reason <- getText
+        return $ ClientBoundDisconnect reason
+      0x01 -> do
+        serverId <- getText
+        publicKey <- getBuffer
+        verifyToken <- getBuffer
+        return $ ClientBoundEncryptionBegin serverId publicKey verifyToken
+      0x02 -> do
+        uuid <- getText
+        username <- getText
+        return $ ClientBoundSuccess uuid username
+
+
+instance Serialize ServerBoundLoginPacket where
+  put (ServerBoundLoginStart username) = do
+    putWord8 0x00
+    putText username
+  put (ServerBoundEncryptionBegin sharedSecret verifyToken) = do
+    putWord8 0x01
+    putBuffer sharedSecret
+    putBuffer verifyToken
+
+
+  get = do
+    packetId <- getWord8
+    case packetId of
+      0x00 -> do
+        username <- getText
+        return $ ServerBoundLoginStart username
+      0x01 -> do
+        sharedSecret <- getBuffer
+        verifyToken <- getBuffer
+        return $ ServerBoundEncryptionBegin sharedSecret verifyToken
+
+
+instance Serialize ClientBoundPlayPacket where
+  put (ClientBoundKeepAlive keepAliveId) = do
+    putWord8 0x00
+    putInt32 keepAliveId
+  put (ClientBoundLogin entityId gameMode dimension difficulty maxPlayers levelType) = do
+    putWord8 0x01
+    putInt32 entityId
+    putWord8 gameMode
+    putInt8 dimension
+    putWord8 difficulty
+    putWord8 maxPlayers
+    putText levelType
+  put (ClientBoundChat message) = do
+    putWord8 0x02
+    putText message
+  put (ClientBoundUpdateTime age time) = do
+    putWord8 0x03
+    putInt64 age
+    putInt64 time
+  put (ClientBoundEntityEquipment entityId slot item) = do
+    putWord8 0x04
+    putInt32 entityId
+    putInt16 slot
+    putSlot item
+  put (ClientBoundSpawnPosition location) = do
+    putWord8 0x05
+    putPositionIII location
+  put (ClientBoundUpdateHealth health food foodSaturation) = do
+    putWord8 0x06
+    putFloat health
+    putInt16 food
+    putFloat foodSaturation
+  put (ClientBoundRespawn dimension difficulty gamemode levelType) = do
+    putWord8 0x07
+    putInt32 dimension
+    putWord8 difficulty
+    putWord8 gamemode
+    putText levelType
+  put (ClientBoundPosition x y z yaw pitch onGround) = do
+    putWord8 0x08
+    putDouble x
+    putDouble y
+    putDouble z
+    putFloat yaw
+    putFloat pitch
+    putBool onGround
+  put (ClientBoundHeldItemSlot slot) = do
+    putWord8 0x09
+    putInt8 slot
+  put (ClientBoundBed entityId location) = do
+    putWord8 0x0a
+    putInt32 entityId
+    putPositionIBI location
+  put (ClientBoundAnimation entityId animation) = do
+    putWord8 0x0b
+    putVarInt entityId
+    putWord8 animation
+  put (ClientBoundNamedEntitySpawn entityId playerUUID playerName pData x y z yaw pitch currentItem metadata) = do
+    putWord8 0x0c
+    putVarInt entityId
+    putText playerUUID
+    putText playerName
+    putArray pData
+    putInt32 x
+    putInt32 y
+    putInt32 z
+    putInt8 yaw
+    putInt8 pitch
+    putInt16 currentItem
+    putEntityMetadata metadata
+  put (ClientBoundCollect collectedEntityId collectorEntityId) = do
+    putWord8 0x0d
+    putInt32 collectedEntityId
+    putInt32 collectorEntityId
+  put (ClientBoundSpawnEntity entityId pType x y z pitch yaw objectData) = do
+    putWord8 0x0e
+    putVarInt entityId
+    putInt8 pType
+    putInt32 x
+    putInt32 y
+    putInt32 z
+    putInt8 pitch
+    putInt8 yaw
+    putContainer objectData
+  put (ClientBoundSpawnEntityLiving entityId pType x y z yaw pitch headPitch velocityX velocityY velocityZ metadata) = do
+    putWord8 0x0f
+    putVarInt entityId
+    putWord8 pType
+    putInt32 x
+    putInt32 y
+    putInt32 z
+    putInt8 yaw
+    putInt8 pitch
+    putInt8 headPitch
+    putInt16 velocityX
+    putInt16 velocityY
+    putInt16 velocityZ
+    putEntityMetadata metadata
+  put (ClientBoundSpawnEntityPainting entityId title location direction) = do
+    putWord8 0x10
+    putVarInt entityId
+    putText title
+    putPositionIII location
+    putWord8 direction
+  put (ClientBoundSpawnEntityExperienceOrb entityId x y z count) = do
+    putWord8 0x11
+    putVarInt entityId
+    putInt32 x
+    putInt32 y
+    putInt32 z
+    putInt16 count
+  put (ClientBoundEntityVelocity entityId velocityX velocityY velocityZ) = do
+    putWord8 0x12
+    putInt32 entityId
+    putInt16 velocityX
+    putInt16 velocityY
+    putInt16 velocityZ
+  put (ClientBoundEntityDestroy entityIds) = do
+    putWord8 0x13
+    putArray entityIds
+  put (ClientBoundEntity entityId) = do
+    putWord8 0x14
+    putInt32 entityId
+  put (ClientBoundRelEntityMove entityId dX dY dZ) = do
+    putWord8 0x15
+    putInt32 entityId
+    putInt8 dX
+    putInt8 dY
+    putInt8 dZ
+  put (ClientBoundEntityLook entityId yaw pitch) = do
+    putWord8 0x16
+    putInt32 entityId
+    putInt8 yaw
+    putInt8 pitch
+  put (ClientBoundEntityMoveLook entityId dX dY dZ yaw pitch) = do
+    putWord8 0x17
+    putInt32 entityId
+    putInt8 dX
+    putInt8 dY
+    putInt8 dZ
+    putInt8 yaw
+    putInt8 pitch
+  put (ClientBoundEntityTeleport entityId x y z yaw pitch) = do
+    putWord8 0x18
+    putInt32 entityId
+    putInt32 x
+    putInt32 y
+    putInt32 z
+    putInt8 yaw
+    putInt8 pitch
+  put (ClientBoundEntityHeadRotation entityId headYaw) = do
+    putWord8 0x19
+    putInt32 entityId
+    putInt8 headYaw
+  put (ClientBoundEntityStatus entityId entityStatus) = do
+    putWord8 0x1a
+    putInt32 entityId
+    putInt8 entityStatus
+  put (ClientBoundAttachEntity entityId vehicleId leash) = do
+    putWord8 0x1b
+    putInt32 entityId
+    putInt32 vehicleId
+    putBool leash
+  put (ClientBoundEntityMetadata entityId metadata) = do
+    putWord8 0x1c
+    putInt32 entityId
+    putEntityMetadata metadata
+  put (ClientBoundEntityEffect entityId effectId amplifier duration) = do
+    putWord8 0x1d
+    putInt32 entityId
+    putInt8 effectId
+    putInt8 amplifier
+    putInt16 duration
+  put (ClientBoundRemoveEntityEffect entityId effectId) = do
+    putWord8 0x1e
+    putInt32 entityId
+    putInt8 effectId
+  put (ClientBoundExperience experienceBar level totalExperience) = do
+    putWord8 0x1f
+    putFloat experienceBar
+    putInt16 level
+    putInt16 totalExperience
+  put (ClientBoundUpdateAttributes entityId properties) = do
+    putWord8 0x20
+    putInt32 entityId
+    putArray properties
+  put (ClientBoundMapChunk x z groundUp bitMap addBitMap compressedChunkData) = do
+    putWord8 0x21
+    putInt32 x
+    putInt32 z
+    putBool groundUp
+    putWord16 bitMap
+    putWord16 addBitMap
+    putBuffer compressedChunkData
+  put (ClientBoundMultiBlockChange chunkX chunkZ recordCount dataLength records) = do
+    putWord8 0x22
+    putInt32 chunkX
+    putInt32 chunkZ
+    putCount recordCount
+    putInt32 dataLength
+    putArray records
+  put (ClientBoundBlockChange location pType metadata) = do
+    putWord8 0x23
+    putPositionIBI location
+    putVarInt pType
+    putWord8 metadata
+  put (ClientBoundBlockAction location byte1 byte2 blockId) = do
+    putWord8 0x24
+    putPositionISI location
+    putWord8 byte1
+    putWord8 byte2
+    putVarInt blockId
+  put (ClientBoundBlockBreakAnimation entityId location destroyStage) = do
+    putWord8 0x25
+    putVarInt entityId
+    putPositionIII location
+    putInt8 destroyStage
+  put (ClientBoundMapChunkBulk chunkColumnCount dataLength skyLightSent compressedChunkData meta) = do
+    putWord8 0x26
+    putCount chunkColumnCount
+    putCount dataLength
+    putBool skyLightSent
+    putBuffer compressedChunkData
+    putArray meta
+  put (ClientBoundExplosion x y z radius affectedBlockOffsets playerMotionX playerMotionY playerMotionZ) = do
+    putWord8 0x27
+    putFloat x
+    putFloat y
+    putFloat z
+    putFloat radius
+    putArray affectedBlockOffsets
+    putFloat playerMotionX
+    putFloat playerMotionY
+    putFloat playerMotionZ
+  put (ClientBoundWorldEvent effectId location pData global) = do
+    putWord8 0x28
+    putInt32 effectId
+    putPositionIBI location
+    putInt32 pData
+    putBool global
+  put (ClientBoundNamedSoundEffect soundName x y z volume pitch) = do
+    putWord8 0x29
+    putText soundName
+    putInt32 x
+    putInt32 y
+    putInt32 z
+    putFloat volume
+    putWord8 pitch
+  put (ClientBoundWorldParticles particleName x y z offsetX offsetY offsetZ particleData particles) = do
+    putWord8 0x2a
+    putText particleName
+    putFloat x
+    putFloat y
+    putFloat z
+    putFloat offsetX
+    putFloat offsetY
+    putFloat offsetZ
+    putFloat particleData
+    putInt32 particles
+  put (ClientBoundGameStateChange reason gameMode) = do
+    putWord8 0x2b
+    putWord8 reason
+    putFloat gameMode
+  put (ClientBoundSpawnEntityWeather entityId pType x y z) = do
+    putWord8 0x2c
+    putVarInt entityId
+    putInt8 pType
+    putInt32 x
+    putInt32 y
+    putInt32 z
+  put (ClientBoundOpenWindow windowId inventoryType windowTitle slotCount useProvidedTitle entityId) = do
+    putWord8 0x2d
+    putWord8 windowId
+    putWord8 inventoryType
+    putText windowTitle
+    putWord8 slotCount
+    putBool useProvidedTitle
+    case entityId of
+      Just entityId' -> putInt32 entityId'
+      Nothing -> return ()
+  put (ClientBoundCloseWindow windowId) = do
+    putWord8 0x2e
+    putWord8 windowId
+  put (ClientBoundSetSlot windowId slot item) = do
+    putWord8 0x2f
+    putInt8 windowId
+    putInt16 slot
+    putSlot item
+  put (ClientBoundWindowItems windowId items) = do
+    putWord8 0x30
+    putWord8 windowId
+    putArray items
+  put (ClientBoundCraftProgressBar windowId property value) = do
+    putWord8 0x31
+    putWord8 windowId
+    putInt16 property
+    putInt16 value
+  put (ClientBoundTransaction windowId action accepted) = do
+    putWord8 0x32
+    putWord8 windowId
+    putInt16 action
+    putBool accepted
+  put (ClientBoundUpdateSign location text1 text2 text3 text4) = do
+    putWord8 0x33
+    putPositionISI location
+    putText text1
+    putText text2
+    putText text3
+    putText text4
+  put (ClientBoundMap itemDamage pData) = do
+    putWord8 0x34
+    putVarInt itemDamage
+    putBuffer pData
+  put (ClientBoundTileEntityData location action nbtData) = do
+    putWord8 0x35
+    putPositionISI location
+    putWord8 action
+    putCompressedNBT nbtData
+  put (ClientBoundOpenSignEntity location) = do
+    putWord8 0x36
+    putPositionIII location
+  put (ClientBoundStatistics entries) = do
+    putWord8 0x37
+    putArray entries
+  put (ClientBoundPlayerInfo playerName online ping) = do
+    putWord8 0x38
+    putText playerName
+    putBool online
+    putInt16 ping
+  put (ClientBoundAbilities flags flyingSpeed walkingSpeed) = do
+    putWord8 0x39
+    putInt8 flags
+    putFloat flyingSpeed
+    putFloat walkingSpeed
+  put (ClientBoundTabComplete matches) = do
+    putWord8 0x3a
+    putArray matches
+  put (ClientBoundScoreboardObjective name displayText action) = do
+    putWord8 0x3b
+    putText name
+    putText displayText
+    putInt8 action
+  put (ClientBoundScoreboardScore itemName action scoreName value) = do
+    putWord8 0x3c
+    putText itemName
+    putInt8 action
+    putText scoreName
+    case value of
+      Just value' -> putInt32 value'
+      Nothing -> return ()
+  put (ClientBoundScoreboardDisplayObjective position name) = do
+    putWord8 0x3d
+    putInt8 position
+    putText name
+  put (ClientBoundScoreboardTeam team mode name prefix suffix friendlyFire nameTagVisibility color players) = do
+    putWord8 0x3e
+    putText team
+    putInt8 mode
+    case name of
+      Just name' -> putText name'
+      Nothing -> return ()
+    case prefix of
+      Just prefix' -> putText prefix'
+      Nothing -> return ()
+    case suffix of
+      Just suffix' -> putText suffix'
+      Nothing -> return ()
+    case friendlyFire of
+      Just friendlyFire' -> putInt8 friendlyFire'
+      Nothing -> return ()
+    case nameTagVisibility of
+      Just nameTagVisibility' -> putText nameTagVisibility'
+      Nothing -> return ()
+    case color of
+      Just color' -> putInt8 color'
+      Nothing -> return ()
+    case players of
+      Just players' -> putArray players'
+      Nothing -> return ()
+  put (ClientBoundCustomPayload channel pData) = do
+    putWord8 0x3f
+    putText channel
+    putBuffer pData
+  put (ClientBoundKickDisconnect reason) = do
+    putWord8 0x40
+    putText reason
+
+
+  get = do
+    packetId <- getWord8
+    case packetId of
+      0x00 -> do
+        keepAliveId <- getInt32
+        return $ ClientBoundKeepAlive keepAliveId
+      0x01 -> do
+        entityId <- getInt32
+        gameMode <- getWord8
+        dimension <- getInt8
+        difficulty <- getWord8
+        maxPlayers <- getWord8
+        levelType <- getText
+        return $ ClientBoundLogin entityId gameMode dimension difficulty maxPlayers levelType
+      0x02 -> do
+        message <- getText
+        return $ ClientBoundChat message
+      0x03 -> do
+        age <- getInt64
+        time <- getInt64
+        return $ ClientBoundUpdateTime age time
+      0x04 -> do
+        entityId <- getInt32
+        slot <- getInt16
+        item <- getSlot
+        return $ ClientBoundEntityEquipment entityId slot item
+      0x05 -> do
+        location <- getPositionIII
+        return $ ClientBoundSpawnPosition location
+      0x06 -> do
+        health <- getFloat
+        food <- getInt16
+        foodSaturation <- getFloat
+        return $ ClientBoundUpdateHealth health food foodSaturation
+      0x07 -> do
+        dimension <- getInt32
+        difficulty <- getWord8
+        gamemode <- getWord8
+        levelType <- getText
+        return $ ClientBoundRespawn dimension difficulty gamemode levelType
+      0x08 -> do
+        x <- getDouble
+        y <- getDouble
+        z <- getDouble
+        yaw <- getFloat
+        pitch <- getFloat
+        onGround <- getBool
+        return $ ClientBoundPosition x y z yaw pitch onGround
+      0x09 -> do
+        slot <- getInt8
+        return $ ClientBoundHeldItemSlot slot
+      0x0a -> do
+        entityId <- getInt32
+        location <- getPositionIBI
+        return $ ClientBoundBed entityId location
+      0x0b -> do
+        entityId <- getVarInt
+        animation <- getWord8
+        return $ ClientBoundAnimation entityId animation
+      0x0c -> do
+        entityId <- getVarInt
+        playerUUID <- getText
+        playerName <- getText
+        pData <- getArray
+        x <- getInt32
+        y <- getInt32
+        z <- getInt32
+        yaw <- getInt8
+        pitch <- getInt8
+        currentItem <- getInt16
+        metadata <- getEntityMetadata
+        return $ ClientBoundNamedEntitySpawn entityId playerUUID playerName pData x y z yaw pitch currentItem metadata
+      0x0d -> do
+        collectedEntityId <- getInt32
+        collectorEntityId <- getInt32
+        return $ ClientBoundCollect collectedEntityId collectorEntityId
+      0x0e -> do
+        entityId <- getVarInt
+        pType <- getInt8
+        x <- getInt32
+        y <- getInt32
+        z <- getInt32
+        pitch <- getInt8
+        yaw <- getInt8
+        objectData <- getContainer
+        return $ ClientBoundSpawnEntity entityId pType x y z pitch yaw objectData
+      0x0f -> do
+        entityId <- getVarInt
+        pType <- getWord8
+        x <- getInt32
+        y <- getInt32
+        z <- getInt32
+        yaw <- getInt8
+        pitch <- getInt8
+        headPitch <- getInt8
+        velocityX <- getInt16
+        velocityY <- getInt16
+        velocityZ <- getInt16
+        metadata <- getEntityMetadata
+        return $ ClientBoundSpawnEntityLiving entityId pType x y z yaw pitch headPitch velocityX velocityY velocityZ metadata
+      0x10 -> do
+        entityId <- getVarInt
+        title <- getText
+        location <- getPositionIII
+        direction <- getWord8
+        return $ ClientBoundSpawnEntityPainting entityId title location direction
+      0x11 -> do
+        entityId <- getVarInt
+        x <- getInt32
+        y <- getInt32
+        z <- getInt32
+        count <- getInt16
+        return $ ClientBoundSpawnEntityExperienceOrb entityId x y z count
+      0x12 -> do
+        entityId <- getInt32
+        velocityX <- getInt16
+        velocityY <- getInt16
+        velocityZ <- getInt16
+        return $ ClientBoundEntityVelocity entityId velocityX velocityY velocityZ
+      0x13 -> do
+        entityIds <- getArray
+        return $ ClientBoundEntityDestroy entityIds
+      0x14 -> do
+        entityId <- getInt32
+        return $ ClientBoundEntity entityId
+      0x15 -> do
+        entityId <- getInt32
+        dX <- getInt8
+        dY <- getInt8
+        dZ <- getInt8
+        return $ ClientBoundRelEntityMove entityId dX dY dZ
+      0x16 -> do
+        entityId <- getInt32
+        yaw <- getInt8
+        pitch <- getInt8
+        return $ ClientBoundEntityLook entityId yaw pitch
+      0x17 -> do
+        entityId <- getInt32
+        dX <- getInt8
+        dY <- getInt8
+        dZ <- getInt8
+        yaw <- getInt8
+        pitch <- getInt8
+        return $ ClientBoundEntityMoveLook entityId dX dY dZ yaw pitch
+      0x18 -> do
+        entityId <- getInt32
+        x <- getInt32
+        y <- getInt32
+        z <- getInt32
+        yaw <- getInt8
+        pitch <- getInt8
+        return $ ClientBoundEntityTeleport entityId x y z yaw pitch
+      0x19 -> do
+        entityId <- getInt32
+        headYaw <- getInt8
+        return $ ClientBoundEntityHeadRotation entityId headYaw
+      0x1a -> do
+        entityId <- getInt32
+        entityStatus <- getInt8
+        return $ ClientBoundEntityStatus entityId entityStatus
+      0x1b -> do
+        entityId <- getInt32
+        vehicleId <- getInt32
+        leash <- getBool
+        return $ ClientBoundAttachEntity entityId vehicleId leash
+      0x1c -> do
+        entityId <- getInt32
+        metadata <- getEntityMetadata
+        return $ ClientBoundEntityMetadata entityId metadata
+      0x1d -> do
+        entityId <- getInt32
+        effectId <- getInt8
+        amplifier <- getInt8
+        duration <- getInt16
+        return $ ClientBoundEntityEffect entityId effectId amplifier duration
+      0x1e -> do
+        entityId <- getInt32
+        effectId <- getInt8
+        return $ ClientBoundRemoveEntityEffect entityId effectId
+      0x1f -> do
+        experienceBar <- getFloat
+        level <- getInt16
+        totalExperience <- getInt16
+        return $ ClientBoundExperience experienceBar level totalExperience
+      0x20 -> do
+        entityId <- getInt32
+        properties <- getArray
+        return $ ClientBoundUpdateAttributes entityId properties
+      0x21 -> do
+        x <- getInt32
+        z <- getInt32
+        groundUp <- getBool
+        bitMap <- getWord16
+        addBitMap <- getWord16
+        compressedChunkData <- getBuffer
+        return $ ClientBoundMapChunk x z groundUp bitMap addBitMap compressedChunkData
+      0x22 -> do
+        chunkX <- getInt32
+        chunkZ <- getInt32
+        recordCount <- get(Count Int16)
+        dataLength <- getInt32
+        records <- getArray
+        return $ ClientBoundMultiBlockChange chunkX chunkZ recordCount dataLength records
+      0x23 -> do
+        location <- getPositionIBI
+        pType <- getVarInt
+        metadata <- getWord8
+        return $ ClientBoundBlockChange location pType metadata
+      0x24 -> do
+        location <- getPositionISI
+        byte1 <- getWord8
+        byte2 <- getWord8
+        blockId <- getVarInt
+        return $ ClientBoundBlockAction location byte1 byte2 blockId
+      0x25 -> do
+        entityId <- getVarInt
+        location <- getPositionIII
+        destroyStage <- getInt8
+        return $ ClientBoundBlockBreakAnimation entityId location destroyStage
+      0x26 -> do
+        chunkColumnCount <- get(Count Int16)
+        dataLength <- get(Count Int32)
+        skyLightSent <- getBool
+        compressedChunkData <- getBuffer
+        meta <- getArray
+        return $ ClientBoundMapChunkBulk chunkColumnCount dataLength skyLightSent compressedChunkData meta
+      0x27 -> do
+        x <- getFloat
+        y <- getFloat
+        z <- getFloat
+        radius <- getFloat
+        affectedBlockOffsets <- getArray
+        playerMotionX <- getFloat
+        playerMotionY <- getFloat
+        playerMotionZ <- getFloat
+        return $ ClientBoundExplosion x y z radius affectedBlockOffsets playerMotionX playerMotionY playerMotionZ
+      0x28 -> do
+        effectId <- getInt32
+        location <- getPositionIBI
+        pData <- getInt32
+        global <- getBool
+        return $ ClientBoundWorldEvent effectId location pData global
+      0x29 -> do
+        soundName <- getText
+        x <- getInt32
+        y <- getInt32
+        z <- getInt32
+        volume <- getFloat
+        pitch <- getWord8
+        return $ ClientBoundNamedSoundEffect soundName x y z volume pitch
+      0x2a -> do
+        particleName <- getText
+        x <- getFloat
+        y <- getFloat
+        z <- getFloat
+        offsetX <- getFloat
+        offsetY <- getFloat
+        offsetZ <- getFloat
+        particleData <- getFloat
+        particles <- getInt32
+        return $ ClientBoundWorldParticles particleName x y z offsetX offsetY offsetZ particleData particles
+      0x2b -> do
+        reason <- getWord8
+        gameMode <- getFloat
+        return $ ClientBoundGameStateChange reason gameMode
+      0x2c -> do
+        entityId <- getVarInt
+        pType <- getInt8
+        x <- getInt32
+        y <- getInt32
+        z <- getInt32
+        return $ ClientBoundSpawnEntityWeather entityId pType x y z
+      0x2d -> do
+        windowId <- getWord8
+        inventoryType <- getWord8
+        windowTitle <- getText
+        slotCount <- getWord8
+        useProvidedTitle <- getBool
+        let entityId =
+          case inventoryType of
+            EntityHorse ->
+            _ ->
+        return $ ClientBoundOpenWindow windowId inventoryType windowTitle slotCount useProvidedTitle entityId
+      0x2e -> do
+        windowId <- getWord8
+        return $ ClientBoundCloseWindow windowId
+      0x2f -> do
+        windowId <- getInt8
+        slot <- getInt16
+        item <- getSlot
+        return $ ClientBoundSetSlot windowId slot item
+      0x30 -> do
+        windowId <- getWord8
+        items <- getArray
+        return $ ClientBoundWindowItems windowId items
+      0x31 -> do
+        windowId <- getWord8
+        property <- getInt16
+        value <- getInt16
+        return $ ClientBoundCraftProgressBar windowId property value
+      0x32 -> do
+        windowId <- getWord8
+        action <- getInt16
+        accepted <- getBool
+        return $ ClientBoundTransaction windowId action accepted
+      0x33 -> do
+        location <- getPositionISI
+        text1 <- getText
+        text2 <- getText
+        text3 <- getText
+        text4 <- getText
+        return $ ClientBoundUpdateSign location text1 text2 text3 text4
+      0x34 -> do
+        itemDamage <- getVarInt
+        pData <- getBuffer
+        return $ ClientBoundMap itemDamage pData
+      0x35 -> do
+        location <- getPositionISI
+        action <- getWord8
+        nbtData <- getCompressedNBT
+        return $ ClientBoundTileEntityData location action nbtData
+      0x36 -> do
+        location <- getPositionIII
+        return $ ClientBoundOpenSignEntity location
+      0x37 -> do
+        entries <- getArray
+        return $ ClientBoundStatistics entries
+      0x38 -> do
+        playerName <- getText
+        online <- getBool
+        ping <- getInt16
+        return $ ClientBoundPlayerInfo playerName online ping
+      0x39 -> do
+        flags <- getInt8
+        flyingSpeed <- getFloat
+        walkingSpeed <- getFloat
+        return $ ClientBoundAbilities flags flyingSpeed walkingSpeed
+      0x3a -> do
+        matches <- getArray
+        return $ ClientBoundTabComplete matches
+      0x3b -> do
+        name <- getText
+        displayText <- getText
+        action <- getInt8
+        return $ ClientBoundScoreboardObjective name displayText action
+      0x3c -> do
+        itemName <- getText
+        action <- getInt8
+        scoreName <- getText
+        let value =
+          case action of
+            1 ->
+            _ ->
+        return $ ClientBoundScoreboardScore itemName action scoreName value
+      0x3d -> do
+        position <- getInt8
+        name <- getText
+        return $ ClientBoundScoreboardDisplayObjective position name
+      0x3e -> do
+        team <- getText
+        mode <- getInt8
+        let name =
+          case mode of
+            0 ->
+            2 ->
+            _ ->
+        let prefix =
+          case mode of
+            0 ->
+            2 ->
+            _ ->
+        let suffix =
+          case mode of
+            0 ->
+            2 ->
+            _ ->
+        let friendlyFire =
+          case mode of
+            0 ->
+            2 ->
+            _ ->
+        let nameTagVisibility =
+          case mode of
+            0 ->
+            2 ->
+            _ ->
+        let color =
+          case mode of
+            0 ->
+            2 ->
+            _ ->
+        let players =
+          case mode of
+            0 ->
+            4 ->
+            3 ->
+            _ ->
+        return $ ClientBoundScoreboardTeam team mode name prefix suffix friendlyFire nameTagVisibility color players
+      0x3f -> do
+        channel <- getText
+        pData <- getBuffer
+        return $ ClientBoundCustomPayload channel pData
+      0x40 -> do
+        reason <- getText
+        return $ ClientBoundKickDisconnect reason
+
+
+instance Serialize ServerBoundPlayPacket where
+  put (ServerBoundKeepAlive keepAliveId) = do
+    putWord8 0x00
+    putInt32 keepAliveId
+  put (ServerBoundChat message) = do
+    putWord8 0x01
+    putText message
+  put (ServerBoundUseEntity target mouse x y z) = do
+    putWord8 0x02
+    putInt32 target
+    putInt8 mouse
+    case x of
+      Just x' -> putFloat x'
+      Nothing -> return ()
+    case y of
+      Just y' -> putFloat y'
+      Nothing -> return ()
+    case z of
+      Just z' -> putFloat z'
+      Nothing -> return ()
+  put (ServerBoundFlying onGround) = do
+    putWord8 0x03
+    putBool onGround
+  put (ServerBoundPosition x stance y z onGround) = do
+    putWord8 0x04
+    putDouble x
+    putDouble stance
+    putDouble y
+    putDouble z
+    putBool onGround
+  put (ServerBoundLook yaw pitch onGround) = do
+    putWord8 0x05
+    putFloat yaw
+    putFloat pitch
+    putBool onGround
+  put (ServerBoundPositionLook x stance y z yaw pitch onGround) = do
+    putWord8 0x06
+    putDouble x
+    putDouble stance
+    putDouble y
+    putDouble z
+    putFloat yaw
+    putFloat pitch
+    putBool onGround
+  put (ServerBoundBlockDig status location face) = do
+    putWord8 0x07
+    putInt8 status
+    putPositionIBI location
+    putInt8 face
+  put (ServerBoundBlockPlace location direction heldItem cursorX cursorY cursorZ) = do
+    putWord8 0x08
+    putPositionIBI location
+    putInt8 direction
+    putSlot heldItem
+    putInt8 cursorX
+    putInt8 cursorY
+    putInt8 cursorZ
+  put (ServerBoundHeldItemSlot slotId) = do
+    putWord8 0x09
+    putInt16 slotId
+  put (ServerBoundArmAnimation entityId animation) = do
+    putWord8 0x0a
+    putInt32 entityId
+    putInt8 animation
+  put (ServerBoundEntityAction entityId actionId jumpBoost) = do
+    putWord8 0x0b
+    putInt32 entityId
+    putInt8 actionId
+    putInt32 jumpBoost
+  put (ServerBoundSteerVehicle sideways forward jump unmount) = do
+    putWord8 0x0c
+    putFloat sideways
+    putFloat forward
+    putBool jump
+    putBool unmount
+  put (ServerBoundCloseWindow windowId) = do
+    putWord8 0x0d
+    putWord8 windowId
+  put (ServerBoundWindowClick windowId slot mouseButton action mode item) = do
+    putWord8 0x0e
+    putInt8 windowId
+    putInt16 slot
+    putInt8 mouseButton
+    putInt16 action
+    putInt8 mode
+    putSlot item
+  put (ServerBoundTransaction windowId action accepted) = do
+    putWord8 0x0f
+    putInt8 windowId
+    putInt16 action
+    putBool accepted
+  put (ServerBoundSetCreativeSlot slot item) = do
+    putWord8 0x10
+    putInt16 slot
+    putSlot item
+  put (ServerBoundEnchantItem windowId enchantment) = do
+    putWord8 0x11
+    putInt8 windowId
+    putInt8 enchantment
+  put (ServerBoundUpdateSign location text1 text2 text3 text4) = do
+    putWord8 0x12
+    putPositionISI location
+    putText text1
+    putText text2
+    putText text3
+    putText text4
+  put (ServerBoundAbilities flags flyingSpeed walkingSpeed) = do
+    putWord8 0x13
+    putInt8 flags
+    putFloat flyingSpeed
+    putFloat walkingSpeed
+  put (ServerBoundTabComplete text) = do
+    putWord8 0x14
+    putText text
+  put (ServerBoundSettings locale viewDistance chatFlags chatColors difficulty showCape) = do
+    putWord8 0x15
+    putText locale
+    putInt8 viewDistance
+    putInt8 chatFlags
+    putBool chatColors
+    putWord8 difficulty
+    putBool showCape
+  put (ServerBoundClientCommand payload) = do
+    putWord8 0x16
+    putInt8 payload
+  put (ServerBoundCustomPayload channel pData) = do
+    putWord8 0x17
+    putText channel
+    putBuffer pData
+
+
+  get = do
+    packetId <- getWord8
+    case packetId of
+      0x00 -> do
+        keepAliveId <- getInt32
+        return $ ServerBoundKeepAlive keepAliveId
+      0x01 -> do
+        message <- getText
+        return $ ServerBoundChat message
+      0x02 -> do
+        target <- getInt32
+        mouse <- getInt8
+        let x =
+          case mouse of
+            2 ->
+            _ ->
+        let y =
+          case mouse of
+            2 ->
+            _ ->
+        let z =
+          case mouse of
+            2 ->
+            _ ->
+        return $ ServerBoundUseEntity target mouse x y z
+      0x03 -> do
+        onGround <- getBool
+        return $ ServerBoundFlying onGround
+      0x04 -> do
+        x <- getDouble
+        stance <- getDouble
+        y <- getDouble
+        z <- getDouble
+        onGround <- getBool
+        return $ ServerBoundPosition x stance y z onGround
+      0x05 -> do
+        yaw <- getFloat
+        pitch <- getFloat
+        onGround <- getBool
+        return $ ServerBoundLook yaw pitch onGround
+      0x06 -> do
+        x <- getDouble
+        stance <- getDouble
+        y <- getDouble
+        z <- getDouble
+        yaw <- getFloat
+        pitch <- getFloat
+        onGround <- getBool
+        return $ ServerBoundPositionLook x stance y z yaw pitch onGround
+      0x07 -> do
+        status <- getInt8
+        location <- getPositionIBI
+        face <- getInt8
+        return $ ServerBoundBlockDig status location face
+      0x08 -> do
+        location <- getPositionIBI
+        direction <- getInt8
+        heldItem <- getSlot
+        cursorX <- getInt8
+        cursorY <- getInt8
+        cursorZ <- getInt8
+        return $ ServerBoundBlockPlace location direction heldItem cursorX cursorY cursorZ
+      0x09 -> do
+        slotId <- getInt16
+        return $ ServerBoundHeldItemSlot slotId
+      0x0a -> do
+        entityId <- getInt32
+        animation <- getInt8
+        return $ ServerBoundArmAnimation entityId animation
+      0x0b -> do
+        entityId <- getInt32
+        actionId <- getInt8
+        jumpBoost <- getInt32
+        return $ ServerBoundEntityAction entityId actionId jumpBoost
+      0x0c -> do
+        sideways <- getFloat
+        forward <- getFloat
+        jump <- getBool
+        unmount <- getBool
+        return $ ServerBoundSteerVehicle sideways forward jump unmount
+      0x0d -> do
+        windowId <- getWord8
+        return $ ServerBoundCloseWindow windowId
+      0x0e -> do
+        windowId <- getInt8
+        slot <- getInt16
+        mouseButton <- getInt8
+        action <- getInt16
+        mode <- getInt8
+        item <- getSlot
+        return $ ServerBoundWindowClick windowId slot mouseButton action mode item
+      0x0f -> do
+        windowId <- getInt8
+        action <- getInt16
+        accepted <- getBool
+        return $ ServerBoundTransaction windowId action accepted
+      0x10 -> do
+        slot <- getInt16
+        item <- getSlot
+        return $ ServerBoundSetCreativeSlot slot item
+      0x11 -> do
+        windowId <- getInt8
+        enchantment <- getInt8
+        return $ ServerBoundEnchantItem windowId enchantment
+      0x12 -> do
+        location <- getPositionISI
+        text1 <- getText
+        text2 <- getText
+        text3 <- getText
+        text4 <- getText
+        return $ ServerBoundUpdateSign location text1 text2 text3 text4
+      0x13 -> do
+        flags <- getInt8
+        flyingSpeed <- getFloat
+        walkingSpeed <- getFloat
+        return $ ServerBoundAbilities flags flyingSpeed walkingSpeed
+      0x14 -> do
+        text <- getText
+        return $ ServerBoundTabComplete text
+      0x15 -> do
+        locale <- getText
+        viewDistance <- getInt8
+        chatFlags <- getInt8
+        chatColors <- getBool
+        difficulty <- getWord8
+        showCape <- getBool
+        return $ ServerBoundSettings locale viewDistance chatFlags chatColors difficulty showCape
+      0x16 -> do
+        payload <- getInt8
+        return $ ServerBoundClientCommand payload
+      0x17 -> do
+        channel <- getText
+        pData <- getBuffer
+        return $ ServerBoundCustomPayload channel pData
+

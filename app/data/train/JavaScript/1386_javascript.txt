@@ -1,0 +1,97 @@
+'use strict';
+
+var phonetic = require('phonetic');
+var socketio = require('socket.io');
+var _ = require('underscore');
+
+var load = function(http) {
+    var io = socketio(http);
+    var ioNamespace = '/';
+    
+    var getEmptyRoomId = function() {
+        var roomId = null;
+    
+        do {
+            roomId = phonetic.generate().toLowerCase()
+        } while (io.nsps[ioNamespace].adapter.rooms[roomId]);
+        
+        return roomId;
+    };
+    
+    var sendRoomInfo = function(socket, info) {
+        if (!info.roomId) {
+            return;
+        }
+        
+        var clients = io.nsps[ioNamespace].adapter.rooms[info.roomId];
+        
+        io.sockets.in(info.roomId).emit('room.info', {
+            id: info.roomId,
+            count: clients ? Object.keys(clients).length : 0
+        });
+    };
+    
+    var onJoin = function(socket, info, data) {
+        if (info.roomId) {
+            return;
+        }
+
+        info.roomId = data && data.roomId ? data.roomId : null;
+        
+        if (!info.roomId || !io.nsps[ioNamespace].adapter.rooms[data.roomId]) {
+            info.roomId = getEmptyRoomId(socket);
+            
+            console.log('[Socket] Assigning room id ' + info.roomId + ' to ip ' + socket.handshake.address);
+        } else {
+            console.log('[Socket] Assigning room id ' + info.roomId + ' to ip ' + socket.handshake.address + ' (from client)');
+        }
+        
+        socket.join(info.roomId);
+        
+        socket.emit('join', {
+            roomId: info.roomId
+        });
+        
+        sendRoomInfo(socket, info);
+    };
+    
+    var onEvent = function(socket, info, event, data) {
+        if (!info.roomId) {
+            return;
+        }
+        
+        socket.broadcast.to(info.roomId).emit(event, data);
+    };
+    
+    var onChunk = function(socket, info, data) {
+        socket.emit('file.ack', {
+            guid: data.guid
+        });
+        
+        onEvent(socket, info, 'file.chunk', data);
+    };
+    
+    var onConnection = function(socket) {
+        console.log('[Socket] New connection from ip ' + socket.handshake.address);
+        
+        var info = {
+            roomId: null
+        };
+        
+        socket.on('disconnect', function() {
+            console.log('[Socket] Connection from ip ' + socket.handshake.address + ' disconnected');
+            
+            sendRoomInfo(socket, info);
+        });
+        
+        socket.on('join', _.partial(onJoin, socket, info));
+        socket.on('file.start', _.partial(onEvent, socket, info, 'file.start'));
+        socket.on('file.chunk', _.partial(onChunk, socket, info));
+    }
+    
+    io.on('connection', onConnection);
+};
+
+module.exports = {
+    load: load
+};

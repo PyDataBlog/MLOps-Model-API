@@ -1,0 +1,545 @@
+use std::io::{self, Write};
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChistErrorType {
+    ActOnError,
+    InvalidType,
+    TooFewElements { expected: usize, actual: usize },
+    UnknownError,
+    DivideByZero,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChistError {
+    i: Instruction,
+    ty: ChistErrorType,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Instruction {
+    /// Pops the top two elements from the int stack, adds them together, and places the result on the int stack
+    Add,
+    /// Pops the top two elements from the int stack, subtracts the second popped from the first, and places the result on the int stack
+    Subtract,
+    /// Pops the top element from the int stack, places it on the heap, and pushes a reference to it on to the ref stack
+    StoreInt,
+    /// If the top reference is to an int, pushes that int to the top of the int stack.
+    LoadInt,
+    /// Pushes the specified i64 on to the int stack
+    PushInt(i64),
+    /// Pops the top two elements from the int stack, multiplies them together, and places the result on the int stack
+    Multiply,
+    /// Pops the top two elements from the int stack, divdes the first popped by the seconds, and places the result on the int stack
+    Divide,
+    /// Pops and prints the first ```n``` values from the USV stack
+    Print(usize),
+    /// Pushes the specified unicode scalar value on to the USV stack
+    PushUSV(char),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum Value {
+    Int(i64),
+    UnicodeScalar(char),
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reference {
+    index: usize,
+}
+
+pub struct Vm<'a> {
+    int_stack: Vec<i64>,
+    ref_stack: Vec<Reference>,
+    usv_stack: Vec<char>,
+    heap: Vec<Value>,
+    writer: Option<&'a mut Write>,
+}
+
+impl<'a> Vm<'a> {
+    pub fn new() -> Vm<'a> {
+        Vm {
+            int_stack: vec![],
+            ref_stack: vec![],
+            usv_stack: vec![],
+            heap: vec![],
+            writer: None,
+        }
+    }
+
+    pub fn execute(&mut self, instruction: Instruction) -> Result<(), ChistError> {
+        use Instruction::*;
+        match instruction {
+            PushInt(n) => {
+                self.int_stack.push(n);
+                Ok(())
+            },
+            PushUSV(c) => {
+            	self.usv_stack.push(c);
+            	Ok(())
+            }
+            Add => self.add(),
+            Subtract => self.subtract(),
+            StoreInt => self.store_int(),
+            LoadInt => self.load_int(),
+            Multiply => self.multiply(),
+            Divide => self.divide(),
+            Print(n) => self.print(n),
+        }
+    }
+
+    pub fn peek_int(&self) -> Option<i64> {
+        self.int_stack.last().cloned()
+    }
+
+    pub fn peek_ref(&self) -> Option<Reference> {
+        self.ref_stack.last().cloned()
+    }
+
+    fn get_two_ints(&mut self) -> Result<(i64, i64), ChistErrorType> {
+        let stack_len = self.int_stack.len();
+        if stack_len < 2 {
+            Err(ChistErrorType::TooFewElements {
+                    expected: 2,
+                    actual: stack_len,
+                })
+        } else {
+            let first = self.int_stack.pop().unwrap();
+            let second = self.int_stack.pop().unwrap();
+            Ok((first, second))
+        }
+    }
+
+    fn add(&mut self) -> Result<(), ChistError> {
+        match self.get_two_ints() {
+            Ok((lhs, rhs)) => {
+                self.int_stack.push(lhs + rhs);
+                Ok(())
+            }
+            Err(ty) => {
+                Err(ChistError {
+                        i: Instruction::Add,
+                        ty: ty,
+                    })
+            }
+        }
+    }
+
+    fn subtract(&mut self) -> Result<(), ChistError> {
+        match self.get_two_ints() {
+            Ok((lhs, rhs)) => {
+                self.int_stack.push(lhs - rhs);
+                Ok(())
+            }
+            Err(ty) => {
+                Err(ChistError {
+                        i: Instruction::Subtract,
+                        ty: ty,
+                    })
+            }
+        }
+    }
+
+    fn multiply(&mut self) -> Result<(), ChistError> {
+        match self.get_two_ints() {
+            Ok((lhs, rhs)) => {
+                self.int_stack.push(lhs * rhs);
+                Ok(())
+            }
+            Err(ty) => {
+                Err(ChistError {
+                        i: Instruction::Multiply,
+                        ty: ty,
+                    })
+            }
+        }
+    }
+
+    fn divide(&mut self) -> Result<(), ChistError> {
+        match self.get_two_ints() {
+            Ok((_, rhs)) if rhs == 0 => {
+                Err(ChistError {
+                        i: Instruction::Divide,
+                        ty: ChistErrorType::DivideByZero,
+                    })
+            }
+            Ok((lhs, rhs)) => {
+                self.int_stack.push(lhs / rhs);
+                Ok(())
+            }
+
+            Err(ty) => {
+                Err(ChistError {
+                        i: Instruction::Divide,
+                        ty: ty,
+                    })
+            }
+        }
+    }
+
+    fn store(&mut self, val: Value) -> Reference {
+        let index = self.heap.len();
+        self.heap.push(val);
+        Reference { index }
+    }
+
+    fn store_int(&mut self) -> Result<(), ChistError> {
+        match self.int_stack.pop() {
+            Some(n) => {
+                let r = self.store(Value::Int(n));
+                self.ref_stack.push(r);
+                Ok(())
+            }
+            None => {
+                Err(ChistError {
+                        i: Instruction::StoreInt,
+                        ty: ChistErrorType::TooFewElements {
+                            expected: 1,
+                            actual: 0,
+                        },
+                    })
+            }
+        }
+    }
+
+    fn load_int(&mut self) -> Result<(), ChistError> {
+        let rf = match self.peek_ref() {
+            Some(r) => r,
+            None => {
+                return Err(ChistError {
+                               i: Instruction::LoadInt,
+                               ty: ChistErrorType::TooFewElements {
+                                   expected: 1,
+                                   actual: 0,
+                               },
+                           })
+            }
+        };
+        match self.heap[rf.index].clone() {
+            Value::Int(i) => {
+                self.int_stack.push(i);
+                self.ref_stack.pop();
+                Ok(())
+            }
+            _ => {
+                Err(ChistError {
+                        i: Instruction::LoadInt,
+                        ty: ChistErrorType::InvalidType,
+                    })
+            }
+        }
+    }
+
+    fn print(&mut self, n: usize) -> Result<(), ChistError> 
+    {    	
+    	let stack_len = self.usv_stack.len();
+    	if stack_len < n {
+    		too_few_elements_error(Instruction::Print(n), n, stack_len)
+    	} else {
+    		let mut s = String::with_capacity(n);
+    		for _ in 0..n {
+    			s.push(self.usv_stack.pop().unwrap());
+    		}
+
+    		let result = match self.writer {
+    			Some(ref mut w) => write!(w, "{}", s),
+    			None => write!(io::stdout(), "{}", s),
+    		};
+    		match result {
+    			Ok(_) => Ok(()),
+    			Err(_) => panic!(), // todo
+    		}
+    	}
+    }
+}
+
+fn too_few_elements_error(instr: Instruction, expected: usize, actual: usize) -> Result<(), ChistError> {
+	Err(ChistError {
+       i: instr,
+       ty: ChistErrorType::TooFewElements {expected, actual}
+   	})
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Cursor};
+    #[test]
+    fn push_and_peek_int() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(3653)).is_ok());
+        assert!(vm.execute(Instruction::PushInt(3654)).is_ok());
+        assert_eq!(vm.peek_int(), Some(3654));
+    }
+
+    #[test]
+    fn peek_empty_int_stack() {
+        let vm = Vm::new();
+        assert_eq!(vm.peek_int(), None);
+    }
+
+    #[test]
+    fn addition() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(12)).is_ok());
+        assert!(vm.execute(Instruction::PushInt(17)).is_ok());
+        assert!(vm.execute(Instruction::Add).is_ok());
+        assert_eq!(vm.peek_int(), Some(29));
+    }
+
+    #[test]
+    fn addition_one_element() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(1)).is_ok());
+        match vm.execute(Instruction::Add) {
+            Err(ce) => {
+                assert_eq!(ce.ty,
+                           ChistErrorType::TooFewElements {
+                               expected: 2,
+                               actual: 1,
+                           });
+                assert_eq!(ce.i, Instruction::Add);
+            }
+            Ok(_) => {
+                assert!(false,
+                        "Addition succeded with only one element in the stack")
+            }
+        }
+    }
+
+    #[test]
+    fn addition_no_elements() {
+        let mut vm = Vm::new();
+        match vm.execute(Instruction::Add) {
+            Err(ce) => {
+                assert_eq!(ce.ty,
+                           ChistErrorType::TooFewElements {
+                               expected: 2,
+                               actual: 0,
+                           });
+                assert_eq!(ce.i, Instruction::Add);
+            }
+            Ok(_) => assert!(false, "Addition succeded with no elements in the stack"),
+        }
+    }
+
+    #[test]
+    fn subtraction() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(12)).is_ok());
+        assert!(vm.execute(Instruction::PushInt(17)).is_ok());
+        assert!(vm.execute(Instruction::Subtract).is_ok());
+        assert_eq!(vm.peek_int(), Some(5));
+    }
+
+    #[test]
+    fn subtraction_one_element() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(1)).is_ok());
+        match vm.execute(Instruction::Subtract) {
+            Err(ce) => {
+                assert_eq!(ce.ty,
+                           ChistErrorType::TooFewElements {
+                               expected: 2,
+                               actual: 1,
+                           });
+                assert_eq!(ce.i, Instruction::Subtract);
+            }
+            Ok(_) => {
+                assert!(false,
+                        "Subtraction succeded with only one element in the stack")
+            }
+        }
+    }
+
+    #[test]
+    fn subtraction_no_elements() {
+        let mut vm = Vm::new();
+        match vm.execute(Instruction::Subtract) {
+            Err(ce) => {
+                assert_eq!(ce.ty,
+                           ChistErrorType::TooFewElements {
+                               expected: 2,
+                               actual: 0,
+                           });
+                assert_eq!(ce.i, Instruction::Subtract);
+            }
+            Ok(_) => {
+                assert!(false,
+                        "Subtraction succeded with only no elements in the stack")
+            }
+        }
+    }
+
+    #[test]
+    fn store_int_gives_ref() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(13)).is_ok());
+        assert!(vm.execute(Instruction::PushInt(19)).is_ok());
+        assert!(vm.execute(Instruction::StoreInt).is_ok());
+        assert!(vm.peek_ref().is_some());
+    }
+
+    #[test]
+    fn store_and_load_int() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(19)).is_ok());
+        assert!(vm.execute(Instruction::StoreInt).is_ok());
+        assert!(vm.execute(Instruction::LoadInt).is_ok());
+        assert_eq!(vm.peek_int(), Some(19));
+    }
+
+    #[test]
+    fn multiplication() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(3)).is_ok());
+        assert!(vm.execute(Instruction::PushInt(7)).is_ok());
+        assert!(vm.execute(Instruction::Multiply).is_ok());
+        assert_eq!(vm.peek_int(), Some(21));
+    }
+
+    #[test]
+    fn multiplication_one_element() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(1)).is_ok());
+        match vm.execute(Instruction::Multiply) {
+            Err(ce) => {
+                assert_eq!(ce.ty,
+                           ChistErrorType::TooFewElements {
+                               expected: 2,
+                               actual: 1,
+                           });
+                assert_eq!(ce.i, Instruction::Multiply);
+            }
+            Ok(_) => {
+                assert!(false,
+                        "Multiplication succeded with only one element in the stack")
+            }
+        }
+    }
+
+    #[test]
+    fn multiplication_no_elements() {
+        let mut vm = Vm::new();
+        match vm.execute(Instruction::Multiply) {
+            Err(ce) => {
+                assert_eq!(ce.ty,
+                           ChistErrorType::TooFewElements {
+                               expected: 2,
+                               actual: 0,
+                           });
+                assert_eq!(ce.i, Instruction::Multiply);
+            }
+            Ok(_) => {
+                assert!(false,
+                        "Multiplication succeded with only no elements in the stack")
+            }
+        }
+    }
+
+    #[test]
+    fn division() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(5)).is_ok());
+        assert!(vm.execute(Instruction::PushInt(18)).is_ok());
+        assert!(vm.execute(Instruction::Divide).is_ok());
+        assert_eq!(vm.peek_int(), Some(3));
+    }
+
+    #[test]
+    fn division_by_zero() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(0)).is_ok());
+        assert!(vm.execute(Instruction::PushInt(18)).is_ok());
+        match vm.execute(Instruction::Divide) {
+            Err(ce) => {
+                assert_eq!(ce.ty, ChistErrorType::DivideByZero);
+                assert_eq!(ce.i, Instruction::Divide);
+            }
+            Ok(_) => assert!(false, "Division by zero succeded!"),
+        }
+    }
+
+
+    #[test]
+    fn division_one_element() {
+        let mut vm = Vm::new();
+        assert!(vm.execute(Instruction::PushInt(1)).is_ok());
+        match vm.execute(Instruction::Divide) {
+            Err(ce) => {
+                assert_eq!(ce.ty,
+                           ChistErrorType::TooFewElements {
+                               expected: 2,
+                               actual: 1,
+                           });
+                assert_eq!(ce.i, Instruction::Divide);
+            }
+            Ok(_) => {
+                assert!(false,
+                        "Division succeded with only one element in the stack")
+            }
+        }
+    }
+
+    #[test]
+    fn division_no_elements() {
+        let mut vm = Vm::new();
+        match vm.execute(Instruction::Divide) {
+            Err(ce) => {
+                assert_eq!(ce.ty,
+                           ChistErrorType::TooFewElements {
+                               expected: 2,
+                               actual: 0,
+                           });
+                assert_eq!(ce.i, Instruction::Divide);
+            }
+            Ok(_) => {
+                assert!(false,
+                        "Division succeded with only no elements in the stack")
+            }
+        }
+    }
+
+    #[test]
+    fn print_single_ascii() {    	
+    	let mut writer = Cursor::new(Vec::new());
+		{
+			let mut vm = Vm::new();
+			vm.writer = Some(&mut writer);
+			assert!(vm.execute(Instruction::PushUSV('a')).is_ok());
+			assert!(vm.execute(Instruction::Print(1)).is_ok());
+		}
+		let output = String::from_utf8(writer.into_inner()).expect("Not UTF-8");
+		assert_eq!(output, "a");
+    }
+
+    #[test]
+    fn print_multiple_ascii() {    	
+    	let mut writer = Cursor::new(Vec::new());
+		{
+			let mut vm = Vm::new();
+			vm.writer = Some(&mut writer);
+			assert!(vm.execute(Instruction::PushUSV('a')).is_ok());
+			assert!(vm.execute(Instruction::PushUSV('2')).is_ok());
+			assert!(vm.execute(Instruction::PushUSV('y')).is_ok());
+			assert!(vm.execute(Instruction::PushUSV('!')).is_ok());
+			assert!(vm.execute(Instruction::Print(4)).is_ok());
+		}
+		let output = String::from_utf8(writer.into_inner()).expect("Not UTF-8");
+		assert_eq!(output, "!y2a");
+    }
+
+    #[test]
+    fn print_two_usv_grapheme() {
+    	let mut writer = Cursor::new(Vec::new());
+		{
+			let mut vm = Vm::new();
+			vm.writer = Some(&mut writer);
+			assert!(vm.execute(Instruction::PushUSV('\u{0306}')).is_ok());
+			assert!(vm.execute(Instruction::PushUSV('y')).is_ok());
+			assert!(vm.execute(Instruction::Print(2)).is_ok());
+		}
+		let output = String::from_utf8(writer.into_inner()).expect("Not UTF-8");
+		assert_eq!(output, "y̆");
+    }
+}

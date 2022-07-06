@@ -1,0 +1,167 @@
+﻿C:\Users\a.hu\Documents\GitHub\Powershell\InfoQ\common-maker.ps1 	
+
+#region Variables
+
+$global:rootsite = "http://www.infoq.com"
+$global:listUrl = "/cn/news/"
+$global:dldFolder = "C:\_tmp\InfoQ-CN-News-Raw"
+$global:clnFolder = "C:\_tmp\InfoQ-CN-News-Clean"
+
+#endregion
+
+#region Download Urls
+
+function global:Get-UrlYear {
+    param (
+        $url,
+        $site
+    )
+
+    $year = $url.Substring($listUrl.Length,4)
+
+    return $year
+
+}
+
+function global:Get-ListUrls {
+    param (
+        $doc,
+        $backedUrls
+    )
+    
+    $nodes = $doc.DocumentNode.SelectNodes("//div[@class='news_type_block' or @class='news_type_block last']/h2/a")
+    $urls = $nodes | ForEach-Object {$_.Attributes["href"].Value}
+
+    $newUrls = @()
+    $existedUrl = $false
+    $urls | ForEach-Object {
+        if($existedUrl -eq $false) {
+            $existedUrl = $backedUrls.Contains($_)
+            if($existedUrl -eq $false) {
+                $newUrls = $newUrls + $_
+            }
+        }
+    }
+
+    return $existedUrl, $newUrls
+}
+
+function global:Get-NextPageUrl {
+    param (
+        $doc,
+        $allUrls
+    )
+
+    $nextPage = $doc.DocumentNode.SelectSingleNode("//div[@class='load_more_articles']/a[@class='blue']")
+    if($nextPage -eq $null) {
+        return $null
+    }
+    return $nextPage.Attributes["href"].Value
+}
+
+#endregion
+
+#region Clean Files
+
+function global:Get-CleanObj {
+    param(
+        $rawFile
+    )
+
+    $artObj = Get-EmptyObj
+
+    $doc = New-Object HtmlAgilityPack.HtmlDocument
+    $doc.Load($rawFile, [System.Text.Encoding]::UTF8)
+    $doc.OptionOutputAsXml = $true
+    $doc.OptionAutoCloseOnEnd = $true
+    $doc.OptionFixNestedTags = $true
+    $doc.OptionOutputOptimizeAttributeValues = $false
+
+
+    $titleOriNode = $doc.DocumentNode.SelectSingleNode("/html/head/title")
+    $artObj.Title = $titleOriNode.InnerText.Trim()
+    
+    $authorOriNode = $doc.DocumentNode.SelectSingleNode("//span[@class='author_general']")
+    $artObj.Author = $authorOriNode.ChildNodes[1].InnerText.Trim() + " " + $authorOriNode.ChildNodes[2].InnerText.Trim()
+    
+    $articleOriNode = $doc.DocumentNode.SelectSingleNode("//div[@class='text_info']")
+    # 获取相关分类
+    $categoryOriNode = $articleOriNode.SelectSingleNode("//div[@class='random_links']")
+    
+    
+    #if($categoryOriNode -eq $null) {
+    #    write-host $artObj.Title -BackgroundColor Red
+    #    $artObj.Category = ""
+    #}
+    #else {
+    #    $artObj.CategoryDomain = $categoryOriNode.SelectSingleNode("//a[@class='f_taxonomy']/b").innerText.Substring(0,2)    
+    #
+    #    $artObj.Category = $categoryOriNode.InnerHtml
+    #}
+    
+    # 获取相关文章
+    #$linksOriNode = $articleOriNode.SelectSingleNode("//div[@class='related_editorial recommended only1']")
+    #$artObj.Links = $linksOriNode.InnerHtml
+
+    # 获取对应链接
+    $oriLinkNode = $articleOriNode.SelectSingleNode("//a[@id='bookmarkBtn']")
+    $onclickvalue = $oriLinkNode.Attributes["onclick"].value
+    $artObj.OriginalLink = $onclickvalue.Substring("Bookmarks.bookmarkContent('news', '".Length, $onclickvalue.Length - "Bookmarks.bookmarkContent('news', '".Length - "');return false;".Length)
+
+    # 清除整个文章所有的无效内容
+    $parentNode = $articleOriNode
+    for ($i=$parentNode.ChildNodes.Count - 1;$i -gt 0;$i--){
+        $node = $parentNode.ChildNodes[$i];
+
+        if(
+            ($node.NodeType -eq "Comment") -or (
+                $node.NodeType -eq "Element" -and (
+                    ($node.OriginalName -eq "iframe") -or    #remove iframe
+                    ($node.OriginalName -eq "script") -or    #remove script
+                    ($node.OriginalName -eq "hr") -or        #remove hr
+                    #remove '<p>给InfoQ中文站投稿或者参与内容翻译工作'
+                    ($node.OriginalName -eq "p" -and $node.InnerText -like "给InfoQ中文站投稿*") -or 
+                    ($node.OriginalName -eq "div" -and (
+                        $node.Attributes["class"].value -eq "clear" -or
+                        $node.Attributes["class"].value -eq "random_links" -or
+                        $node.Attributes["class"].value -like "*related_sponsors*" -or
+                        $node.Attributes["class"].value -eq "comment_here" -or
+                        $node.Attributes["class"].value -eq "comments" -or
+                        $node.Attributes["id"].value -eq "lowerFullwidthVCR" -or
+                        $node.Attributes["id"].value -eq "responseContent" -or
+                        $node.Attributes["style"].value -eq "margin-bottom:5px" -or
+                        $node.Attributes["class"].value -eq "all_comments" -or
+                        $node.Attributes["class"].value -eq "popupLoginComments" -or
+                        $node.Attributes["class"].value -like "*paid_section*" -or
+                        $node.Attributes["id"].value -eq "overlay_comments"
+                        )
+                    )
+                )
+            )
+        
+        ) {
+            $parentNode.ChildNodes.RemoveAt($i)
+            continue
+        }
+    }
+
+    # add month here
+    #$month = $artObj.OriginalLink.Substring(5,2)
+    #$artObj.CategoryDomain = $month + "/" + $artObj.CategoryDomain
+
+    # 对内容降两级
+    $artObj.Content = $articleOriNode.InnerHtml.Replace("<h4>", "<h6>").Replace("</h4>", "</h6>").Replace("<h3>", "<h5>").Replace("</h3>", "</h5>").Replace("<h2>", "<h4>").Replace("</h2>", "</h4>").Replace("<h1>", "<h3>").Replace("</h1>", "</h3>");
+
+    return $artObj
+}
+
+#endregion
+
+function Main {
+    #$allUrls = List-AllUrls $rootsite $listUrl $dldFolder
+    #Download-AllUrls $dldFolder $allUrls $rootsite
+    Cleanse-FilesFromRaw $dldFolder $clnFolder
+}
+
+Cls
+Main

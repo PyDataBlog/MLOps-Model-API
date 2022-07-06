@@ -1,0 +1,85 @@
+#!/bin/bash
+set -o xtrace
+
+echo -- set hostname
+echo 'archmaster' > /etc/hostname
+
+echo -- set timezone
+ln -s /usr/share/zoneinfo/UTC /etc/localtime
+
+echo -- set locale
+sed -i 's/#en_US.UTF-8 UTF-8/en_US.UTF-8 UTF-8/' /etc/locale.gen
+sed -i 's/#en_DK.UTF-8 UTF-8/en_DK.UTF-8 UTF-8/' /etc/locale.gen
+locale-gen
+cat << EOF > /etc/locale.conf
+LANG=en_US.utf8
+LC_TIME=en_DK.utf8
+LC_NUMERIC=en_DK.utf8
+LC_MONETARY=en_DK.utf8
+LC_PAPER=en_DK.utf8
+LC_MEASUREMENT=en_DK.utf8
+EOF
+
+echo -- dont clear console on boot
+mkdir /etc/systemd/system/getty@.service.d
+cat << EOF > /etc/systemd/system/getty@.service.d/override.conf
+[Service]
+TTYVTDisallocate=no
+EOF
+
+echo -- setup journal
+sed -i 's/#SystemMaxUse=.*$/SystemMaxUse=32M/' /etc/systemd/journald.conf
+sed -i 's/#RuntimeMaxUse=.*$/RuntimeMaxUse=64M/' /etc/systemd/journald.conf
+
+echo -- setup initcpio
+sed -i "s/ 'fallback'//" /etc/mkinitcpio.d/linux.preset
+sed -i 's/MODULES=()/MODULES=(bochs_drm virtio virtio_blk virtio_pci virtio_net)/' /etc/mkinitcpio.conf
+sed -i -r 's/^(HOOKS=.+)autodetect /\1/' /etc/mkinitcpio.conf
+pacman -S --noconfirm linux
+rm /boot/initramfs-linux-fallback.img
+
+echo -- setup network
+cat << EOF > /etc/systemd/network/50-eth0.network
+[Match]
+Name=eth0
+
+[Network]
+DHCP=yes
+EOF
+cat << EOF > /etc/systemd/network/98-default.link
+[Link]
+NamePolicy=kernel
+EOF
+umount /etc/resolv.conf
+ln -sf /run/systemd/resolve/resolv.conf /etc/resolv.conf
+systemctl enable systemd-networkd systemd-resolved
+
+echo -- setup sshd
+sed -i 's/#PermitRootLogin .*$/PermitRootLogin yes/g' /etc/ssh/sshd_config
+echo 'root:root' | chpasswd
+systemctl enable sshd
+
+echo -- install boot manager
+syslinux-install_update -i -m
+cat << EOF > /boot/syslinux/syslinux.cfg
+DEFAULT linux
+PROMPT 0
+LABEL linux
+  LINUX ../vmlinuz-linux
+  APPEND root=/dev/disk/by-label/root rw
+  INITRD ../initramfs-linux.img
+EOF
+
+echo -- cleanup
+pacman -Rsn --noconfirm dhcpcd jfsutils man-db man-pages netctl openresolv pciutils pcmciautils reiserfsprogs s-nail texinfo usbutils vi xfsprogs
+yes | pacman -Scc
+
+sed -i '1d' /etc/pacman.d/mirrorlist
+
+rm -v \
+  /etc/machine-id \
+  /etc/*- \
+  /var/log/*
+rm -rfv /var/log/journal/*
+
+rm ~/.bash_history || true

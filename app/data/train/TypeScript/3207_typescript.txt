@@ -1,0 +1,105 @@
+import 'rxjs/add/operator/catch';
+import 'rxjs/add/operator/map';
+import 'rxjs/add/operator/switchMap';
+import 'rxjs/add/operator/debounceTime';
+import 'rxjs/add/operator/withLatestFrom';
+import 'rxjs/add/operator/skip';
+import 'rxjs/add/operator/takeUntil';
+import { Injectable } from '@angular/core';
+import { Effect, Actions, toPayload } from '@ngrx/effects';
+import { Action, Store } from '@ngrx/store';
+import { Observable } from 'rxjs/Observable';
+import { from } from 'rxjs/observable/from';
+
+import Constants from '../../constants';
+import { IResume } from '../../models';
+import { ResumeService } from '../../services/resume';
+import {
+  RESUME_GET,
+  RESUME_PATCH_AND_UPDATE,
+  RESUME_DELETE_AND_UPDATE,
+  ResumeGetCompleteAction,
+  ResumePatchAndUpdateCompleteAction,
+  ResumeErrorAction,
+} from '../actions/resume';
+import { ResumesGetAction } from '../actions/resumes';
+import { AddAlertMessageAction } from '../actions/alertMessages';
+import { ErrorsAction } from '../actions/errors';
+import { IState as IStoreState } from '../reducers';
+
+@Injectable()
+export class ResumeEffects {
+  @Effect() private getResume$: Observable<Action> = this.actions$
+    .ofType(RESUME_GET)
+    .debounceTime(300)
+    .map(toPayload)
+    .switchMap((payload) => {
+      return this.resumeService.getResume(payload)
+        .map((response) => new ResumeGetCompleteAction(response))
+        .catch((err) => from([
+          new ResumeErrorAction(),
+          new ErrorsAction(err.json(), err.status),
+        ]));
+    });
+
+  @Effect() private patchResume$: Observable<Action> = this.actions$
+    .ofType(RESUME_PATCH_AND_UPDATE)
+    .debounceTime(300)
+    .map(toPayload)
+    .withLatestFrom(this.store, (payload, state) => ({
+      payload,
+      token: state.session.sessionObject.authorization_token,
+    }))
+    .switchMap(({ payload, token }) => {
+      return this.resumeService.patchResume(payload, token)
+        .mergeMap(
+          (response: IResume) => from ([
+            new ResumePatchAndUpdateCompleteAction({ resume: response }),
+            new ResumesGetAction({
+              pagination: {
+                per: Constants.SHARED_LINKS_PER_PAGE,
+                page: payload.location.page ? payload.location.page : null,
+              },
+              filter: {
+                full_name: payload.location.full_name ? payload.location.full_name: null,
+              },
+            }),
+            new AddAlertMessageAction('effects.message.update'),
+          ]),
+        )
+        .catch((err) => from([
+          new ResumeErrorAction(),
+          new ErrorsAction(err.json(), err.status),
+        ]));
+    });
+
+  @Effect() private deleteResume$: Observable<Action> = this.actions$
+    .ofType(RESUME_DELETE_AND_UPDATE)
+    .debounceTime(300)
+    .map(toPayload)
+    .withLatestFrom(this.store, (payload, state) => ({
+      payload,
+      token: state.session.sessionObject.authorization_token,
+    }))
+    .switchMap(({ payload, token }) => {
+      return this.resumeService.deleteResume(payload, token)
+        .map((response: IResume) => (
+          new ResumesGetAction({
+            pagination: {
+              per: Constants.SHARED_LINKS_PER_PAGE,
+              page: payload.location.page ? payload.location.page : null,
+            },
+          })
+        ))
+        .catch((err) => from([
+          new ResumeErrorAction(),
+          new ErrorsAction(err.json(), err.status),
+        ]));
+    });
+
+  constructor(
+    private actions$: Actions,
+    private resumeService: ResumeService,
+    private store: Store<IStoreState>,
+  ) { }
+}

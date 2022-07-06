@@ -1,0 +1,129 @@
+package main
+
+import (
+	"bufio"
+	"fmt"
+	"log"
+	"os"
+	"strings"
+
+	"github.com/lmas/go-herald/src"
+)
+
+const (
+	ADDR    = "localhost:8000"
+	APIUSER = "demoid:demokey"
+)
+
+var (
+	channel string = "chatchannel"
+	api     *herald.HeraldAPI
+)
+
+type Command struct {
+	Command string
+	Desc    string
+	DoFunc  func(string)
+}
+
+var Commands = []Command{
+	Command{"join", "Join another channel.", dojoin},
+	Command{"quit", "Quit the chat client.", doquit},
+}
+
+func main() {
+	var err error
+	api, err = herald.NewAPI(ADDR, APIUSER)
+	checkerror(err)
+
+	// To get rid of the "initialization loop" problem...
+	Commands = append(Commands, Command{"help", "Shows this help message.", dohelp})
+
+	showintro()
+	go handleinput()
+
+	err = api.ListenForNewMsgs(func(m herald.Message) {
+		if m.Channel.Title != channel {
+			return
+		}
+		fmt.Printf("%s: \t%s\n", m.User.Name, m.Message)
+	})
+	checkerror(err)
+}
+
+func checkerror(e error) {
+	if e != nil {
+		log.Fatal(e)
+	}
+}
+
+func handleinput() {
+	bio := bufio.NewReader(os.Stdin)
+	for {
+		line, err := bio.ReadString('\n')
+		checkerror(err)
+		line = strings.TrimSpace(line)
+
+		if parsecommand(line) {
+			continue
+		}
+		_, err = api.NewMsg(line, channel)
+		checkerror(err)
+	}
+}
+
+func showintro() {
+	fmt.Println(`Go-Herald Chat Client Example
+Enter /help for a list of commands.`)
+
+	showchannel()
+}
+
+func showchannel() {
+	fmt.Printf("\nYou are now talking on #%s. Getting the latest messages...\n", channel)
+
+	msgs, err := api.Search("", channel, 10, 0)
+	if err != nil {
+		fmt.Println("Error: Failed to get any messages")
+		return
+	}
+	for _, m := range msgs.Messages {
+		fmt.Printf("%s: \t%s\n", m.User.Name, m.Message)
+	}
+}
+
+func parsecommand(line string) bool {
+	var args string
+
+	if strings.HasPrefix(line, "/") {
+		tmp := strings.SplitN(line, " ", 2)
+		cmd := strings.TrimPrefix(tmp[0], "/")
+		if len(tmp) > 1 {
+			args = strings.TrimSpace(tmp[1])
+		}
+		for _, c := range Commands {
+			if c.Command == cmd {
+				c.DoFunc(args)
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+func dohelp(data string) {
+	fmt.Println("\nAvailable commands:")
+	for _, c := range Commands {
+		fmt.Printf("\t/%s\t%s\n", c.Command, c.Desc)
+	}
+}
+
+func dojoin(data string) {
+	channel = data
+	showchannel()
+}
+
+func doquit(data string) {
+	os.Exit(0)
+}

@@ -1,0 +1,158 @@
+#
+# AutoliteDeployServer.ps1
+#
+# Installs an Autolite runtime as a windows service on port 3700
+#
+
+param(
+[Parameter(ParameterSetName = "Install", Mandatory=$true)]
+[Parameter(ParameterSetName = "Update", Mandatory=$true)]
+[Parameter(ParameterSetName = "Uninstall", Mandatory=$true)]
+[string[]]$Machines,
+[Parameter(ParameterSetName = "Install", Mandatory=$true)]
+[Parameter(ParameterSetName = "Update", Mandatory=$true)]
+[string]$Source,
+[Parameter(ParameterSetName = "Update", Mandatory=$true)]
+[switch]$Update,
+[Parameter(ParameterSetName = "Uninstall", Mandatory=$true)]
+[switch]$Uninstall)
+
+$TargetDir = "C:\Autolite"
+$TargetDirUncSuffix = "c$\Autolite"
+$RecoveryOptions = "restart/1000/restart/30000/restart/60000"
+$Port = "3700"
+
+# Ask the user for credentials when installing the service
+if (-not $Update -and -not $Uninstall)
+{
+    $credential = Get-Credential -Message "Please provide account details (with domain, e.g. redmond\tsebuild) for installing the Autolite runtime service."
+    if (($credential -eq $null) -or ($credential.Password.Length -eq 0))
+    {
+        Write-Error "Credentials require a name as password."
+        exit -1
+    }
+}
+
+#Start remote sessions
+$s = new-pssession -computername $Machines
+
+# Stop and cleanup previous installation
+Invoke-Command -session $s { 
+param([string]$TargetDir,[bool]$Update)
+    
+    $serviceFound = $false
+
+    #Stop the service
+    Get-Service | Where-Object { $_.Name -eq "AutoliteRuntime"} | ForEach-Object {
+        $serviceFound = $true
+        Write-Output "$(get-content env:ComputerName): Stopping AutoliteRuntime service"
+        Stop-Service $_
+    }
+
+    #Kill any console instances
+    Get-Process | Where-Object { $_.Name -eq "AutoliteServer.exe" }  | ForEach-Object {
+        $serviceProcessId = $_.Id
+        Write-Output "$(get-content env:ComputerName): Killing AutoliteServer.exe ($serviceProcessId) and child processes"
+        $_.Kill()
+
+        $childProcesses = Get-WmiObject -Class Win32_Process -Filter "ParentProcessID=$serviceProcessId"
+        $childProcesses | ForEach-Object {
+            $childProcessId = $_.ProcessId
+            Write-Output "$(get-content env:ComputerName): Killing process $childProcessId (child of $serviceProcessId)"
+            Get-Process | Where-Object { $_.ID -eq $childProcessId } | Stop-Process -Force
+        }
+    }
+
+    #Kill any process holding the port open, and its children
+    $listeningProcess = $(netstat -o -a | select-string ":3700" | select-string "TCP" | select-string "LISTENING")
+    if($listeningProcess -ne $null) {
+        $listeningProcess = $listeningProcess.Line.Split()
+        $listeningProcessId = [system.int32]::Parse($listeningProcess[$listeningProcess.Count-1]) #get the process ID
+
+        Get-Process | Where-Object { $_.ID -eq $listeningProcessId }  | ForEach-Object {
+            $processName = $_.Name
+            Write-Output "$(get-content env:ComputerName): Killing $processName that is listening on 3900"
+        }
+
+        $childProcesses = Get-WmiObject -Class Win32_Process -Filter "ParentProcessID=$listeningProcessId"
+        $childProcesses | ForEach-Object {
+            $childProcessId = $_.ProcessId
+            Write-Output "$(get-content env:ComputerName): Killing process $childProcessId (child of $listeningProcessId that is listening on 3900)"
+            Get-Process | Where-Object { $_.ID -eq $childProcessId } | Stop-Process -Force
+        }
+    }
+
+        
+    if (-not $Update)
+    {
+        Write-Output "$(get-content env:ComputerName): Deleting AutoliteRuntime"
+        Write-Output "$(get-content env:ComputerName): $(C:\Windows\System32\sc.exe delete AutoliteRuntime)"
+    }
+    
+    if (-not $serviceFound)
+    {
+        Write-Output "$(get-content env:ComputerName): AutoliteRuntime service not found"
+    }
+
+    if (Test-Path $TargetDir)
+    {
+        Write-Output "$(get-content env:ComputerName): Removing $TargetDir"
+        Remove-Item $TargetDir -Recurse -Force
+    }
+    else
+    {
+        Write-Output "$(get-content env:ComputerName): $TargetDir does not exist"
+    }
+} -ArgumentList $TargetDir,$Update
+
+
+if ((-not $Uninstall) -and $?)
+{
+    #Deploy runtime
+    $Machines | ForEach-Object {
+        $Unc = "\\$_\$TargetDirUncSuffix"
+        Write-Output "Copying $Source $Unc"
+        New-Item -ItemType Directory $Unc | Out-Null
+        Copy-Item $Source\*.* $Unc -Force
+    }
+
+    #Recreate services and start the runtime
+    Invoke-Command -session $s { 
+    param([string]$TargetDir,[bool]$Update,[string]$Port,[PSCredential]$credential,[string]$RecoveryOptions)
+        if (-not $Update)
+        {
+            cmd /c $TargetDir\ntrights.exe -u Administrators +r SeServiceLogonRight
+
+            $userPath = "WinNT://$($credential.UserName.Replace('\','/'))"
+
+            $adminGroup = [ADSI]("WinNT://$(get-content env:ComputerName)/Administrators,group")
+
+            $credentialUserIsAdmin = $false
+
+            $adminGroup.Members() | ForEach-Object {
+                $adminName = $_.GetType().InvokeMember("Name", 'GetProperty', $null, $_, $null)
+                if($adminName -eq $userObject.Name) { $credentialUserIsAdmin = $true; }
+            }
+
+            if(-not $credentialUserIsAdmin) {
+                Write-Output "Adding user '$userPath' to Administrators"
+                $adminGroup.psbase.Invoke("Add",$userPath)
+            }
+
+            Write-Output "$(get-content env:ComputerName): Creating AutoliteRuntime"
+            New-Service -Name AutoliteRuntime -BinaryPathName $TargetDir\AutoliteServer.exe -StartupType Automatic -Credential $credential | Out-Null            
+        }
+
+        Write-Output "$(get-content env:ComputerName): Setting AutoliteRuntime to port $Port"
+        Set-ItemProperty -Path HKLM:\SYSTEM\CurrentControlSet\Services\AutoliteRuntime -Name ImagePath -Value "$TargetDir\AutoliteServer.exe /p:$Port"
+
+        Write-Output "$(get-content env:ComputerName): Setting recovery options to $RecoveryOptions"
+        sc.exe failure AutoliteRuntime reset= 86400 actions= $RecoveryOptions
+
+        Write-Output "$(get-content env:ComputerName): Starting AutoliteRuntime"
+        Start-Service AutoliteRuntime
+        
+    } -ArgumentList $TargetDir,$Update,$Port,$credential,$RecoveryOptions
+}
+
+Remove-PSSession $s

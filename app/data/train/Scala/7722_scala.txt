@@ -1,0 +1,103 @@
+package models.daos
+
+import java.io.{File, FileOutputStream}
+import java.nio.charset.Charset
+import javax.inject.{Inject, Singleton}
+
+import models.TwitterAuthCredentials
+import play.api.Environment
+import play.api.libs.json.Json
+
+import scala.concurrent.{ExecutionContext, Future}
+
+/**
+  * Copyright (c) 2017 A. Roberto Fischer
+  *
+  * @author A. Roberto Fischer <a.robertofischer@gmail.com> on 3/25/2017
+  */
+sealed trait TwitterAuthDAO extends SelfContainedDAO[String, TwitterAuthCredentials] {
+  def iterator(): Iterator[TwitterAuthCredentials]
+
+  def size(): Int
+}
+
+@Singleton
+final class InMemoryTwitterAuthDAO extends InMemorySelfContainedDAO[String, TwitterAuthCredentials]
+  with TwitterAuthDAO {
+  override def iterator(): Iterator[TwitterAuthCredentials] = data.iterator
+
+  override def size(): Int = data.size
+}
+
+@Singleton
+final class FileTwitterAuthDAO @Inject()(environment: Environment,
+                                         relativeFilePath: String)
+                                        (implicit executionContext: ExecutionContext)
+  extends InMemorySelfContainedDAO[String, TwitterAuthCredentials] with TwitterAuthDAO {
+
+  private val inputStream = environment.resourceAsStream(relativeFilePath).get
+
+  private val json = try {
+    Json.parse(inputStream)
+  } finally {
+    inputStream.close()
+  }
+
+  private val authList = json.validate[Seq[TwitterAuthCredentials]].get
+
+  authList.foreach(auth => data += auth)
+
+  override def iterator(): Iterator[TwitterAuthCredentials] = {
+    data.iterator
+  }
+
+
+  override def size(): Int = {
+    data.size
+  }
+
+  /**
+    * @param value value
+    * @return Failure if key was already present, Success otherwise.
+    */
+  override def create(value: TwitterAuthCredentials): Future[TwitterAuthCredentials] = {
+    super.create(value).map { result =>
+      outputStreamWrite(Json.toJson(iterator().toArray).toString().getBytes(Charset.forName("UTF-8")))
+
+      result
+    }
+  }
+
+  /**
+    * @param value value
+    * @return Failure if key was present, Success otherwise.
+    */
+  override def update(value: TwitterAuthCredentials): Future[TwitterAuthCredentials] = {
+    super.update(value).map { result =>
+      outputStreamWrite(Json.toJson(iterator().toArray).toString().getBytes(Charset.forName("UTF-8")))
+
+      result
+    }
+  }
+
+  /**
+    * @param key key
+    * @return Failure if key was not present, Success otherwise.
+    */
+  override def delete(key: String): Future[Unit] = {
+    super.delete(key).map { result =>
+      outputStreamWrite(
+        Json.toJson(iterator().toArray).toString().
+          getBytes(Charset.forName("UTF-8")))
+
+      result
+    }
+  }
+
+  private def outputStreamWrite(input: Array[Byte]) = {
+    val stream = new FileOutputStream(
+      new File(environment.resource(relativeFilePath).get.getPath), false)
+    stream.write(input)
+    stream.close()
+  }
+}

@@ -1,0 +1,217 @@
+module Process.PeerManager
+    ( start
+    ) where
+
+{-
+import Control.Applicative
+
+import Control.Concurrent
+import Control.Concurrent.STM
+import Control.DeepSeq
+
+import Control.Monad.State
+import Control.Monad.Reader
+
+import Data.Array
+import qualified Data.Map as M
+
+import qualified Network.Socket as Sock
+import System.Log.Logger
+
+import Channels
+import Process
+import Process.Peer as Peer
+import Process.ChokeMgr hiding (start)
+import Process.FS hiding (start)
+import Process.PieceMgr hiding (start)
+import Process.Status hiding (start)
+import Protocol.Wire
+
+import Torrent hiding (infoHash)
+-}
+
+
+numPeers :: Int
+numPeers = 40
+
+data PConf = PConf
+    { cRateTVar :: RateTVar
+    , cPeerManagerChan :: PeerManagerChannel
+    , cChokeManagerChan :: ChokeMgrChannel
+    , cPeerEventChannel :: PeerEventChannel
+    }
+
+
+data PState = PState
+    , sPeerId :: PeerId
+    , sPeerQueue :: [(InfoHash, Peer)]
+    , sActivePeers ::  M.Map ThreadId PeerChannel
+    , sChanManageMap :: M.Map InfoHash TorrentLocal
+    }
+
+
+instance Logging PConf where
+    logName _ = "Process.PeerManager"
+
+
+start :: PeerId -> RateTVar -> PeerManagerChannel -> IO ThreadId
+start peerId rateTV peerChan = do
+    mgrC <- newTChanIO
+    let conf = PConf rateTV peerChan chokeChan
+        state =  PState peerId [] M.empty M.empty
+    spawnProcess conf state (catchProcess loop (return ()))
+  where
+    loop = do
+        peerEventChan <- asks cPeerEventChan
+        peerManagerChan <- asks cPeerManagerChan
+        event <- liftIO . atomically $
+                    (readTChan peerEventChan >>= return . Left)
+                    `orElse`
+                    (readTChan peerManagerChan >>= return . Right)
+        case event of
+            Left msg -> peerEvent msg
+            Right msg -> incomingPeers msg
+        fillPeers
+        loop
+
+
+fillPeers :: Process PConf PState ()
+fillPeers = do
+    count <- M.size `fmap` gets sActivePeers
+    when (count < numPeers) $ do
+        let addCount = numPeers - count
+        debugP $ "Подключаем новых " ++ show addCount ++ " пиров"
+        queue <- gets sPeerQueue
+        let (peers, rest) = splitAt addCount queue
+        mapM_ addPeer peers
+        modify (\state -> state { sPeerQueue = rest })
+
+
+addPeer :: (InfoHash, Peer) -> Process PConf PState ThreadId
+addPeer (infoHash, Peer addr) = do
+    peerId <- gets sPeerId
+    -- pool <- asks cPeerPool
+    mgrC <- asks mgrCh
+    cm   <- gets cChanManageMap
+    rateTV <- asks cRateTV
+    liftIO $ connect (addr, peerId, infoHash) pool mgrC rateTV cm
+
+
+
+incomingPeers :: PeerManagerMessage -> Process PConf PState ()
+incomingPeers msg = case msg of
+       PeersFromTracker infoHash peers -> do
+            debugP "Добавление новых пиров в очередь"
+            modify (\s -> s {
+                    sPeerQueue = (map (infohash,) peers) ++ sPeerQueue s
+                })
+
+       NewIncoming conn@(sock, _) -> do
+            size <- M.size `fmap` gets peers
+            if size < numPeers
+                then do
+                    debugP "Подключаем новые пиры"
+                    _ <- addIncoming conn
+                    return ()
+                else do
+                    debugP "Слишком много активных пиров, закрываем"
+                    liftIO $ Sock.sClose sock
+
+       NewTorrent infoHash torrent -> do
+           modify (\s -> s { sChanManageMap = M.insert infoHash torrent (sChanManageMap s) })
+
+       StopTorrent _ih -> do
+           errorP "Остановка торрента не реализована"
+
+
+peerEvent :: PeerMessage -> Process PConf PState ()
+peerEvent msg = case msg of
+    Connect infoHash tid chan -> newPeer ih tid chan
+    Disconnect tid -> removePeer tid
+  where
+    newPeer infoHash tid chan = do
+        debugP $ "Подключаем пир " ++ show tid
+        chockChan <- asks chokeMgrCh
+        liftIO . atomically $ writeTChan chockChan (AddPeer infoHash tid chan)
+        peers <- M.insert tid chan <$> gets sActivePeers
+        modify (\s -> s { sActivePeers = peers })
+
+    removePeer threadId =
+        do debugP $ "Отключаем пир " ++ show threadId
+        chockChan <- asks cChokeManagerChan
+        liftIO . atomically $ writeTChan chockChan (RemovePeer threadId)
+        peers <- M.delete threadId <$> gets sActivePeers
+        modify (\s -> s { sActivePeers = peers })
+
+
+
+addIncoming :: (Sock.Socket, Sock.SockAddr) -> Process CF ST ThreadId
+addIncoming conn = do
+    ppid   <- gets peerId
+    pool <- asks peerPool
+    mgrC <- asks mgrCh
+    v    <- asks chokeRTV
+    cm   <- gets cmMap
+    liftIO $ acceptor conn pool ppid mgrC v cm
+
+
+type ConnectRecord = (SockAddr, PeerId, InfoHash)
+
+connect :: ConnectRecord
+    -> PeerChannel
+    -> RateTVar
+    -> ChanManageMap
+    -> IO ThreadId
+connect (addr, peerId, infoHash) peeChan rateTV cmap =
+    forkIO connector
+  where
+    connector = do
+        sock <- socket AF_INET Stream defaultProtocol
+        debugP $ "Соединяюсь с " ++ show addr
+        connect sock addr
+        debugP "Соединение установленно, рукопожатие"
+        r <- initiateHandshake sock peerId infoHash
+        case r of
+            Left err -> do
+                debugP $ "Не удалось соединится с " ++ show addr ++ ". Ошибка:" ++ err)
+                return ()
+            Right (caps, himPeerId, himInfoHash) -> do
+                debugP "Входим в работчий режис с " ++ show addr
+                let tc = case M.lookup himInfoHash cmap of
+                    Just x  -> x
+                    Nothing -> error "Impossible"
+                children <- Peer.start sock caps mgrC rtv
+                                                  (tcPcMgrCh tc) (tcFSCh tc) (tcStatTV tc)
+                                                  (tcPM tc) (succ . snd . bounds $ tcPM tc)
+                                                  ihsh
+                return ()
+
+
+acceptor :: (Sock.Socket, Sock.SockAddr) -> SupervisorChannel
+         -> PeerId -> MgrChannel -> RateTVar -> ChanManageMap
+         -> IO ThreadId
+acceptor (s,sa) pool pid mgrC rtv cmmap =
+    forkIO (connector >> return ())
+  where ihTst k = M.member k cmmap
+        connector = {-# SCC "acceptor" #-} do
+            debugLog "Handling incoming connection"
+            r <- receiveHandshake s pid ihTst
+            debugLog "RecvHandshake run"
+            case r of
+                Left err -> do debugLog ("Incoming Peer handshake failure with "
+                                            ++ show sa ++ ", error: " ++ err)
+                               return()
+                Right (caps, _rpid, ih) ->
+                    do debugLog "entering peerP loop code"
+                       let tc = case M.lookup ih cmmap of
+                                  Nothing -> error "Impossible, I hope"
+                                  Just x  -> x
+                       children <- Peer.start s caps mgrC rtv (tcPcMgrCh tc) (tcFSCh tc)
+                                                        (tcStatTV tc) (tcPM tc)
+                                                        (succ . snd . bounds $ tcPM tc) ih
+                       atomically $ writeTChan pool $
+                            SpawnNew (Supervisor $ allForOne "PeerSup" children)
+                       return ()
+        debugLog = debugM "Process.PeerMgr.acceptor"
+
+

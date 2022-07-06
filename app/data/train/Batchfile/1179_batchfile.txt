@@ -1,0 +1,1 @@
+cmd_drivers/hwmon/built-in.o :=  /home/josh/gcc-linaro-arm-linux-gnueabihf-4.7-2013.04-20130415_linux/bin/arm-linux-gnueabihf-ld -EL    -r -o drivers/hwmon/built-in.o drivers/hwmon/hwmon.o drivers/hwmon/ina219.o drivers/hwmon/tegra-tsensor.o drivers/hwmon/al3010.o 

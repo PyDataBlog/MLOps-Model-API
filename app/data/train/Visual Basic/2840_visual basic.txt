@@ -1,0 +1,1647 @@
+﻿Imports NLog
+Imports Transporter_AEHF.Objects.Enumerations
+Imports Transporter_AEHF.Objects.Positioners.Directed_Perception
+
+
+Namespace Objects.Positioners
+
+    ''' <summary>
+    ''' Class to create an object that has all the functionality of a PTU-300 positioner
+    ''' </summary>
+    Public Class FlirUnit
+        Implements IDisposable
+        Implements IPositioner
+
+        Private Const OneSecondArc = 0.0002778
+        Private Const DefaulTimeout = -1
+
+        Private _connection As FlirConnection
+        Private _resolution As Double
+        Private _getPositions(360) As Int32
+        Private _factoryMaxPanLimit As String = String.Empty
+        Private _factoryMinPanLimit As String = String.Empty
+        Private _factoryMaxPanSpeedLimit As String = String.Empty
+        Private _factoryMinPanSpeedLimit As String = String.Empty
+        Private _factoryMaxTiltLimit As String = String.Empty
+        Private _factoryMinTiltLimit As String = String.Empty
+        Private _factoryMaxTiltSpeedLimit As String = String.Empty
+        Private _factoryMinTiltSpeedLimit As String = String.Empty
+        Private _userMaxPanLimit As String = String.Empty
+        Private _userMinPanLimit As String = String.Empty
+        Private _userMaxTiltLimit As String = String.Empty
+        Private _userMinTiltLimit As String = String.Empty
+        Private _panBaseSpeed As String = String.Empty
+        Private _tiltBaseSpeed As String = String.Empty
+        Private _cableWrap As Boolean = False
+        Protected Disposed As Boolean = False
+        Private _log As Logger = LogManager.GetCurrentClassLogger
+        Private _loggerSelection As String = String.Empty
+
+
+        Public Sub Connect(
+                          address As String,
+                          port As String,
+                          conType As PumaEnums.ConnectionType,
+                          loggerSelection As String,
+                          Optional panReset As Boolean = False,
+                          Optional cableWrap As Boolean = False) Implements IPositioner.Connect
+
+            _loggerSelection = loggerSelection
+
+            _connection = New FlirConnection(port)
+            _cableWrap = cableWrap
+
+            Initialize()
+            If panReset And (cableWrap = False) Then
+                ResetPan()
+            End If
+        End Sub
+
+        ''' <summary>
+        ''' Sets all parameters for inital  use of Flir Unit
+        ''' </summary>
+        ''' <remarks></remarks>
+        Public Sub Initialize() Implements IPositioner.Initialize
+            If _cableWrap Then
+                DisableContinuousRotationPanAxis()
+                ClearConnectionStream()
+                DisableLimits()
+                ResetPan()
+            End If
+
+            GetPanResolution()
+            BuildPositionsArray()
+            SetSpeedMode(PumaEnums.SpeedMode.Independent)
+            SetCommandMode(PumaEnums.CommandMode.Immediate)
+            SetTimeout(DefaulTimeout)
+        End Sub
+
+
+        ''' <summary>
+        ''' set to -1 for infinite timeout
+        ''' </summary>
+        ''' <param name="milliseconds"></param>
+        Private Sub SetTimeout(ByVal milliseconds As Int32)
+
+            _connection.SetTimeout(milliseconds)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Convert positions to degrees
+        ''' </summary>
+        ''' <param name="position"></param>
+        ''' <returns></returns>
+        Private Function PositionToDegree(ByVal position As Int32) As Int32
+
+            Dim ans As Int32
+
+            Dim degreesPerPosition = _resolution * OneSecondArc
+            ans = CInt(Math.Round(degreesPerPosition * position))
+
+            Return ans
+
+        End Function
+
+
+        ''' <summary>
+        ''' Resets the Pan axis of the unit.
+        ''' </summary>
+        Public Function ResetPan() As String Implements IPositioner.ResetPan
+            Dim ans As String = String.Empty
+            ans = _connection.QueryPositioner(FlirCommand.ResetPan)
+            Return ans
+        End Function
+
+        ''' <summary>
+        ''' Resets the Tilt axis of the unit
+        ''' </summary>
+        Public Function ResetTilt() As String Implements IPositioner.ResetTilt
+            Dim ans As String = String.Empty
+            ans = _connection.QueryPositioner(FlirCommand.ResetTilt)
+            Return ans
+        End Function
+
+        ''' <summary>
+        ''' Moves pan to specified degree
+        ''' </summary>
+        ''' <param name="degree">Degree must be between 0 and 360</param>
+        ''' <exception cref="System.ArgumentOutOfRangeException">Thrown when degree is not in range 0-360</exception>
+        Public Function MovePanToPosition(ByVal degree As Int32) As String Implements IPositioner.MovePanToPosition
+            Dim ans As String = String.Empty
+
+            Debug.Assert((degree >= 0 And degree <= 360), "Degree out of range, 0-360")
+
+            If (degree < 0 Or degree > 360) Then 'make sure degree between 0 and 360
+
+                Throw New Exception("Out Of Range Exception.  When moving pan, the degree must be between 0 and 360.")
+                Return ans
+            Else
+
+                ans = _connection.QueryPositioner(FlirCommand.SetPanPosition & _getPositions(degree))  'send command 
+
+                Return ans
+            End If
+
+        End Function
+
+        ''' <summary>
+        ''' Moves tilt to specified degree
+        ''' </summary>
+        ''' <param name="degree">Degree must be between -30 and 30</param>
+        ''' <exception cref="System.ArgumentOutOfRangeException">Thrown when degree is not in range -30 to 30</exception>
+        Public Function MoveTiltToPosition(ByVal degree As Int32) As String Implements IPositioner.MoveTiltToPosition
+            Dim ans As String = String.Empty
+            'Debug.Assert((degree >= -30 And degree <= 30), "Degree out of range, -30 to 30")
+
+            If (degree < 270 And degree > 30) Then 'make sure degree is betwee -30 and 30
+
+                Throw New ArgumentOutOfRangeException("Out Of Range Exception.  When moving tilt, the degree must be less than 30 or greater than 270.")
+                Return ans
+            Else
+
+                ans = _connection.QueryPositioner(FlirCommand.SetTiltPosition & _getPositions(degree))
+
+                Return ans
+            End If
+
+        End Function
+
+
+
+        ''' <summary>
+        ''' Rotates the pan axis left or right until halt command is issued.  Speed mode must be velocity
+        ''' </summary>
+        ''' <param name="pd">PanRotationDirection.left or PanRotationDirection.right</param>
+        Public Function RotatePan(ByVal pd As PumaEnums.PanRotationDirection) As String Implements IPositioner.RotatePan
+            Dim ans As String = String.Empty
+            _connection.QueryPositioner(FlirCommand.SetSpeedModeVelocity)
+            _connection.QueryPositioner(_panRotationDirectionArray(CInt(pd)) & GetPanSpeed())
+            ans = _connection.QueryPositioner(FlirCommand.SetSpeedModeIndependent)
+            Return ans
+        End Function
+
+        Public Function RotateTilt(ByVal td As PumaEnums.TiltRotationDirection) As String Implements IPositioner.RotateTilt
+            'not yet implemented
+            Return 0
+        End Function
+
+
+        ''' <summary>
+        ''' Halts all movement of the positioner
+        ''' </summary>
+        Public Function Halt() As String Implements IPositioner.Halt, IPositioner.HaltPan, IPositioner.HaltTilt
+            Dim ans As String = String.Empty
+            ans = _connection.QueryPositioner(FlirCommand.Halt)
+            Return ans
+        End Function
+
+
+
+        ''' <summary>
+        ''' Returns the current pan position in degrees
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetPanPosition(Optional count As Int32 = 0) As String Implements IPositioner.GetPanPosition
+
+            Dim ans = String.Empty
+            Dim numericalAns = New Int32
+
+            ClearConnectionStream()
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.GetPanPosition)
+            ans = StringTrim(_connection.Answer)
+            Dim intans As Int32
+
+            'this try/catch attempts to fix a situation where the positioner sends back garbage by asking again up to 1000 times
+            Try
+                intans = CInt(ans)
+            Catch ex As Exception
+                If count > 1000 Then Throw New Exception("Positioner is unresponsive or needs to be reset.")
+                count += 1
+                ans = GetPanPosition(count)
+                Return ans
+            End Try
+
+            EnableVerboseFeedback()
+            intans = PositionToDegree(intans)
+            ans = CStr(intans)
+
+            Return ans
+
+        End Function
+
+
+        ''' <summary>
+        ''' Returns the current set pan speed 
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetPanSpeed(Optional count As Int32 = 0) As String Implements IPositioner.GetPanSpeed
+
+            Dim ans = String.Empty
+
+            ClearConnectionStream()
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.GetPanSpeed)
+            ans = StringTrim(_connection.Answer)
+            EnableVerboseFeedback()
+
+
+            Return ans
+        End Function
+
+        ''' <summary>
+        ''' Returns the current tilt position in degrees
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetTiltPosition(Optional count As Int32 = 0) As String Implements IPositioner.GetTiltPosition
+
+            Dim ans = String.Empty
+
+            ClearConnectionStream()
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.GetTiltPosition)
+            ans = StringTrim(_connection.Answer)
+            Dim intans As Int32
+
+            'this try/catch attempts to fix a situation where the positioner sends back garbage by asking again up to 1000 times
+            Try
+                intans = CInt(ans)
+            Catch ex As Exception
+                If count > 1000 Then Throw New Exception("Positioner is unresponsive or needs to be reset.")
+                count += 1
+                ans = GetTiltPosition(count)
+                Return ans
+            End Try
+
+            EnableVerboseFeedback()
+            intans = PositionToDegree(intans)
+            ans = CStr(intans)
+
+            Return ans
+
+        End Function
+
+
+
+
+
+        ''' <summary>
+        ''' Returns the current set tilt speed
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetTiltSpeed() As String Implements IPositioner.GetTiltSpeed
+
+            Dim ans = String.Empty
+
+            ClearConnectionStream()
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.GetTiltSpeed)
+            ans = StringTrim(_connection.Answer)
+            EnableVerboseFeedback()
+
+            Return ans
+
+        End Function
+
+        ''' <summary>
+        ''' Returns input voltage and current temperature values of positioner
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetVoltageAndTemp() As String Implements IPositioner.GetTiltVoltage,
+                                                                 IPositioner.GetPanVoltage,
+                                                                 IPositioner.GetTiltTemperature,
+                                                                 IPositioner.GetPanTemperature
+
+            _connection.QueryPositioner(FlirCommand.GetVoltageAndTemp)
+            Return _connection.Answer
+
+        End Function
+
+
+
+        ''' <summary>
+        ''' Set the positioner speed mode independent or velocity
+        ''' </summary>
+        ''' <param name="sm">SpeedMode.independent or SpeedMode.velocity</param>
+        Public Sub SetSpeedMode(ByVal sm As PumaEnums.SpeedMode)
+
+            _connection.QueryPositioner(_speedModeArray(CInt(sm)))
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Set the step mode for the pan axis
+        ''' </summary>
+        ''' <param name="stm">StepMode.Full, .Half, .Quarter, .Eighth, or .Auto</param>
+        Public Sub SetPanStepMode(ByVal stm As PumaEnums.StepMode)
+
+            _connection.QueryPositioner(FlirCommand.SetStepModePanAxis & _stepModeArray(CInt(stm)))
+
+            If (_cableWrap) Then
+
+                ResetPan()
+                _cableWrap = False
+                Initialize()
+                _cableWrap = True
+
+            Else
+
+                ResetPan()
+                Initialize()
+            End If
+
+        End Sub
+
+
+
+        ''' <summary>
+        ''' Set the step mode for the tilt axis
+        ''' </summary>
+        ''' <param name="stm">StepMode.Full, .Half, .Quarter, .Eighth, or .Auto</param>
+        Public Sub SetTiltStepMode(ByVal stm As PumaEnums.StepMode)
+
+            _connection.QueryPositioner(FlirCommand.SetStepModeTiltAxis & _stepModeArray(CInt(stm)))
+
+            If (_cableWrap) Then
+
+                _cableWrap = False
+                Initialize()
+                _cableWrap = True
+                ResetTilt()
+
+            Else
+
+                Initialize()
+                ResetTilt()
+            End If
+
+        End Sub
+
+
+
+
+        ''' <summary>
+        ''' Send Ascii Command to positioner
+        ''' </summary>
+        ''' <param name="command">Positioner ascii command</param>
+        Public Function SendCommand(axis As String, command As String) As String Implements IPositioner.SendCommand
+
+            _connection.QueryPositioner(command)
+            Return _connection.Answer
+
+        End Function
+
+
+
+        ''' <summary>
+        ''' Set the positioner command mode immediate or slaved
+        ''' </summary>
+        ''' <param name="cm">CommandMode.immediate or CommandMode.slaved</param>
+        Public Sub SetCommandMode(ByVal cm As PumaEnums.CommandMode)
+
+            _connection.QueryPositioner(_commandModeArray(CInt(cm)))
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Enable continuous rotation on pan axis
+        ''' </summary>
+        Public Function EnableContinousRotationPanAxis() As String Implements IPositioner.EnableContinuousRotationPanAxis
+            Dim ans As String = String.Empty
+            ans = _connection.QueryPositioner(FlirCommand.EnableContinuousPanRotation)
+            Return ans
+        End Function
+
+
+        ''' <summary>
+        ''' Disable continuous rotation on pan axis
+        ''' </summary>
+        Public Function DisableContinuousRotationPanAxis() As String Implements IPositioner.DisableContinuousRotationPanAxis
+            Dim ans As String = String.Empty
+            ans = _connection.QueryPositioner(FlirCommand.DisableContinuousPanRotation)
+            Return ans
+        End Function
+
+
+        ''' <summary>
+        ''' Disable echoing
+        ''' </summary>
+        Public Sub DisableEchoing()
+
+            _connection.QueryPositioner(FlirCommand.DisableEchoing)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Disables limit enforcement on pan and tilt axis
+        ''' </summary>
+        Public Sub DisableLimits() Implements IPositioner.DisableLimits
+
+            _connection.QueryPositioner(FlirCommand.DisableLimitEnforcement)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Awaits completion of current pan tilt movement
+        ''' </summary>
+        Public Sub Await()
+
+            _connection.QueryPositioner(FlirCommand.AwaitCommand)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Enables the factory set limits on Pan and Tilt axis
+        ''' </summary>
+        Public Sub EnableFactoryLimits() Implements IPositioner.EnablePositionLimits
+
+            _connection.QueryPositioner(FlirCommand.EnablefactoryLimits)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Enables user defined limits on pan and tilt axis
+        ''' </summary>
+        Public Sub EnableUserLimits()
+
+            _connection.QueryPositioner(FlirCommand.EnableUserLimits)
+
+        End Sub
+
+
+
+        ''' <summary>
+        ''' Restores pan and tilt unit to factory default settings
+        ''' </summary>
+        ''' <remarks></remarks>
+        Public Sub RestoreFactorySettings()
+
+            _connection.QueryPositioner(FlirCommand.EnableTerseFeedback)
+            _connection.QueryPositioner(FlirCommand.RestoreFactoryDefaults)
+            _connection.QueryPositioner(FlirCommand.DisableEchoing)
+            _connection.QueryPositioner(FlirCommand.EnableVerboseFeedback)
+
+
+        End Sub
+
+        ''' <summary>
+        ''' Clears any data in the input buffer of serial connection
+        ''' </summary>
+        Private Sub ClearConnectionStream()
+
+            _connection.ClearConnectionStream()
+
+        End Sub
+
+        ''' <summary>
+        ''' Returns max pan speed limit
+        ''' </summary>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Function GetMaxPanSpeedLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMaxPanSpeedLimit)
+
+            _factoryMaxPanSpeedLimit = StringTrim(_connection.Answer)
+
+            EnableVerboseFeedback()
+
+            Return _factoryMaxPanSpeedLimit
+
+        End Function
+
+        ''' <summary>
+        ''' Returns max pan factory limit as string
+        ''' </summary>
+        ''' <returns></returns>
+        Private Function GetMaxPanFactoryLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMaxPanFactoryLimit)
+
+            _factoryMaxPanLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _factoryMaxPanLimit
+
+        End Function
+
+
+        ''' <summary>
+        ''' Returns max pan user set limit as string
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetMaxPanUserLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMaxPanUserLimit)
+
+            _userMaxPanLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _userMaxPanLimit
+
+        End Function
+
+
+        ''' <summary>
+        ''' Returns pan base speed
+        ''' </summary>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Function GetPanBaseSpeed() As String Implements IPositioner.GetPanAcceleration
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.GetPanBaseSpeed)
+
+            _panBaseSpeed = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _panBaseSpeed
+        End Function
+
+
+
+        ''' <summary>
+        ''' Returns tilt base speed
+        ''' </summary>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Function GetTiltBaseSpeed() As String Implements IPositioner.GetTiltAcceleration
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.GetTiltBaseSpeed)
+
+            _tiltBaseSpeed = StringTrim(_connection.Answer)
+
+            EnableVerboseFeedback()
+
+            Return _tiltBaseSpeed
+        End Function
+
+
+
+        ''' <summary>
+        ''' Returns max tilt factory limit as string
+        ''' </summary>
+        ''' <returns></returns>
+        Private Function GetMaxTiltFactoryLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMaxTiltFactoryLimit)
+
+            _factoryMaxTiltLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _factoryMaxTiltLimit
+
+        End Function
+
+
+        ''' <summary>
+        ''' Returns max tilt user set limit as string
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetMaxTiltUserLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMaxTiltUserLimit)
+
+            _userMaxTiltLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _userMaxTiltLimit
+        End Function
+
+
+        ''' <summary>
+        ''' Returns m tilt speed limit 
+        ''' </summary>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Function GetMaxTiltSpeedLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMaxTiltSpeedLimit)
+
+            _factoryMaxTiltSpeedLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _factoryMaxTiltSpeedLimit
+        End Function
+
+
+
+
+        ''' <summary>
+        ''' Returns min tilt factory limit as string
+        ''' </summary>
+        ''' <returns></returns>
+        Private Function GetMinTiltFactoryLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMinTiltFactoryLimit)
+
+            _factoryMinTiltLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _factoryMinTiltLimit
+        End Function
+
+
+
+        ''' <summary>
+        ''' Returns min tilt user set limit as string
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetMinTiltUserLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMinTiltUserLimit)
+
+            _userMinTiltLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _userMinTiltLimit
+        End Function
+
+
+
+
+        ''' <summary>
+        ''' Returns min tilt speed limit 
+        ''' </summary>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Function GetMinTiltSpeedLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMinTiltSpeedLimit)
+
+            _factoryMinTiltSpeedLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _factoryMinTiltSpeedLimit
+        End Function
+
+
+
+        ''' <summary>
+        ''' Returns min pan speed limit
+        ''' </summary>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Function GetMinPanSpeedLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMinPanSpeedLimit)
+
+            _factoryMinPanSpeedLimit = StringTrim(_connection.Answer)
+
+            EnableVerboseFeedback()
+
+            Return _factoryMinPanSpeedLimit
+
+        End Function
+
+
+
+
+        ''' <summary>
+        ''' Returns min pan factory limit as string
+        ''' </summary>
+        ''' <returns></returns>
+        Private Function GetMinPanFactoryLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMinPanFactoryLimit)
+
+            _factoryMinPanLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _factoryMinPanLimit
+
+        End Function
+
+
+        ''' <summary>
+        ''' Returns min pan user set limit as string
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetMinPanUserLimit() As String
+
+            EnableTerseFeedback()
+            _connection.QueryPositioner(FlirCommand.QueryMinPanUserLimit)
+
+            _userMinPanLimit = StringTrim(_connection.Answer) '// _connection.Answer.Substring(1).Trim()
+
+            EnableVerboseFeedback()
+
+            Return _userMinPanLimit
+        End Function
+
+
+
+        ''' <summary>
+        ''' Trims the string down to eliminate preceding * and all white space
+        ''' </summary>
+        ''' <param name="inString"></param>
+        ''' <returns></returns>
+        Private Function StringTrim(ByVal inString As String) As String
+
+            Dim result As String()
+
+            result = inString.Split("*")
+
+            Return Trim(result(1))
+
+        End Function
+
+        ''' <summary>
+        ''' Set pan axis user limits
+        ''' </summary>
+        ''' <param name="maxDegree">Must be between 1 and 179</param>
+        ''' <param name="minDegree">Must be between -1 and -179</param>
+        Public Sub SetPanUserLimits(ByVal maxDegree As Int32, ByVal minDegree As Int32) Implements IPositioner.SetPanUserLimits
+
+            Dim maxPosition = DegreeToPosition(maxDegree)
+            Dim minPosition = DegreeToPosition(minDegree)
+
+            Dim commandMax = CommandBuild(FlirCommand.SetMaxPanUserLimit, maxPosition.ToString())
+            Dim commandMin = CommandBuild(FlirCommand.SetMinPanUserLimit, minPosition.ToString())
+
+            _connection.QueryPositioner(commandMax)
+            ClearConnectionStream()
+            _connection.QueryPositioner(commandMin)
+
+        End Sub
+
+        Public Sub SetTiltUserLimits(ByVal maxDegree As Int32, ByVal minDegree As Int32) Implements IPositioner.SetTiltUserLimits
+            'needs to be implemented
+        End Sub
+
+
+        ''' <summary>
+        ''' Set pan axis speed
+        ''' </summary>
+        ''' <param name="speed">Integer that represents a speed unit.  Must be between 0 and 1985.</param>
+        ''' <exception cref="System.Exception">Thrown when pan speed is greater than 1985</exception>
+        Public Sub SetPanSpeed(ByVal speed As Int32) Implements IPositioner.SetPanSpeed
+
+            Debug.Assert(speed < 1985, "Pan speed cannot exceed 1985 positions/sec")
+
+            Dim command = CommandBuild(FlirCommand.SetPanSpeed, speed.ToString())
+
+            If (speed > 1985) Then
+
+                Throw New Exception("Pan speed cannot exceed 1985 positions/sec")
+
+            Else
+
+                _connection.QueryPositioner(FlirCommand.SetSpeedModeIndependent)
+                _connection.QueryPositioner(command)
+
+            End If
+
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Set tilt axis speed
+        ''' </summary>
+        ''' <param name="speed">Integer that represents a speed unit.  Must be between 0 and 1985.</param>
+        ''' <exception cref="System.Exception">Thrown when speed is greater than 1985</exception>
+        Public Sub SetTiltSpeed(ByVal speed As Int32) Implements IPositioner.SetTiltSpeed
+
+            Debug.Assert(speed < 1985, "Tilt speed cannot exceed 1985 positions/sec")
+
+            Dim command = CommandBuild(FlirCommand.SetTiltSpeed, speed.ToString())
+
+            If (speed > 1985) Then
+
+                Throw New Exception("Tilt speed cannot exceed 1985 positions/sec")
+
+            Else
+
+                _connection.QueryPositioner(FlirCommand.SetSpeedModeIndependent)
+                _connection.QueryPositioner(command)
+            End If
+
+        End Sub
+
+
+
+        ''' <summary>
+        ''' Set pan base speed
+        ''' </summary>
+        ''' <param name="speed"></param>
+        ''' <remarks></remarks>
+        Public Sub SetPanBaseSpeed(ByVal speed As Int32) Implements IPositioner.SetPanAccel
+
+            Dim command = CommandBuild(FlirCommand.SetPanBaseSpeed, speed.ToString())
+
+            _connection.QueryPositioner(FlirCommand.SetSpeedModeIndependent)
+            _connection.QueryPositioner(command)
+        End Sub
+
+
+
+
+        ''' <summary>
+        ''' Set tilt base speed
+        ''' </summary>
+        ''' <param name="speed"></param>
+        ''' <remarks></remarks>
+        Public Sub SetTiltBaseSpeed(ByVal speed As Int32) Implements IPositioner.SetTiltAccel
+
+            Dim command = CommandBuild(FlirCommand.SetTiltBaseSpeed, speed.ToString())
+
+            _connection.QueryPositioner(FlirCommand.SetSpeedModeIndependent)
+            _connection.QueryPositioner(command)
+        End Sub
+
+
+
+
+        ''' <summary>
+        ''' Flush the input buffer of serial connection
+        ''' </summary>
+        Public Sub Flush() Implements IPositioner.Flush
+
+            _connection.ClearConnectionStream()
+
+
+        End Sub
+
+
+
+        ''' <summary>
+        ''' Returns the current state of echo mode
+        ''' </summary>
+        ''' <returns></returns>
+        Public Function GetEchoModeState() As String
+
+            _connection.QueryPositioner(FlirCommand.QueryEchoMode)
+            Return _connection.Answer
+
+        End Function
+
+
+
+        ''' <summary>
+        ''' Returns the current state of limit enforcement
+        ''' </summary>
+        ''' <returns>Returns current state of limit enforcement as string</returns>
+        Public Function GetLimitEnforcementState() As String
+
+            _connection.QueryPositioner(FlirCommand.QueryLimitEnforcement)
+            Return _connection.Answer
+
+        End Function
+
+
+        ''' <summary>
+        ''' Enable echoing
+        ''' </summary>
+        Public Sub EnableEchoing()
+
+            _connection.QueryPositioner(FlirCommand.EnableEchoing)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Enable terse feedback
+        ''' </summary>
+        Public Sub EnableTerseFeedback()
+
+            _connection.QueryPositioner(FlirCommand.EnableTerseFeedback)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Enable verbose feedback
+        ''' </summary>
+        Public Sub EnableVerboseFeedback()
+
+            _connection.QueryPositioner(FlirCommand.EnableVerboseFeedback)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Sends positioner to 0 degrees pan
+        ''' </summary>
+        Public Sub StowPan() Implements IPositioner.StowPan
+
+            _connection.QueryPositioner(FlirCommand.StowPan)
+
+        End Sub
+
+
+
+        ''' <summary>
+        ''' Sends positioner to 0 degrees tilt
+        ''' </summary>
+        Public Sub StowTilt() Implements IPositioner.StowTilt
+
+            _connection.QueryPositioner(FlirCommand.StowTilt)
+
+        End Sub
+
+        Public Sub SetTiltPositiveLimit(positive As Int32) Implements IPositioner.SetTiltPositiveLimit
+            'needs to be implemented
+        End Sub
+
+
+        ''' <summary>
+        ''' Set pan axis user limits to absolute max and min
+        ''' </summary>
+        Private Sub SetPanUserLimits()
+
+            Dim commandMax = CommandBuild(FlirCommand.SetMaxPanUserLimit, _getPositions(180).ToString())
+            Dim commandMin = CommandBuild(FlirCommand.SetMinPanUserLimit, _getPositions(181).ToString())
+
+            _connection.QueryPositioner(commandMax)
+            _connection.QueryPositioner(commandMin)
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Get the pan resolution of the unit
+        ''' </summary>
+        Public Function GetPanResolution(Optional count As Int32 = 0) As Double Implements IPositioner.GetPanResolution
+
+            EnableTerseFeedback()
+
+            _connection.QueryPositioner(FlirCommand.GetPanResolution)
+            Dim ans As String
+            ans = _connection.Answer.Trim
+            Dim dblans As Double
+
+            'this try/catch attempts to fix a situation where the positioner sends back garbage by asking again up to 1000 times
+            Try
+                dblans = CDbl(ans)
+            Catch ex As Exception
+                If count > 1000 Then Throw New Exception("Positioner is unresponsive or needs to be reset.")
+                count += 1
+                ans = GetPanResolution(count)
+                Return ans
+            End Try
+
+            EnableVerboseFeedback()
+            Return (dblans)
+        End Function
+
+        Public Function GetTiltResolution(Optional count As Int32 = 0) As Double Implements IPositioner.GetTiltResolution
+            'Needs to be implemented
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+
+        ''' <summary>
+        ''' Returns the firmware version of the positioner
+        ''' </summary>
+        Public Sub GetFirmwareVersion()
+
+            _connection.QueryPositioner(FlirCommand.GetFirmwareVersion)
+
+        End Sub
+
+        Public Function IsPanHomeSet() As Boolean Implements IPositioner.IsPanHomeSet
+            Return True
+        End Function
+
+        Public Function IsTiltHomeSet() As Boolean Implements IPositioner.IsTiltHomeSet
+            Return True
+        End Function
+
+
+        ''' <summary>
+        ''' Conconate the two strings to build command string
+        ''' </summary>
+        ''' <param name="first"></param>
+        ''' <param name="second"></param>
+        ''' <returns>Command string</returns>
+        Private Function CommandBuild(ByVal first As String, ByVal second As String) As String
+
+            Return first & second
+
+        End Function
+
+
+        ''' <summary>
+        ''' Builds array of positions synonomous with degrees 0-360
+        ''' </summary>
+        Private Sub BuildPositionsArray()
+
+            For i As Int32 = 0 To 359
+                _getPositions(i) = ConvertToPositions(_getDegree(i))
+            Next
+
+        End Sub
+
+
+        ''' <summary>
+        ''' Converts a degree to a position
+        ''' </summary>
+        ''' <param name="degree"></param>
+        ''' <returns>Equivalent position value</returns>
+        Private Function ConvertToPositions(ByVal degree As Int32) As Int32
+
+            Dim positions = New Int32
+            Dim degreesPerMove = New Double
+
+
+            degreesPerMove = _resolution * OneSecondArc
+
+            'ticks equal degrees/degrees per move 
+            positions = CInt((CDbl((degree)) / degreesPerMove))
+
+            Return positions
+        End Function
+
+
+
+        ''' <summary>
+        ''' Returns the position equivilent of supplied degree
+        ''' </summary>
+        ''' <param name="degree">Degree must be between 0 and 360</param>
+        ''' <returns></returns>
+        ''' <exception cref="System.ArgumentOutOfRangeException">Thrown when degree is not in range 0-360</exception>
+        Public Function DegreeToPosition(ByVal degree As Int32) As Int32
+            While (degree < 0)
+                degree += 360
+            End While
+
+            If (degree < 0 Or degree > 360) Then
+
+                Throw New ArgumentOutOfRangeException("degree", "Degree must be between 0 or 360.")
+
+                Return False
+            Else
+                Return Convert.ToInt32(_getPositions(degree))
+            End If
+        End Function
+
+        ''' <summary>
+        ''' Resolution of positioner in seconds arc per position where 1 sec arc = 1 deg/3600 = .0002778 degrees
+        ''' </summary>
+        Public Property Resolution
+            Get
+                Return _resolution
+            End Get
+            Set(value)
+
+            End Set
+        End Property
+
+
+        ''' <summary>
+        ''' Returns string that contains value of minimum factory set pan limit
+        ''' </summary>
+        Public Property MinimumFactoryPanLimit
+            Get
+                Return GetMinPanFactoryLimit()
+            End Get
+            Set(value)
+
+            End Set
+        End Property
+
+
+        ''' <summary>
+        ''' Returns string that contains value of maximum factory set pan limit
+        ''' </summary>
+        Public Property MaximumFactoryPanLimit
+            Get
+                Return GetMaxPanFactoryLimit()
+            End Get
+            Set(value)
+
+            End Set
+        End Property
+
+
+
+        ''' <summary>
+        ''' Returns string that contains value of maximum factory set tilt limit
+        ''' </summary>
+        Public Property MaximumFactoryTiltLimit
+            Get
+                Return GetMinTiltFactoryLimit()
+            End Get
+            Set(value)
+
+            End Set
+        End Property
+
+
+        ''' <summary>
+        ''' Returns string that contains value of minimum factory set tilt limit
+        ''' </summary>
+        Public Property MinimumFactoryTiltLimit
+            Get
+                Return GetMinTiltFactoryLimit()
+            End Get
+            Set(value)
+
+            End Set
+        End Property
+
+
+        Public Function EnablePanStabilization() As String Implements IPositioner.EnablePanStabilization
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+        Public Function DisablePanStabilization() As String Implements IPositioner.DisablePanStabilization
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+        Public Function EnableTiltStabilization() As String Implements IPositioner.EnableTiltStabilization
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+        Public Function DisableTiltStabilization() As String Implements IPositioner.DisableTiltStabilization
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+        Public Function GetPanAmperage() As String Implements IPositioner.GetPanAmperage
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+        Public Function GetTiltAmperage() As String Implements IPositioner.GetTiltAmperage
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+        Public Function GetPanTargetPosition(Optional count As Int32 = 0) As String Implements IPositioner.GetPanTargetPosition
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+        Public Function GetTiltTargetPosition() As String Implements IPositioner.GetTiltTargetPosition
+            Dim ans As String = String.Empty
+            Return ans
+        End Function
+
+
+
+
+
+#Region "IDispose"
+        ''' <summary>
+        ''' Frees any allocated memory when object use is complete
+        ''' </summary>
+        Public Overloads Sub Dispose() Implements IDisposable.Dispose
+
+            Dispose(True)
+            GC.SuppressFinalize(Me)
+
+        End Sub
+
+        ''' <summary>
+        ''' Frees any allocated memory when object use is complete
+        ''' </summary>
+        ''' <param name="disposing"></param>
+        Protected Overridable Overloads Sub Dispose(ByVal disposing As Boolean)
+
+            If Not Me.Disposed Then
+                If disposing Then
+                    If Not _connection Is Nothing Then _connection.Dispose()
+                End If
+            End If
+            Me.Disposed = True
+
+        End Sub
+
+
+#End Region
+#Region "Arrays"
+#Region "Rotation Direction Array"
+        Private _panRotationDirectionArray As String() = {
+                                                        "PS-",
+                                                        "PS"
+                                                        }
+
+#End Region
+#Region "Speed Mode Array"
+        Private _speedModeArray As String() = {
+                                             "CI",
+                                             "CV"
+                                            }
+
+#End Region
+#Region "Command Mode Array"
+        Private _commandModeArray As String() = {
+                                                "I",
+                                                "S"
+                                                }
+
+#End Region
+#Region "Degree Array"
+        Private _getDegree As Int32() = {
+                    0,
+                    1,
+                    2,
+                    3,
+                    4,
+                    5,
+                    6,
+                    7,
+                    8,
+                    9,
+                    10,
+                    11,
+                    12,
+                    13,
+                    14,
+                    15,
+                    16,
+                    17,
+                    18,
+                    19,
+                    20,
+                    21,
+                    22,
+                    23,
+                    24,
+                    25,
+                    26,
+                    27,
+                    28,
+                    29,
+                    30,
+                    31,
+                    32,
+                    33,
+                    34,
+                    35,
+                    36,
+                    37,
+                    38,
+                    39,
+                    40,
+                    41,
+                    42,
+                    43,
+                    44,
+                    45,
+                    46,
+                    47,
+                    48,
+                    49,
+                    50,
+                    51,
+                    52,
+                    53,
+                    54,
+                    55,
+                    56,
+                    57,
+                    58,
+                    59,
+                    60,
+                    61,
+                    62,
+                    63,
+                    64,
+                    65,
+                    66,
+                    67,
+                    68,
+                    69,
+                    70,
+                    71,
+                    72,
+                    73,
+                    74,
+                    75,
+                    76,
+                    77,
+                    78,
+                    79,
+                    80,
+                    81,
+                    82,
+                    83,
+                    84,
+                    85,
+                    86,
+                    87,
+                    88,
+                    89,
+                    90,
+                    91,
+                    92,
+                    93,
+                    94,
+                    95,
+                    96,
+                    97,
+                    98,
+                    99,
+                    100,
+                    101,
+                    102,
+                    103,
+                    104,
+                    105,
+                    106,
+                    107,
+                    108,
+                    109,
+                    110,
+                    111,
+                    112,
+                    113,
+                    114,
+                    115,
+                    116,
+                    117,
+                    118,
+                    119,
+                    120,
+                    121,
+                    122,
+                    123,
+                    124,
+                    125,
+                    126,
+                    127,
+                    128,
+                    129,
+                    130,
+                    131,
+                    132,
+                    133,
+                    134,
+                    135,
+                    136,
+                    137,
+                    138,
+                    139,
+                    140,
+                    141,
+                    142,
+                    143,
+                    144,
+                    145,
+                    146,
+                    147,
+                    148,
+                    149,
+                    150,
+                    151,
+                    152,
+                    153,
+                    154,
+                    155,
+                    156,
+                    157,
+                    158,
+                    159,
+                    160,
+                    161,
+                    162,
+                    163,
+                    164,
+                    165,
+                    166,
+                    167,
+                    168,
+                    169,
+                    170,
+                    171,
+                    172,
+                    173,
+                    174,
+                    175,
+                    176,
+                    177,
+                    178,
+                    179,
+                    180,
+                    -179,
+                    -178,
+                    -177,
+                    -176,
+                    -175,
+                    -174,
+                    -173,
+                    -172,
+                    -171,
+                    -170,
+                    -169,
+                    -168,
+                    -167,
+                    -166,
+                    -165,
+                    -164,
+                    -163,
+                    -162,
+                    -161,
+                    -160,
+                    -159,
+                    -158,
+                    -157,
+                    -156,
+                    -155,
+                    -154,
+                    -153,
+                    -152,
+                    -151,
+                    -150,
+                    -149,
+                    -148,
+                    -147,
+                    -146,
+                    -145,
+                    -144,
+                    -143,
+                    -142,
+                    -141,
+                    -140,
+                    -139,
+                    -138,
+                    -137,
+                    -136,
+                    -135,
+                    -134,
+                    -133,
+                    -132,
+                    -131,
+                    -130,
+                    -129,
+                    -128,
+                    -127,
+                    -126,
+                    -125,
+                    -124,
+                    -123,
+                    -122,
+                    -121,
+                    -120,
+                    -119,
+                    -118,
+                    -117,
+                    -116,
+                    -115,
+                    -114,
+                    -113,
+                    -112,
+                    -111,
+                    -110,
+                    -109,
+                    -108,
+                    -107,
+                    -106,
+                    -105,
+                    -104,
+                    -103,
+                    -102,
+                    -101,
+                    -100,
+                    -99,
+                    -98,
+                    -97,
+                    -96,
+                    -95,
+                    -94,
+                    -93,
+                    -92,
+                    -91,
+                    -90,
+                    -89,
+                    -88,
+                    -87,
+                    -86,
+                    -85,
+                    -84,
+                    -83,
+                    -82,
+                    -81,
+                    -80,
+                    -79,
+                    -78,
+                    -77,
+                    -76,
+                    -75,
+                    -74,
+                    -73,
+                    -72,
+                    -71,
+                    -70,
+                    -69,
+                    -68,
+                    -67,
+                    -66,
+                    -65,
+                    -64,
+                    -63,
+                    -62,
+                    -61,
+                    -60,
+                    -59,
+                    -58,
+                    -57,
+                    -56,
+                    -55,
+                    -54,
+                    -53,
+                    -52,
+                    -51,
+                    -50,
+                    -49,
+                    -48,
+                    -47,
+                    -46,
+                    -45,
+                    -44,
+                    -43,
+                    -42,
+                    -41,
+                    -40,
+                    -39,
+                    -38,
+                    -37,
+                    -36,
+                    -35,
+                    -34,
+                    -33,
+                    -32,
+                    -31,
+                    -30,
+                    -29,
+                    -28,
+                    -27,
+                    -26,
+                    -25,
+                    -24,
+                    -23,
+                    -22,
+                    -21,
+                    -20,
+                    -19,
+                    -18,
+                    -17,
+                    -16,
+                    -15,
+                    -14,
+                    -13,
+                    -12,
+                    -11,
+                    -10,
+                    -9,
+                    -8,
+                    -7,
+                    -6,
+                    -5,
+                    -4,
+                    -3,
+                    -2,
+                    -1
+    }
+
+#End Region
+#Region "Step Mode"
+        Private _stepModeArray As String() = {
+                                             "F",
+                                             "H",
+                                             "Q",
+                                             "E",
+                                             "A"
+                                         }
+
+#End Region
+#End Region
+    End Class
+End Namespace

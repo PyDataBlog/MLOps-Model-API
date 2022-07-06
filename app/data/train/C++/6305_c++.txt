@@ -1,0 +1,461 @@
+//////////////////////////////////////////////////////////////////
+//
+// KARM_Rtx_Test.cpp
+//
+//////////////////////////////////////////////////////////////////
+
+#include <stdio.h>
+#include <Windows.h>
+#include "KARM_Rtx_Test.h"
+
+long	Iteration = 0;
+int		ret;
+int		ctrl_mode = 0;
+int		ctrl_pose = 0;
+
+LARGE_INTEGER	TaskTime_cst;
+LARGE_INTEGER	TaskTime_new;
+LONGLONG		TaskTime_now;
+LONGLONG		TaskTime_old;
+LONGLONG		TaskTime_gap;
+
+HANDLE	hMapF;
+log_t	*s_log;
+
+motor_t	motor[JOINT_DOF];
+ctrl_t  *ctrl = NULL;
+
+
+void main(void)
+{
+	// for periodic timer code
+	LARGE_INTEGER	liPeriod;   // timer period
+	HANDLE			hTimer;     // timer handle
+	BOOL			sTimer;		// timer state
+	int nm;
+
+	ctrl = new ctrl_t;
+
+	hMapF = RtOpenSharedMemory( SHM_MAP_WRITE, FALSE, TEXT("Log0"), (LPVOID *) &s_log);
+	s_log->command_msg = CMD_Null;
+
+	RtPrintf("KARM Program Start !!! \n\n");
+
+	ret = command_para_set(motor);
+	if(!ret) RtPrintf("ERROR command_para_set !!! \n");
+
+	ret = control_para_set(ctrl);
+	if(!ret) RtPrintf("ERROR control_para_set !!! \n");
+
+	ret = command_can_open();
+	if(!ret) RtPrintf("ERROR command_canopen !!! \n");
+
+	while (s_log->command_msg != CMD_Exit)
+	{
+		switch(s_log->command_msg)
+		{
+			case CMD_Connect :
+
+				ret = command_can_reset();
+				if(!ret) RtPrintf("ERROR command_can_reset !!! \n");
+
+				ret = command_elmo_init(motor);
+				if(!ret) RtPrintf("ERROR command_elmoinit !!! \n");
+
+				break;
+
+			case CMD_Disconnect:
+
+				ret = command_can_close();
+				if(!ret) RtPrintf("ERROR command_canclose !!! \n");
+
+				break;
+
+			case CMD_ResetEncoder:
+
+				ret = command_reset_encoder(motor);
+				if(!ret) RtPrintf("ERROR command_reset_encoder !!! \n");
+
+				break;
+
+			case CMD_HomeSearch :
+
+				ret = command_home_search(motor);
+				if(!ret) RtPrintf("ERROR command_home_search !!! \n");
+
+				break;
+
+			case CMD_GoHome :
+
+				ret = command_go_home(motor);
+				if(!ret) RtPrintf("ERROR command_go_home !!! \n");
+
+				break;
+
+			case CMD_ServoOn :
+				ret = command_servo_on(motor);
+				if(!ret) RtPrintf("ERROR command_servo_on !!! \n");
+
+				break;
+
+			case CMD_ServoOff :
+				ret = command_servo_off(motor);
+				if(!ret) RtPrintf("ERROR command_servo_off !!! \n");
+
+				break;
+
+			case CMD_PDO_Reset :
+				ret = command_pdo_reset(motor);
+				if(!ret) RtPrintf("ERROR command_pdo_reset !!! \n");
+
+				break;
+
+			case CMD_PDO_Set :
+				ret = command_pdo_set(motor);
+				if(!ret) RtPrintf("ERROR command_pdo_set !!! \n");
+
+				break;
+
+			case CMD_ModePosition :
+				ret = command_mode_position(motor);
+				if(!ret) RtPrintf("ERROR command_mode_position !!! \n");
+
+				break;
+
+			case CMD_ModeVelocity :
+				ret = command_mode_velocity(motor);
+				if(!ret) RtPrintf("ERROR command_mode_velocity !!! \n");
+
+				break;
+
+			case CMD_ModeCurrent :
+				ret = command_mode_current(motor);
+				if(!ret) RtPrintf("ERROR command_mode_current !!! \n");
+
+				break;
+
+			case CMD_Ctrl_Start :
+
+				ret = command_servo_off(motor);
+				if(!ret) RtPrintf("ERROR command_servo_off !!! \n");
+
+				ret = command_mode_current(motor);
+				if(!ret) RtPrintf("ERROR command_mode_current !!! \n");
+
+				ret = command_servo_on(motor);
+				if(!ret) RtPrintf("ERROR command_servo_on !!! \n");
+
+				ret = command_pdo_set(motor);
+				if(!ret) RtPrintf("ERROR command_pdo_set !!! \n");
+
+				ret = command_current_start(motor);
+				if(!ret) RtPrintf("ERROR command_current_start !!! \n");
+
+				Sleep(200);
+				//  RTX periodic timer code:
+				liPeriod.QuadPart = CONTROL_PERIOD;
+
+				// Create a periodic timer
+				hTimer = RtCreateTimer(NULL, 0, TimerHandler, NULL, RT_PRIORITY_MAX, CLOCK_2);
+				if (!hTimer)
+				{
+					RtWprintf(L"RtCreateTimer error = %d\n",GetLastError());
+					break;
+				}
+
+				sTimer = RtSetTimerRelative( hTimer, &liPeriod, &liPeriod);
+				if (!sTimer)
+				{
+					RtWprintf(L"RtSetTimerRelative error = %d\n",GetLastError());
+					break;
+				}
+
+				RtGetClockTime(CLOCK_2, &TaskTime_cst);
+				
+				break;
+
+			case CMD_Ctrl_End :
+
+				sTimer = RtDeleteTimer( hTimer );
+				if(!sTimer) RtWprintf(L"RtDeleteTimer error = %d\n",GetLastError());
+
+				ret = command_current_end(motor);
+				if(!ret) RtPrintf("ERROR command_current_end !!! \n");
+
+				for (nm=0; nm<JOINT_DOF; nm++) motor[nm].out_current = 0;
+				ret = command_write_current(motor);
+				if(!ret) RtPrintf("ERROR command_write_current !!! \n");
+
+				ret = command_pdo_reset(motor);
+				if(!ret) RtPrintf("ERROR command_pdo_reset !!! \n");
+
+				ret = command_servo_off(motor);
+				if(!ret) RtPrintf("ERROR command_servo_off !!! \n");
+
+				RtPrintf("Iteration (time) = %ld (%6.3f) \n", Iteration, Iteration*DEL_TIME);
+				RtPrintf("Task Time : %.3f \n", (double)TaskTime_now / 10000000.0);
+				RtPrintf("Total Error : ");
+				for (nm=0; nm<JOINT_DOF; nm++) RtPrintf("%ld ", motor[nm].err_total);
+				RtPrintf("\n");
+				RtPrintf("Test finished \n");
+
+				break;
+
+			case CMD_Ctrl_Mode0 :	// Test mode
+				ctrl->Iteration = 0;
+				ctrl_mode = CMD_Ctrl_Mode0;
+				break;
+
+			case CMD_Ctrl_Mode1 :	// Control Bae mode
+				ctrl->Iteration = 0;
+				ctrl_mode = CMD_Ctrl_Mode1;
+				break;
+
+			case CMD_Ctrl_Mode2 :	// Control Yang mode
+				ctrl->Iteration = 0;
+				ctrl_mode = CMD_Ctrl_Mode2;
+				break;
+
+			case CMD_Ctrl_Pose0 :	// Stop
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose0;
+					break;
+
+			case CMD_Ctrl_Pose1 :
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose1;
+					break;
+
+			case CMD_Ctrl_Pose2 :
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose2;
+					break;
+
+			case CMD_Ctrl_Pose3 :
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose3;
+					break;
+
+			case CMD_Ctrl_Pose4 :
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose4;
+					break;
+
+			case CMD_Ctrl_Pose5 :
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose5;
+					break;
+
+			case CMD_Ctrl_Pose6 :
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose6;
+					break;
+
+			case CMD_Ctrl_Pose7 :	// Elbow
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose7;
+					break;
+
+			case CMD_Ctrl_Pose8 :	// Cycle
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose8;
+					break;
+
+			case CMD_Ctrl_Pose9 :	// Lissajous
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Ctrl_Pose9;
+				break;
+
+			case CMD_Test_1 :		// test_1
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Test_1;
+				break;
+
+			case CMD_Test_2 :		// test_2
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Test_2;
+				break;
+
+			case CMD_Test_3 :		// test_3
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Test_3;
+				break;
+
+			case CMD_Test_4 :		// test_4
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Test_4;
+				break;
+
+			case CMD_Test_5 :		// test_5
+				ctrl->Iteration = 0;
+				ctrl_pose = CMD_Test_5;
+				break;
+
+			default :
+				break;
+		}
+		s_log->command_msg = CMD_Null;
+		Sleep(100);
+	}
+
+	UnmapViewOfFile(s_log);
+
+	RtCloseHandle(s_log);
+
+	delete ctrl;
+
+	ExitProcess(0);
+
+}
+
+
+void RTFCNDCL TimerHandler(PVOID context)
+{
+	int nm, np;
+
+	RtGetClockTime(CLOCK_2, &TaskTime_new);
+	TaskTime_old = TaskTime_now;
+	TaskTime_now = TaskTime_new.QuadPart - TaskTime_cst.QuadPart;
+	TaskTime_gap = TaskTime_now - TaskTime_old;
+
+
+	switch (ctrl_pose)
+	{
+	case CMD_Ctrl_Pose0 :		// stop
+
+		ctrl->target_pos[0] = ctrl->end_now_p[0];
+		ctrl->target_pos[1] = ctrl->end_now_p[1];
+		ctrl->target_pos[2] = ctrl->end_now_p[2];
+		ctrl->Kp = 0.0;
+		ctrl->Kd = 0.0;
+		control_trajectory(ctrl, 7.0);
+
+		break;
+
+	case CMD_Ctrl_Pose1 :
+
+		ctrl->target_pos[0] =  0.2;
+		ctrl->target_pos[1] = -0.3;
+		ctrl->target_pos[2] = -0.4;
+		ctrl->Kp = 10.0; // 200.0;
+		ctrl->Kd = 0.5;
+		control_trajectory(ctrl, 7.0);
+
+		break;
+
+	case CMD_Ctrl_Pose2 :
+
+		break;
+
+	case CMD_Ctrl_Pose3 :
+
+		break;
+
+	case CMD_Ctrl_Pose4 :
+
+		break;
+
+	case CMD_Ctrl_Pose5 :
+
+		break;
+
+	case CMD_Ctrl_Pose6 :
+
+		break;
+
+	case CMD_Ctrl_Pose7 :
+
+		break;
+
+	case CMD_Ctrl_Pose8 :
+
+		break;
+
+	case CMD_Ctrl_Pose9 :
+
+		break;
+
+	default :
+		break;
+	}
+
+	switch (ctrl_mode)
+	{
+		case CMD_Ctrl_Mode0 :
+			control_test(motor, ctrl);
+			break;
+
+		case CMD_Ctrl_Mode1:
+			control_bae(motor, ctrl);
+			break;
+
+		case CMD_Ctrl_Mode2:
+			control_yang(motor, ctrl);
+			break;
+
+		case CMD_Ctrl_Mode3:	// tapo Controller
+			control_tapo(motor, ctrl);
+
+		default :
+			control_none(motor);
+			break;
+	}
+	ret = command_current_control(motor);
+	if(!ret) RtPrintf("ERROR command_current_control !!! \n");
+
+/*
+	// -------------------------------------------------------------------------------------
+	if ((int)((double)Iteration*DEL_TIME*1000.0)%200 == 0)
+	{
+		RtPrintf("Iteration (time) = %ld (%6.3f sec) \n", Iteration, Iteration*DEL_TIME);
+		RtPrintf("Task time = %7.3f sec \n", (double)TaskTime_now/10000000);
+		RtPrintf("Task time gap = %7.3f msec \n", (double)(TaskTime_now - TaskTime_old)/10000);
+		RtPrintf("\n");
+
+		RtPrintf(" <pos_deg> <current> <status> <torque> \n", Iteration);
+		for (nm=0; nm<JOINT_DOF; nm++)
+			RtPrintf(" %7.2f %7.3f %8d %7.3f \n", RTD(motor[nm].now_position), motor[nm].out_current, motor[nm].status, motor[nm].out_torque);
+		RtPrintf("\n");
+
+		RtPrintf("out_pos ( %f, %f, %f ) \n", ctrl->out_pos[0], ctrl->out_pos[1], ctrl->out_pos[2]);
+		RtPrintf("now_pos ( %f, %f, %f ) \n", ctrl->now_pos[0], ctrl->now_pos[1], ctrl->now_pos[2]);
+		RtPrintf("\n");
+	}
+	// -------------------------------------------------------------------------------------
+*/
+
+	for (nm=0; nm<JOINT_DOF; nm++) if(motor[nm].status!=0) motor[nm].err_total++;
+	for (nm=0; nm<JOINT_DOF; nm++) motor[nm].status = 0;
+
+	// -------------------------------------------------------------------------------------
+	if(Iteration<LOG_MAX_COUNT)
+	{
+		s_log->log_count = Iteration;
+		s_log->time[Iteration] = Iteration*DEL_TIME;
+		s_log->tasktime_gap[Iteration] = (double)TaskTime_gap / 10000.0;
+
+		for (nm=0; nm<JOINT_DOF; nm++)
+			s_log->now_position[nm][Iteration] = motor[nm].now_position;
+		for (nm=0; nm<JOINT_DOF; nm++)
+			s_log->now_velocity[nm][Iteration] = motor[nm].now_velocity;
+		for (nm=0; nm<JOINT_DOF; nm++)
+			s_log->out_current[nm][Iteration] = motor[nm].out_current;
+		for (nm=0; nm<JOINT_DOF; nm++)
+			s_log->status[nm][Iteration] = motor[nm].status;
+		for (np=0; np<POS_DOF; np++)
+			s_log->now_endpos[np][Iteration] = ctrl->end_now_p[np];
+		for (np=0; np<POS_DOF; np++)
+			s_log->out_endpos[np][Iteration] = ctrl->end_out_p[np];
+	}
+	if(Iteration==LOG_MAX_COUNT)
+		RtPrintf("Log memory over !!! \n");
+	if(Iteration>=20000)
+		s_log->command_msg = CMD_Ctrl_End;
+	// -------------------------------------------------------------------------------------
+
+	Iteration++;
+	ctrl->Iteration++;
+
+	return;
+}
+

@@ -1,0 +1,2442 @@
+﻿Imports Visomes.MySQL
+Imports System.Diagnostics
+Imports System.Net
+Imports System.Net.Dns
+Imports KeepAutomation.Barcode.Bean
+Imports System.Threading
+Imports Visomes.SGV.Core
+Imports System.Collections.Generic
+Imports Visomes.Validation
+
+''' <summary>
+''' CADASTRO DE PC
+''' </summary>
+''' <remarks></remarks>
+
+Public Class ControleComputadores
+
+#Region "Variaveis"
+    Private idTipoPc As Integer
+    Private idTipoProcessador As Integer
+    Private idTipoSO As Integer
+    Private idTipoRam As Integer
+    Private idTipoComponente As Integer
+    Private idSoftware As Integer
+    Private idTipoConexao As Integer
+    Private idTipoLink As Integer
+    Private delComponentes As New HashSet(Of Integer)
+    Private delSoftware As New HashSet(Of Integer)
+    Private delConexao As New HashSet(Of Integer)
+    Private delLink As New HashSet(Of Integer)
+    Private WithEvents BackgroundWorker1 As New System.ComponentModel.BackgroundWorker()
+    Private barcode As BarCode = New BarCode()
+    Private blnValidaSubCadastros As Boolean = True
+    Private data As New Visomes.Extras.Date()
+    Private moeda As New Visomes.Extras.Currency()
+    Private valid As New Validating()
+    Private novo As Boolean
+#End Region
+
+
+    ''' <summary>
+    ''' INÍCIO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub frmControleComputadores_Load(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles MyBase.Load
+        If Me.novo Then
+            ValidatesOutPut = True
+            cboStatus.SelectedIndex = 0
+            mtbDtCadastro.Text = CurrentDate().ToShortDateString
+            txtCodPc.Text = CStr(DML.NextPK("idPc", "pc").ToString("D5"))
+            CarregaHistoricoPC(0)
+            CarregaComponente(0)
+            CarregaSoftwares(0)
+            CarregaConexao(0)
+            CarreLinks(0)
+            CarregaCombox()
+        Else
+            ValidatesOutPut = False
+        End If
+    End Sub
+
+    '
+    ' ÁREA DE CARREGAMENTOS DOS DADOS DO FORMULÁRIO
+
+    ''' <summary>
+    ''' CARREGA CAMPOS PC
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Public Sub CarregaCamposPc(ByVal idPc As Integer)
+
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA HISTORIO CADASTRAL DO PC
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub CarregaHistoricoPC(ByVal idPc As Integer)
+        dgvHistorico.DataSource = DML.FeedDataGridView("t.descricao Tipo, h.data Data,h.hora Hora,u.login 'Alterado por'", _
+                                                       "historico_cadastral_pc h INNER JOIN tipo_alteracao_cadastral t, pc c , usuario u", _
+                                                       "h.idUsuario = u.idUsuario" _
+                                                     & " AND h.idPC = c.idPc AND " _
+                                                     & "h.idTipoAlteracaoCadastral = t.idTipoAlteracaoCadastral" _
+                                                     & " AND h.idPC = '" & idPc & "'")
+    End Sub
+
+
+    ''' <summary>
+    ''' CARREGA  COMPONENTE
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub CarregaComponente(ByVal idPc As Integer)
+
+        bdsComponentes.DataSource = DML.FeedDataGridView("tcp.descricao 'Componente', tcpp.descricao 'Descricao'," _
+                                                       & "tcpp.idTipoComponentePC,tcpp.qtd Quantidade,1", _
+                                                         "tipo_componente_pc_has_pc tcpp " _
+                                                       & "INNER JOIN tipo_componente_pc tcp ON " _
+                                                       & "tcp.idTipoComponentePC = tcpp.idTipoComponentePC " _
+                                                       & "INNER JOIN pc p ON p.idPc = tcpp.idPc", _
+                                                         "tcpp.idPc = " & idPc & "")
+
+        dgvComponente.DataSource = bdsComponentes
+        dgvComponente.Columns(2).Visible = False
+        dgvComponente.Columns(4).Visible = False
+
+        If dgvComponente.RowCount > 0 Then
+            btnDelAdc.Enabled = True
+            btnEditAdc.Enabled = True
+        Else
+            btnDelAdc.Enabled = False
+            btnEditAdc.Enabled = False
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA  SOFTWARES
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub CarregaSoftwares(ByVal idPc As Integer)
+
+        bdsSoftwares.DataSource = DML.FeedDataGridView("sp.descricao 'Software', spp.descricao 'Descricao',spp.idSoftwarePC,1", _
+                                                       "software_pc_has_pc spp " _
+                                                     & "INNER JOIN software_pc sp ON sp.idSoftwarePC = spp.idSoftwarePC " _
+                                                     & "INNER JOIN pc p ON p.idPc = spp.idPc", _
+                                                       "spp.idPc = " & idPc & "")
+
+        dgvSoftware.DataSource = bdsSoftwares
+        dgvSoftware.Columns(2).Visible = False
+        dgvSoftware.Columns(3).Visible = False
+
+        If dgvSoftware.RowCount > 0 Then
+            btnDelSoft.Enabled = True
+            btnEditSoft.Enabled = True
+        Else
+            btnDelSoft.Enabled = False
+            btnEditSoft.Enabled = False
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA  CONEXÕES
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub CarregaConexao(ByVal idPc As Integer)
+
+
+        bdsConexoes.DataSource = DML.FeedDataGridView("tc.descricao 'Conexao', ptc.mac 'MAC Address', ptc.ip 'IP',ptc.idTipoConexao,1", _
+                                                      "pc_has_tipo_conexao ptc " _
+                                                    & "INNER JOIN tipo_conexao tc ON tc.idTipoConexao = ptc.idTipoConexao " _
+                                                    & "INNER JOIN pc p ON p.idPc = ptc.idPc", _
+                                                      "ptc.idPc = " & idPc & "")
+
+        dgvConexoes.DataSource = bdsConexoes
+        dgvConexoes.Columns(3).Visible = False
+        dgvConexoes.Columns(4).Visible = False
+
+        If dgvConexoes.RowCount > 0 Then
+            btnDelConex.Enabled = True
+            btnEditConex.Enabled = True
+        Else
+            btnDelConex.Enabled = False
+            btnEditConex.Enabled = False
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA  LINKS
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub CarreLinks(ByVal idPc As Integer)
+
+        bdsLinks.DataSource = DML.FeedDataGridView("tlp.descricao 'Tipo', tlpp.link 'Link', tlpp.idTipoLinkPc,1", _
+                                                       "tipo_link_pc_has_pc tlpp " _
+                                                     & "INNER JOIN tipo_link_pc tlp ON tlp.idTipoLinkPc = tlpp.idTipoLinkPc " _
+                                                     & "INNER JOIN pc p ON p.idPc = tlpp.idPc", _
+                                                       "tlpp.idPc = " & idPc & "")
+
+        dgvLinks.DataSource = bdsLinks
+        dgvLinks.Columns(2).Visible = False
+
+        With dgvLinks()
+            .AutoGenerateColumns = False
+            .Columns.Clear()
+
+            'TIPO LINK
+            Dim tipo_Text As New DataGridViewTextBoxColumn
+            tipo_Text.HeaderText = "Tipo"
+            tipo_Text.DataPropertyName = "Tipo"
+            .Columns.Add(tipo_Text)
+            .Columns(0).DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter
+
+            'LINK
+            Dim link_Text As New DataGridViewLinkColumn
+            link_Text.HeaderText = "Link"
+            link_Text.DataPropertyName = "Link"
+            .Columns.Add(link_Text)
+            .Columns(1).DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter
+
+            'ID LINK
+            Dim id_Text As New DataGridViewTextBoxColumn
+            id_Text.HeaderText = "idTipoLinkPc"
+            id_Text.DataPropertyName = "idTipoLinkPc"
+            .Columns.Add(id_Text)
+            .Columns(2).DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter
+            .Columns(2).Visible = False
+
+            '1
+            Dim um_Text As New DataGridViewTextBoxColumn
+            um_Text.HeaderText = "1"
+            um_Text.DataPropertyName = "1"
+            .Columns.Add(um_Text)
+            .Columns(3).DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter
+            .Columns(3).Visible = False
+
+        End With
+
+        If dgvLinks.RowCount > 0 Then
+            btnDelLink.Enabled = True
+            btnEditLink.Enabled = True
+        Else
+            btnDelLink.Enabled = False
+            btnEditLink.Enabled = False
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA COMBOX
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CarregaCombox()
+
+        'TIPO PC
+        cboTipoPc.Items.Clear()
+        cboTipoPc.Items.AddRange(FeedsLists("descricao", "tipo_pc", "status = 1"))
+
+        'PROCESSADOR
+        cboProcessador.Items.Clear()
+        cboProcessador.Items.AddRange(FeedsLists("descricao", "tipo_processador", "status = 1"))
+
+        'TIPO RAM
+        cboTipoRam.Items.Clear()
+        cboTipoRam.Items.AddRange(FeedsLists("descricao", "tipo_ram", "status = 1"))
+
+        'SO
+        cboSo.Items.Clear()
+        cboSo.Items.AddRange(FeedsLists("descricao", "tipo_so", "status = 1"))
+
+        'COMPONENTES
+        cboTipoComponente.Items.Clear()
+        cboTipoComponente.Items.AddRange(FeedsLists("descricao", "tipo_componente_pc", "status = 1"))
+
+        'SOFTWARE
+        cboSoftware.Items.Clear()
+        cboSoftware.Items.AddRange(FeedsLists("descricao", "software_pc", "status = 1"))
+
+        'TIPO CONEXÃO DE REDE
+        cboTipoConexao.Items.Clear()
+        cboTipoConexao.Items.AddRange(FeedsLists("descricao", "tipo_conexao", "status = 1"))
+
+        'TIPO LINK
+        cboTipoLink.Items.Clear()
+        cboTipoLink.Items.AddRange(FeedsLists("descricao", "tipo_link_pc", "status = 1"))
+
+    End Sub
+
+
+    ''' <summary>
+    ''' SELEÇÃO DE ABAS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub tbcPc_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tbcPc.SelectedIndexChanged
+
+        Select Case tbcPc.SelectedIndex
+
+            Case 1
+
+            Case 2
+
+        End Select
+    End Sub
+
+
+    '
+    ' ÁREA DE VALIDAÇÕES
+    '
+
+    ''' <summary>
+    ''' SÓ NÚMERO RAN
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtNumRam_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles txtNumRam.KeyPress
+        valid.InputDecimal(sender, e)
+    End Sub
+
+    ''' <summary>
+    ''' SÓ NÚMERO RAN
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtArmazenamento_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles txtArmazenamento.KeyPress
+        valid.InputDecimal(sender, e)
+    End Sub
+
+    ''' <summary>
+    ''' SÓ NÚMERO QUANTIDADE COMPONENTES
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtQtdComponente_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles txtQtdComponente.KeyPress
+        valid.InputDecimal(sender, e)
+    End Sub
+
+    ''' <summary>
+    ''' MAIOR QUE ZERO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtQtdComponente_Validating(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles txtQtdComponente.Validating
+
+        If Not String.IsNullOrEmpty(txtQtdComponente.Text) Then
+            If CInt(txtQtdComponente.Text) <= 0 Then
+                txtQtdComponente.Text = "1"
+            End If
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' DEDIMAL
+    ''' </summary>
+    ''' <remarks></remarks> 
+    Private Sub txtNumRam_TextChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles txtNumRam.TextChanged
+        moeda.TextBoxCurrency(txtNumRam)
+    End Sub
+
+    ''' <summary>
+    ''' DECIMAL
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtArmazenamento_TextChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles txtArmazenamento.TextChanged
+        moeda.TextBoxCurrency(txtArmazenamento)
+    End Sub
+
+    ''' <summary>
+    ''' MAC ADDRESS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub mtbMac_Validating(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles mtbMac.Validating
+
+        If Not valid.MacAdress(mtbMac.Text) Then
+
+            epvPc.SetError(mtbMac, "MAC em formato inválido")
+            ValidatesOutPut = False
+            ErrorSavamento.Append("MAC em formato inválido" & vbCrLf)
+
+        Else
+            epvPc.SetError(mtbMac, "")
+            ErrorSavamento.Replace("MAC em formato inválido" & vbCrLf, "")
+            ValidatesOutPut = True
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' FORMATA MASCARA DE IP CONFORME SE DIGITA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub mtbIp_TextChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles mtbIp.TextChanged
+
+        If mtbIp.Text.Length = 4 Then
+
+            If IsNumeric(mtbIp.Text(2)) And Not mtbIp.Text(3) = "." Then
+
+                mtbIp.Text = mtbIp.Text.Substring(0, 3) & "." & mtbIp.Text.Substring(3)
+                mtbIp.Select(mtbIp.Text.Length, 0)
+
+            End If
+
+        ElseIf mtbIp.Text.Length = 8 Then
+
+            If IsNumeric(mtbIp.Text(6)) And Not mtbIp.Text(7) = "." Then
+
+                mtbIp.Text = mtbIp.Text.Substring(0, 7) & "." & mtbIp.Text.Substring(7)
+                mtbIp.Select(mtbIp.Text.Length, 0)
+
+            End If
+
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' SE PASSOU DO TAMANHO BLOQUEIA TECLADO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub mtbIp_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles mtbIp.KeyPress
+
+        If mtbIp.Text.Length > 14 And Not e.KeyChar = Convert.ToChar(Keys.Back) Then
+            e.Handled = True
+        End If
+
+        If e.KeyChar = Convert.ToChar(Keys.Enter) Then
+            SendKeys.Send("{TAB}")
+            SendKeys.Send("{ENTER}")
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' VALIDA IP
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub mtbIp_Validating(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles mtbIp.Validating
+
+        If Not valid.IP(mtbIp.Text) Then
+
+            epvPc.SetError(mtbIp, "IP em formato inválido")
+            ValidatesOutPut = False
+            ErrorSavamento.Append("IP em formato inválido" & vbCrLf)
+
+        Else
+            epvPc.SetError(mtbIp, "")
+            ErrorSavamento.Replace("IP em formato inválido" & vbCrLf, "")
+            ValidatesOutPut = True
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' VALIDA URL
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtLink_Validating(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles txtLink.Validating
+
+        If Not valid.Url(txtLink.Text) Then
+
+            epvPc.SetError(txtLink, "URL em formato inválido")
+            ValidatesOutPut = False
+            ErrorSavamento.Append("URL em formato inválido" & vbCrLf)
+
+        Else
+            epvPc.SetError(txtLink, "")
+            ValidatesOutPut = True
+            lklLink.Visible = True
+            txtLink.Visible = False
+            lklLink.Text = txtLink.Text
+            epvPc.SetError(txtLink, "")
+            ErrorSavamento.Replace("URL em formato inválido" & vbCrLf, "")
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' DATA INICIAL
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dtpDataInicial_ValueChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles dtpDataInicial.ValueChanged
+
+        Dim Data As Date = dtpDataInicial.Value.Date
+
+        If (Data.Subtract(dtpDataFinal.Value.Date).Days) > 0 Then
+            dtpDataInicial.Value = Today
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' DATA FINAL
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dtpDataFinal_ValueChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles dtpDataFinal.ValueChanged
+
+        Dim Data As Date = dtpDataInicial.Value.Date
+
+        If (Data.Subtract(dtpDataFinal.Value.Date).Days) > 0 Then
+            dtpDataFinal.Value = Today
+        End If
+
+        If Today.Subtract(dtpDataFinal.Value.Date).Days > 0 Then
+
+            lblDataFinal.ForeColor = Color.DarkRed
+            lblDataFinal.Font = New Font("Arial", 8.25, FontStyle.Bold)
+            epvPc.SetError(dtpDataFinal, "Garantia encerrada.")
+
+        Else
+
+            lblDataFinal.ForeColor = Color.Black
+            lblDataFinal.Font = New Font("Arial", 8.25, FontStyle.Regular)
+            epvPc.SetError(dtpDataFinal, "")
+
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' ATIVA OU DESATIVA DATAS DE GARANTIA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub chkGarantia_CheckedChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles chkGarantia.CheckedChanged
+
+        If chkGarantia.Checked Then
+
+            dtpDataInicial.Enabled = False
+            dtpDataFinal.Enabled = False
+
+            lblDataFinal.ForeColor = Color.Black
+            lblDataFinal.Font = New Font("Arial", 8.25, FontStyle.Regular)
+            epvPc.SetError(dtpDataFinal, "")
+
+        Else
+
+            dtpDataInicial.Enabled = True
+            dtpDataFinal.Enabled = True
+
+            If Today.Subtract(dtpDataFinal.Value.Date).Days > 0 Then
+
+                lblDataFinal.ForeColor = Color.DarkRed
+                lblDataFinal.Font = New Font("Arial", 8.25, FontStyle.Bold)
+                epvPc.SetError(dtpDataFinal, "Garantia encerrada.")
+
+            Else
+
+                lblDataFinal.ForeColor = Color.Black
+                lblDataFinal.Font = New Font("Arial", 8.25, FontStyle.Regular)
+                epvPc.SetError(dtpDataFinal, "")
+
+            End If
+
+        End If
+
+    End Sub
+
+
+    '
+    'MICRO CADASTROS
+    '
+
+    ''' <summary>
+    ''' TIPO PC
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddTipoPc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddTipoPc.Click
+
+        CadTipoPCTI.ShowDialog()
+        cboTipoPc.Items.Clear()
+        cboTipoPc.Items.AddRange(FeedsLists("descricao", "tipo_pc", "status = 1"))
+
+    End Sub
+
+    ''' <summary>
+    ''' PROCESSADOR
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddProcessador_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddProcessador.Click
+
+        CadTipoProcessadorTI.ShowDialog()
+        cboProcessador.Items.Clear()
+        cboProcessador.Items.AddRange(FeedsLists("descricao", "tipo_processador", "status = 1"))
+
+    End Sub
+
+    ''' <summary>
+    ''' TIPO DE RAN
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddTipoRam_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddTipoRam.Click
+
+        CadTipoRamTI.ShowDialog()
+        cboTipoRam.Items.Clear()
+        cboTipoRam.Items.AddRange(FeedsLists("descricao", "tipo_ram", "status = 1"))
+
+    End Sub
+
+    ''' <summary>
+    ''' SO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub AddSo_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles AddSo.Click
+
+        CadTipoSOTI.ShowDialog()
+        cboSo.Items.Clear()
+        cboSo.Items.AddRange(FeedsLists("descricao", "tipo_so", "status = 1"))
+
+    End Sub
+
+    ''' <summary>
+    ''' COMPONENTE
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddTipoCoponenete_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddTipoCoponenete.Click
+        CadTipoComponentePCTI.ShowDialog()
+        cboTipoComponente.Items.Clear()
+        cboTipoComponente.Items.AddRange(FeedsLists("descricao", "tipo_componente_pc", "status = 1"))
+    End Sub
+
+    ''' <summary>
+    ''' TIPO PC
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddSoftware_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddSoftware.Click
+        CadSoftwareTI.ShowDialog()
+        cboSoftware.Items.Clear()
+        cboSoftware.Items.AddRange(FeedsLists("descricao", "software_pc", "status = 1"))
+    End Sub
+
+    ''' <summary>
+    ''' TIPO CONEXÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnTipoConexao_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnTipoConexao.Click
+        CadTipoConexaoTI.ShowDialog()
+        cboTipoConexao.Items.Clear()
+        cboTipoConexao.Items.AddRange(FeedsLists("descricao", "tipo_conexao", "status = 1"))
+    End Sub
+
+    ''' <summary>
+    ''' TIPO LINK
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddTipoLink_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddTipoLink.Click
+        CadTipoLinkSuporteTI.ShowDialog()
+        cboTipoLink.Items.Clear()
+        cboTipoLink.Items.AddRange(FeedsLists("descricao", "tipo_link_pc", "status = 1"))
+    End Sub
+
+    ''' <summary>
+    ''' BUSCA USUÁRIO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnBuscaUsu_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscaUsu.Click
+        Dim frm As New ListUsuarios()
+        If frm.ShowDialog() = Windows.Forms.DialogResult.OK Then
+            txtCodUsu.Text = frm.GetRow.Cells(0).Value.ToString
+            txtLogin.Text = frm.GetRow.Cells(1).Value.ToString
+        End If
+        frm.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' BUSCA FABRICANTE
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnBuscFabricante_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscFabricante.Click
+    End Sub
+
+    ''' <summary>
+    ''' INFORMAÇÕES DO FABRICANTE
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnViewFabricante_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnViewFabricante.Click
+
+    End Sub
+
+    ''' <summary>
+    ''' TIPO PC
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboTipoPc_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboTipoPc.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idTipoPc", _
+                            "tipo_pc", _
+                            "descricao = '" & cboTipoPc.SelectedItem.ToString() & "'")
+        If (MyData.Read()) Then
+            idTipoPc = MyData.GetInt32(0)
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' TIPO PROCESSADOR
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboProcessador_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboProcessador.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idTipoProcessador", _
+                            "tipo_processador", _
+                            "descricao = '" & cboProcessador.SelectedItem.ToString() & "'")
+        If (MyData.Read()) Then
+            idTipoProcessador = MyData.GetInt32(0)
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' TIPO DE RAM
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboTipoRam_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboTipoRam.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idTipoRam", _
+                            "tipo_ram", _
+                            "descricao = '" & cboTipoRam.SelectedItem.ToString() & "'")
+        If (MyData.Read()) Then
+            idTipoRam = MyData.GetInt32(0)
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' SO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboSo_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboSo.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idTipoSo", _
+                            "tipo_so", _
+                            "descricao = '" & cboSo.SelectedItem.ToString() & "'")
+        If (MyData.Read()) Then
+            idTipoSO = MyData.GetInt32(0)
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' TIPO COMPONENTE
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboTipoComponente_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboTipoComponente.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idTipoComponentePC", _
+                            "tipo_componente_pc", _
+                            "descricao = '" & cboTipoComponente.SelectedItem.ToString() & "'")
+        If (MyData.Read()) Then
+            idTipoComponente = MyData.GetInt32(0)
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' SOFTWARE
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboSoftware_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboSoftware.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idSoftwarePC", _
+                            "software_pc", _
+                            "descricao = '" & cboSoftware.SelectedItem.ToString() & "'")
+        If (MyData.Read()) Then
+            idSoftware = MyData.GetInt32(0)
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' TIPO DE CONEXÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboTipoConexao_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboTipoConexao.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idTipoConexao", _
+                            "tipo_conexao", _
+                            "descricao = '" & cboTipoConexao.SelectedItem.ToString() & "'")
+        If (MyData.Read()) Then
+            idTipoConexao = MyData.GetInt32(0)
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' TIPO LINK
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboTipoLink_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboTipoLink.SelectedIndexChanged
+        Connection.ConnectionMysql()
+        MyData = DML.Select("idTipoLinkPc", _
+                            "tipo_link_pc", _
+                            "descricao = '" & cboTipoLink.SelectedItem.ToString() & "'")
+        If (MyData.Read()) Then
+            idTipoLink = MyData.GetInt32(0)
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+    End Sub
+
+    '
+    'SALVAMENTO DOS DADOS NO BD
+    '
+
+    ''' <summary>
+    ''' CHAMA FUNÇÃO DE VALIDAÇÃO DOS DADOS PARA SALVAMENTO
+    ''' </summary>
+    ''' <remarks>CASO CONTENHA ALGUM CAMPO INVÁLIDO NÃO SERÁ POSSÍVEL SALVAR</remarks>
+    Private Sub btnSalvar_Click(ByVal sender As System.Object, _
+                                ByVal e As System.EventArgs) Handles btnSalvar.Click
+        If ValidSalvamento() Then
+            SalvaDados()
+        End If
+    End Sub
+
+
+    ''' <summary>
+    ''' Funcao responsavel por validar o salvamento
+    ''' </summary>
+    ''' <returns>Verdade salvamento prosegue, Falso não prosegue</returns>
+    ''' <remarks></remarks>
+    Private Function ValidSalvamento() As Boolean
+        If ValidatesOutPut And IsNullField() Then
+            Return True
+
+        Else
+            MessageBox.Show(ErrorSavamento.ToString() & FieldBlank.ToString() & "Por favor, verifique-os e tente novamente.", _
+                            Core.STR_NOME_SISTEMA, _
+                            MessageBoxButtons.OK, _
+                            MessageBoxIcon.Error)
+
+            ErrorSavamento = New System.Text.StringBuilder("Campos incorretos: " & vbCrLf)
+            FieldBlank = New System.Text.StringBuilder("Os seguintes campos estão em braco e são obrigatórios: " & vbCrLf)
+            Return False
+        End If
+    End Function
+
+    ''' <summary>
+    ''' VERIFICA SE OS CAMPOS OBRIGATÓRIOS ESTÃO PREENCHIDOS
+    ''' </summary>
+    ''' <returns>TRUE - COMPLETO - FALSE - INCOMPLETO</returns>
+    Private Function IsNullField() As Boolean
+
+        'COD PC
+        If String.IsNullOrEmpty(txtCodPc.Text) Then
+            FieldBlank.Append("Cód Pc em branco" + vbCrLf)
+            epvPc.SetError(txtCodPc, "Cód Pc  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Cód Pc  em branco" + vbCrLf, "")
+            epvPc.SetError(txtCodPc, "")
+        End If
+
+        'CÓD USUÁRIO
+        If String.IsNullOrEmpty(txtCodUsu.Text) Then
+            FieldBlank.Append("Cód Usuaário em branco" + vbCrLf)
+            epvPc.SetError(txtCodUsu, "Cód Usuaário  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Cód Usuário  em branco" + vbCrLf, "")
+            epvPc.SetError(txtCodUsu, "")
+        End If
+
+        'FABRICANTE
+        If String.IsNullOrEmpty(txtCodFabricante.Text) Then
+            FieldBlank.Append("Cód Fabricante em branco" + vbCrLf)
+            epvPc.SetError(txtCodFabricante, "Cód Fabricante  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Cód Fabricante  em branco" + vbCrLf, "")
+            epvPc.SetError(txtCodFabricante, "")
+        End If
+
+        'NOME NETBIOS
+        If String.IsNullOrEmpty(txtNetBios.Text) Then
+            FieldBlank.Append("Nome NetBios em branco" + vbCrLf)
+            epvPc.SetError(txtNetBios, "Nome NetBios  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Nome NetBios  em branco" + vbCrLf, "")
+            epvPc.SetError(txtNetBios, "")
+        End If
+
+        'MODELO
+        If String.IsNullOrEmpty(txtModelo.Text) Then
+            FieldBlank.Append("Modelo em branco" + vbCrLf)
+            epvPc.SetError(txtModelo, "Modelo  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Modelo  em branco" + vbCrLf, "")
+            epvPc.SetError(txtModelo, "")
+        End If
+
+        'TIPO DE PC
+        If cboTipoPc.SelectedIndex = -1 Then
+            FieldBlank.Append("Tipo de pc em branco" + vbCrLf)
+            epvPc.SetError(cboTipoPc, "Tipo de pc  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Tipo de pc  em branco" + vbCrLf, "")
+            epvPc.SetError(cboTipoPc, "")
+        End If
+
+        'TIPO DE PROCESSADOR
+        If cboProcessador.SelectedIndex = -1 Then
+            FieldBlank.Append("Tipo de processador em branco" + vbCrLf)
+            epvPc.SetError(cboProcessador, "Tipo de processador  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Tipo de processador  em branco" + vbCrLf, "")
+            epvPc.SetError(cboProcessador, "")
+        End If
+
+        'TIPO DE RAM
+        If cboTipoRam.SelectedIndex = -1 Then
+            FieldBlank.Append("Tipo de RAM em branco" + vbCrLf)
+            epvPc.SetError(cboTipoRam, "Tipo de RAM  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Tipo de RAM  em branco" + vbCrLf, "")
+            epvPc.SetError(cboTipoRam, "")
+        End If
+
+        'ESPAÇO RAM
+        If String.IsNullOrEmpty(txtNumRam.Text) Then
+            FieldBlank.Append("Tamanho da RAM em branco" + vbCrLf)
+            epvPc.SetError(txtNumRam, "Tamanho da RAM  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Tamanho da RAM em branco" + vbCrLf, "")
+            epvPc.SetError(txtNumRam, "")
+        End If
+
+        'ARMAZENAMENTO
+        If String.IsNullOrEmpty(txtArmazenamento.Text) Then
+            FieldBlank.Append("Armazenamento em branco" + vbCrLf)
+            epvPc.SetError(txtArmazenamento, "Armazenamento  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Armazenamento em branco" + vbCrLf, "")
+            epvPc.SetError(txtArmazenamento, "")
+        End If
+
+        'SISTEMA OPERACIONAL
+        If cboSo.SelectedIndex = -1 Then
+            FieldBlank.Append("SO em branco" + vbCrLf)
+            epvPc.SetError(cboSo, "SO  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("SO em branco" + vbCrLf, "")
+            epvPc.SetError(cboSo, "")
+        End If
+
+        'CONEXÃO
+        If dgvConexoes.RowCount = 0 Then
+            FieldBlank.Append("Conexões em branco" + vbCrLf)
+            epvPc.SetError(dgvConexoes, "Conexões  em branco")
+            Return False
+        Else
+            FieldBlank = FieldBlank.Replace("Conexões em branco" + vbCrLf, "")
+            epvPc.SetError(dgvConexoes, "")
+        End If
+
+        Return True
+    End Function
+
+    Private Sub NovaInstancia()
+        Dim frm As New ControleComputadores()
+        frm.MdiParent = ViewInicial
+        frm.Show()
+        ViewInicial.CloseMdiChildren(Me)
+    End Sub
+
+
+    ''' <summary>
+    ''' SALVA DADOS
+    ''' </summary>
+    ''' <remarks></remarks> 
+    Private Sub SalvaDados()
+
+        CleanSQLInjection(Me)
+
+        Dim strNumRam As String = txtNumRam.Text.Replace(".", "").Replace(",", ".")
+        Dim strNumArmazenamento As String = txtArmazenamento.Text.Replace(".", "").Replace(",", ".")
+        Dim strDataInicialGarantia As String = data.ConvertToInternacionalDate(dtpDataInicial.Value.ToShortDateString)
+        Dim strDataFinalGarantia As String = data.ConvertToInternacionalDate(dtpDataFinal.Value.ToShortDateString)
+
+        'SALVANDO...
+        If Me.novo Then
+            txtCodPc.Text = CStr(DML.NextPK("idPc", "pc"))
+            If Not DML.Insert("pc", _
+                              "idPc, idUsuario, idTipoSO, idTipoProcessador, idTipoRam," _
+                            & "idFabricante, idTipoPc, nomeNetBios, dtCadastro, status," _
+                            & "modelo, espacoRam, armazenamento, productKey, numSerie," _
+                            & "garantiaInicial, garantiaFinal, garantia", _
+                              "" & txtCodPc.Text & "," & txtCodUsu.Text & "," & idTipoSO & "," _
+                            & "" & idTipoProcessador & "," & idTipoRam & "," & txtCodFabricante.Text & "," _
+                            & "" & idTipoPc & ",'" & txtNetBios.Text & "',CURRENT_DATE()," _
+                            & "" & Status(cboStatus.SelectedIndex) & ",'" & txtModelo.Text & "'," _
+                            & "" & strNumRam & "," & strNumArmazenamento & ",'" & mtbKey.Text & "'," _
+                            & "'" & mtbNumSerie.Text & "','" & strDataInicialGarantia & "'," _
+                            & "'" & strDataFinalGarantia & "'," & chkGarantia.Checked & "") Then
+                Exit Sub
+            End If
+
+            'ADICIONA COMPONENTE
+            AdicionaComponentePC(CInt(txtCodPc.Text))
+
+            'ADIICONA SOFTWARES
+            AdicionaSoftwarePC(CInt(txtCodPc.Text))
+
+            'ADICIONA CONEXÕES
+            AdicionaConexoesPC(CInt(txtCodPc.Text))
+
+            'ADICIONA LINKS
+            AdicionaLinksPC(CInt(txtCodPc.Text))
+
+            'ADICIONA HISTÓRICO CADASTRAL
+            If AdicionaHistoricoPc(HistoricoCadastral.TypeOfChanceRegistration.Criacao) Then
+
+                If MessageBox.Show("Dados salvos com sucesso! Deseja continuar alterando?", _
+                                   Core.STR_NOME_SISTEMA, _
+                                   MessageBoxButtons.YesNo) = Windows.Forms.DialogResult.No Then
+                    ViewInicial.CloseMdiChildren(Me)
+                Else
+                    NovaInstancia()
+                End If
+            End If
+
+            'ALTERAÇÃO
+        Else
+
+            If Not DML.Update("pc", _
+                              "idUsuario = " & txtCodUsu.Text & ",idTipoSO=" & idTipoSO & "," _
+                            & "idTipoProcessador = " & idTipoProcessador & ",idTipoRam = " & idTipoRam & "," _
+                            & "idFabricante = " & txtCodFabricante.Text & ",idTipoPc = " & idTipoPc & "," _
+                            & "nomeNetBios = '" & txtNetBios.Text & "',status = " & Status(cboStatus.SelectedIndex) & "," _
+                            & "modelo = '" & txtModelo.Text & "',espacoRam = " & strNumRam & "," _
+                            & "armazenamento = " & strNumArmazenamento & ",productKey = '" & mtbKey.Text & "'," _
+                            & "numSerie = '" & mtbNumSerie.Text & "',garantiaInicial = '" & strDataInicialGarantia & "'," _
+                            & "garantiaFinal = '" & strDataFinalGarantia & "',garantia = " & chkGarantia.Checked & "", _
+                              "idPc = " & txtCodPc.Text & "") Then
+                Exit Sub
+            End If
+
+            'ADICIONA COMPONENTE
+            AdicionaComponentePC(CInt(txtCodPc.Text))
+
+            'ADIICONA SOFTWARES
+            AdicionaSoftwarePC(CInt(txtCodPc.Text))
+
+            'ADICIONA CONEXÕES
+            AdicionaConexoesPC(CInt(txtCodPc.Text))
+
+            'ADICIONA LINKS
+            AdicionaLinksPC(CInt(txtCodPc.Text))
+
+            'TIPO DE ALTERAÇÃO CADASTRAL
+            Dim tipo As HistoricoCadastral.TypeOfChanceRegistration
+            If Status(cboStatus.SelectedIndex) Then
+                tipo = HistoricoCadastral.TypeOfChanceRegistration.Alterar
+            Else
+                tipo = HistoricoCadastral.TypeOfChanceRegistration.Inativar
+            End If
+
+
+            'ADICIONA HISTÓRICO CADASTRAL
+            If AdicionaHistoricoPc(tipo) Then
+                If MessageBox.Show("Dados salvos com sucesso! Deseja continuar alterando?", _
+                                   Core.STR_NOME_SISTEMA, _
+                                   MessageBoxButtons.YesNo) = Windows.Forms.DialogResult.No Then
+                    ViewInicial.CloseMdiChildren(Me)
+                Else
+                    NovaInstancia()
+                End If
+            End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA COMPONENTE DO PC
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub AdicionaComponentePC(ByVal idPc As Integer)
+
+        CancelaEdicaoComponentes()
+
+        'EXCLUI SE NECESSÁRIO
+        For Each num As Integer In delComponentes
+            If Not DML.Delete("tipo_componente_pc_has_pc", _
+                              "idTipoComponentePC = " & num & " AND idPC='" & idPc & "'") Then
+                Exit Sub
+            End If
+        Next
+        delComponentes.Clear()
+
+        For Each rows As DataGridViewRow In dgvComponente.Rows
+
+            If CInt(rows.Cells(4).Value) = 0 Then
+
+                If Not DML.Insert("tipo_componente_pc_has_pc", _
+                                  "idTipoComponentePC,idPC,descricao,qtd", _
+                                  "'" & rows.Cells(2).Value.ToString() & "','" & idPc & "'," _
+                                & "'" & rows.Cells(1).Value.ToString() & "'," _
+                                & "'" & rows.Cells(3).Value.ToString() & "'") Then
+                    Exit Sub
+                End If
+            Else
+
+                'ALTERA
+                If Not DML.Update("tipo_componente_pc_has_pc", _
+                                  "idTipoComponentePC=" & rows.Cells(2).Value.ToString() & "," _
+                                & "descricao='" & rows.Cells(1).Value.ToString() & "'," _
+                                & "qtd='" & rows.Cells(3).Value.ToString() & "'", _
+                                  "idTipoComponentePC =  " & rows.Cells(2).Value.ToString() & " " _
+                                & "AND idPC='" & idPc & "'") Then
+                    Exit Sub
+                End If
+
+            End If
+        Next
+
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA SOFTWARES DO PC
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub AdicionaSoftwarePC(ByVal idPc As Integer)
+
+        CancelaEdicaooftware()
+
+        'EXCLUI SE NECESSÁRIO
+        For Each num As Integer In delSoftware
+            If Not DML.Delete("software_pc_has_pc", _
+                              "idSoftwarePC = " & num & " AND idPC='" & idPc & "'") Then
+                Exit Sub
+            End If
+        Next
+        delSoftware.Clear()
+
+        For Each rows As DataGridViewRow In dgvSoftware.Rows
+
+            If CInt(rows.Cells(3).Value) = 0 Then
+
+                If Not DML.Insert("software_pc_has_pc", _
+                                  "idSoftwarePC,idPC,descricao", _
+                                  "'" & rows.Cells(2).Value.ToString() & "','" & idPc & "'," _
+                                & "'" & rows.Cells(1).Value.ToString() & "'") Then
+                    Exit Sub
+                End If
+
+            Else
+
+                'ALTERA
+                If Not DML.Update("software_pc_has_pc", _
+                                  "idSoftwarePC=" & rows.Cells(2).Value.ToString() & "," _
+                                & "descricao='" & rows.Cells(1).Value.ToString() & "'", _
+                                  "idSoftwarePC =  " & rows.Cells(2).Value.ToString() & " " _
+                                & "AND idPC='" & idPc & "'") Then
+                    Exit Sub
+                End If
+
+            End If
+        Next
+
+
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA CONEXÕES DO PC
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub AdicionaConexoesPC(ByVal idPc As Integer)
+
+        CancelaEdicaoConexao()
+
+
+        'EXCLUI SE NECESSÁRIO
+        For Each num As Integer In delConexao
+            If Not DML.Delete("pc_has_tipo_conexao", _
+                              "idTipoConexao = " & num & " AND idPC='" & idPc & "'") Then
+                Exit Sub
+            End If
+        Next
+        delConexao.Clear()
+
+        For Each rows As DataGridViewRow In dgvConexoes.Rows
+
+            If CInt(rows.Cells(4).Value) = 0 Then
+
+                If Not DML.Insert("pc_has_tipo_conexao", _
+                                  "idTipoConexao,idPC,mac,IP", _
+                                  "'" & rows.Cells(3).Value.ToString() & "','" & idPc & "'," _
+                                & "'" & rows.Cells(1).Value.ToString() & "'," _
+                                & "'" & rows.Cells(2).Value.ToString() & "'") Then
+                    Exit Sub
+                End If
+
+            Else
+                'ALTERA
+                If Not DML.Update("pc_has_tipo_conexao", _
+                                  "idTipoConexao=" & rows.Cells(3).Value.ToString() & "," _
+                                & "mac='" & rows.Cells(1).Value.ToString() & "'," _
+                                & "ip='" & rows.Cells(2).Value.ToString() & "'", _
+                                  "idTipoConexao =  " & rows.Cells(3).Value.ToString() & " " _
+                                & "AND idPC='" & idPc & "'") Then
+                    Exit Sub
+                End If
+            End If
+        Next
+
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA LINKS DO PC
+    ''' </summary>
+    ''' <param name="idPc">PK DO PC</param>
+    ''' <remarks></remarks>
+    Private Sub AdicionaLinksPC(ByVal idPc As Integer)
+
+        CancelaEdicaoLink()
+
+        'EXCLUI SE NECESSÁRIO
+        For Each num As Integer In delLink
+            If Not DML.Delete("tipo_link_pc_has_pc", _
+                              "idTipoLinkPc = " & num & " AND idPC='" & idPc & "'") Then
+                Exit Sub
+            End If
+        Next
+        delLink.Clear()
+
+        For Each rows As DataGridViewRow In dgvLinks.Rows
+
+            If CInt(rows.Cells(3).Value) = 0 Then
+
+                If Not DML.Insert("tipo_link_pc_has_pc", _
+                                  "idTipoLinkPc,idPC,link", _
+                                  "'" & rows.Cells(2).Value.ToString() & "','" & idPc & "','" & rows.Cells(1).Value.ToString() & "'") Then
+                    Exit Sub
+                End If
+
+            Else
+
+                'ALTERA
+                If Not DML.Update("tipo_link_pc_has_pc", _
+                                  "idTipoLinkPc=" & rows.Cells(2).Value.ToString() & "," _
+                                & "link='" & rows.Cells(1).Value.ToString() & "'", _
+                                  "idTipoLinkPc =  " & rows.Cells(2).Value.ToString() & " AND idPC='" & idPc & "'") Then
+                    Exit Sub
+                End If
+
+            End If
+        Next
+
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA NO HIDTÓRICO DO PC
+    ''' </summary>
+    ''' <param name="tipo">TIPO ALTERAÇÃO - VIDE ARQUIVO TIPOALTERAÇÃOCADASTRAL</param>
+    ''' <returns>TRUE SALVO, FALSE nao salvo</returns>
+    ''' <remarks></remarks>
+    Private Function AdicionaHistoricoPc(ByVal tipo As HistoricoCadastral.TypeOfChanceRegistration) As Boolean
+
+        Dim idhistorico_cadastral_pc As Integer = DML.NextPK("idhistorico_cadastral_pc", _
+                                                             "historico_cadastral_pc")
+
+        If DML.Insert("historico_cadastral_pc", _
+                      "idhistorico_cadastral_pc,idUsuario,idPC,idTipoAlteracaoCadastral,data,hora", _
+                      " " & idhistorico_cadastral_pc & "," & Core.Usuario.ID & ",'" & txtCodPc.Text & "'," _
+                    & "" & tipo & ",CURRENT_DATE(),CURTIME()") Then
+            Return True
+        Else
+            Return False
+        End If
+    End Function
+
+
+
+    '
+    'EDIÇÃO COMPONENTES ADICIONAIS
+    '
+
+    ''' <summary>
+    ''' ADICIONA LINHAS AS DATAGRIDVIEW COMPONENTES
+    ''' </summary>
+    ''' <returns>TRUE ADICIONOU / FALSE NÃO ADICIONOU</returns>
+    ''' <remarks></remarks>
+    Private Function AddRowInDataGridComponentes() As Boolean
+
+        Dim strMesagemErro As String = "Há campos que faltam ser preenchidos."
+
+        If Not (String.IsNullOrEmpty(cboTipoComponente.SelectedItem.ToString) _
+           Or String.IsNullOrEmpty(txtQtdComponente.Text)) _
+           And blnValidaSubCadastros Then
+
+            If Not btnAceitaAdc.Enabled Then
+                For Each row As DataGridViewRow In dgvComponente.Rows
+                    If cboTipoComponente.SelectedItem.ToString = row.Cells(0).Value.ToString Then
+                        epvPc.SetError(btnAddAdc, "Componente já adiconado")
+                        Return False
+                    End If
+                Next
+            End If
+
+            CleanSQLInjection(CType(pnlAdicional, Control))
+            dgvComponente.CurrentRow.Cells(0).Value = cboTipoComponente.SelectedItem
+            dgvComponente.CurrentRow.Cells(1).Value = txtDescCoponente.Text
+            dgvComponente.CurrentRow.Cells(2).Value = idTipoComponente
+            dgvComponente.CurrentRow.Cells(3).Value = txtQtdComponente.Text
+
+            If Not btnAceitaAdc.Enabled Then
+                dgvComponente.CurrentRow.Cells(4).Value = 0
+            End If
+
+            epvPc.SetError(btnAddAdc, "")
+            Return True
+        Else
+
+            epvPc.SetError(btnAddAdc, strMesagemErro)
+            Return False
+
+        End If
+
+    End Function
+
+
+    ''' <summary>
+    ''' CARREGA CAMPOS DE COMPONENTES
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CarregaCamposComponente()
+
+        If (Not dgvComponente.CurrentRow Is Nothing) And btnNovoAdc.Enabled Then
+
+            cboTipoComponente.SelectedItem = dgvComponente.CurrentRow.Cells(0).Value
+            txtDescCoponente.Text = dgvComponente.CurrentRow.Cells(1).Value.ToString
+            txtQtdComponente.Text = dgvComponente.CurrentRow.Cells(3).Value.ToString
+
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' DELETE LINHAS EM DATAGRID
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Function RemoveRowInDataGrid(ByRef grid As DataGridView) As Boolean
+        If grid.RowCount > 0 Then
+            grid.Rows.Remove(grid.CurrentRow)
+            Return True
+        Else
+            Return False
+        End If
+    End Function
+
+    ''' <summary>
+    ''' CANCELA EDIÇÃO DA PROPOSTA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CancelaEdicaoComponentes()
+
+        Me.bdsComponentes.CancelEdit()
+
+        OffFields(CType(pnlAdicional, Control))
+        CleanFields(CType(pnlAdicional, Control))
+
+        epvPc.Clear()
+
+        btnAddAdc.Enabled = False
+        btnNovoAdc.Enabled = True
+        btnCancelaAdc.Enabled = False
+        btnAceitaAdc.Enabled = False
+        dgvComponente.Enabled = True
+
+        If dgvComponente.RowCount > 0 Then
+            btnEditAdc.Enabled = True
+        Else
+            btnEditAdc.Enabled = False
+        End If
+
+        CarregaCamposComponente()
+
+    End Sub
+
+
+    '
+    'BOTÕES DE EDIÇÃO DE ORIGEM
+    '
+
+    ''' <summary>
+    ''' EDITA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnEditAdc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnEditAdc.Click
+
+        ActiveFields(CType(pnlAdicional, Control))
+        btnNovoAdc.Enabled = False
+        btnAceitaAdc.Enabled = True
+        btnEditAdc.Enabled = False
+        btnCancelaAdc.Enabled = True
+        dgvComponente.Enabled = False
+
+    End Sub
+
+    ''' <summary>
+    ''' ACEITA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAceitaAdc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAceitaAdc.Click
+
+        If AddRowInDataGridComponentes() Then
+
+            CleanFields(CType(pnlAdicional, Control))
+            bdsComponentes.EndEdit()
+            OffFields(CType(pnlAdicional, Control))
+
+            btnAceitaAdc.Enabled = False
+            btnCancelaAdc.Enabled = False
+            btnAddAdc.Enabled = False
+            btnNovoAdc.Enabled = True
+            btnEditAdc.Enabled = True
+            dgvComponente.Enabled = True
+
+            CarregaCamposComponente()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' CANCELA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnCancelaAdc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnCancelaAdc.Click
+
+        CancelaEdicaoComponentes()
+
+    End Sub
+
+    ''' <summary>
+    ''' NOVO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnNovoAdc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnNovoAdc.Click
+
+        bdsComponentes.AddNew()
+
+        CleanFields(CType(pnlAdicional, Control))
+        ActiveFields(CType(pnlAdicional, Control))
+
+        btnAddAdc.Enabled = True
+        btnNovoAdc.Enabled = False
+        btnCancelaAdc.Enabled = True
+        btnEditAdc.Enabled = False
+        dgvComponente.Enabled = False
+
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddAdc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddAdc.Click
+
+        If AddRowInDataGridComponentes() Then
+
+            bdsComponentes.EndEdit()
+            OffFields(CType(pnlAdicional, Control))
+            CleanFields(CType(pnlAdicional, Control))
+
+            btnAddAdc.Enabled = False
+            btnNovoAdc.Enabled = True
+            btnCancelaAdc.Enabled = False
+            btnDelAdc.Enabled = True
+            btnEditAdc.Enabled = True
+            dgvComponente.Enabled = True
+
+            CarregaCamposComponente()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' DELETA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnDelAdc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnDelAdc.Click
+
+        delComponentes.Add(CInt(dgvComponente.CurrentRow.Cells(2).Value))
+
+        If RemoveRowInDataGrid(dgvComponente) Then
+
+            CleanFields(CType(pnlAdicional, Control))
+            CarregaCamposComponente()
+
+            If dgvComponente.RowCount > 0 Then
+                btnDelAdc.Enabled = True
+                btnEditAdc.Enabled = True
+            Else
+                btnDelAdc.Enabled = False
+                btnEditAdc.Enabled = False
+            End If
+
+        Else
+            delComponentes.Remove(CInt(dgvComponente.CurrentRow.Cells(2).Value))
+        End If
+
+    End Sub
+
+    '
+    'ALIMENTA CAMPOS DE COMPONENTES
+    '
+
+    Private Sub dgvComponente_CellClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellEventArgs) Handles dgvComponente.CellClick
+
+        If e.RowIndex > -1 Then
+            CarregaCamposComponente()
+        End If
+
+    End Sub
+
+    Private Sub dgvComponente_KeyUp(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyEventArgs) Handles dgvComponente.KeyUp
+        CarregaCamposComponente()
+    End Sub
+
+
+    '
+    'EDIÇÃO AOFTWARES
+    '
+
+    ''' <summary>
+    ''' ADICIONA LINHAS AS DATAGRIDVIEW SOFTWARE
+    ''' </summary>
+    ''' <returns>TRUE ADICIONOU / FALSE NÃO ADICIONOU</returns>
+    ''' <remarks></remarks>
+    Private Function AddRowInDataGridSoftware() As Boolean
+
+        Dim strMesagemErro As String = "Há campos que faltam ser preenchidos."
+
+        If Not (String.IsNullOrEmpty(cboSoftware.SelectedItem.ToString) _
+           Or String.IsNullOrEmpty(txtDescSoft.Text)) _
+           And blnValidaSubCadastros Then
+
+            If Not btnAceitaSoft.Enabled Then
+                For Each row As DataGridViewRow In dgvSoftware.Rows
+                    If cboSoftware.SelectedItem.ToString = row.Cells(0).Value.ToString Then
+                        epvPc.SetError(btnAddAdc, "Software já adiconado")
+                        Return False
+                    End If
+                Next
+            End If
+
+            CleanSQLInjection(CType(pnlSoftware, Control))
+            dgvSoftware.CurrentRow.Cells(0).Value = cboSoftware.SelectedItem
+            dgvSoftware.CurrentRow.Cells(1).Value = txtDescSoft.Text
+            dgvSoftware.CurrentRow.Cells(2).Value = idSoftware
+
+            If Not btnAceitaSoft.Enabled Then
+                dgvSoftware.CurrentRow.Cells(3).Value = 0
+            End If
+
+            epvPc.SetError(btnAddSoft, "")
+            Return True
+        Else
+
+            epvPc.SetError(btnAddSoft, strMesagemErro)
+            Return False
+
+        End If
+
+    End Function
+
+    ''' <summary>
+    ''' CARREGA CAMPOS DE COMPONENTES
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CarregaCamposSoftware()
+
+        If (Not dgvSoftware.CurrentRow Is Nothing) And btnNovoSoft.Enabled Then
+
+            cboSoftware.SelectedItem = dgvSoftware.CurrentRow.Cells(0).Value
+            txtDescSoft.Text = dgvSoftware.CurrentRow.Cells(1).Value.ToString
+
+        End If
+
+    End Sub
+
+
+    ''' <summary>
+    ''' CANCELA EDIÇÃO DA PROPOSTA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CancelaEdicaooftware()
+
+        Me.bdsSoftwares.CancelEdit()
+
+        OffFields(CType(pnlSoftware, Control))
+        CleanFields(CType(pnlSoftware, Control))
+
+        epvPc.Clear()
+
+        btnAddSoft.Enabled = False
+        btnNovoSoft.Enabled = True
+        btnCancelaSoft.Enabled = False
+        btnAceitaSoft.Enabled = False
+        dgvComponente.Enabled = True
+
+        If dgvSoftware.RowCount > 0 Then
+            btnEditSoft.Enabled = True
+        Else
+            btnEditSoft.Enabled = False
+        End If
+
+        CarregaCamposSoftware()
+
+    End Sub
+
+
+    '
+    'BOTÕES DE EDIÇÃO DE SOFTWARE
+    '
+
+    ''' <summary>
+    ''' EDITA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnEditSoft_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnEditSoft.Click
+
+        ActiveFields(CType(pnlSoftware, Control))
+        btnNovoSoft.Enabled = False
+        btnAceitaSoft.Enabled = True
+        btnEditSoft.Enabled = False
+        btnCancelaSoft.Enabled = True
+        dgvSoftware.Enabled = False
+
+    End Sub
+
+    ''' <summary>
+    ''' ACEITA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAceitaSoft_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAceitaSoft.Click
+
+        If AddRowInDataGridSoftware() Then
+
+            CleanFields(CType(pnlSoftware, Control))
+            bdsSoftwares.EndEdit()
+            OffFields(CType(pnlSoftware, Control))
+
+            btnAceitaSoft.Enabled = False
+            btnCancelaSoft.Enabled = False
+            btnAddSoft.Enabled = False
+            btnNovoSoft.Enabled = True
+            btnEditSoft.Enabled = True
+            dgvSoftware.Enabled = True
+
+            CarregaCamposSoftware()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' CANCELA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnCancelaSoft_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnCancelaSoft.Click
+
+        CancelaEdicaooftware()
+
+    End Sub
+
+    ''' <summary>
+    ''' NOVO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnNovoSoft_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnNovoSoft.Click
+
+        bdsSoftwares.AddNew()
+
+        CleanFields(CType(pnlSoftware, Control))
+        ActiveFields(CType(pnlSoftware, Control))
+
+        btnAddSoft.Enabled = True
+        btnNovoSoft.Enabled = False
+        btnCancelaSoft.Enabled = True
+        btnEditSoft.Enabled = False
+        dgvSoftware.Enabled = False
+
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddSoft_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddSoft.Click
+
+        If AddRowInDataGridSoftware() Then
+
+            bdsSoftwares.EndEdit()
+            OffFields(CType(pnlSoftware, Control))
+            CleanFields(CType(pnlSoftware, Control))
+
+            btnAddSoft.Enabled = False
+            btnNovoSoft.Enabled = True
+            btnCancelaSoft.Enabled = False
+            btnDelSoft.Enabled = True
+            btnEditSoft.Enabled = True
+            dgvSoftware.Enabled = True
+
+            CarregaCamposSoftware()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' DELETA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnDelSoft_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnDelSoft.Click
+
+        delSoftware.Add(CInt(dgvSoftware.CurrentRow.Cells(2).Value))
+
+        If RemoveRowInDataGrid(dgvSoftware) Then
+
+            CleanFields(CType(pnlSoftware, Control))
+            CarregaCamposSoftware()
+
+            If dgvSoftware.RowCount > 0 Then
+                btnDelSoft.Enabled = True
+                btnEditSoft.Enabled = True
+            Else
+                btnDelSoft.Enabled = False
+                btnEditSoft.Enabled = False
+            End If
+
+        Else
+            delSoftware.Remove(CInt(dgvSoftware.CurrentRow.Cells(2).Value))
+        End If
+
+    End Sub
+
+    '
+    'ALIMENTA CAMPOS DE SOFTWARE
+    '
+
+    Private Sub dgvSoftware_CellClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellEventArgs) Handles dgvSoftware.CellClick
+
+        If e.RowIndex > -1 Then
+            CarregaCamposSoftware()
+        End If
+
+    End Sub
+
+    Private Sub dgvSoftware_KeyUp(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyEventArgs) Handles dgvSoftware.KeyUp
+        CarregaCamposSoftware()
+    End Sub
+
+
+    '
+    'EDIÇÃO DE CONEXÃO
+    '
+
+    ''' <summary>
+    ''' ADICIONA LINHAS AS DATAGRIDVIEW CONEXÃO
+    ''' </summary>
+    ''' <returns>TRUE ADICIONOU / FALSE NÃO ADICIONOU</returns>
+    ''' <remarks></remarks>
+    Private Function AddRowInDataGridConexao() As Boolean
+
+        Dim strMesagemErro As String = "Há campos que faltam ser preenchidos."
+
+        If Not (String.IsNullOrEmpty(cboTipoConexao.SelectedItem.ToString) _
+           Or Not mtbIp.MaskFull Or Not mtbMac.MaskFull) _
+           And blnValidaSubCadastros Then
+
+            CleanSQLInjection(CType(pnlConexao, Control))
+            dgvConexoes.CurrentRow.Cells(0).Value = cboTipoConexao.SelectedItem
+            dgvConexoes.CurrentRow.Cells(1).Value = mtbMac.Text
+            dgvConexoes.CurrentRow.Cells(2).Value = mtbIp.Text
+            dgvConexoes.CurrentRow.Cells(3).Value = idTipoConexao
+
+            If Not btnAceitaConex.Enabled Then
+                dgvConexoes.CurrentRow.Cells(4).Value = 0
+            End If
+
+            epvPc.Clear()
+            Return True
+        Else
+
+            epvPc.SetError(btnAddConex, strMesagemErro)
+            Return False
+
+        End If
+
+    End Function
+
+    ''' <summary>
+    ''' CARREGA CAMPOS DE CONEXÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CarregaCamposConexao()
+
+        If (Not dgvConexoes.CurrentRow Is Nothing) And btnNovoConex.Enabled Then
+
+            cboTipoConexao.SelectedItem = dgvConexoes.CurrentRow.Cells(0).Value
+            mtbMac.Text = dgvConexoes.CurrentRow.Cells(1).Value.ToString
+            mtbIp.Text = dgvConexoes.CurrentRow.Cells(2).Value.ToString
+
+        End If
+
+    End Sub
+
+
+    ''' <summary>
+    ''' CANCELA EDIÇÃO DA CONEXÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CancelaEdicaoConexao()
+
+        Me.bdsConexoes.CancelEdit()
+
+        OffFields(CType(pnlConexao, Control))
+        CleanFields(CType(pnlConexao, Control))
+
+        epvPc.Clear()
+
+        btnAddConex.Enabled = False
+        btnNovoConex.Enabled = True
+        btnCancelaConex.Enabled = False
+        btnAceitaConex.Enabled = False
+        dgvConexoes.Enabled = True
+
+        If dgvConexoes.RowCount > 0 Then
+            btnEditConex.Enabled = True
+        Else
+            btnEditConex.Enabled = False
+        End If
+
+        CarregaCamposConexao()
+
+    End Sub
+
+    '
+    'BOTÕES DE EDIÇÃO DE CONEXÃO
+    '
+
+    ''' <summary>
+    ''' EDITA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnEditConex_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnEditConex.Click
+
+        ActiveFields(CType(pnlConexao, Control))
+        btnNovoConex.Enabled = False
+        btnAceitaConex.Enabled = True
+        btnEditConex.Enabled = False
+        btnCancelaConex.Enabled = True
+        dgvConexoes.Enabled = False
+
+    End Sub
+
+    ''' <summary>
+    ''' ACEITA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAceitaConex_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAceitaConex.Click
+
+        If AddRowInDataGridConexao() Then
+
+            CleanFields(CType(pnlConexao, Control))
+            bdsConexoes.EndEdit()
+            OffFields(CType(pnlConexao, Control))
+
+            btnAceitaConex.Enabled = False
+            btnCancelaConex.Enabled = False
+            btnAddConex.Enabled = False
+            btnNovoConex.Enabled = True
+            btnEditConex.Enabled = True
+            dgvConexoes.Enabled = True
+
+            CarregaCamposConexao()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' CANCELA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnCancelaConex_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnCancelaConex.Click
+        CancelaEdicaoConexao()
+    End Sub
+
+    ''' <summary>
+    ''' NOVO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnNovoConex_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnNovoConex.Click
+
+        bdsConexoes.AddNew()
+
+        CleanFields(CType(pnlConexao, Control))
+        ActiveFields(CType(pnlConexao, Control))
+
+        btnAddConex.Enabled = True
+        btnNovoConex.Enabled = False
+        btnCancelaConex.Enabled = True
+        btnEditConex.Enabled = False
+        dgvConexoes.Enabled = False
+
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddConex_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddConex.Click
+
+        If AddRowInDataGridConexao() Then
+
+            bdsConexoes.EndEdit()
+            OffFields(CType(pnlConexao, Control))
+            CleanFields(CType(pnlConexao, Control))
+
+            btnAddConex.Enabled = False
+            btnNovoConex.Enabled = True
+            btnCancelaConex.Enabled = False
+            btnDelConex.Enabled = True
+            btnEditConex.Enabled = True
+            dgvConexoes.Enabled = True
+
+            CarregaCamposConexao()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' DELETA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnDelConex_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnDelConex.Click
+
+        delConexao.Add(CInt(dgvConexoes.CurrentRow.Cells(2).Value))
+
+        If RemoveRowInDataGrid(dgvConexoes) Then
+
+            CleanFields(CType(pnlConexao, Control))
+            CarregaCamposConexao()
+
+            If dgvConexoes.RowCount > 0 Then
+                btnDelConex.Enabled = True
+                btnEditConex.Enabled = True
+            Else
+                btnDelConex.Enabled = False
+                btnEditConex.Enabled = False
+            End If
+
+        Else
+            delConexao.Remove(CInt(dgvConexoes.CurrentRow.Cells(2).Value))
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' OBTÉM MAC DO IP
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnObtemMac_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnObtemMac.Click
+
+        If Not String.IsNullOrEmpty(mtbIp.Text) Then
+
+            'OBTEM O IP DA MÁQUINA LOCAL
+            Dim a() As IPAddress = GetHostAddresses(GetHostName())
+
+            'VARIÁVEIS PARA OBTER O MAC DA MÁQUINA LOCAL
+            Dim mc As Management.ManagementClass
+            Dim mo As System.Management.ManagementObject
+            mc = New Management.ManagementClass("Win32_NetworkAdapterConfiguration")
+            Dim moc As Management.ManagementObjectCollection = mc.GetInstances
+
+            For i As Integer = 0 To a.Length - 1
+
+                'O COMANDO ARP -A NÃO OBTÉM O MAC DA MÁQUINA LOCAL
+                'CASO O IP DA MÁQUINA LOCAL FOR O MESMO DO IP INFORMADO
+                'OBTÉM O MAC PELA VARIÁVEL MO
+                If a(i).ToString() = mtbIp.Text Then
+                    For Each mo In moc
+                        If CBool(mo.Item("IPenabled")) Then
+                            mtbMac.Text = mo.Item("MacAddress").ToString
+                            Exit Sub
+                        End If
+                    Next
+                End If
+            Next
+
+            BackgroundWorker1.RunWorkerAsync()
+
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' INICIA TRABALHO EM SEGUNDO PLANO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub BackgroundWorker1_DoWork(ByVal sender As Object, ByVal e As System.ComponentModel.DoWorkEventArgs) Handles BackgroundWorker1.DoWork
+        e.Result = OpenCMD("arp -a " & mtbIp.Text & "")
+    End Sub
+
+    ''' <summary>
+    ''' TRATA STRING DE RETORNA PARA CAPTURAR O MAC CORESPONDENTE AO IP
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub BackgroundWorker1_RunWorkerCOmpleted(ByVal sender As Object, ByVal e As System.ComponentModel.RunWorkerCompletedEventArgs) Handles BackgroundWorker1.RunWorkerCompleted
+
+        Dim x As Integer = 0
+        Dim strTemp As String = Nothing
+
+        'REMOVE LINHAS INDESEJADAS DO RESULTADO
+        For Each letras In e.Result.ToString
+            If letras = ControlChars.Lf Then
+                x += 1
+            End If
+            If x > 6 And x < 8 And Not letras = ControlChars.Lf Then
+                strTemp += letras
+            End If
+        Next
+
+        Dim strTemp2 As String = Nothing
+        x = 0
+
+        'PEGA SOMENTE INFORMAÇÃO DO MAC
+        If Not String.IsNullOrEmpty(strTemp) Then
+            For Each letras In strTemp
+                If x >= 24 And x <= 41 Then
+                    strTemp2 += letras
+                End If
+                x += 1
+            Next
+        End If
+
+        If Not String.IsNullOrEmpty(strTemp2) Then
+            mtbMac.Text = strTemp2.ToUpper().Replace("-", ":")
+        Else
+            MessageBox.Show("IP não encontrado. Tente novamente com outro endereço de IP.")
+            mtbMac.Clear()
+        End If
+
+    End Sub
+
+    '
+    'ALIMENTA CAMPOS DE CONEXAO
+    '
+
+    Private Sub dgvConexoes_CellClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellEventArgs) Handles dgvConexoes.CellClick
+
+        If e.RowIndex > -1 Then
+            CarregaCamposConexao()
+        End If
+
+    End Sub
+
+    Private Sub dgvConexoes_KeyUp(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyEventArgs) Handles dgvConexoes.KeyUp
+        CarregaCamposConexao()
+    End Sub
+
+    ''' <summary>
+    ''' ABRE TELA DE SCANNER DE REDE
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnScanearRede_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnScanearRede.Click
+        Dim frm As New ViewIPRange()
+        frm.ShowDialog()
+        frm.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' GERA QRCODE PARA AS INFORMAÇÃO DO PC
+    ''' </summary>
+    ''' <param name="strCode">STIRNG DAS INFORMAÇÕES</param>
+    ''' <returns>IMAGEM DO QRCODE</returns>
+    ''' <remarks></remarks>
+    Private Function GeraQRCodeToImage(ByVal strCode As String) As System.Drawing.Bitmap
+
+        barcode.Symbology = KeepAutomation.Barcode.Symbology.QRCode
+        barcode.CodeToEncode = strCode
+        barcode.X = 6
+        barcode.Y = 6
+
+        Return barcode.generateBarcodeToBitmap
+
+    End Function
+
+    ''' <summary>
+    ''' GERA QRCODE PARA AS INFORMAÇÃO DO PC
+    ''' </summary>
+    ''' <param name="strCode">STIRNG DAS INFORMAÇÕES</param>
+    ''' <remarks></remarks>
+    Private Sub GeraQRCodeToImageFile(ByVal strCode As String)
+
+        If Not String.IsNullOrEmpty(strCode) Then
+
+            barcode.Symbology = KeepAutomation.Barcode.Symbology.QRCode
+            barcode.CodeToEncode = strCode
+            barcode.X = 3
+            barcode.Y = 3
+
+            SaveFileDialog1 = New SaveFileDialog()
+            SaveFileDialog1.Filter = " Arquivos de imagem (*.png)|*.png|Todos os arquivos (*.*)|*.* "
+            SaveFileDialog1.FileName = txtCodPc.Text
+            SaveFileDialog1.InitialDirectory = "%HomePath%\Documentos"
+            Dim result As DialogResult = SaveFileDialog1.ShowDialog()
+
+            If result = Windows.Forms.DialogResult.OK Then
+                barcode.generateBarcodeToImageFile(SaveFileDialog1.FileName)
+                SaveFileDialog1.Dispose()
+            End If
+
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' GERA STRING PARA QRCODE
+    ''' </summary>
+    ''' <returns>STRING FORMATADA</returns>
+    ''' <remarks></remarks>
+    Private Function GetaStringQRCode() As String
+
+        Dim strConexcoesRede As String = String.Empty
+
+        For Each rows As DataGridViewRow In dgvConexoes.Rows
+            strConexcoesRede += "Tipo de Conexão: " & rows.Cells(0).Value.ToString() & _
+                                " MAC Adress: " & rows.Cells(1).Value.ToString() & _
+                                " IP: " & rows.Cells(2).Value.ToString() & ControlChars.Lf
+        Next
+
+        Return "Cód. PC: " & txtCodPc.Text & " Usuário: " & txtLogin.Text & ControlChars.Lf _
+             & "Nome NetBios: " & txtNetBios.Text & " Fabricante: " & txtRazaoSocial.Text & ControlChars.Lf _
+             & "Modelo: " & txtModelo.Text & ControlChars.Lf _
+             & "Conexões de Rede: " & ControlChars.Lf _
+             & strConexcoesRede
+
+
+    End Function
+
+
+    ''' <summary>
+    ''' EXIBE MENU DE CONTEXTO PARA IMPRESSÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnImprimir_MouseClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.MouseEventArgs) Handles btnImprimir.MouseClick
+        cmsPrintQrCode.Show(btnImprimir, New System.Drawing.Point(e.X, e.Y))
+    End Sub
+
+    '
+    'MENU DE CONTEXTO PARA IMPRESSÃO DE QRCODE
+    '
+
+
+    Private Sub ImprimirToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ImprimirToolStripMenuItem.Click
+
+        PrintDocument1 = New Printing.PrintDocument()
+        PrintDialog1.Document = PrintDocument1
+
+        If PrintDialog1.ShowDialog() = Windows.Forms.DialogResult.OK Then
+            PrintDocument1.Print()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' GERA IMAGEM
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub GerarImagemToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles GerarImagemToolStripMenuItem.Click
+
+        GeraQRCodeToImageFile(GetaStringQRCode())
+
+    End Sub
+
+    ''' <summary>
+    ''' VIZUALIZA IMAGEM DO QRCODE GERADO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub VisualizarToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles VisualizarToolStripMenuItem.Click
+        'Dim frm As New PopupWithImg(GeraQRCodeToImage(GetaStringQRCode()), 1000)
+        'frm.PictureBox.SizeMode = PictureBoxSizeMode.StretchImage
+        'Dim position As Point = Cursor.Position
+        'frm.StartPosition = FormStartPosition.CenterScreen
+        'frm.Opacity = 100
+        'frm.Show()
+    End Sub
+
+
+    ''' <summary>
+    ''' CONFIGURA PÁGINA PARA IMPRESSA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub PrintDocument1_PrintPage(ByVal sender As System.Object, ByVal e As System.Drawing.Printing.PrintPageEventArgs) Handles PrintDocument1.PrintPage
+
+        Dim rect As New Rectangle(20, 20, 200, 200)
+        e.Graphics.DrawImage(GeraQRCodeToImage(GetaStringQRCode()), rect)
+
+    End Sub
+
+
+    '
+    'EDIÇÃO DE SUPORTE LINKS
+    '
+
+    ''' <summary>
+    ''' ADICIONA LINHAS AS DATAGRIDVIEW SUPORTE LINKS
+    ''' </summary>
+    ''' <returns>TRUE ADICIONOU / FALSE NÃO ADICIONOU</returns>
+    ''' <remarks></remarks>
+    Private Function AddRowInDataGridLink() As Boolean
+
+        Dim strMesagemErro As String = "Há campos que faltam ser preenchidos ou estão incorretos."
+
+        If Not (String.IsNullOrEmpty(cboTipoLink.SelectedItem.ToString) _
+           Or String.IsNullOrEmpty(txtLink.Text)) _
+           And blnValidaSubCadastros Then
+
+            CleanSQLInjection(CType(pnlLink, Control))
+            dgvLinks.CurrentRow.Cells(0).Value = cboTipoLink.SelectedItem
+            dgvLinks.CurrentRow.Cells(1).Value = txtLink.Text
+            dgvLinks.CurrentRow.Cells(2).Value = idTipoLink
+
+            If Not btnAceitaLink.Enabled Then
+                dgvLinks.CurrentRow.Cells(3).Value = 0
+            End If
+
+            epvPc.SetError(btnAddLink, "")
+            Return True
+        Else
+
+            epvPc.SetError(btnAddLink, strMesagemErro)
+            Return False
+
+        End If
+
+    End Function
+
+    ''' <summary>
+    ''' CARREGA CAMPOS DE CONEXÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CarregaCamposLink()
+
+        If (Not dgvLinks.CurrentRow Is Nothing) And btnNovoLink.Enabled Then
+            cboTipoLink.SelectedItem = dgvLinks.CurrentRow.Cells(0).Value
+            txtLink.Text = dgvLinks.CurrentRow.Cells(1).Value.ToString
+            lklLink.Text = dgvLinks.CurrentRow.Cells(1).Value.ToString
+        End If
+
+    End Sub
+
+
+    ''' <summary>
+    ''' CANCELA EDIÇÃO DA CONEXÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CancelaEdicaoLink()
+
+        Me.bdsLinks.CancelEdit()
+
+        OffFields(CType(pnlLink, Control))
+        CleanFields(CType(pnlLink, Control))
+
+        epvPc.Clear()
+
+        btnAddLink.Enabled = False
+        btnNovoLink.Enabled = True
+        btnCancelaLink.Enabled = False
+        btnAceitaLink.Enabled = False
+        dgvLinks.Enabled = True
+
+        If dgvLinks.RowCount > 0 Then
+            btnEditLink.Enabled = True
+        Else
+            btnEditLink.Enabled = False
+        End If
+
+        CarregaCamposLink()
+
+    End Sub
+
+    '
+    'BOTÕES DE EDIÇÃO DE LINK
+    '
+
+    ''' <summary>
+    ''' EDITA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnEditLink_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnEditLink.Click
+
+        ActiveFields(CType(pnlLink, Control))
+        btnNovoLink.Enabled = False
+        btnAceitaLink.Enabled = True
+        btnEditLink.Enabled = False
+        btnCancelaLink.Enabled = True
+        dgvLinks.Enabled = False
+
+    End Sub
+
+    ''' <summary>
+    ''' ACEITA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAceitaLink_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAceitaLink.Click
+
+        If AddRowInDataGridLink() Then
+
+            CleanFields(CType(pnlLink, Control))
+            bdsLinks.EndEdit()
+            OffFields(CType(pnlLink, Control))
+
+            btnAceitaLink.Enabled = False
+            btnCancelaLink.Enabled = False
+            btnAddLink.Enabled = False
+            btnNovoLink.Enabled = True
+            btnEditLink.Enabled = True
+            dgvLinks.Enabled = True
+
+            CarregaCamposLink()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' CANCELA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnCancelaLink_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnCancelaLink.Click
+
+        CancelaEdicaoLink()
+
+    End Sub
+
+    ''' <summary>
+    ''' NOVO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnNovoLink_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnNovoLink.Click
+
+        bdsLinks.AddNew()
+
+        CleanFields(CType(pnlLink, Control))
+        ActiveFields(CType(pnlLink, Control))
+
+        btnAddLink.Enabled = True
+        btnNovoLink.Enabled = False
+        btnCancelaLink.Enabled = True
+        btnEditLink.Enabled = False
+        dgvLinks.Enabled = False
+
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddLink_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddLink.Click
+
+        If AddRowInDataGridLink() Then
+
+            bdsLinks.EndEdit()
+            OffFields(CType(pnlLink, Control))
+            CleanFields(CType(pnlLink, Control))
+
+            btnAddLink.Enabled = False
+            btnNovoLink.Enabled = True
+            btnCancelaLink.Enabled = False
+            btnDelLink.Enabled = True
+            btnEditLink.Enabled = True
+            dgvLinks.Enabled = True
+
+            CarregaCamposLink()
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' DELETA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnDelLink_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnDelLink.Click
+
+        delLink.Add(CInt(dgvLinks.CurrentRow.Cells(2).Value))
+
+        If RemoveRowInDataGrid(dgvLinks) Then
+
+            CleanFields(CType(pnlLink, Control))
+            CarregaCamposLink()
+
+            If dgvLinks.RowCount > 0 Then
+                btnDelLink.Enabled = True
+                btnEditLink.Enabled = True
+            Else
+                btnDelLink.Enabled = False
+                btnEditLink.Enabled = False
+            End If
+
+        Else
+            delLink.Remove(CInt(dgvLinks.CurrentRow.Cells(2).Value))
+        End If
+
+    End Sub
+
+    ''' <summary>
+    ''' ATIVA TXT DE LINK
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub lklLink_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles lklLink.Click
+        lklLink.Visible = False
+        txtLink.Visible = True
+        txtLink.Focus()
+    End Sub
+
+    '
+    'ALIMENTA CAMPOS DE LINK
+    '
+
+    Private Sub dgvLinks_CellClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellEventArgs) Handles dgvLinks.CellClick
+
+        If e.RowIndex > -1 Then
+            CarregaCamposLink()
+        End If
+
+    End Sub
+
+    Private Sub dgvLinks_KeyUp(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyEventArgs) Handles dgvLinks.KeyUp
+        CarregaCamposLink()
+    End Sub
+
+    ''' <summary>
+    ''' ABRE LINK
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dgvLinks_CellContentClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellEventArgs) Handles dgvLinks.CellContentClick
+        If e.ColumnIndex = 1 And e.RowIndex > -1 Then
+            Process.Start(dgvLinks.CurrentCell.Value.ToString)
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' SAI DO FORMULÁRIO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnCancelarComputador_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnCancelarComputador.Click
+        ViewInicial.CloseMdiChildren(Me)
+    End Sub
+End Class

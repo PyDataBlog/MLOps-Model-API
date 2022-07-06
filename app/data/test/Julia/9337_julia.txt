@@ -1,0 +1,108 @@
+
+using Knet
+
+Base.indmax(x::KnetArray) = indmax(Array(x))
+
+function onehot(dtype, index, height)
+    x = dtype(zeros(height, 1))
+    x[index] = 1
+
+    return x
+end
+
+function isdfaequal(x, y)
+    if x == y
+        return true
+    end
+
+    x = unprocess(x)
+    y = unprocess(y)
+    result = split(readstring(`java -jar regex_dfa_equals.jar $x $y`), "\n")[end]
+
+    if result == "1"
+        return true
+    elseif result == "0"
+        return false
+    else
+        error("Unexpected output from DFA-equality checker")
+    end
+end
+
+function unprocess(line)
+    line = replace(line, "<VOW>", join("AEIOUaeiou", " "))
+    line = replace(line, "<NUM>", join("0-9", " "))
+    line = replace(line, "<LET>", join("A-Za-z", " "))
+    line = replace(line, "<CAP>", join("A-Z", " "))
+    line = replace(line, "<LOW>", join("a-z", " "))
+
+    line = replace(line, "<M0>", join("dog", " "))
+    line = replace(line, "<M1>", join("truck", " "))
+    line = replace(line, "<M2>", join("ring", " "))
+    line = replace(line, "<M3>", join("lake", " "))
+
+    line = replace(line, " ", "")
+
+    return line
+end
+
+function prettydict(dict; sorted=false, args...)
+    items = collect(dict)
+    sorted && sort!(items; args...)
+    s = ""
+    for (k, v) in items
+        s *= @sprintf("%-15s  =>  %s\n", k, v)
+    end
+    return chomp(s)
+end
+
+function translate(parameters, network, dict, input)
+    srcdict, trgdict = dict
+    source = seqtovec(network.dtype, wordtoseq(split(input), srcdict), length(srcdict))
+    prediction = beamsearch(parameters, network, source)
+    wordseq = vectoword(prediction, trgdict)
+    return wordseq
+end
+
+function _save(filename, parameters, network, dict, args)
+    to_dtype = Array{Float32}
+    p = convert_parameters(parameters, network.dtype, to_dtype)
+    n = deepcopy(network)
+    n.endofseq = to_dtype(n.endofseq)
+    n.state = convert_parameters(n.state, network.dtype, to_dtype)
+    save(filename, "parameters", p, "network", n, "dict", dict, "args", args)
+end
+
+function _load(filename, to_dtype)
+    from_dtype = Array{Float32}
+    d = load(filename)
+    d["parameters"] = convert_parameters(d["parameters"], from_dtype, to_dtype)
+    d["network"].dtype = to_dtype
+    d["network"].endofseq = to_dtype(d["network"].endofseq)
+    d["network"].state = convert_parameters(d["network"].state, from_dtype, to_dtype)
+    return d
+end
+
+#=
+
+function vindmax(x)
+    indices = []
+
+    for j = 1:size(x, 2)
+        push!(indices, indmax(x[:, j]))
+    end
+
+    return indices
+end
+
+function onehot(dtype, indices, height)
+    len = length(indices)
+    x = dtype(zeros(height, len))
+
+    for j = 1:len
+        x[indices[j], j] = 1
+    end
+
+    return x
+end
+
+=#

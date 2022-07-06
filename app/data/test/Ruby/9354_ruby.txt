@@ -1,0 +1,51 @@
+require 'uri'
+
+module Redbrick
+  module Integration
+    module Foursquare
+      module Neighborhood
+        extend ActiveSupport::Concern
+
+        def nearby_venues
+          client_id = ENV.fetch('FOURSQUARE_CLIENT_ID')
+          client_secret = ENV.fetch('FOURSQUARE_CLIENT_SECRET')
+
+          url = "https://api.foursquare.com/v2/venues/explore?section=food&ll=#{location}&client_id=#{client_id}&client_secret=#{client_secret}&v=20170328&venuePhotos=1"
+
+          hash = Digest::SHA256.hexdigest url
+          key = "v1/foursquare_neighborhood/#{hash}"
+          json = Rails.cache.fetch(key, expires_in: 12.hours) do
+            response = Http.get(url)
+            body = response.body.to_s
+
+            body ? JSON.parse(body) : nil
+          end
+
+          return nil unless json
+
+          begin
+            items = json['response']['groups'][0]['items']
+          rescue NoMethodError
+            byebug
+          end
+
+          items.map do |item|
+            venue = item['venue']
+            location = venue['location']
+
+            photo = venue['photos']['groups'][0]['items'][0]
+            prefix = photo['prefix']
+            suffix = photo['suffix']
+
+            Venue.new venue['id'],
+                      venue['name'],
+                      "#{prefix}300x300#{suffix}",
+                      venue['rating'],
+                      venue['ratingSignals'],
+                      Redbrick::Data::Location.new(location['lat'], location['lng'])
+          end
+        end
+      end
+    end
+  end
+end

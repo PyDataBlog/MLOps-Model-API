@@ -1,0 +1,387 @@
+#!/usr/bin/env python3
+#
+# Copyright (c) 2015, Roberto Riggio
+# All rights reserved.
+#
+# Redistribution and use in source and binary forms, with or without
+# modification, are permitted provided that the following conditions are met:
+#    * Redistributions of source code must retain the above copyright
+#      notice, this list of conditions and the following disclaimer.
+#    * Redistributions in binary form must reproduce the above copyright
+#      notice, this list of conditions and the following disclaimer in the
+#      documentation and/or other materials provided with the distribution.
+#    * Neither the name of the CREATE-NET nor the
+#      names of its contributors may be used to endorse or promote products
+#      derived from this software without specific prior written permission.
+#
+# THIS SOFTWARE IS PROVIDED BY CREATE-NET ''AS IS'' AND ANY
+# EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+# WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+# DISCLAIMED. IN NO EVENT SHALL CREATE-NET BE LIABLE FOR ANY
+# DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+# (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+# LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+# ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+# (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+# SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+"""Basic Zephyr manager."""
+
+
+from empower.core.app import EmpowerApp
+from empower.core.app import DEFAULT_PERIOD
+from empower.main import RUNTIME
+from empower.datatypes.etheraddress import EtherAddress
+from empower.core.resourcepool import ResourcePool
+from empower.lvapp.lvappconnection import LVAPPConnection
+
+import time, datetime, threading
+import empower.apps.zephyr.zephyrLinker as linker
+starttime = datetime.datetime.now()
+
+class Zephyr(EmpowerApp):
+    """Basic mobility manager.
+
+    Command Line Parameters:
+
+        tenant_id: tenant id
+        limit: handover limit in dBm (optional, default -80)
+        every: loop period in ms (optional, default 5000ms)
+
+    Example:
+
+        ./empower-runtime.py apps.mobilitymanager.mobilitymanager \
+            --tenant_id=52313ecb-9d00-4b7d-b873-b55d3d9ada26
+    """
+
+    def __init__(self, **kwargs):
+        self.__limit = linker.DEFAULT_RSSI_LIMIT
+        EmpowerApp.__init__(self, **kwargs)
+
+        # Register an wtp up event
+        self.wtpup(callback=self.wtp_up_callback)
+
+        # Register an lvap join event
+        self.lvapjoin(callback=self.lvap_join_callback)
+
+        # Register an lvap leave event
+        self.lvapleave(callback=self.lvap_leave_callback)
+
+    def lvap_leave_callback(self, lvap):
+        """Called when an LVAP disassociates from a tennant."""
+
+        self.log.info("LVAP %s left %s" % (lvap.addr, lvap.ssid))
+
+    def wtp_up_callback(self, wtp):
+        """Called when a new WTP connects to the controller."""
+
+        for block in wtp.supports:
+            self.ucqm(block=block, every=self.every)
+
+    def lvap_join_callback(self, lvap):
+        """Called when an joins the network."""
+
+        self.rssi(lvap=lvap.addr, value=self.limit, relation='LT',
+                  callback=self.low_rssi)
+
+    def handover(self, lvap):
+        """ Handover the LVAP to a WTP with
+        an RSSI higher that -65dB. """
+        self.log.info("Running handover...")
+        
+        self.log.info("LVAP: %s - Limit RSSI : %u dB" % (lvap.addr, self.limit))
+
+        self.log.info("Initialize the Resource Pool")
+        pool = ResourcePool()
+        for wtp in self.wtps():
+            #for wtpd, lvaps in wtpdict.items():
+                #self.log.info("WTP in wtps : %s WTP in dict : %s are equal : %u\n" % (str(wtp.addr), wtpd, (wtp.addr == wtpd)))
+            templist = linker.wtpdict[str(wtp.addr)]
+            length = len(templist)
+            self.log.info("Pooling WTP: %s" % str(wtp.addr))
+            self.log.info(wtp.supports)
+            pool = pool | wtp.supports
+        
+        self.log.info("Select matching Resource Blocks")
+        matches = pool #& lvap.scheduled_on
+        self.log.info(matches)
+        
+        self.log.info("LVAP1 LOOP 107")
+        counter=0
+        for lvap in self.lvaps():
+            self.log.info("!!!!!!!!!!!!!!!%d : %s" % (counter, lvap.addr))
+            counter=counter+1
+            for block in matches:
+                self.log.info("Time : %f \n LVAP : %s \n addr : %s \n last_rssi_avg : %.2f \n last_rssi_std : %.2f \n last_packets : %u \n mov_rrsi : %.2f\n" % (time.time(),
+                                                  lvap.addr,
+                                                  block.ucqm[lvap.addr]['addr'],
+                                                  block.ucqm[lvap.addr]['last_rssi_avg'],
+                                                  block.ucqm[lvap.addr]['last_rssi_std'],
+                                                  block.ucqm[lvap.addr]['last_packets'],
+                                                  block.ucqm[lvap.addr]['mov_rssi']))
+                if (lvap.addr=="78:44:76:BF:DA:D4"):
+                    self.log.info("LVAP: %s is leaving" % lvap.addr)
+                    #del lvap.downlink[block] #deletes lvap
+        
+        # Initialize the Resource Pool
+        pool = ResourcePool()
+
+        # Update the Resource Pool with all
+        # the available Resourse Blocks
+        for wtp in self.wtps():
+            if (str(wtp.addr) in linker.wtpdict):
+                if (len(linker.wtpdict[str(wtp.addr)]) < linker.wtpdict_limit[str(wtp.addr)]):
+                    pool = pool | wtp.supports
+        # Select matching Resource Blocks
+        matches = pool & lvap.scheduled_on
+        # Filter Resource Blocks by RSSI   
+        valid = [block for block in matches
+                    if block.ucqm[lvap.addr]['mov_rssi'] >= self.limit]
+
+        #valid = self.blocks(lvap, self.limit)
+
+        if not valid:
+            self.log.info("not valid")
+            return
+
+        for block in valid:
+            self.log.info("valid LVAP: %s - Current RSSI : %u dB" % (lvap.addr, float(block.ucqm[lvap.addr]['mov_rssi'])))
+
+        new_block = max(valid, key=lambda x: x.ucqm[lvap.addr]['mov_rssi'])
+        self.log.info("LVAP %s setting new block %s" % (lvap.addr, new_block))
+
+        lvap.scheduled_on = new_block
+
+    @property
+    def limit(self):
+        """Return loop period."""
+
+        return self.__limit
+
+    @limit.setter
+    def limit(self, value):
+        """Set limit."""
+
+        limit = int(value)
+
+        if limit > 0 or limit < -100:
+            raise ValueError("Invalid value for limit")
+
+        self.log.info("Setting limit %u dB" % value)
+        self.__limit = limit
+
+    def set_limit(self, value):
+        """Set limit."""
+
+        limit = int(value)
+
+        if limit > 0 or limit < -100:
+            raise ValueError("Invalid value for limit")
+
+        self.log.info("Setting limit %u dB" % value)
+        self.__limit = limit
+
+    def low_rssi(self, trigger):
+        """ Perform handover if an LVAP's rssi is
+        going below the threshold. """
+
+        self.log.info("Received trigger from %s rssi %u dB",
+                      trigger.event['block'],
+                      trigger.event['current'])
+
+        lvap = self.lvap(trigger.lvap)
+
+        if not lvap:
+            return
+
+        self.handover(lvap)
+
+
+    def wtp_clientlimit(self):
+        self.log.info("Running Client Limit...")
+        wtp_c=0
+        for wtp in self.wtps():
+
+            #Create lvaplist for the specific wtp
+            lvaplist = []
+            for lvap in self.lvaps():
+                if lvap.wtp.addr == wtp.addr:
+                    #self.log.info("LVAP before list : %s" % lvap.addr)
+                    lvaplist.append(str(lvap.addr))
+                    #self.log.info("LVAP after list : %s" % lvaplist[-1])
+
+            #Check if limit is not given and provide the default
+            #if str(wtp.addr) not in linker.wtpdict_limit:
+                #linker.wtpdict_limit[str(wtp.addr)]=linker.DEFAULT_LVAP_NUMBER_LIMIT
+
+            #Check if wtp is not on the list and add it
+            if str(wtp.addr) not in linker.wtpdict:
+                linker.wtpdict[str(wtp.addr)] = lvaplist
+
+            #If limit is -1 then wtp has no limit
+            if linker.wtpdict_limit[str(wtp.addr)] == -1:
+                self.log.info("################ WTP : %s has unlimited LVAPs (limit %f) %s ######################\n" % (wtp, linker.wtpdict_limit[str(wtp.addr)], linker.wtpdict[str(wtp.addr)]))
+                continue
+            #If wtp client limit is exceeded, then handover the excess lvaps to new wtp
+            elif len(lvaplist) > linker.wtpdict_limit[str(wtp.addr)]:
+                self.log.info("################ WTP : %s has more LVAPs than the limit %f ######################\n" % (wtp, linker.wtpdict_limit[str(wtp.addr)]))
+                self.log.info(lvaplist)
+                self.log.info(linker.wtpdict[str(wtp.addr)])
+                diff = [a for a in lvaplist+linker.wtpdict[str(wtp.addr)] if (a not in lvaplist) or (a not in linker.wtpdict[str(wtp.addr)])]
+                self.log.info(diff)
+                numoflvaptohandover=len(lvaplist) - linker.wtpdict_limit[str(wtp.addr)]
+                self.log.info(numoflvaptohandover)
+                for lvap in self.lvaps():
+                    #If lvap is the extra lvap in wtp then find wtp with best rssi and handover to that
+                    if lvap.addr in diff or lvap.addr in lvaplist:
+                        self.log.info("If lvap in diff")
+                        # Initialize the Resource Pool
+                        pool = ResourcePool()
+                        # Update the Resource Pool with all
+                        # the available Resourse Blocks
+                        for other_wtp in self.wtps():
+                            if other_wtp.addr != wtp.addr:
+                                if linker.wtpdict_limit[str(other_wtp.addr)] < len(linker.wtpdict[str(other_wtp.addr)]):
+                                    self.log.info(linker.wtpdict_limit[str(other_wtp.addr)])
+                                    self.log.info(len(linker.wtpdict[str(other_wtp.addr)]))
+                                    pool = pool | other_wtp.supports
+                        # Select matching Resource Blocks
+                        matches = pool & lvap.scheduled_on
+                        max_rssi = -float("inf")
+                        first_block=1;
+                        for block in matches:
+                            if first_block == 1:
+                                first_block=0
+                                max_rssi=block.ucqm[lvap.addr]['mov_rssi']
+                            else:
+                                if max_rssi < block.ucqm[lvap.addr]['mov_rssi']:
+                                    max_rssi=block.ucqm[lvap.addr]['mov_rssi']
+
+                        # Filter Resource Blocks by RSSI   
+                        valid = [block for block in matches
+                                    if block.ucqm[lvap.addr]['mov_rssi'] >= max_rssi]
+                        if not valid:
+                            self.log.info("not valid")
+                            continue
+
+                        for block in valid:
+                            self.log.info("valid LVAP: %s - Current RSSI : %.2f dB" % (lvap.addr, float(block.ucqm[lvap.addr]['mov_rssi'])))
+                            #Remove from lvaplist
+                            lvaplist.remove(str(lvap.addr))
+
+
+                        new_block = max(valid, key=lambda x: x.ucqm[lvap.addr]['mov_rssi'])
+                        self.log.info("LVAP %s setting new block %s" % (lvap.addr, new_block))
+
+                        lvap.scheduled_on = new_block
+                        numoflvaptohandover=numoflvaptohandover-1
+
+                    else:
+                        continue
+                    #if all lvaps have been handovered then break
+                    if numoflvaptohandover == 0:
+                        break
+            else:
+                self.log.info("################ WTP : %s has LVAPs' limit %f %s ######################\n" % (wtp, linker.wtpdict_limit[str(wtp.addr)], linker.wtpdict[str(wtp.addr)]))
+            #Update lvaplist for given wtp
+            linker.wtpdict[str(wtp.addr)] = lvaplist
+
+        
+        for wtp, lvaps in linker.wtpdict.items():
+            temp = None
+            insert_comma = 0
+            for lvap in lvaps:
+                if insert_comma == 0:
+                    temp = lvap
+                    insert_comma=1
+                    continue
+                temp = temp + ', ' + lvap #str(lvaps).strip('['']')#.strip('[EtherAddress'']')
+            self.log.info("WTP : %s has %u LVAPs : %s\n" % (wtp, len(lvaps), temp))
+            #self.wtp_lvap_limit(wtp,lvaps)
+            #if len(lvaps) > linker.DEFAULT_LVAP_NUMBER_LIMIT:
+                #self.log.info("################WTP : %s has more LVAPs than the limit######################\n" % wtp)
+                #for wtp in self.wtps()
+
+    def lvap_timelimit(self):
+        self.log.info("Running Time Limit...")
+        self.log.info("DEFAULT_LVAP_TIME_LIMIT : %d" % linker.DEFAULT_LVAP_TIME_LIMIT)
+        deletionlist = []
+        for lvap, endtime in linker.lvap_timer.items():
+            #self.log.info("LVAP")
+            formated_endtime = datetime.datetime.strptime(endtime, '%Y-%m-%d %H:%M:%S')
+            currenttime = datetime.datetime.now()
+            if (currenttime - formated_endtime).total_seconds() >= 0:
+                self.log.info("$$$$$$$$$$$$$ LVAP: %s Time ends" % lvap)
+                deletionlist.append(lvap)
+            else:
+                self.log.info("$$$$$$$$$$$$$ LVAP: %s Time continues" % lvap)
+        for dlvap in deletionlist:
+            self.log.info("$$$$$$$$$$$$$ Removing Timer LVAP: %s" % dlvap)
+            linker.removeLVAPTimer(self,dlvap)
+            for lvap in self.lvaps():
+                if str(lvap.addr) == dlvap:
+                    lvaplabel=RUNTIME.get_label(lvap.addr)
+                    self.log.info("$$$$$$$$$$$$$$$$$$$$$$$$$$$$$")
+                    #del lvap.downlink[lvap.block] #deletes lvap
+                    #del RUNTIME.lvaps[lvap.addr]
+                    for wtp in self.wtps():
+                        if lvap.wtp.addr == wtp.addr:
+                            #wtp.connection.send_del_lvap(lvap)
+                            RUNTIME.remove_lvap(lvap.addr)
+                            temp = linker.wtpdict[str(wtp.addr)]
+                            temp.remove(str(lvap.addr))
+                            #del RUNTIME.lvaps[lvap.addr]
+                            break
+                    #self.remove_lvap(lvap)
+                    lvaplabel=RUNTIME.get_label(lvap.addr)
+                    #self.log.info(lvaplabel)
+                    self.log.info("Deleting LVAP %s from db" % lvaplabel)
+                    self.log.info("Removing %s %s from allowed LVAPs" % (lvaplabel, lvap.addr))
+                    RUNTIME.remove_allowed(lvap.addr)
+                    self.log.info("Adding %s %s to denied LVAPs" % (lvaplabel, lvap.addr))
+                    RUNTIME.add_denied(lvap.addr,lvaplabel)
+                    self.log.info("LVAP %s deleted" % lvaplabel)
+                    break
+
+        #pool = ResourcePool()
+        #for lvap in self.lvaps():
+        #    matches = pool
+        #    for block in matches:
+        #        self.log.info("zephyr : LVAP: %s - Current RSSI : %f dB" % (lvap.addr, float(block.ucqm[lvap.addr]['mov_rssi'])))
+
+
+    def loop(self):
+        """ Periodic job. """
+        self.log.info("Periodic job.\n")
+        self.log.info("Allowed LVAPs: %s" % (RUNTIME.allowed))
+        self.log.info("Denied LVAPs: %s\n" % (RUNTIME.denied))
+
+        if linker.initialize_limit == 1:
+            for wtp in self.wtps():
+            #Check if limit is not given and provide the default
+                if str(wtp.addr) not in linker.wtpdict_limit:
+                    linker.wtpdict_limit[str(wtp.addr)]=linker.DEFAULT_LVAP_NUMBER_LIMIT
+            linker.initialize_limit = 0
+            self.log.info("Setting limit to default")
+
+        self.wtp_clientlimit()
+        self.lvap_timelimit()
+        self.log.info("Current limit %u linker limit to %u" % (self.limit,linker.RSSI_LIMIT))
+        if self.limit != linker.RSSI_LIMIT:
+            self.log.info("Current limit %u setting limit to %u" % (self.limit,linker.RSSI_LIMIT))
+            self.set_limit(linker.RSSI_LIMIT)
+
+        # Handover every active LVAP to
+        # the best WTP
+        counterlvap=0
+        for lvap in self.lvaps():
+            self.handover(lvap)
+            counterlvap=counterlvap+1
+        self.log.info("Active LVAPs: %u" % counterlvap)
+
+
+
+def launch(tenant_id, limit=linker.DEFAULT_RSSI_LIMIT, every=DEFAULT_PERIOD):
+    """ Initialize the module. """
+
+    return Zephyr(tenant_id=tenant_id, limit=limit, every=every)

@@ -1,0 +1,239 @@
+﻿using Newtonsoft.Json;
+using RedditReader.Common;
+using RedditReader.Data;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices.WindowsRuntime;
+using Windows.ApplicationModel.Resources;
+using Windows.Data.Json;
+using Windows.Foundation;
+using Windows.Foundation.Collections;
+using Windows.Graphics.Display;
+using Windows.Storage;
+using Windows.UI.Core;
+using Windows.UI.ViewManagement;
+using Windows.UI.Xaml;
+using Windows.UI.Xaml.Controls;
+using Windows.UI.Xaml.Controls.Primitives;
+using Windows.UI.Xaml.Data;
+using Windows.UI.Xaml.Input;
+using Windows.UI.Xaml.Media;
+using Windows.UI.Xaml.Media.Imaging;
+using Windows.UI.Xaml.Navigation;
+
+// The Universal Hub Application project template is documented at http://go.microsoft.com/fwlink/?LinkID=391955
+
+namespace RedditReader
+{
+    public sealed partial class HubPage : Page
+    {
+        private readonly NavigationHelper navigationHelper;
+        private readonly ObservableDictionary defaultViewModel = new ObservableDictionary();
+
+        List<SubredditDataItem> Subreddits = null;
+
+        public HubPage()
+        {
+            this.InitializeComponent();
+
+            // Hub is only supported in Portrait orientation
+            DisplayInformation.AutoRotationPreferences = DisplayOrientations.Portrait;
+
+            this.NavigationCacheMode = NavigationCacheMode.Required;
+
+            this.navigationHelper = new NavigationHelper(this);
+            this.navigationHelper.LoadState += this.NavigationHelper_LoadState;
+        }
+
+        private async void LoadData()
+        {
+            try
+            {
+                if (Subreddits == null)
+                {
+                    if (Reddit.Reddit.LoginHelper.IsLoggedIn())
+                    {
+                        signInBtn.Content = "sign out";
+
+                        var reddits = await Reddit.Reddit.Reddit.GetSubreddits(100);
+
+                        var subreddits = new List<SubredditDataItem>();
+
+                        foreach (var child in reddits.Data.Children)
+                        {
+                            var defReddit = new SubredditDataItem(child.Data.DisplayName, false, "");
+                            subreddits.Add(defReddit);
+                        }
+
+
+                        string json = JsonConvert.SerializeObject(subreddits);
+
+                        Reddit.Database.SetValue("reddits", json);
+
+                        Subreddits = subreddits;
+                    }
+                    else
+                    {
+                        signInBtn.Content = "sign in";
+
+                        if (Reddit.Database.GetValue("reddits") == null)
+                        {
+                            var defreddits = await Reddit.Reddit.Reddit.GetDefaultSubreddits();
+
+                            var defSubreddits = new List<SubredditDataItem>();
+
+                            foreach (var child in defreddits.Data.Children)
+                            {
+                                var defReddit = new SubredditDataItem(child.Data.DisplayName, false, "");
+                                defSubreddits.Add(defReddit);
+                            }
+
+                            string json = JsonConvert.SerializeObject(defSubreddits);
+
+                            Reddit.Database.SetValue("reddits", json);
+
+                            Subreddits = defSubreddits;
+                        }
+                        else
+                        {
+                            Subreddits = JsonConvert.DeserializeObject<List<SubredditDataItem>>((string)Reddit.Database.GetValue("reddits"));
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Debug.WriteLine(ex.Message);
+            }
+            Debug.WriteLine(Subreddits[0].Name);
+            List<TextPostDataItem> items = new List<TextPostDataItem>();
+            int cnt = 0;
+            while (cnt < 10)
+            {
+                TextPostDataItem post = new TextPostDataItem("Test post #" + cnt, "empty", new Random(23).Next(10, 3000), new Random(213).Next(10, 9000), new Random(43).Next(10, 9000), new Random(35).Next(10, 5000), "marsmax", "", Vote.Neutral);
+
+                items.Add(post);
+
+                cnt++;
+            }
+
+            Subreddits = Subreddits.OrderByDescending(o => o.IsFavourite).ToList();
+            //var settings = ApplicationData.Current.LocalSettings.Values;
+
+            var hubData = new HubDataItem(items, "none", "none", "0% read", "",
+                "igbyecf iuweviuw ycvuivcy ushyvc kchyvssadhy vcayscvu aluyvc uyasvd clasyvclcv ay vcoaiysvc iacs yvaicyvo",
+                Subreddits);
+
+            Hub.DataContext = hubData;
+        }
+
+        public NavigationHelper NavigationHelper
+        {
+            get { return this.navigationHelper; }
+        }
+
+        private void NavigationHelper_LoadState(object sender, LoadStateEventArgs e)
+        {
+            LoadData();
+        }
+
+        #region NavigationHelper registration
+
+        /// <summary>
+        /// The methods provided in this section are simply used to allow
+        /// NavigationHelper to respond to the page's navigation methods.
+        /// <para>
+        /// Page specific logic should be placed in event handlers for the
+        /// <see cref="NavigationHelper.LoadState"/>
+        /// and <see cref="NavigationHelper.SaveState"/>.
+        /// The navigation parameter is available in the LoadState method
+        /// in addition to page state preserved during an earlier session.
+        /// </para>
+        /// </summary>
+        /// <param name="e">Event data that describes how this page was reached.</param>
+        protected override void OnNavigatedTo(NavigationEventArgs e)
+        {
+            this.navigationHelper.OnNavigatedTo(e);
+        }
+
+        protected override void OnNavigatedFrom(NavigationEventArgs e)
+        {
+            this.navigationHelper.OnNavigatedFrom(e);
+        }
+
+        #endregion
+
+        private void AddRemoveFavouriteSubreddit(object sender)
+        {
+                var s = sender as AppBarToggleButton;
+                //var settings = ApplicationData.Current.LocalSettings.Values;
+
+                if (s.Tag != null)
+                {
+                    var item = Subreddits.Find(i => i.Name == s.Tag.ToString());
+                    item.IsFavourite = !item.IsFavourite;
+
+                    LoadData();
+                }
+        }
+
+        private void Hub_SectionsInViewChanged(object sender, SectionsInViewChangedEventArgs e)
+        {
+            if (e.AddedSections.Contains(SubredditsHub))
+                BottomAppBar.ClosedDisplayMode = AppBarClosedDisplayMode.Compact;
+            if (e.RemovedSections.Contains(SubredditsHub))
+                BottomAppBar.ClosedDisplayMode = AppBarClosedDisplayMode.Minimal;
+        }
+
+        private async void AppBarButton_Click(object sender, RoutedEventArgs e)
+        {
+            if (signInBtn.Content.ToString() == "sign in")
+            {
+                SignInPage sip = new SignInPage();
+                await sip.ShowAsync();
+
+                LoadData();
+            }
+            else
+            {
+                Reddit.Reddit.LoginHelper.Logout();
+
+                LoadData();
+            }
+        }
+
+        private void StackPanel_Tapped(object sender, TappedRoutedEventArgs e)
+        {
+            var tag = (sender as StackPanel).Tag.ToString();
+
+            Frame.Navigate(typeof(SubredditPage), tag);
+        }
+
+        private void ListView_ItemClick(object sender, ItemClickEventArgs e)
+        {
+
+        }
+
+        private void MenuFlyoutItem_Click(object sender, RoutedEventArgs e)
+        {
+            var s = sender as MenuFlyoutItem;
+
+            if (s.Tag != null)
+            {
+                var item = Subreddits.Find(i => i.Name == s.Tag.ToString());
+                item.IsFavourite = !item.IsFavourite;
+                item.Update(item.IsFavourite);
+
+                LoadData();
+            }
+        }
+
+        private void StackPanel_Holding(object sender, HoldingRoutedEventArgs e)
+        {
+            FlyoutBase.ShowAttachedFlyout((FrameworkElement)sender); 
+        }
+    }
+}

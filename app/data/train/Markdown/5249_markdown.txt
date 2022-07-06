@@ -1,0 +1,1 @@
+This article along with all other DevExtreme Angular articles was moved to the [DevExtreme website](https://js.devexpress.com/Documentation/Guide/Angular_Components/Getting_Started/Other_Approaches/Using_Ionic/).

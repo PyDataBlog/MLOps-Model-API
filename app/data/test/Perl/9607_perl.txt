@@ -1,0 +1,738 @@
+#!/usr/bin/perl
+
+# vim: ts=4:sw=4:noexpandtab
+
+use warnings;
+use strict;
+use POSIX qw(mktime);
+use Errno qw(:POSIX);
+use Carp;
+use Socket;
+
+
+##### lib #####
+{ package lib;
+
+our $windows = 0;
+our $linux = 0;
+our $root;
+our $perm = "0644";
+our $user;
+our $group;
+our @users;
+our @groups;
+our $size = 16;
+
+sub function
+{
+	return (caller(1))[3];
+}
+
+sub pfunction
+{
+	print( (caller(1))[3]."(" .(@_? "@_" :"") .")\n" );
+	return 1;
+}
+
+sub init
+{
+	if (`uname -s` =~ /cygwin/i) {
+		$windows = 1;
+	} else {
+		$linux = 1;
+	}
+
+	if ($windows) {
+		$root = "Administrator";
+		$user = $root;
+		$group = "root";
+		@users = ($user, "SYSTEM", "LocalService", "Guest");
+		@groups = ($group, "SYSTEM", "None", "Guests");
+	} else {
+		$root = "root";
+		$user = $root;
+		$group = "root";
+		@users = ($user, "bin", "daemon", "nobody");
+		@groups = ($group, "bin", "daemon", "nobody");
+	}
+}
+
+sub time2str
+{
+	my ($time) = @_;
+	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime($time);
+	return sprintf "%04d-%02d-%02d-%02d:%02d:%02d", 
+		$year +1900, $mon +1, $mday, $hour, $min, $sec;
+}
+
+sub str2time
+{
+	my ($str) = @_;
+	my ($year,$mon,$mday,$hour,$min,$sec) = 
+		$str =~ /(\d\d\d\d)-(\d\d)-(\d\d)-(\d\d):(\d\d):(\d\d)/;
+	$year -= 1900;
+	$mon -= 1;
+	my ($wday,$yday,$isdst) = (0,0,-1);
+	return ::mktime($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst);
+}
+
+sub mkfile
+{
+	# pfunction @_;
+
+	my ($perm, $user, $group, $size, $date, $name) = @_;
+
+	open FILE, ">$name" or ::confess $!;
+	for (my $i=0; $i<int($size/10); $i++) {
+		printf FILE "%09d\n", $i;
+	}
+	if ($size%10) {
+		for (my $i=0; $i<$size%10 -1; $i++) {
+			print FILE ".";
+		}
+		print FILE "\n";
+	}
+	close FILE;
+
+	my $uid = getpwnam($user);
+	::confess $! if !defined $uid;
+	my $gid = getgrnam($group);
+	::confess $! if !defined $gid;
+	chown $uid, $gid, $name or ::confess $!;
+	#chmod $perm, $name;
+	system("chmod $perm $name") and ::confess $!;
+	utime(time, str2time($date), $name) or ::confess $!;
+	return 1;
+}
+
+sub mkfile_s
+{
+	my ($size, $path) = @_;
+	return mkfile($perm, $user, $group, $size, time2str(time), $path);
+}
+
+sub mkfile_ps
+{
+	my ($perm, $size, $path) = @_;
+	return mkfile($perm, $user, $group, $size, time2str(time), $path);
+}
+
+sub mkfile_ug
+{
+	# pfunction @_;
+
+	my ($user, $group, $path) = @_;
+	return mkfile($perm, $user, $group, $size, time2str(time), $path);
+}
+
+sub mkfile_d
+{
+	my ($date, $path) = @_;
+	return mkfile($perm, $user, $group, $size, $date, $path);
+}
+
+sub mkdir_p
+{
+  # pfunction @_;
+
+  ($_) = @_;
+  my $dir = "";
+  for (split /\//) {
+    $dir .= "$_/";
+
+	  $! = 0;
+  	mkdir($dir);
+  	if ($! && $! != ::EEXIST) {
+  		::confess function()."(): mkdir(): $!";
+  	}
+  }
+
+	return 1;
+}
+
+sub mksock
+{
+	my ($sock) = @_;
+
+	socket(SOCK, Socket::PF_UNIX, Socket::SOCK_STREAM, 0) or ::confess $!;
+	bind(SOCK, Socket::sockaddr_un($sock)) or ::confess $!;
+	close(SOCK) or ::confess $!;
+}
+
+sub systemx
+{
+	system("@_") and ::confess $!;
+}
+
+} # lib
+
+
+
+##### test #####
+{ package test;
+
+our $dir;
+
+sub init
+{
+	lib::pfunction @_;
+
+	my ($two) = @_;
+
+	&cleanup;
+	lib::mkdir_p("test1");
+	lib::mkdir_p("test2") if ($two == 2);
+	return 1;
+}
+
+sub copy
+{
+	system("cp -au test1/* test2") and ::confess "cp: $!";
+	return 1;
+}
+
+sub cleanup
+{
+	lib::pfunction;
+
+	lib::systemx("rm -rf test1") if (-d "test1");
+	lib::systemx("rm -rf test2") if (-d "test2");
+	return 1;
+}
+
+sub gen_data
+{
+	lib::pfunction @_;
+
+	$dir = "";
+	($dir) = @_;
+
+	if ($dir && $dir eq "2") {
+		$dir = "test2";
+	} else {
+		$dir = "test1";
+	}
+
+	### permissions
+	# same perms in for all groups
+	for (0..7) {
+		my $size = $_ *10;
+		lib::mkfile_ps("$_$_$_", $size, "$dir/perm0$_$_$_");
+	}
+	# perms for each group
+	for my $i (1..3) {
+		for (0..7) {
+			my $size = $_ *10;
+			my $perm = sprintf "%03o", $_ *8**($i-1);
+			lib::mkfile_ps($perm, $size, "$dir/perm$i$perm");
+		}
+	}
+	# stick, set uid/gid (+x)
+	for (0..7) {
+		my $size = $_ *10;
+		lib::mkfile_ps("${_}755", $size, "$dir/perm4${_}755");
+	}
+	# stick, set uid/gid (-x)
+	for (0..7) {
+		my $size = $_ *10;
+		lib::mkfile_ps("${_}444", $size, "$dir/perm5${_}444");
+	}
+
+	# user /group
+	for my $group (@lib::groups) {
+		for my $user (@lib::users) {
+			lib::mkfile_ug($user, $group, "$dir/ug_$user.$group");
+		}
+	}
+
+	# file type
+	lib::systemx("mknod -m644 $dir/ft_char c 100 200");
+	lib::systemx("mknod -m644 $dir/ft_block b 120 240");
+	lib::systemx("mkfifo -m644 $dir/ft_pipe");
+	lib::systemx("mkdir -m755 $dir/ft_dir");
+	lib::systemx("ln -s file10 $dir/ft_link");
+	lib::mksock("$dir/ft_sock");
+
+	my $date = "2010-01-01-01:01:01";
+	for (qw(char block pipe dir sock)) {
+		utime(time, lib::str2time($date), "$dir/ft_$_") or ::confess $!;
+	}
+
+	# date
+	local $test::year;
+	local $test::mon;
+	local $test::day;
+	local $test::hour;
+	local $test::min;
+	local $test::sec;
+
+	sub ls_date_default
+	{
+		$test::year = "2011";
+		$test::mon = "01";
+		$test::day = "01";
+		$test::hour = "01";
+		$test::min = "00";
+		$test::sec = "00";
+	}
+	ls_date_default;
+
+	sub ls_mkfile_d
+	{
+		my $date = "$test::year-$test::mon-$test::day-$test::hour:$test::min:$test::sec";
+		lib::mkfile_d($date, "$dir/date_$date");
+	}
+
+	for (qw(1970 2010 2030)) { $test::year = $_; ls_mkfile_d; }
+	ls_date_default;
+	for (qw(05 08 12)) { $test::mon = $_; ls_mkfile_d; }
+	ls_date_default;
+	for (qw(09 18 31)) { $test::day = $_; ls_mkfile_d; }
+	ls_date_default;
+	for (qw(09 15 23)) { $test::hour = $_; ls_mkfile_d; }
+	ls_date_default;
+	for (qw(01 38 59)) { $test::min = $_; ls_mkfile_d; }
+	ls_date_default;
+	for (qw(02 45 59)) { $test::sec = $_; ls_mkfile_d; }
+
+	# nested dirs
+	for my $i (1..3) {
+		for my $j (1..3) {
+			for my $k (1..3) {
+				lib::mkdir_p("$dir/dir1$i/dir2$j/dir3$k");
+				lib::mkfile_s(32, "$dir/dir1$i/dir2$j/dir3$k/file$i$j$k");
+			}
+		}
+	}
+}
+
+
+sub ls
+{
+	lib::pfunction;
+
+	init 2;
+
+	gen_data;
+
+	# generate expected file
+	open FH, ">test1/exp" or ::confess $!;
+
+	open PIPE, "ls -l --time-style=full-iso test1|" or ::confess $!;
+	while (<PIPE>) {
+		my ($perm, $dummy, $user, $group, $size, $major, $minor,
+			$date1, $date2, $date3, @file, $out);
+
+		# regular file
+		if ( (($perm, $dummy, $user, $group, $size, 
+			$date1, $date2, $date3, @file) = split) && 
+			defined($size) && $size !~ /,$/)
+		{
+			my $date = "$date1-".(split /\./,$date2)[0];
+			$out = "$perm $user $group $size $date @file";
+		# special file
+		} elsif ((($perm, $dummy, $user, $group, $major, $minor,
+			$date1, $date2, $date3, @file) = split) && 
+			defined($major) && $major =~ /,$/)
+		{
+			my $date = "$date1-".(split /\./,$date2)[0];
+			$out = "$perm $user $group $major $minor $date @file";
+		} else {
+			# print "[$_]\n";
+			next;
+		}
+
+		print FH "$out\n";
+	}
+	close PIPE;
+
+	close FH;
+
+	# generate list file
+	# testing -A and -R
+	lib::systemx("cd test1 &&../fst -A ls -R >list");
+
+	lib::systemx("sed -i 's/ ->.*//' test1/exp");	# remove -> from links
+	lib::systemx("sed -i '/ exp\$/d' test1/exp");	# remove exp file
+	# remove + from perm
+	lib::systemx('sed -i \'s/^\(..........\)+/\1/\' test1/exp');
+	# remove exp file
+	lib::systemx("sed -i '/ exp\$/d; / list\$/d;' test1/list");
+
+	sub eqExp
+	{
+		open(PIPE, "diff test1/exp test1/list |") or ::confess $!;
+		my $rc = 1;
+		while (<PIPE>)
+		{
+			$rc = 0;
+			print;
+		}
+		close(PIPE);
+		return $rc;
+	}
+
+
+	die lib::function ." failed(1)!" if !eqExp;
+
+	# now check nested dirs...
+	lib::systemx("find test1/dir1* |sed 's/^test1\\///' |sort >test1/exp");
+	lib::systemx("./fst ls test1 |grep 'dir1' |awk '{print\$6}' >test1/list");
+
+	die lib::function ." failed(2)!" if !eqExp;
+
+	### now let's test ls options...
+	# test "implicit dir" and "-o" options
+	lib::systemx("cd test1/dir11/dir21/dir31 &&" .
+		"../../../../fst ls -o ../../../list &&" .
+		"grep file111 ../../../list >/dev/null");
+	# -R was already tested
+	# test -d, option mixing and file truncate
+	lib::systemx("./fst ls -do test1/list test1 &&" .
+		"grep test1 test1/list >/dev/null &&" .
+		"[ x`wc -l test1/list |cut -f1 -d' '` == x'1' ]");
+	lib::systemx("./fst ls -d -o test1/list test1 &&" .
+		"grep test1 test1/list >/dev/null &&" .
+		"[ x`wc -l test1/list |cut -f1 -d' '` == x'1' ]");
+}
+
+sub cksum
+{
+	lib::pfunction;
+
+	init 1;
+	lib::systemx("cd test1 &&".
+		"echo 'test_file_00112233445566778899' >file &&".
+		"md5sum file |cut -f1 -d' ' >file.md5 &&".
+		"sha1sum file |cut -f1 -d' ' >file.sha1 &&".
+		"sha256sum file |cut -f1 -d' ' >file.sha256 &&".
+		"sha512sum file |cut -f1 -d' ' >file.sha512 &&".
+		"gzip file &&".
+		"gzip -vl file.gz |tail -n1 |cut -f2 -d' ' >file.crc32 &&".
+		"gunzip file.gz");
+	lib::systemx("cd test1 &&".
+		"../fst cksum file >fst.md5 &&".
+		"../fst -csha1 cksum file >fst.sha1 &&".
+		"../fst -csha256 cksum file >fst.sha256 &&".
+		"../fst -csha512 cksum file >fst.sha512 &&".
+		"../fst -ccrc32 cksum file >fst.crc32");
+
+	for (qw(crc32 md5 sha1 sha256 sha512)) {
+		lib::systemx("diff test1/file.$_ test1/fst.$_");
+	}
+
+	return 1;
+}
+
+sub diff
+{
+	lib::pfunction;
+
+	# init 2;
+	# gen_data 1;
+
+	sub _reset
+	{
+		system("rm -rf test2/*; cp -a test1/* test2 2>&1 |grep -v ft_sock");	# ft_sock will fail
+
+		# fix cp modified perms
+		for (0..7) {
+			my $size = $_ *10;
+			my $perm = sprintf "%03o", $_;
+			lib::systemx("chmod $perm test2/perm1$perm");
+		}
+		# stick, set uid/gid (+x)
+		for (0..7) {
+			my $size = $_ *10;
+			lib::systemx("chmod ${_}755 test2/perm4${_}755");
+		}
+		# stick, set uid/gid (-x)
+		for (0..7) {
+			my $size = $_ *10;
+			lib::systemx("chmod ${_}444 test2/perm5${_}444");
+		}
+		# sock isn't copied
+		lib::mksock("test2/ft_sock");
+		# fix date of special files
+		my $date = "2010-01-01-01:01:01";
+		for (qw(char block pipe dir sock)) {
+			utime(time, lib::str2time($date), "test2/ft_$_") or ::confess $!;
+		}
+
+		# check if test1 is equal test2
+		open(PIPE, "./fst diff test1 test2 |");
+		while (<PIPE>) {
+			print;
+			die lib::function ." failed: expected no output.";
+		}
+		close(PIPE);
+	}
+
+	_reset;
+
+	# now let's change test2...
+	my $add = 1;
+	my $del = 0;
+	my $type = 0;
+	my $perm = 0;
+	my $mtime = 0;
+
+	sub _diff
+	{
+		sub _parseline
+		{
+			my ($line) = @_;
+			# print "z: $line\n";
+
+			my $size;
+			my $special = 1;
+			my ($change, $perm, $user, $group, $major, $minor, $date, $file)
+				= split / +/,$line;
+			if (!$file) {
+				$special = 0;
+				$file = $date;
+				$date = $minor;
+				$size = $major;
+				chomp $file;
+				# print "x: $change $perm $user $group $size $date $file $special\n";
+			} else {
+				chomp $file;
+				# print "x: $change $perm $user $group $major $minor $date $file $special\n";
+			}
+
+			return ($change, $perm, $user, $group, $major, $minor, $date, $file, $size, $special);
+		}
+
+		sub _equal
+		{
+			# l1: expected
+			my ($l1, $l2) = @_;
+
+			my ($change1, $perm1, $user1, $group1, $major1, $minor1, $date1, $file1, $size1, $special1) =
+				_parseline($l1);
+			my ($change2, $perm2, $user2, $group2, $major2, $minor2, $date2, $file2, $size2, $special2) =
+				_parseline($l2);
+
+			return 0 if $special1 != $special2;
+			if ($special1) {
+				if (
+					($change1 eq $change2 || $change1 eq "any") &&
+					($perm1 eq $perm2 || $perm1 eq "any") &&
+					($user1 eq $user2 || $user1 eq "any") &&
+					($group1 eq $group2 || $group1 eq "any") &&
+					($major1 eq $major2 || $major1 eq "any") &&
+					($minor1 eq $minor2 || $minor1 eq "any") &&
+					($date1 eq $date2 || $date1 eq "any") &&
+					($file1 eq $file2 || $file1 eq "any")
+				) {
+					return 1;
+				} else {
+					return 0;
+				}
+			} else {
+				if (
+					($change1 eq $change2 || $change1 eq "any") &&
+					($perm1 eq $perm2 || $perm1 eq "any") &&
+					($user1 eq $user2 || $user1 eq "any") &&
+					($group1 eq $group2 || $group1 eq "any") &&
+					($size1 eq $size2 || $size1 eq "any") &&
+					($date1 eq $date2 || $date1 eq "any") &&
+					($file1 eq $file2 || $file1 eq "any")
+				) {
+					return 1;
+				} else {
+					return 0;
+				}
+			}
+		}
+
+		my ($e) = @_;
+		my @exp = split /\n/,$e;
+
+		open(PIPE, "./fst diff test1 test2 |");
+		for (<PIPE>) {
+			my $e = shift @exp;
+			# print "e: $e\nl: $_";
+			if (_equal($e, $_) == 0) {
+				print
+					"exp: $e\n".
+					"got: $_";
+			}
+		}
+		close(PIPE);
+	}
+
+	# add
+	if ($add) {
+		lib::systemx("touch test2/add_file");
+		lib::systemx("mkdir test2/add_dir");
+		lib::systemx("ln -s test2/add_file test2/add_link");
+		lib::systemx("mknod -m644 test2/add_char c 100 200");
+		lib::systemx("mknod -m644 test2/add_block b 120 240");
+		lib::systemx("mkfifo -m644 test2/add_pipe");
+		lib::mksock("test2/add_sock");
+
+		# expected
+		my $exp =
+		"[++++++++] brw-r--r--        any        any     120, 240                 any add_block\n".
+		"[++++++++] crw-r--r--        any        any     100, 200                 any add_char\n".
+		"[++++++++] drwxr-xr-x        any        any            0                 any add_dir\n".
+		"[++++++++] -rw-r--r--        any        any            0                 any add_file\n".
+		"[++++++++] lrwxrwxrwx        any        any           14                 any add_link\n".
+		"[++++++++] prw-r--r--        any        any            0                 any add_pipe\n".
+		"[++++++++] srwxr-xr-x        any        any            0                 any add_sock\n";
+
+		print "ADD:\n";
+		_diff $exp;
+		_reset;
+	}
+
+	# del 
+	if ($del) {
+		lib::systemx("rm test2/perm0777");
+		lib::systemx("rmdir test2/ft_dir");
+		lib::systemx("rm test2/ft_link");
+		lib::systemx("rm test2/ft_char");
+		lib::systemx("rm test2/ft_block");
+		lib::systemx("rm test2/ft_pipe");
+		lib::systemx("rm test2/ft_sock");
+		print "DEL:\n";
+		lib::systemx("./fst diff test1 test2");
+		_reset;
+	}
+
+	# type
+	if ($type) {
+		lib::systemx("rm test2/ft_block; touch test2/ft_block");
+		lib::systemx("rm test2/ft_char; mknod -m644 test2/ft_char b 1 2");
+		lib::systemx("rmdir test2/ft_dir; touch test2/ft_dir");
+		lib::systemx("rm test2/ft_link; touch test2/ft_link");
+		lib::systemx("rm test2/ft_sock; mkdir test2/ft_sock");
+		lib::systemx("rm test2/perm0444; mkfifo -m644 test2/perm0444");
+		lib::systemx("rm test2/perm0555; mkdir test2/perm0555");
+		lib::systemx("rm test2/perm0666; mknod -m644 test2/perm0666 c 3 4");
+		print "TYPE:\n";
+		lib::systemx("./fst diff test1 test2");
+		_reset;
+	}
+
+	# perm
+	if ($perm) {
+		# normal
+		lib::systemx("chmod 755 test2/perm0111");
+		lib::systemx("chmod 754 test2/perm0777");
+		# stick / set uid/gid
+		lib::systemx("chmod 5755 test2/perm0000");
+		lib::systemx("chmod 754 test2/perm47755");
+		print "PERM:\n";
+		lib::systemx("./fst diff test1 test2");
+		_reset;
+	}
+
+	# modification time
+	if ($mtime) {
+		lib::systemx("touch test2/date_1970-01-01-01:00:00");
+		lib::systemx("touch test2/date_2011-12-01-01:00:00");
+		lib::systemx("touch test2/date_2030-01-01-01:00:00");
+		print "MTIME:\n";
+		lib::systemx("./fst diff test1 test2");
+		_reset;
+	}
+
+	return 1;
+}
+
+sub mkup
+{
+	lib::pfunction;
+	return 1;
+}
+
+sub opts
+{
+	lib::pfunction;
+
+	init 1;
+	gen_data;
+	return 1;
+
+	# -c: tested in cksum
+
+	# TODO -f: need mkup/up
+	# TODO -m: need mkup/up
+
+	# -r
+	# -rug
+	lib::systemx("./fst -A -rug ls test1 |grep ug_ >test1/list");	
+	lib::systemx("ls -ln --time-style=full-iso test1/ug_* | ".
+		"sed 's/ \\+/ /g; s,test1/,,' | ".
+		qq(awk '{ print \$1 " " \$3 " " \$4 " " \$5 " " \$6 "-" \$7 " " \$9 }' | ).
+		"sed 's/\\.[0-9]\\+//' ".
+		">test1/exp");
+	lib::systemx("diff test1/{exp,list}");
+	# -rm
+	lib::systemx("./fst -rm ls test1 |grep perm0 |cut -f1 -d' ' |sed 's/...//' >test1/list");
+	lib::systemx("cd test1 &&ls --color=none perm0* |sed 's/perm//' >exp");
+	lib::systemx("diff test1/{exp,list}");
+	# -rt
+	open (PIPE, "./fst -Art ls -R test1 |grep date_ |") or die $!;
+	while (<PIPE>) {
+		my @line = split;
+
+		#      0    1     2     3    4     5     6     7      8
+		my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = 
+			localtime($line[4]);
+		$year += 1900;
+		$mon += 1;
+		my $date = sprintf("date_%04d-%02d-%02d-%02d:%02d:%02d",
+			$year, $mon, $mday, $hour, $min, $sec);
+		if ($line[5] ne $date) {
+			die "Expected: $line[5], got: $date";
+		}
+	}
+	close(PIPE);
+
+	# TODO -t: need mkup/up
+	# -v: no need to test
+
+	# -A: tested in ls
+
+	# TODO -O: need diff
+	# TODO -P: need diff
+
+	return 1;
+}
+
+sub test
+{
+	lib::pfunction;
+
+	#cksum;	# OK
+	#ls;	# OK
+	diff;
+	#mkup;
+	#opts;	# OK
+	return 1;
+}
+
+} # test
+
+
+
+#### main #####
+package main;
+
+sub main
+{
+	lib::init;
+	eval {
+		test::test;
+	};
+	if ($@) {
+		print "EXCEPTION\n";
+		print $@;
+	}
+}
+
+main @ARGV;
+

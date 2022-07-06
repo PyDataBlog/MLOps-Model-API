@@ -1,0 +1,246 @@
+﻿' ******************************************************************************
+' ** 
+' **  Yahoo! Managed
+' **  Written by Marius Häusler 2011
+' **  It would be pleasant, if you contact me when you are using this code.
+' **  Contact: YahooFinanceManaged@gmail.com
+' **  Project Home: http://code.google.com/p/yahoo-finance-managed/
+' **  
+' ******************************************************************************
+' **  
+' **  Copyright 2011 Marius Häusler
+' **  
+' **  Licensed under the Apache License, Version 2.0 (the "License");
+' **  you may not use this file except in compliance with the License.
+' **  You may obtain a copy of the License at
+' **  
+' **    http://www.apache.org/licenses/LICENSE-2.0
+' **  
+' **  Unless required by applicable law or agreed to in writing, software
+' **  distributed under the License is distributed on an "AS IS" BASIS,
+' **  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+' **  See the License for the specific language governing permissions and
+' **  limitations under the License.
+' ** 
+' ******************************************************************************
+Imports System.Text.RegularExpressions
+
+
+Namespace YahooManaged.Finance.API
+
+    ''' <summary>
+    ''' Provides methods for searching for Yahoo! Finance IDs.
+    ''' </summary>
+    ''' <remarks></remarks>
+    Public Class IDSearchDownload
+        Inherits Base.StringDownload
+        Implements Base.IStringDownload
+
+        ''' <summary>
+        ''' Raises if an asynchronous download of ID search results completes.
+        ''' </summary>
+        ''' <param name="sender">The event raising object</param>
+        ''' <param name="ea">The event args of the asynchronous download</param>
+        ''' <remarks></remarks>
+        Public Event AsyncDownloadCompleted(ByVal sender As Base.Download, ByVal ea As IDSearchDownloadCompletedEventArgs)
+
+        Private mCulture As Culture = Culture.DefaultCultures.UnitedStates_English
+
+
+        ''' <summary>
+        ''' Gets or sets the used server location for next download.
+        ''' </summary>
+        ''' <value></value>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Property Culture() As Culture
+            Get
+                Return mCulture
+            End Get
+            Set(ByVal value As Culture)
+                mCulture = value
+            End Set
+        End Property
+
+        ''' <summary>
+        ''' Downloads ID search results.
+        ''' </summary>
+        ''' <param name="keyword">The keyword or ID you are searching for</param>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Function Download(ByVal keyword As String) As IDSearchResponse
+            If keyword = String.Empty Then Throw New ArgumentNullException("keyword", "The passed keyword is empty.")
+            Return Me.ToResponse(MyBase.DownloadString(Me.DownloadURL(keyword, mCulture)))
+        End Function
+
+        ''' <summary>
+        ''' Starts an asynchronous download of ID search results.
+        ''' </summary>
+        ''' <param name="keyword">The keyword or ID you are searching for</param>
+        ''' <param name="userArgs">Individual user argument</param>
+        ''' <remarks></remarks>
+        Public Overloads Sub DownloadAsync(ByVal keyword As String, Optional ByVal userArgs As Object = Nothing)
+            If keyword = String.Empty Then Throw New ArgumentNullException("keyword", "The passed keyword is empty.")
+            Dim args As New AsyncDownloadArgs(userArgs, keyword, mCulture)
+            MyBase.DownloadStreamAsync(Me.DownloadURL(args.Keyword, args.Culture), args)
+        End Sub
+
+        ''' <summary>
+        ''' Default constructor
+        ''' </summary>
+        ''' <remarks></remarks>
+        Public Sub New()
+        End Sub
+
+        Private Sub DownloadAsync_Completed(ByVal sender As Base.Download, ByVal e As Base.StringDownloadCompletedEventArgs) Handles MyBase.AsyncStringDownloadCompleted
+            If e IsNot Nothing AndAlso e.UserArgs IsNot Nothing AndAlso TypeOf e.UserArgs Is AsyncDownloadArgs Then
+                Dim dlArgs As AsyncDownloadArgs = DirectCast(e.UserArgs, AsyncDownloadArgs)
+                Dim args As New IDSearchDownloadCompletedEventArgs(dlArgs.UserArgs, Me.ToResponse(e.Response), dlArgs.Keyword, dlArgs.Culture)
+                RaiseEvent AsyncDownloadCompleted(Me, args)
+            End If
+        End Sub
+
+        Private Function DownloadURL(ByVal search As String, ByVal cult As Culture) As String
+            Dim url As New Text.StringBuilder
+            'url.Append("http://d.yimg.com/autoc.finance.yahoo.com/autoc?query=")
+            'url.Append(Uri.EscapeDataString(search.Trim))
+            'url.Append("&callback=YAHOO.Finance.SymbolSuggest.ssCallback")
+            url.Append("http://d.yimg.com/aq/autoc?query=")
+            url.Append(Uri.EscapeDataString(search.Trim))
+            url.Append(mHelper.CultureToParameters(mCulture))
+            url.Append("&callback=YAHOO.util.ScriptNodeDataSource.callbacks")
+            Return url.ToString
+        End Function
+
+        Private Function ToResponse(ByVal resp As Base.StringResponse) As IDSearchResponse
+            Return New IDSearchResponse(resp.Connection, Me.ConvertJSON(resp.Result))
+        End Function
+
+        Public Function ConvertJSON(ByVal text As String) As IDSearchResult()
+            Dim lst As New List(Of IDSearchResult)
+            Dim results As MatchCollection = Regex.Matches(text, "{""symbol"":.*?}")
+            For Each res As Match In results
+                Dim prp() As String = res.Value.Replace("{", "").Replace("}", "").Split(","c)
+                If prp.Length > 0 Then
+                    Dim name As String = String.Empty
+                    Dim id As String = String.Empty
+                    Dim category As String = String.Empty
+                    Dim exchange As String = String.Empty
+                    Dim type As String = String.Empty
+                    For Each p As String In prp
+                        Dim kvp() As String = p.Replace("""", "").Split(":"c)
+                        If kvp.Length = 2 Then
+                            Select Case kvp(0)
+                                Case "symbol" : id = kvp(1).Trim
+                                Case "name" : name = kvp(1).Trim
+                                Case "exch" : exchange = kvp(1).Trim
+                                Case "type"
+                                    Select Case kvp(1).Trim
+                                        Case "S" : type = "Stock"
+                                        Case "I" : type = "Index"
+                                        Case "F" : type = "Future"
+                                        Case "E" : type = "ETF"
+                                        Case "M" : type = "Fund"
+                                    End Select
+                            End Select
+                        End If
+                    Next
+                    lst.Add(New IDSearchResult(name, id, type, exchange, String.Empty, String.Empty))
+                End If
+            Next
+            Return lst.ToArray
+        End Function
+
+        Private Class AsyncDownloadArgs
+            Inherits Base.DownloadEventArgs
+            Public Keyword As String = String.Empty
+            Public Culture As Culture = Nothing
+            Public Sub New(ByVal userArgs As Object, ByVal keywrd As String, ByVal cult As Culture)
+                MyBase.New(userArgs)
+                Me.Keyword = keywrd
+                Me.Culture = cult
+            End Sub
+        End Class
+
+    End Class
+
+    ''' <summary>
+    ''' Provides information and response of an asynchronous ID search download.
+    ''' </summary>
+    ''' <remarks></remarks>
+    Public Class IDSearchDownloadCompletedEventArgs
+        Inherits Base.DownloadCompletedEventArgs
+
+        Private mKeyword As String = String.Empty
+        Private mCulture As Culture = Nothing
+
+        ''' <summary>
+        ''' Gets the keyword or ID you searched for.
+        ''' </summary>
+        ''' <value></value>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public ReadOnly Property Keyword() As String
+            Get
+                Return mKeyword
+            End Get
+        End Property
+
+        ''' <summary>
+        ''' Gets the used server location for downloading.
+        ''' </summary>
+        ''' <value></value>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public ReadOnly Property Culture() As Culture
+            Get
+                Return mCulture
+            End Get
+        End Property
+        ''' <summary>
+        ''' Gets the response with ID search results.
+        ''' </summary>
+        ''' <value></value>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Overloads ReadOnly Property Response() As IDSearchResponse
+            Get
+                Return DirectCast(MyBase.Response, IDSearchResponse)
+            End Get
+        End Property
+
+        Friend Sub New(ByVal userArgs As Object, ByVal resp As IDSearchResponse, ByVal keywrd As String, ByVal cult As Culture)
+            MyBase.New(userArgs, resp)
+            mKeyword = keywrd
+            mCulture = cult
+        End Sub
+
+    End Class
+
+    ''' <summary>
+    ''' Provides connection information and ID search results.
+    ''' </summary>
+    ''' <remarks></remarks>
+    Public Class IDSearchResponse
+        Inherits Base.Response
+
+        ''' <summary>
+        ''' Gets the received ID search results.
+        ''' </summary>
+        ''' <value></value>
+        ''' <returns></returns>
+        ''' <remarks></remarks>
+        Public Overloads ReadOnly Property Result() As IDSearchResult()
+            Get
+                Return TryCast(MyBase.Result, IDSearchResult())
+            End Get
+        End Property
+
+
+        Friend Sub New(ByVal info As Base.ConnectionInfo, ByVal result As IDSearchResult())
+            MyBase.New(info, result)
+        End Sub
+
+    End Class
+
+End Namespace

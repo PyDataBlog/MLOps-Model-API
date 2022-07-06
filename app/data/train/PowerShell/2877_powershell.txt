@@ -1,0 +1,391 @@
+$Script:NS = "PwSh.Object"
+
+<#
+.SYNOPSIS
+Convert an XML content to a PowerShell Object
+
+.DESCRIPTION
+Convert any XML content to a PSCustomObject. It can then be manipulated like any object.
+It handles array and nested XML content.
+It is usefull for example to convert an XML object to a JSON object
+
+.PARAMETER InputObject
+XML object to convert
+
+.EXAMPLE
+[XML]$xml = Get-Content /path/to/file.xml
+$obj = $xml | ConvertFrom-Xml
+$json = $obj | ConvertTo-Json
+
+.NOTES
+
+#>
+
+function ConvertFrom-Xml {
+	[CmdletBinding()]Param (
+		[Parameter(Mandatory = $true,ValueFromPipeLine = $true)][System.Object]$InputObject
+	)
+	Begin {
+		# eenter($Script:NS + "\" + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		$OutputObject = New-Object PSObject
+		if ($null -ne $InputObject) {
+			if ($InputObject.HasAttributes) {
+				ForEach ($attr in $InputObject.Attributes) {
+					$OutputObject | Add-Member -MemberType NoteProperty -Name $attr.Name -Value $attr.Value
+				}
+			}
+			if ($InputObject.HasChildNodes) {
+				ForEach ($child in $InputObject.ChildNodes) {
+					$OutputObject | Add-Member -MemberType NoteProperty -Name $child.LocalName -Value @() -ErrorAction SilentlyContinue
+					$OutputObject.($child.LocalName) += ($child | ConvertFrom-Xml)
+				}
+			}
+		}
+		return $OutputObject
+	}
+
+	End {
+		# eleave($Script:NS + "\" + $MyInvocation.MyCommand)
+	}
+}
+
+<#
+.SYNOPSIS
+List object's properties.
+
+.DESCRIPTION
+Get properties of the type of an object.
+It can be used to filter out default object's type properties.
+
+.PARAMETER obj
+Object of reference
+
+.EXAMPLE
+$s = "this is a test"
+$s | Get-ObjectProperties
+
+.NOTES
+#>
+function Get-ObjectProperties {
+	[CmdletBinding()]Param (
+		[Parameter(Mandatory = $true,ValueFromPipeLine = $true)][System.object]$obj,
+		[string[]]$Exclude
+	)
+	Begin {
+		# eenter($Script:NS + "\" + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		if (!$obj) { return }
+		if ($null -eq $obj) { return }
+
+		Try	{
+			$DefaultTypeProps = @( $obj.gettype().GetProperties() | Where-Object { $_.Name -notin $Exclude } | Select-Object -ExpandProperty Name -ErrorAction Stop )
+			if ($DefaultTypeProps.count -gt 0) {
+				# edevel("Excluding default properties for $($obj.gettype().Fullname):")
+				# edevel($($DefaultTypeProps | Out-String))
+			}
+		}
+		Catch {
+			ewarn("Failed to extract properties from $($obj.gettype().Fullname): $_")
+			$DefaultTypeProps = @()
+		}
+
+		@( $DefaultTypeProps ) | Select-Object -Unique
+	}
+
+	End {
+		# eleave($Script:NS + "\" + $MyInvocation.MyCommand)
+	}
+}
+
+<#
+.SYNOPSIS
+Get the usefull properties of an object.
+
+.DESCRIPTION
+Get the properties of an object minus the default object properties. It is the opposite of Get-ObjectProperties.
+
+.PARAMETER InputObject
+Object to inspect
+
+.PARAMETER Include
+For inclusion of a default property that would otherwise been stripped out.
+
+.EXAMPLE
+$obj | Get-CustomObjectProperties
+
+.EXAMPLE
+$obj | Get-CustomObjectProperties -Include Name
+
+.NOTES
+General notes
+#>
+
+function Get-CustomObjectProperties {
+	[CmdletBinding()]Param (
+		[Parameter(Mandatory = $true,ValueFromPipeLine = $true)][Object]$InputObject,
+		[string[]]$Include
+	)
+	Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		$excludeProps = $InputObject | Get-ObjectProperties | Where-Object { $_ -notin $Include }
+		Try	{
+			$DefaultTypeProps = @($InputObject.gettype().GetProperties() | Where-Object { $_.Name -notin $excludeProps } | Select-Object -ExpandProperty Name -ErrorAction Stop )
+			if ($DefaultTypeProps.count -gt 0) {
+				# edevel($($DefaultTypeProps | Out-String))
+			}
+		} Catch {
+			ewarn("Failed to extract properties from $($obj.gettype().Fullname): $_")
+			$DefaultTypeProps = @()
+		}
+
+		return @($DefaultTypeProps) | Sort-Object -Unique
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}
+
+function Merge-Object {
+	[CmdletBinding()]Param (
+		[Parameter(Mandatory = $true,ValueFromPipeLine = $true)][Object]$InputObject1,
+		[Parameter(Mandatory = $true,ValueFromPipeLine = $false)][Object]$InputObject2
+	)
+	Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		$excludeProps = $InputObject2 | Get-ObjectProperties
+
+		return $OutputObject
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}
+
+<#
+.SYNOPSIS
+Merge two or more hashtables
+
+.DESCRIPTION
+Merge multiple hashtables into one.
+For this cmdlet you can use several syntaxes and you are not limited to two input tables: Using the pipeline: $h1, $h2, $h3 | Merge-Hashtables
+Using arguments: Merge-Hashtables $h1 $h2 $h3
+Or a combination: $h1 | Merge-Hashtables $h2 $h3
+
+.EXAMPLE
+$h1, $h2, $h3 | Merge-Hashtables
+
+.EXAMPLE
+Merge-Hashtables $h1 $h2 $h3
+
+.EXAMPLE
+$h1 | Merge-Hashtables $h2 $h3
+
+.NOTES
+https://stackoverflow.com/questions/8800375/merging-hashtables-in-powershell-how
+#>
+
+Function Merge-Hashtables {
+    $Output = @{}
+    ForEach ($Hashtable in ($Input + $Args)) {
+        If ($Hashtable -is [Hashtable]) {
+            ForEach ($Key in $Hashtable.Keys) {$Output.$Key = $Hashtable.$Key}
+        }
+    }
+    $Output
+}
+
+<#
+.SYNOPSIS
+Sort a hashtable
+
+.DESCRIPTION
+Sort a hashtable by Name
+
+.PARAMETER InputObject
+Hashtable to sort
+
+.EXAMPLE
+$h = @{ "this" = "is"; "a" = "test"}
+$h | Sort-HashTable
+
+.NOTES
+I know Sort is not an approved verb but hey, this function actually DOES sort a hashtable
+
+.OUTPUTS
+The sorted hashtable
+#>
+
+function Sort-HashTable {
+	[CmdletBinding()]Param (
+		[Parameter(Mandatory = $true, ValueFromPipeLine = $true)][hashtable]$InputObject
+	)
+	Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		# return $InputObject.GetEnumerator() | Sort-Object -Property Name
+		$hReturn = [ordered]@{}
+		$InputObject.GetEnumerator() | Sort-Object -Property Name | ForEach-Object {
+			$hReturn.Add($_.Name, $_.Value)
+		}
+		return $hReturn
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}
+
+<#
+.SYNOPSIS
+	Convert a XML Plist to a PowerShell object
+
+.DESCRIPTION
+    Converts an XML PList (property list) in to a usable object in PowerShell.
+	Properties will be converted in to ordered hashtables, the values of each property may be integer, double, date/time, boolean, string, or hashtables, arrays of any these, or arrays of bytes.
+
+.PARAMETER plist
+	The property list as an [XML] document object, to be processed.  This parameter is mandatory and is accepted from the pipeline.
+
+.EXAMPLE
+    $pList = [xml](Get-Content 'somefile.plist') | ConvertFrom-Plist
+
+.INPUTS
+	system.xml.document
+
+.OUTPUTS
+	system.object
+
+.NOTES
+    Original Script / Function / Class assembled by Carl Morris, Morris Softronics, Hooper, NE, USA
+	Initial release - Aug 27, 2018
+	Rewritten without the use of class
+
+.LINK
+	https://github.com/msftrncs/PwshReadXmlPList
+
+.FUNCTIONALITY
+    data format conversion
+#>
+function ConvertFrom-Plist {
+	[CmdletBinding()]Param (
+		[Parameter(Mandatory = $true, ValueFromPipeLine = $true)][xml]$plist
+	)
+	Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		if ($null -eq $plist.item('plist')) {
+			return $null
+		} else {
+			return (Read-PlistNode -Node $plist.item('plist').FirstChild)
+		}
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}
+
+function Read-PlistNode {
+	[CmdletBinding()][OutputType([System.Object])]Param (
+		[Parameter(Mandatory = $true, ValueFromPipeLine = $true)][System.Xml.XmlElement]$node
+	)
+	Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		if ($node.HasChildNodes) {
+			# edevel "$($node.name) - $($node.'#text')"
+			switch ($node.Name) {
+				array {
+					# for arrays, recurse each node in the subtree, returning an array (forced)
+					, @($node.ChildNodes.foreach{ (Read-PlistNode -Node $_) })
+					continue
+				}
+				date {
+					# must be a date-time type value element, return its value
+					$node.InnerText -as [datetime]
+					continue
+				}
+				data {
+					# must be a data block value element, return its value as [byte[]]
+					# [convert]::FromBase64String((Read-PlistNode -Node $node.InnerText))
+					$node.InnerText
+					continue
+				}
+				dict {
+					# for dictionary, return the subtree as a ordered hashtable, with possible recursion of additional arrays or dictionaries
+					$collection = [ordered]@{}
+					$currnode = $node.FirstChild # start at the first child node of the dictionary
+					while ($null -ne $currnode) {
+						if ($currnode.Name -eq 'key') {
+							# edevel "$($currnode.name) - $($currnode.'#text')"
+							# a key in a dictionary, add it to a collection
+							if ($null -ne $currnode.NextSibling) {
+								# edevel "$($currnode.NextSibling.name) - $($currnode.NextSibling.'#text')"
+								# note: keys are forced to [string], insures a $null key is accepted
+								# $collection[$currnode.InnerText] = (Read-PlistNode -Node $currnode.NextSibling)
+								$collection.Add($currnode.InnerText, (Read-PlistNode -Node $currnode.NextSibling))
+								$currnode = $currnode.NextSibling.NextSibling # skip the next sibling because it was the value of the property
+							} else {
+								throw "Dictionary property value missing!"
+							}
+						} else {
+							throw "Non 'key' element found in dictionary: <$($currnode.Name)>!"
+						}
+					}
+					# return the collected hash table
+					$collection
+					continue
+				}
+				integer {
+					# must be an integer type value element, return its value
+					$node.InnerText -as [int]
+					continue
+				}
+				real {
+					$node.InnerText -as [double]
+					continue
+				}
+				string {
+					# for string, return the value, with possible recursion and
+					# collection
+					$node.InnerText
+					continue
+				}
+				default {
+					# we didn't recognize the element type!
+					throw "Unhandled PLIST property type <$($node.Name)>!"
+				}
+			}
+		} else {
+			# return simple element value (need to check for Boolean datatype, and process value accordingly)
+			switch ($node.Name) {
+				true { $true; continue } # return a Boolean TRUE value
+				false { $false; continue } # return a Boolean FALSE value
+				# default { $node.Value } # return the element value
+			}
+		}
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}

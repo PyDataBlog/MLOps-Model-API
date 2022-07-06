@@ -1,0 +1,397 @@
+import common.config
+import common.messaging as messaging
+import common.storage
+import common.debug as debug
+from common.geo import Line, LineSet
+from common.concurrency import ConcurrentObject
+
+from threading import Lock, RLock
+
+import tree.pachinko.message_type as message_type
+import tree.pachinko.config as config
+
+import tree.common.protocol.client_configuration_pb2 as client_config_protocol
+import tree.pachinko.protocol.modifications_pb2 as modifications_protocol
+import tree.pachinko.protocol.queries_pb2 as query_protocol
+
+from tree.common.content_server import ContentServer as BaseContentServer
+
+class Transaction(ConcurrentObject):
+    def __init__(self, client_handler, client_id, identifier):
+        ConcurrentObject.__init__(self)
+
+        self.client_handler = client_handler
+        self.client_id = client_id
+        self.identifier = identifier
+
+        self.write_intervals = None
+        self.read_intervals = None
+        self.end_request = None
+        self.dependencies = []
+        self.pending = []
+        self.done = False
+        
+    def can_execute(self):
+        if not self.end_request:
+             return False
+
+        if self.done:
+             return False # has already been executed
+
+        return self.end_request.abort or len(self.dependencies) == 0
+
+    def set_end_request(self, end_request):
+       assert not self.end_request
+       assert not self.done
+       self.end_request = end_request
+        
+    def commit(self):
+       result = modifications_protocol.ModificationResult()
+        
+       result.okay = True
+       result.replyTo = self.identifier
+       result.num_inserted = 0
+       result.num_modified = 0
+       result.num_deleted = 0
+
+       for write in self.end_request.writes:
+           assert write.HasField('insert')
+           result.MergeFrom(self.client_handler.handle_insert(write.insert))
+ 
+       # Forward to correct client
+       client = self.client_handler.content_server.client_acceptor.clients[self.client_id]
+       
+       with client:
+            client.peer.send(message_type.client.mod_result, result.SerializeToString())
+ 
+       self.client_handler.content_server.transactions.remove(self)
+        
+       for pending in self.pending:
+           with pending: 
+               pending.dependencies.remove(self)
+               if pending.can_execute():
+                  pending.commit()
+        
+       debug.log("Ended transaction " + str(self.identifier) + " from client " + str(self.client_id))
+       self.done = True
+  
+    def equals(self, client_id, transaction_id):
+        return (self.client_id == client_id) and (self.identifier == transaction_id)
+
+class ClientHandler(ConcurrentObject):
+    def __init__(self, content_server, peer):
+        ConcurrentObject.__init__(self)
+
+        self.content_server = content_server
+        self.peer = peer
+        self.fileno = peer.get_socket().fileno()
+        self.identifier = -1
+       
+    def get_socket(self):
+        return self.peer
+
+    def is_connected(self):
+        return self.peer.is_connected()
+ 
+    def handle_insert(self, insert):
+        result = modifications_protocol.ModificationResult()
+        result.okay = True
+        result.num_inserted = 0
+        result.num_modified = 0
+        result.num_deleted = 0
+        
+        for obj in insert.objects:
+            # Only insert if it is in our partition
+            if (obj.position >= self.content_server.content_position * self.content_server.partition_size()
+                and obj.position <= (1+self.content_server.content_position) * self.content_server.partition_size()):
+                self.content_server.storage.put(obj.position, obj.value)
+                result.num_inserted += 1
+            
+        debug.log("Inserted " + str(result.num_inserted) + " objects")
+        return result
+        
+    def handle_range_remove(self, range_remove):
+        result = modifications_protocol.ModificationResult()
+        result.okay = True
+        result.num_inserted = 0
+        result.num_modified = 0
+ 
+        result.num_deleted = self.content_server.storage.range_remove(range_remove.start, range_remove.end)        
+        debug.log("Deleted " + str(result.num_inserted) + " objects")
+        return result
+
+    def handle_range_search(self, range_search):
+        result = query_protocol.QueryResponse()
+    
+        for key,value in self.content_server.storage.find(range_search.start, range_search.end):
+            obj = result.objects.add()
+            obj.position = key
+            obj.value = value
+
+        debug.log("Found " + str(len(result.objects)) + " objects")
+        return result
+
+    def handle_transaction_start(self, start_transaction):
+        result = modifications_protocol.ModificationResult()
+        result.okay = True
+        result.replyTo = start_transaction.transaction_id
+        result.num_inserted = 0
+        result.num_modified = 0
+        result.num_deleted = 0
+        
+        assert (self.identifier == -1) or (self.identifier == start_transaction.client_id)
+
+        # Read (in)validation
+        read_intervals = LineSet()
+        read_intervals.parse(start_transaction.read_intervals)
+
+        write_intervals = LineSet()
+        write_intervals.parse(start_transaction.write_intervals)
+
+        dependencies = []
+
+        self.content_server.transaction_lock.acquire()
+
+        for other in self.content_server.transactions:
+            if other.write_intervals.overlaps(read_intervals) and not other.done:
+                debug.log("Detected read-write conflict between client " + str(other.client_id) + " and " + str(start_transaction.client_id))
+                result.okay = False
+                break
+            elif other.write_intervals.overlaps(write_intervals):
+                other.acquire()
+                 
+                if other.done:
+                   other.release()
+                else: 
+                   dependencies.append(other)
+            elif other.read_intervals.overlaps(write_intervals):
+                other.acquire()
+                 
+                if other.done:
+                   other.release()
+                else: 
+                   dependencies.append(other)
+            
+        assert len(start_transaction.server_ops) == 1
+        
+        # only check reads if we didn't abort yet
+        if result.okay:
+            for read in start_transaction.server_ops[0].reads:
+                reply = self.handle_range_search(read.range_search)
+                
+                if len(read.result) != len(reply.objects):
+                    result.okay = False
+                else:
+                    for i in range(0, len(read.result)):
+                        if (read.result[i].position != reply.objects[i].position) or (read.result[i].position != reply.objects[i].position):
+                           debug.log("Found outdated read")
+                           result.okay = False
+        
+        if result.okay:
+            debug.log("Started transaction " + str(start_transaction.transaction_id) + " from client " + str(start_transaction.client_id))
+            
+            tx = Transaction(self, start_transaction.client_id, start_transaction.transaction_id)
+            tx.write_intervals = write_intervals
+            tx.read_intervals = read_intervals      
+            tx.dependencies = dependencies
+
+            for other in dependencies:
+                other.pending.append(tx)
+                other.release()
+
+            self.content_server.transactions.append(tx)
+        else:
+            for other in dependencies:
+                other.release()
+
+            debug.log("Rejected transaction")
+  
+        # Forward to correct client
+        client = self.content_server.client_acceptor.clients[start_transaction.client_id]     
+
+        with client:
+             client.peer.send(message_type.client.mod_result, result.SerializeToString())
+
+        self.content_server.transaction_lock.release()
+
+    def handle_transaction_end(self, end_transaction):
+        with self.content_server.transaction_lock:        
+           transaction = None
+
+           for tx in self.content_server.transactions:
+               if tx.equals(end_transaction.client_id, end_transaction.transaction_id):
+                  transaction = tx
+                  break
+      
+           if not transaction:
+               debug.log("Failed to end transaction " + str(end_transaction.transaction_id) + " from client " + str(end_transaction.client_id))
+       
+               result = modifications_protocol.ModificationResult()
+               # abort also succeeds if we find no such transaction on this server
+               result.okay = True if end_transaction.abort else False
+               result.replyTo = end_transaction.transaction_id
+               result.num_inserted = 0
+               result.num_modified = 0
+               result.num_deleted = 0
+ 
+               # Forward to correct client
+               client = self.content_server.client_acceptor.clients[end_transaction.client_id]
+               with client:
+                  client.peer.send(message_type.client.mod_result, result.SerializeToString())
+           else:
+               with transaction:
+                  transaction.set_end_request(end_transaction)
+  
+                  if transaction.can_execute():
+                     transaction.commit()
+ 
+    def forward_transaction_start(self, transaction_start):
+        with self.content_server.forwarding_lock:
+            servers = []
+          
+            assert len(transaction_start.server_ops) 
+            for i in transaction_start.server_ops:
+                servers.append(i.position)
+              
+            left_intersection = set(servers).intersection(self.content_server.left_partitions)
+            right_intersection = set(servers).intersection(self.content_server.right_partitions)
+          
+            assert len(servers) > 0
+            assert len(servers) == (len(left_intersection)+len(right_intersection))
+          
+            if len(left_intersection):
+              assert self.content_server.left_child
+              left_start = modifications_protocol.StartTransactionRequest()
+              left_start.has_reads = transaction_start.has_reads
+              left_start.client_id = transaction_start.client_id
+              left_start.transaction_id = transaction_start.transaction_id
+         
+              for interval in transaction_start.write_intervals:
+                  if interval.end <= self.content_server.center:
+                      i = left_start.write_intervals.add()
+                      i.CopyFrom(interval)
+              
+              for interval in transaction_start.read_intervals:
+                  if interval.end <= self.content_server.center:
+                      i = left_start.read_intervals.add()
+                      i.CopyFrom(interval)
+              
+              for server_ops in transaction_start.server_ops:
+                  if server_ops.position in self.content_server.left_partitions:
+                      left_ops = left_start.server_ops.add()
+                      left_ops.CopyFrom(server_ops)
+                   
+              self.content_server.left_child.send(message_type.client.start_transaction, left_start.SerializeToString())
+              
+            if len(right_intersection):
+              assert self.content_server.right_child
+              right_start = modifications_protocol.StartTransactionRequest()
+              right_start.has_reads = transaction_start.has_reads
+              right_start.client_id = transaction_start.client_id
+              right_start.transaction_id = transaction_start.transaction_id
+
+              for interval in transaction_start.write_intervals:
+                 if interval.end >= self.content_server.center:
+                    i = right_start.write_intervals.add()
+                    i.CopyFrom(interval)
+              
+              for interval in transaction_start.read_intervals:
+                if interval.end >= self.content_server.center:
+                    i = right_start.read_intervals.add()
+                    i.CopyFrom(interval)
+                   
+              for server_ops in transaction_start.server_ops:
+                if server_ops.position in self.content_server.right_partitions:
+                    right_ops = right_start.server_ops.add()
+                    right_ops.CopyFrom(server_ops)
+
+              self.content_server.right_child.send(message_type.client.start_transaction, right_start.SerializeToString())
+
+    def close(self):
+        if self.identifier > 0:
+            del self.content_server.client_acceptor.clients[self.identifier]
+       
+        self.content_server.unregister_handler(self.fileno, self)
+ 
+        for tx in self.content_server.transactions:
+            if tx.client_id == self.identifier:
+                self.content_server.transactions.remove(tx)
+        
+    def update(self):
+        # Loop until we run out of messages
+        while True:
+            try:
+                msgtype, data = self.peer.receive()
+            except:
+                self.close()
+                return
+            
+            # Connection closed
+            if msgtype is None:
+                self.close()
+            
+            elif msgtype is message_type.client.mod_request:
+                mod_request = modifications_protocol.ModificationRequest()
+                mod_request.ParseFromString(data)
+                result = None
+                
+                if mod_request.HasField("insert"):
+                    result = self.handle_insert(mod_request.insert)
+                elif mod_request.HasField("range_remove"):
+                    result = self.handle_range_remove(mod_request.range_remove)
+                else:
+                    raise RuntimeError("Unknown Modification")
+                    
+                result.replyTo = mod_request.identifier                
+                self.peer.send(message_type.client.mod_result, result.SerializeToString())
+                
+            elif msgtype is message_type.client.notify_client_id:
+                message = client_config_protocol.NotifyClientId()
+                message.ParseFromString(data)
+
+                self.identifier = message.identifier                
+                self.content_server.client_acceptor.clients[self.identifier] = self
+
+                self.peer.send(message_type.client.notify_cid_ack, bytes())
+            
+            elif msgtype is message_type.client.start_transaction:
+                start_transaction = modifications_protocol.StartTransactionRequest()
+                start_transaction.ParseFromString(data)
+                
+                if self.content_server.is_leaf():
+                    self.handle_transaction_start(start_transaction)                
+                else:
+                    self.forward_transaction_start(start_transaction)
+    
+            elif msgtype is message_type.client.query_request:
+                query_request = query_protocol.QueryRequest()
+                query_request.ParseFromString(data)
+                
+                result = None
+                
+                if query_request.HasField("range_search"):
+                    result = self.handle_range_search(query_request.range_search)
+                else:
+                    raise RuntimeError("Unknown query type")
+                
+                result.replyTo = query_request.identifier
+                self.peer.send(message_type.client.query_result, result.SerializeToString())
+                
+            elif msgtype is message_type.client.end_transaction:
+                end_transaction = modifications_protocol.EndTransactionRequest()
+                end_transaction.ParseFromString(data)
+                self.handle_transaction_end(end_transaction)
+                            
+            else:
+                raise RuntimeError("Received unknown message type from client")
+            
+            # Done?
+            if not self.peer.has_messages():
+                return
+
+class ContentServer(BaseContentServer):
+    def __init__(self, coordinator, name, level, pos):
+        BaseContentServer.__init__(self, "pachinko", coordinator, config.COORDINATOR_PORT_INTERNAL, name, level, pos, ClientHandler)
+       
+        self.transaction_lock = RLock() 
+        self.forwarding_lock = Lock()

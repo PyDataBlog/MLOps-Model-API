@@ -1,0 +1,296 @@
+require 'spec_helper'
+
+def department_in_index?(d)
+  Department.__elasticsearch__.refresh_index!
+  Department.__elasticsearch__.search(query: { match: { '_id' => d.id.to_s } }).count == 1
+end
+
+describe Department do
+  let(:attrs) { {} }
+  subject(:department) { build :department, attrs }
+
+  # relationships
+  it { should have_many :child_departments }
+  it { should belong_to :parent_department }
+  it { should embed_many :gallery_photos }
+  it { should embed_many :social_media }
+  it { should embed_many :department_contacts }
+  it { should embed_many :memberships }
+  it { should embed_one :address }
+  it { should belong_to :campus_location }
+  it { should have_and_belong_to_many :academic_subjects }
+  it { should have_and_belong_to_many :events }
+  it { should have_and_belong_to_many :articles }
+  it { should have_and_belong_to_many :publications }
+
+  # fields
+  it { should have_field(:title).of_type String }
+  it { should have_field(:slug).of_type String }
+  it { should have_field(:label).of_type(String).with_default_value_of('Department') }
+  it { should have_field(:hr_title).of_type String}
+  it { should have_field(:service_content).of_type String }
+  it { should have_field(:description).of_type String}
+  it { should have_field(:location).of_type String }
+  it { should have_field(:location_details).of_type String }
+  it { should have_field(:website).of_type String }
+  it { should have_field(:email).of_type String }
+  it { should have_field(:phone).of_type String }
+  it { should have_field(:fax).of_type String }
+  it { should have_field(:open_hours).of_type String }
+  it { should have_field(:published).of_type(Mongoid::Boolean).with_default_value_of(true) }
+  it { should have_field(:banner) }
+  it { should have_field(:logo) }
+  it { should have_field(:forms_department_id).of_type Integer }
+  it { should have_field(:categories).of_type Array }
+
+  # validations
+  it { should validate_presence_of :title }
+  it { should validate_presence_of :slug }
+  it { should validate_uniqueness_of :slug }
+  it { should validate_uniqueness_of :title}
+  it { should validate_uniqueness_of :hr_title}
+
+  describe 'parent_department' do
+    before do
+      @parent_department = Department.new(title: 'Papa')
+      @child_department = Department.new(title: 'Son', parent_department: @parent_department)
+    end
+
+    it 'should return the title of the parent department' do
+      expect(@child_department.parent_department.title).to eq('Papa')
+    end
+
+    it 'should return the title of the child department' do
+      expect(@parent_department.child_departments.first.title).to eq('Son')
+    end
+  end
+
+  describe 'website validation' do
+    context 'valid url' do
+      let(:attrs) { {website: 'http://biola.edu/it'} }
+      it { should be_valid }
+    end
+
+    context 'invalid url' do
+      let(:attrs) { {website: 'biola.edu/it'} }
+      it { should be_invalid }
+    end
+  end
+
+  # class methods
+  describe '.custom_search for the following query' do
+    let!(:it) { create :department, title: 'Information Technology', aliases: ['IT'] }
+    let!(:hr) { create :department, title: 'Human Resources', aliases: ['HR'] }
+    let(:query) { '' }
+    subject { Department.custom_search(query).map{|d| d.aliases.to_a.first } }
+    [
+      { query: 'in', yes: ['IT'], no: ['HR'] },
+      { query: 'information t', yes: ['IT'], no: ['HR'] },
+      { query: 'tech', yes: ['IT'], no: ['HR'] },
+      { query: 'it', yes: ['IT'], no: ['HR'] },
+      { query: 'hr', yes: ['HR'], no: ['IT'] },
+      { query: 'r', yes: ['IT', 'HR'], no: [] },
+      { query: '', yes: ['IT', 'HR'], no: [] },
+      { query: nil, yes: ['IT', 'HR'], no: [] },
+    ].each do |q|
+      context "'#{q[:query]}'" do
+        let(:query) { q[:query] }
+        it { should include(*q[:yes]) }
+        it { should_not include(*q[:no]) }
+      end
+    end
+  end
+
+  # instance methods and behavior
+  describe '.to_s' do
+    it 'returns title' do
+      expect(department.to_s).to eq(department.title)
+    end
+  end
+
+  describe '.hr_title' do
+    it 'can be blank' do
+      department = FactoryGirl.build :department, hr_title: ""
+      expect(department).to be_valid
+    end
+
+    it 'can be nil' do
+      department = FactoryGirl.build :department, hr_title: nil
+      expect(department).to be_valid
+    end
+  end
+
+  describe '#first_or_create_by_hr_title' do
+    before(:all) { Department.destroy_all }
+    let(:hr_title) { "Bursar" }
+    let!(:department) { create :department, hr_title: hr_title }
+
+    context 'when matching hr_title exists' do
+      it 'returns a Department' do
+        expect(Department.first_or_create_by_hr_title(hr_title)).to be_a Department
+      end
+
+      it 'returns the matching department' do
+        expect(Department.first_or_create_by_hr_title(hr_title).id).to eq department.id
+      end
+    end
+
+    context 'when matching hr_title does not exist' do
+      it 'creates a new department' do
+        expect{Department.first_or_create_by_hr_title("not bursar")}.to change{Department.count}.by(1)
+      end
+      it 'uses .hr_title for .title' do
+        expect(Department.first_or_create_by_hr_title("another title").title).to eq("another title")
+      end
+    end
+  end
+
+  describe '.actors' do
+    let(:department) { create :department, attrs}
+
+    it 'returns an array' do
+      expect(department.actors).to be_a Array
+    end
+
+    it 'returns all permission actors' do
+      people = []
+      5.times do
+        p = FactoryGirl.create :person
+        people << p
+        department.permissions.create(actor_type: p.class.to_s, actor_id: p.id, ability: :edit)
+      end
+      expect(department.actors - people).to be_empty
+    end
+  end
+
+  context 'when ManagedByPermissions...' do
+    # methods
+    describe '.new_permissions_for' do
+      let(:department) { create :department }
+      let(:object) { create :person }
+      subject(:permission) {department.new_permissions_for object}
+
+      it 'returns a Permission' do
+        expect(permission).to be_a Permission
+      end
+
+      it 'populates actor_type with class of passed object' do
+        expect(permission.actor_type).to eq object.class.to_s
+      end
+
+      it 'populates actor_id with id of passed object' do
+        expect(permission.actor_id).to eq object.id.to_s
+      end
+
+      it 'sets the parent object' do
+        expect(permission.department).to eq department
+      end
+    end
+
+    describe '.authorize!' do
+      let(:department) { create :department }
+      let(:object) { create :person }
+      let(:ability) { :edit }
+
+      it 'requires an ability parameter' do
+        expect{department.authorize!(object)}.to raise_error(ArgumentError)
+      end
+
+      it 'creates a permission for the given object' do
+        expect(department.authorize!(object, ability)).to be_truthy
+      end
+
+
+    end
+
+    # scopes
+    describe '.by_actor(actor) scope' do
+      before(:each) do
+        viewable_department.permissions.create(actor_type: person.class.to_s, actor_id: person.id, ability: :view)
+        editable_department.permissions.create(actor_type: person.class.to_s, actor_id: person.id, ability: :edit)
+      end
+
+      let(:person) { create :person }
+      let(:viewable_department) { create :department }
+      let(:editable_department) { create :department }
+
+      it 'includes objects with a permission containing the given actor' do
+        # expect(view_permission).to be_valid
+        expect(Department.by_actor(person).to_a).to include(viewable_department)
+      end
+
+      it 'excludes objects without a permission containing the given actor' do
+        department_with_no_permissions = FactoryGirl.create :department
+        expect(Department.by_actor(person).to_a).to_not include(department_with_no_permissions)
+      end
+    end
+
+    describe '.with_permission_to(ability, actor) scope' do
+      before(:each) do
+        viewable_department.permissions.create(actor_type: person.class.to_s, actor_id: person.id, ability: :view)
+        editable_department.permissions.create(actor_type: person.class.to_s, actor_id: person.id, ability: :edit)
+      end
+
+      let(:person) { create :person }
+      let(:viewable_department) { create :department }
+      let(:editable_department) { create :department }
+
+      it 'includes objects with a permission containing the given ability' do
+        # expect(Department.by_actor(person).with_permission_to(:view).to_a).to include(viewable_department)
+        expect(Department.with_permission_to(:view, person).to_a).to include(viewable_department)
+      end
+
+      it 'excludes objects with a permission containing a different given ability' do
+        expect(Department.with_permission_to(:view, person).to_a).to_not include(editable_department)
+      end
+    end
+  end
+
+  describe 'indexation' do
+    let(:privacy) { false }
+
+    context 'when published is initially false' do
+      let(:attrs) { {published: false} }
+      context 'department' do
+        it 'does not get indexed' do
+          department.save!
+          expect(department_in_index?(department)).to be false
+        end
+
+        context 'but now are published' do
+          it 'gets added to index' do
+            department.save!
+            expect(department_in_index?(department)).to be false
+            department.update_attribute(:published, true)
+            expect(department_in_index?(department)).to be true
+          end
+        end
+      end
+    end
+
+    context 'when published is initially true' do
+      context 'department' do
+        it 'gets indexed' do
+          department.save!
+          expect(department_in_index?(department)).to be true
+        end
+
+        context 'but now arent published' do
+          it 'gets removed from index' do
+            department.save!
+            expect(department_in_index?(department)).to be true
+            department.update_attribute(:published, false)
+            expect(department_in_index?(department)).to be false
+          end
+        end
+      end
+    end
+  end
+
+  describe '.slug' do
+    it 'should make a slug out of .title' do
+      department = FactoryGirl.create :department, { title: "Cat Sitters" }
+      expect(department.slug).to eq('cat-sitters')
+    end
+  end
+end

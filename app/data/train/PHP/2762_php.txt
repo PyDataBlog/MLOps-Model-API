@@ -1,0 +1,164 @@
+<?php
+
+/*
+ * This file is part of the EP-Manager website
+ *
+ * (c) 2013 Julien Brochet <julien.brochet@orange.com>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+namespace EPManager\MainBundle\Controller;
+
+use Sensio\Bundle\FrameworkExtraBundle\Configuration\Route;
+use Sensio\Bundle\FrameworkExtraBundle\Configuration\Template;
+use Sensio\Bundle\FrameworkExtraBundle\Configuration\ParamConverter;
+use Sensio\Bundle\FrameworkExtraBundle\Configuration\Method;
+use Symfony\Component\HttpFoundation\Request;
+use Symfony\Component\HttpFoundation\JsonResponse;
+use EPManager\MainBundle\Entity\Group;
+
+/**
+ * Group controller
+ *
+ * @author Julien Brochet <julien.brochet@orange.com>
+ *
+ * @Route("/group")
+ */
+class GroupController extends BaseController
+{
+    /**
+     * @Route("/list", name="group_list")
+     * @Template
+     */
+    public function listAction()
+    {
+        $this->checkCredentials('ROLE_USER');
+
+        $em = $this->getDoctrine()->getManager();
+        $groups = $em->getRepository('MainBundle:Group')->childrenHierarchy(null, false, [
+            'childSort' => [
+                'field' => 'name',
+                'dir' => 'asc'
+            ]
+        ]);
+
+        return [
+            'groups' => $groups
+        ];
+    }
+
+    /**
+     * @Route("/show/{id}", name="group_show")
+     * @ParamConverter("group", class="MainBundle:Group")
+     * @Template
+     */
+    public function showAction(Group $group)
+    {
+        $em = $this->getDoctrine()->getManager();
+        $gRepo = $em->getRepository('MainBundle:Group');
+        $sRepo = $em->getRepository('MainBundle:Server');
+        $groups = $gRepo->children($group);
+
+        $ids = [];
+        foreach ($groups as $g) {
+            $ids[] = $g->getId();
+        }
+
+        return [
+            'group' => $group,
+            'path' => $gRepo->getPath($group),
+            'children_servers' => $sRepo->findAllByGroups($ids),
+        ];
+    }
+
+    /**
+     * @Route("/create", name="group_create")
+     * @Method("POST")
+     */
+    public function createAction(Request $request)
+    {
+        $this->checkCredentials('ROLE_USER');
+
+        $parentId = $request->request->get('parent_id', null);
+        $name = $request->request->get('name');
+
+        $group = new Group($name);
+
+        $em = $this->getDoctrine()->getManager();
+        if ($parentId) {
+            // Add the parent if it exists
+            $repo = $em->getRepository('MainBundle:Group');
+            $parent = $repo->findOneById($parentId);
+
+            if (!$parent) {
+                throw $this->createNotFoundException('Unable to find the parent group');
+            }
+
+            $group->setParent($parent);
+        }
+
+        $validator = $this->get('validator');
+        $errorList = $validator->validate($group);
+
+        // We need to do the validation ourself because
+        // the form is not used this time
+        if (count($errorList) > 0) {
+            $errors = [];
+            foreach ($errorList as $error) {
+                $errors[] = $error->getMessage();
+            }
+
+            $this->get('session')->getFlashBag()->add('error',
+                'Impossible de créer le groupe du nom "'.$name.'". ('.
+                 implode(', ', $errors).
+                 ')'
+            );
+
+            return new JsonResponse(['status' => 'nok']);
+        }
+
+        $em->persist($group);
+        $em->flush();
+
+        return new JsonResponse(['status' => 'ok']);
+    }
+
+    /**
+     * @Route("/delete", name="group_delete_async")
+     * @Method("POST")
+     */
+    public function deleteAsyncAction(Request $request)
+    {
+        $this->checkCredentials('ROLE_USER');
+
+        $ids = $request->request->get('ids', null);
+        if (null === $ids) {
+            return new JsonResponse(['status' => 'nok']);
+        }
+
+        $em = $this->getDoctrine()->getManager();
+        $repo = $em->getRepository('MainBundle:Group');
+
+        $groups = $repo->findArrayNodes($ids);
+        foreach ($groups as $group) {
+            if (true === $group->hasTasks()) {
+                $this->get('session')->getFlashBag()->add('error',
+                    'Impossible de supprimer le groupe "'.$group->getName().'" car'.
+                    ' celui-ci est toujours associé à une tâche.'.
+                    ' Vous devez préalablement supprimer cette tâche'.
+                    ' avant de pouvoir continuer.'
+                );
+
+                return new JsonResponse(['status' => 'nok']);
+            }
+
+            $em->remove($group);
+        }
+
+        $em->flush();
+
+        return new JsonResponse(['status' => 'ok']);
+    }
+}

@@ -1,0 +1,82 @@
+"""
+simplex = SimplexConstraint(n, tol=1e-10)
+simplex(x) # tests if x lies on the simplex
+
+Indicator function on the probability simplex.
+
+Arguments:
+----------
+
+* **n** -- embedded dimension of the simplex
+* **tol** -- absolute tolerance for testing sum(x) == 1.0
+
+Example:
+--------
+
+julia> simplex = ProxAlgs.SimplexConstraint(5)\n
+julia> simplex([0,0,1,0,0])\n
+0.0 # feasible\n
+julia> simplex([0,0,-1,0,1])\n
+Inf # infeasible (negative)\n
+julia> simplex([1,0,1,0,0])\n
+Inf # infeasible (doesn't sum to one)\n
+julia> simplex([1,0,0,0])\n
+ERROR: dimension mismatch # length of input =/= 5
+"""
+immutable SimplexConstraint <: Constraint
+    indicator::Function # indicator function
+
+    function SimplexConstraint(n::Int; tol=1e-10)
+        ## Construct the indicator function
+        function ifunc(x::Array)
+            length(x) != n && error("dimension mismatch")
+            if allnonneg(x) && abs(sum(x)-1.0) <= tol
+                return 0.0
+            else
+                return Inf
+            end
+        end
+        return new(ifunc)
+    end
+end
+
+## See Chen and Ye (2011) "Projection Onto A Simplex"
+## http://arxiv.org/pdf/1101.6081v2.pdf
+function prox(::SimplexConstraint, u::Array)
+    n = length(u)
+    y = sort(u, rev=true)
+    ysum = cumsum(y)
+    t = (ysum[end]-1)/n
+    for i=1:(n-1)
+        @inbounds if (ysum[i]-1)/i >= y[i+1]
+            @inbounds t = (ysum[i]-1)/i
+            break
+        end
+    end
+    result = max(u - t, 0)
+    
+    return result
+end
+
+## Inplace prox
+function prox!(c::SimplexConstraint, u::Array)
+    n = length(u)
+    y = sort(u, rev=true)
+    ysum = cumsum(y)
+    t = (ysum[end]-1)/n
+    for i=1:(n-1)
+        @inbounds if (ysum[i]-1)/i >= y[i+1]
+            @inbounds t = (ysum[i]-1)/i
+            break
+        end
+    end
+
+    for i = 1:n
+        u[i] = u[i] - t[i]
+        if u[i] < 0.0
+            u[i] = 0.0
+        end
+    end
+
+    return u
+end

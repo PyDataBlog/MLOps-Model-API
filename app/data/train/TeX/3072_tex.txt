@@ -1,0 +1,585 @@
+The sampling based \pbt software discussed in chapter \ref{pbtsystems}
+have a number of similarities in their design
+while adopting a variety of test selection and generation strategies.
+One of our main criticisms of the ``*Check'' family
+is their tight coupling of a test case generation, evaluation and reporting
+(section \ref{pbtsystems}).
+Rather a system should allow different sampling generators to be combined with
+modules that evaluate and report test results in the most appropriate way for
+the situation at hand.
+This would be best implemented as a \emph{framework} 
+based on common interfaces for generating, evaluating and reporting.
+
+This chapter provides the requirements that a generic \pbt system framework
+should satisfy, guided by the critiques from chapter \ref{pbtsystems},
+by the analysis of test context supporting hypotheses (section \ref{pbt}), and 
+sampling methodologies (section \ref{sec:sampling_theory}).
+The requirements cover:
+\begin{enumerate}
+\item the definition of the properties to be tested,
+\item the organization of test cases,
+\item the automatic generation of test cases,
+\item scheduling the evaluation of properties over test cases,
+\item reporting the results of the test.
+\end{enumerate}
+\noindent
+To remain concrete and be able to compare with \GC, we assume that the code
+to be tested and the framework will be written in Haskell.  However, the
+requirements should apply to other (functional) programming languages.
+In places, \emph{non-requirements} will also be explicitly spelled out.
+
+\section {Properties} \label{reqprop}
+
+Properties need to be defined by the user, and usable by the framework.
+
+It is generally assumed that properties are (unary) predicates which
+are total on their domain of definition (section~\ref{formal_pbt}).
+Optionally, one can also give an additional predication which is a decision
+procedure for domain-membership --- typically used when only a subset of
+a type is the natural domain of a function to be tested.
+
+It should be possible to \emph{combine} predicates, so that multiple
+properties (on the same data) can be combined.
+
+The requirement that properties be unary predicates does seem to be
+quite drastic.  However, if instead of requiring as input a predicate,
+instead we require an \emph{eventual} predicate --- i.e. a function
+which when saturated with all its (curried) arguments, \emph{is}
+boolean-valued, that requirement is no longer a burden.  This is what
+\QC does.
+
+However, this sequential approach to multivariate testing does not allow
+the effective use of systematic samplics methods, as the domain is not
+effectively know at the time of test case generation. This is also
+a problem with random sampling for enumerative generators,
+which rely on having the complete definition of the test domain to
+establish the probability distributions for selection.
+
+Instead, properties should be uncurried, to give access to the entire
+domain at once. Of course, there is no suggestion the the functions being
+tested shold be uncurried --- just the property.
+
+The domain of a property is thus a single type (but which can be a 
+product). However the property may not be defined over all values of that
+type.  For example, a property might apply only to ordered lists,
+but the condition of ordered cannot (easily) be represented in the type system.
+It is acceptable for a property to be undefined outside of its domain.
+Thus we may need a \emph{precondition}, another predicate on the same
+type (as that of the property function) which represents the 
+property's domain.  \QC and other packages incorporate these preconditions
+into the definition of properties via a conditional combinator.
+
+\emph{Existential variables} are, however, not a requirement for our \pbt.
+\SC and \GAST support properties that incorporate \emph{existential} variables
+with the goal of ensuring that at least (or exactly) one value exists that
+satisfies the property.  This is an appealing feature,
+but solving for the existence of a value is substantially different than
+evaluating a property, and as such is \emph{not} included as a
+requirement.
+
+Existential properties can be emulated by testing the negated property
+i.e. $\exists x . p (x) \iff \neg (\forall x . \neg p (x))$.
+
+\section{Organizing test cases} \label{reqtestsuite}
+
+A core feature of a \pbt is to evaluate properies over a
+collection of test cases, i.e. a \emph{test suite}.
+Attributes of test cases can be useful to organize the test suite.
+For example, complexity and strata can be used to order sampling
+strategies. Independence can be used for parallel evaluat on distributed
+systems. Meta-data about the functions being test can be used to support
+coverage analysis in the reporting of results. Lastly, attributes can
+be used as a filter to report verdicts on just part of the test cases.
+
+\subsection{Test Cases}
+
+Each test case will consist of:
+
+\begin{description}
+    \item[datum] the value over which the property will be evaluated,
+    \item[meta-data] additional information about that value, including the rank
+\end{description} 
+\noindent
+A test framework should allow different representations of test cases,
+to enable attaching different kinds of meta-data,
+by defining a standard interface to access the datum.
+
+\subsection{Rank as a Complexity Measure }\label{sub:reqrank}
+
+As mentioned before, term complexity plays an important role
+in the selection, generation and evaluation priority of test cases.
+Using a complexity measure to partition values into finite subsets
+ties test results back to uniformity and regularity hypotheses,
+required for arguing validity of the testing process.
+
+Thus all terms should come with some complexity measure, which we will call
+the \emph{rank} of the term. We will thus \textbf{require} that a rank
+be available as test case meta-data.
+
+Recall that section~\ref{complexgen} discussed the various complexity measures
+implemented in the systems we surveyed. We will allow any complexity
+measure as a ranking as long as it satisfies the followind requirements:
+\begin{enumerate}
+    \item is in $\mathbb{N}$
+    \item $>0$ for any defined term; $\bot$ may have rank 0 if the test program supports such test values (e.g. \LSC)    
+    \item $1$ for base types (such as |Int| or |Char|)
+    \item induces a partial ordering of the terms
+    \item is strictly monotonic with respect to term inclusion,
+    i.e. if the term |x| contains the term |y|, the rank of |x| should be strictly greater than that of |y|
+    \item a partition of the terms, with a finite number of terms for any given rank
+\end{enumerate}
+\noindent Most of these requirements are straightforward. The only non-trivial
+requirement is the last one, that ranking induces a partition of the terms where
+each class is finite.  In practice, this is not onerous.
+
+The system should be mainly polymorphic over complexity measures. Certainly
+multiple complexity measures should be usable over the same test suite (unlike
+for most current \pbt which only support a single one, or a single family).
+
+\subsection{Test Suites}
+
+A test suite is simple a \emph{collection} of test cases. However,
+for the purposes of scheduling test cases and reporting their verdict,
+such a collection must have a few attributes:
+
+\begin{description}
+\item[Partitioned] allow an arbitrary partitioning of the test cases
+\item[Labels] permit arbitrary labels for the parts
+\item[Ordered] maintain the order of test cases within each part
+\item[Immutable] neither test suite nor individual test cases should be modified by test evaluation
+\item[Persistent] storable and recoverable so tests can be repeated
+\item[Duplicates] duplicate test values should be allowed as separate test cases
+(thus the name ``suite'' instead of the theoretical test set from chapter \ref{chp:propertytesting})
+\item[Merging] it should be possible to merge test suites (of like structure)
+with the partitions and labels respected by the merge.
+\item[Source Independent] the test suite should allow test cases from multiple sources,
+whether automated generators, loaded from files or otherwise provisioned.
+\end{description}
+\noindent
+Note that 
+these attributes are independent of the property being tested and the evaluation strategy.
+
+The labeling may be based on 
+any meta-data associated with the stratification strategy,
+but generally include the rank of the test cases within the part.
+
+A test suite can be identified as \emph{valid} for a property if 
+all of its test cases are known to be valid for a property test,
+i.e. are within the property's domain.
+This attribute of a property / test suite pair 
+should be accepted by the framework and made available to the evaluation engine
+to determine if the property's precondition should be applied before evaluating test cases.
+
+\subsection{Multiple Properties and Shared Test Suites}
+
+Properties over a common type
+should be able to use the same test cases, to avoid the overhead of regenerating them.
+This is a weakness of \QC et al:
+test cases are generated during test execution, and
+a new test suite is generated with every test pass
+(test cases can only be shared by testing a conjunction of properties).
+Sharing test suites requires them to be accessible from outside the context of
+a single property test.  This enables scheduling multiple properties to be
+evaluated within the running of a single test.
+
+Repeatability is also an important requirement, thus
+it must be possible to store and retrieve a test suite to allow tests to be repeated.
+
+
+\section{Automated Test Generation} \label{reqtestgen}
+
+Automated test case generation for property based testing consists of :
+
+\begin{enumerate}
+    \item defining some sampling strategy defining the count, complexity and sampling methods to be used
+    \item the application of sampling selection criterion, possibly including preconditions, to decide which values to evaluate and in what order
+    \item building the concrete instances of test datum of the appropriate type
+\end{enumerate}
+
+A property based testing framework should provide a
+standardized but powerful set of tools to generate test cases
+for all representable types and standard sampling methods (section \ref{sec:sampling_theory}).
+This should include both a library of generators of standard types and sampling methods,
+and the ability to building new or customizing generators,
+including the use of non-standard sampling methods.
+As shown in chapter \ref{chp:enumgen}, 
+automated test case generation in Haskell is amenable to standardizing
+because generators for algebraic data types which form the majority of the terms
+may be created using datatype generic construction techniques.
+
+\subsection{Generators}
+
+A test case \emph{generator} is a function that produces an ordered collection of test cases of a fixed type.
+These were examined at length in chapter \ref{chp:enumgen}
+where scalar, parameterized and complexity ranked generators were defined;
+the requirements are repeated in summary form here for convenience.
+
+Generators are functions returning lists of terms of a given type.
+\begin{description}
+    \item[scalar] generators return values of a scalar type and do not require rank as an input argument
+    \item[complexity ranked] generators produce terms of a specified rank
+    \item[parameterized] generators that accept arguments other than rank
+\end{description}
+
+A generator will apply a sampling method to select and order the values to be returned.
+For recursive or infinitely populated types (e.g. unlimited Integers),
+the sampling method will be applied to the values of a given complexity / rank.
+The framework should support the use of standard sampling techniques:
+\begin{enumerate}
+    \item exhaustive
+    \item random
+    \item uniform
+    \item extreme / boundary
+\end{enumerate}
+In addition, it should be possible to use alternative sampling methods in generators
+and incorporate those new methods into the test strategies in the system.
+
+The framework must accept a wide range of behaviors from generators, which may:
+\begin{enumerate}
+    \item produce a finite or unbounded sequence of values,
+    \item guarantee unique values or permit duplicates,
+    \item have a range that does or does not include all of the type's values,
+    \item order values according to their priority for testing,
+\end{enumerate}
+
+
+\subsection{ Generator Substitution and Composition } \label{sub:reqsubcomp}
+
+\gordon{Is this really a requirement, or is it just part of the GenCheck implementation?}
+
+Mutual recursion, substitution and composition are all used
+to define data types in Haskell programs.
+Any of these could be complicated relationships,
+and it should be possible to choose different sampling strategies
+for components, elements and mutual recursive structures.
+
+One of the most significant shortcomings of the single sampling strategy packages
+is their inability to generate efficient test suites of data structures populated with base elements.
+The problem is that exhaustive testing of algebraic data types 
+is a good strategy for the \emph{shapes} of the data types,
+but generally not efficient for the base type elements such as integers in the structures.
+Random generators do well producing the elements,
+but then don't provide the same confidence and efficiency when testing
+the small / simple structure shapes that exhaustive testing would provide.
+
+The testing framework should allow 
+structures to be generated just as shapes first,
+and then substitute independently generated sets of elements to populate them.
+It should also allow the elements to be generated as 
+part of the structure, i.e. allow the enumeration or traversal to \emph{include element values}.
+Structures and their elements are fundamentally different
+so the test generators should allow different sampling strategies 
+to select structures and their of elements.
+Generators could then populate the structures substituting 
+one or more sets of elements into each structure.
+
+Generators should be able to use at least the following five \emph{substitution} strategies:
+
+\begin{enumerate}
+\item one distinct substitution per structure
+\item $n$ distinct substitutions per structure
+\item linearly partition the set of elements by the structure size
+and populate as many copies of the structure as there are partitions (finite generators only)
+\item all  possible permutations of a set of elements per structure
+\item all combinations of a set of elements per structure
+\end{enumerate}
+
+Composition is similar to substitution but replaces the elements of the data structure
+with other data structures; the newly composed structure can then 
+be populated with elements through substitution.
+In substitution, the rank of the substitution set is ignored,
+and all of the values are assumed to be of rank 1.
+In composition the substitution set values are structures with a variable rank,
+and the total rank (or complexity) of the composed structure
+is the rank of the initial structure plus the sum of the ranks of the composing structures.
+
+\gordon{picture of substitution and composition, composition showing the sum of ranks}
+
+
+\subsection{Sampling Strategies}
+
+Evaluation of the existing property based testing software showed that 
+the most significant distinguishing feature was the test selection criterion.
+Each of these sampling methods has advantages and disadvantages,
+proponents and detractors, and a role to play in proving the test hypothesis.
+Other sampling methods are often presented, usually as heuristics,
+and there is no definitive evaluation process to determine which is best.
+It is reasonable to conclude that test selection criterion are still
+an area of research and that any test framework should support
+all of them and other methodologies not discussed here.
+
+It is also reasonable to demand that a test framework support
+multiple sampling methods in a single test data set.
+Most practitioners would agree that testing a module
+using both \QC and \SC would provide greater confidence
+than using either alone; being able to use the same specification
+and implementation to do both tests is convenient.
+It would be even more convenient if the default for testing a property
+was to incorporate multiple sampling methods without
+having to maintain multiple \pbt systems and separate test results.
+
+There is a ``strategy'' in the construction of a test suite
+that can be defined independently of the specific type of the test case.
+The strategy will specify one or more parts to the test,
+with each part defined by a sampling method, 
+a number of test cases (perhaps as a percentage of the total test case count)
+and a range of term complexity for ranked types.
+A \pbt framework should allow the definition of such a strategy independently of the test type,
+and be able to either retrieve or construct the generators required
+where the sampling methods are known (e.g the standard sampling methods above).
+
+
+\section{Evaluation and Scheduling}
+
+A test evaluates some or all of the test cases in a test suite,
+using an evaluation function.
+There are different kinds of tests depending on 
+the characteristics of the evaluation function,
+and the termination conditions for the test.
+
+A test for a property consists of evaluating a property
+over the data contained in a test suite.
+Assuming that the test cases are independent 
+the test program must decide how to schedule test cases for evaluation
+and collect the results.
+
+
+\begin{df}[Test]
+A test is a function from a test suite to a result based on an evaluation function:
+
+$$\test{\eval{\property}} : \testsuite{\alpha} \ra \resultset{\alpha}$$
+\end{df}
+
+
+\begin{df}[Conditional Test]
+A conditional test is based on a conditional evaluation function $\eval{\property}$ 
+and may include test cases assigned the verdict $\invalid$ where
+the test data is not in the property's domain.
+\end{df}
+\begin{df}[Unconditional Test]
+An unconditional test is based on an unconditional evaluation function $\evaluncon{\property}$, 
+so all test data is assumed to be in the property's domain
+and will not be identified as $\invalid$.
+\end{df}
+
+\begin{df}[Complete Test]
+A test is complete if all of the test cases are evaluated,
+so no test cases will have the verdict $\noteval$.
+\end{df}
+\begin{df}[Partial Test]
+A partial test may terminate without evaluating all of the test cases,
+so some test cases may have the verdict $\noteval$.
+\end{df}
+
+\begin{df}[Time Limited]
+A test is time limited if an exception is generated when
+the evaluation of a property (or a precondition in the form of a domain's characteristic function)
+fails to evaluated in a set period of time,
+resulting in a verdict of $\nonterm$ for that case.
+\end{df}
+
+A test function can be characterized by these three concepts
+(conditional / unconditional, complete / partial, time limited or not) independently.
+
+\subsection{Evaluation function}
+
+An evaluation function for the property P
+applies the property function to the datum of a test case.
+The following factors should be considered:
+
+\begin{description}
+\item[Conditional] evaluation functions will accept as input the characteristic function of a property's domain,
+identify any test cases that are not valid and return $\invalid$ without evaluating the property at that value.
+\item[Unconditional] evaluation functions does not perform such a check,
+and are used if the test cases are guaranteed to be in the domain,
+or if it is more efficient to evaluate the invalid test cases
+than to prevent them from being tested.
+\item[Time-limited] evaluation functions will interrupt the evaluation of a test case
+if it exceeds a time limite and produce a $\nonterm$ verdict.
+This could also be caused by the characteristic function not terminating,
+if domain membership is being tested,
+but these conditions will not be distinguished.
+A $\nonterm$ result could be interpreted as a $\fail$ verdict,
+but this is not an accurate reporting of the results.
+\end{description}
+
+Note that if the characteristic function for the domain is available,
+an evaluation function maybe constructed by composing
+the characteristic function of the domain (precondition) and 
+an unconditional evaluation function:
+
+
+\subsubsection{Scheduling}
+Scheduling refers to providing the order in which test cases in a test suite are evaluated.
+An implementation of a test function will
+determine how the evaluation function will be applied
+to the test cases in the test suite.
+If it is a partial test, the scheduling will include
+how termination conditions for the test are implemented.
+
+The simplest form of scheduling is 
+a |map| of the evaluation function
+over the test suite container.
+This allows the compiler to assign any order
+to the evaluations and so may be more efficient.
+This is a pure computation (i.e. not monadic) 
+so has the property of referential transparency.
+In an Haskell implementation,
+this would require the test suite container to be an instance of the |Functor| class.
+
+\QC, \SC and the related packages reviewed in chapter \ref{pbtsystems}
+scheduled test cases to be generated and evaluated sequentially,
+using a monadic test function (or a similar approach).
+This kind of scheduling can be accomplished using 
+a |fold| over the test suite container.
+In an Haskell implementation,
+this would require the test suite container to be an instance of the |Foldable| class;
+this class will take advantage of the interior monoidal construction of the test suite
+described above in section \ref{reqtestsuite}.
+
+The evaluation of a test case is the process of computing 
+whether the property holds at that value.
+and possibly their distribution amongst different threads, nodes or systems as required;
+on distributed systems, it would also include collecting the results for reporting.
+These are generally simple steps,
+but some care to make sure
+Haskell's lazy evaluation environment does not confuse 
+when and how that this happens.
+
+\subsection{Execution Mode}
+
+The programming interface should function without assumed access to the IO environment,
+except for components that exist solely to perform IO
+(or are use to test implementations that perform IO).
+A test of a pure implementation should be a pure computation itself,
+with only a thin layer of monadic control provided for displaying the results.
+When the property being tested incorporates monadic functions,
+the property should be written to resolve the monad.
+The IO monad prevents this, so then the property must be tested in a monadic way.
+
+\gordon{think about this some more, testing monadic functions, look up papers}
+
+Reporting of course must be an IO function,
+as is retrieving test cases from a file,
+but otherwise the test components should not use an IO monad
+
+\subsubsection{Parallelism}
+Testing is one of the few intrinsically parallel tasks software engineers face,
+as test cases are (at least meant to be) independent.
+It is important to have the opportunity to take advantage of the increase resources this offers.
+
+\subsection{Termination Conditions}
+
+\QC, \SC, etc. terminate testing when a fixed number (defaulting to 1) of errors are found.
+This is a reasonable approach for quick checks during coding and debugging,
+and results in a small number of failure cases being reported so is easy to interpret.
+It does require that the test cases are evaluated sequentially,
+or perhaps results from that approach to testing.
+
+More formal software development environments
+will often complete the test and report on all test cases,
+as the process for correcting, building and testing the system is much longer,
+and so gathering as much information about failed test cases as possible is desirable.
+Of course, it is only useful if the test reports use sensible approaches to 
+consolidating or summarizing the results when there are a large numbers of errors.
+
+Testing programs should allow time limits to be set on 
+the evaluation of an individual test case,
+and on the overall amount of time devoted to a test suite.
+This both identifies non-terminating test cases
+and allows very large test suites to be defined
+and evaluated for the timeframe desired
+instead of trying to guess how many test cases should be run.
+This approach will work well with Haskell's lazy evaluation.
+
+
+\section{Results and Reporting}
+The results of a test - the evaluation of a property over a test suite - consist of the overall verdict,
+but also the evaluation of each test case 
+and optionally information about the performance of the system during that evaluation.
+Like the test case,
+a result should be a class of data structure,
+with a method to retreive the verdict,
+but optional meta-data that can be captured by a specialized evaluation engine
+and made available to a reporting module.
+
+Although the properties are boolean valued functions,
+the verdict of a test must be expanded beyond a simple success / fail
+to capture the possible outcomes associated with a test case:
+
+\begin{df}[Verdicts]
+    The \emph{verdict} of a test is a set of labels describing the combined results of one or more test evaluations:
+    
+    $\verdictset = \{ \fail, \nonterm, \success, \invalid, \noteval \}$ where
+    
+    \begin{description}
+        \item[$\fail$] the property does not hold over the valid test case
+        \item[$\nonterm$] the property did not evaluate in the allowed time
+        \item[$\success$] the property holds over the valid test case
+        \item[$\invalid$] the test case was not in the domain of P, so was not evaluated
+        \item[$\noteval$] the test case was not evaluated by the test (may or may not be valid)
+    \end{description}
+\end{df}
+
+Not all verdicts will be possible under all models of evaluation.
+The $\nonterm$ verdict in particular will only occur if the evaluation engine 
+sets some kind of time or resource limit on execution.
+The other states are all used by at least one of the packages from chapter \ref{pbtsystems}.
+
+These verdicts are actually in a precedence order that can be used when combining 
+the verdicts of two result sets,
+e.g. a fail verdict overrides non-termination, non-termination overrides success, etc.
+\begin{df}[Verdict Monoid]
+    identity : \noteval \\
+    concat : v1 \^ v2 = greater of the two\\
+\end{df}
+
+The result container consists of the verdict and evaluations of each test case.
+Making the result container a labeled partitioned container like the test suite
+provides good support for reporting coverage analysis,
+and provides for low overhead evaluation strategies (such as map),
+but also allows the result set to be monoidal in both the container and the verdict.
+
+\begin{df}[Result Class]
+    defines a labelled partioned container as defined for the test suite,
+    but the monoid is extended to include the calculation of a verdict.
+    
+    verdict is available for any part or single test result.
+\end{df}
+Note that while there may be some confusion in a Haskell implementation
+caused by having verdicts at both the test case and test suite levels,
+the monoidal nature of the verdict computation makes the meaning consistent.
+
+Reporting modules will present the contents of a results class,
+optionally using the partitioning and labeling of those parts
+to provide more detailed analyses.
+They may be specialized to use extra information about the evaluations.
+
+%
+%\section{Summary}
+%
+%It is impossible to generalize the needs of any significant project size,
+%and it is equally unnecessary to trap the tester in any given paradigm.
+%Data generation should not be restricted to any particular theory, 
+%container type, monad or sampling strategy.
+%It should allow a significant level of choice and customization by the tester.
+%This is can best be managed by developing an architecture
+%and framework for assembling test programs from components providing
+%generators, test suites, evaluation and reporting functions through
+%minimal programming interfaces. The testing software should provide support for :
+%
+%\begin{enumerate}
+%\item quickly building default generators from the property definitions
+%\item quickly build default test suites using mixed heuristic strategies
+%\item allow test suites to be combined and separated, stored and recovered 
+%\item allow test suite strategies consisting of sampling strategies over known generators
+%\item allow generators to be customized using hybrid sampling strategies 
+%for element substitution, structure composition or mutual recursion
+%\item allow fully customgenerators to be included at any point,
+%\item support inclusion of manually coded test cases
+%\item integration with different execution models by decoupling the
+%test scheduling from execution and generation, except where absolutely necessary
+%\item integration of different reporting modules that allow varying degrees of 
+%coverage analysis and interactivity
+%\end{enumerate}
+%

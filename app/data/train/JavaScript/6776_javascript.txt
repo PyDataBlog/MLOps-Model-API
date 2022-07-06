@@ -1,0 +1,718 @@
+'use strict';
+angular.module('testing').controller('TestingController', ['$scope', '$http', '$location', 'Authentication', 'Appprogress', 'Users', 'Registrations', 'creditCardMgmt', 'createDialog', 'bankAccountMgmt',
+	function ($scope, $http, $location, Authentication, Appprogress, Users, Registrations, creditCardMgmt, createDialogService, bankAccountMgmt) {
+
+	    $scope.user = Authentication.user;
+	    $scope.registration = null;
+	    $scope.cards = [];
+	    $scope.accounts = [];
+	    $scope.selectedPart = [];
+
+	    // If user is not signed in then redirect back home
+	    if (!$scope.user) $location.path('/');
+	    var appProgress = Appprogress;
+
+	    // $scope.isExistingUser = true;
+
+	    $scope.getBankAccountsList = function () {
+	        console.log('getBankAccountsList()');
+	        appProgress.showPleaseWait();
+	        $http.get('/registrationsdetails/' + $scope.user._id).success(function (reg) {
+	            if (reg[0] && reg[0].bankAccountId) {
+	                for (var i = 0; i < reg[0].bankAccountId.length; i++) {
+	                    $http.post('/getObject', { "objectHref": "/bank_accounts/" + reg[0].bankAccountId[i] }).success(function (response) {
+	                        $scope.accounts.push({
+	                            "bankName": response.bank_name,
+	                            "bankAccountName": response.name,
+	                            "bankAccountNumber": response.account_number,
+	                            "bankAccountType": response.account_type
+
+	                        });
+	                    });
+	                }
+	            }
+	            appProgress.hidePleaseWait();
+	        }).error(function (err) {
+	            appProgress.hidePleaseWait();
+	        });
+	        $scope.gridAccounts = {
+	            data: 'accounts',
+	            multiSelect: false,
+	            selectedItems: $scope.selectedPart,
+	            columnDefs: [{ field: 'bankName', displayName: 'Bank Name', width: '**' },
+                     { field: 'bankAccountName', displayName: 'Account Name' },
+                     { field: 'bankAccountNumber', displayName: 'Account Number' },
+                     { field: 'bankAccountType', displayName: 'Account Type' }]
+	        };
+
+	    };
+
+	    $scope.getBankAccount = function () {
+	        console.log('getBankAccount()');
+	        appProgress.showPleaseWait();
+	        $http.get('/registrationsdetails/' + $scope.user._id).success(function (reg) {
+	            if (reg && reg[0].bankAccountId) {
+	                $http.post('/getObject', { "objectHref": "/bank_accounts/" + reg[0].bankAccountIdbankAccountId }).success(function (response) {
+	                    $("#bankName").val(response.bank_name);
+	                    $("#bankAccountName").val(response.name);
+	                    $("#bankAccountNumber").val(response.account_number);
+	                    $("#bankAccountType").val(response.account_type);
+	                    $("#bankSwift").val(response.routing_number);
+	                    $("#bankAddress1").val(response.address ? response.address.line1 : "");
+	                    $("#bankAddress2").val(response.address ? response.address.line2 : "");
+	                    $("#bankCity").val(response.address ? response.address.city : "");
+	                    $("#bankState").val(response.address ? response.address.state : "");
+	                    $("#bankZip").val(response.address ? response.address.postal_code : "");
+	                    $("#bankCountry").val(response.address ? response.address.country_code : "");
+
+	                    appProgress.hidePleaseWait();
+	                }).
+                    error(function (response) {
+                        appProgress.hidePleaseWait();
+                        $scope.error = response.message;
+                        $scope.payment = null;
+                    });
+	            }
+	            appProgress.hidePleaseWait();
+	        })
+            .error(function (error) {
+                appProgress.hidePleaseWait();
+                alert(error);
+            });
+	    };
+
+	    $scope.updateBankAccount = function () {
+
+	        console.log('testing.updateBankAccount()');
+
+	        // create objects for balanced payments to store bank account
+	        var account = {
+	            "routing_number": $("#bankSwift").val(),
+	            "account_type": $("#bankAccountType").val(),
+	            "name": $("#bankAccountName").val(),
+	            "account_number": $("#bankAccountNumber").val(),
+	        };
+
+	        var address = {
+	            "city": $("#bankCity").val(),
+	            "line1": $("#bankAddress1").val(),
+	            "line2": $("#bankAddress2").val(),
+	            "state": $("#bankState").val(),
+	            "postal_code": $("#bankZip").val(),
+	            "country_code": $("#bankCountry").val()
+	        };
+
+	        var createAccountObj = {
+	            "account": account,
+	            "address": address
+	        };
+
+	        var userEmail = $scope.user.email;
+	        var userHref = '';
+
+	        //TODO:balanced2 get the balanced customer identifier from the registration for this user
+	        // use that identifier to see if we have a customer record matching in balanced
+	        // if not theoretically it is a system error if we have the id locally and it is not in balanced however
+	        // we can for now just create a new one in that case and log the error
+	        $http.get('/registrationsdetails/' + $scope.user._id).success(function (reg) {
+	            if (reg && reg[0].balancedPaymentsId) {
+	                $http.post('/getObject', { "objectHref": "/customers/" + reg[0].balancedPaymentsId }).success(function (customer_response) {
+
+	                    $http.post('/createAccount', createAccountObj).success(function (account_response) {
+	                        console.log(account_response);
+	                        var accountHref = account_response.href;
+	                        if (accountHref == undefined) {
+	                            console.log('error creating bank acount');
+	                            alert('error creating bank account');
+	                            return;
+	                        }
+
+	                        $http.post('/addAccountToCustomer', { "customerHref": "/customers/" + reg[0].balancedPaymentsId, "accountHref": accountHref }).success(function (addAccount_response) {
+	                            console.log('Add account to customer');
+	                            console.log(addAccount_response);
+
+	                            //Updare the registration object with the card id and save the reg object.
+	                            var registration = new Registrations({
+	                                _id: reg[0]._id,
+	                                user: $scope.user._id
+	                            });
+	                            reg[0].bankAccountId.push(account_response.id);
+	                            registration.bankAccountId = reg[0].bankAccountId;
+
+	                            registration.$update(function (response) {
+	                                console.log('registration saved'); $scope.success = true;
+	                            },
+                                function (error) {
+                                    console.log('failed saving registration data.');
+                                });
+
+	                            //TODO:balanced get the response credit card account identifier and store with registration.js schema for user
+
+	                            alert("created");
+	                        }).error(function (response) {
+	                            alert(response.message);
+	                        });
+	                    }).error(function (response) {
+	                        alert(response.message);
+	                    });
+	                });
+	            }
+	            else {
+	                var customer = {
+	                    "name": $scope.user.firstName + ' ' + $scope.user.lastName,
+	                    "email": $scope.user.email,
+	                    "phone": ""
+	                };
+	                $http.post('/createCustomer', customer).success(function (customer_response) {
+	                    console.log(customer_response);
+
+	                    if (!customer_response.id) {
+	                        alert('Error creating customer');
+	                        return;
+	                    }
+
+	                    //Updare the registration object with the customer id and save the reg object.
+	                    //Updare the registration object with the card id and save the reg object.
+	                    var registration = new Registrations({
+	                        balancedPaymentsId: customer_response.id,
+	                        _id: reg[0]._id,
+	                        user: $scope.user._id
+	                    });
+
+
+	                    registration.$update(function (save_response) {
+	                        console.log('registration saved');
+	                        $scope.success = true;
+	                        $http.post('/createAccount', createAccountObj).success(function (account_response) {
+	                            console.log(account_response);
+	                            var accountHref = account_response.href;
+	                            if (!accountHref) {
+	                                alert('Error creating bank account');
+	                                return;
+	                            }
+	                            $http.post('/addAccountToCustomer', { "customerHref": "/customers/" + customer_response.id, "accountHref": accountHref }).success(function (addAccountResponse) {
+	                                console.log(addAccountResponse);
+
+	                                registration = new Registrations({
+
+	                                    _id: reg[0]._id,
+	                                    user: $scope.user._id
+	                                });
+
+	                                reg[0].bankAccountId.push(addAccountResponse.id);
+	                                registration.bankAccountId = reg[0].bankAccountId;
+
+	                                registration.$update(function (save_response) { console.log('registration saved'); $scope.success = true; }).error(function (err) { console.log('failed saving registration data.'); });
+	                                //TODO:balanced get the response credit card account identifier and store with registration.js schema for user
+	                                alert("created");
+	                            }).error(function (response) {
+	                                alert(response.message);
+	                            });
+	                        }).error(function (response) {
+	                            alert(response.message);
+	                        });
+	                    }).error(function (err) {
+	                        console.log('failed saving registration data.');
+	                    });
+
+
+	                }).
+                    error(function (error) {
+                        alert(error);
+                    });
+
+	            }
+	        });
+	    };
+
+	    $scope.getCreditCardsList = function () {
+	        console.log('getCreditCardsList()');
+	        appProgress.showPleaseWait();
+	        $http.get('/registrationsdetails/' + $scope.user._id).success(function (reg) {
+	            if (reg[0] && reg[0].creditCardId) {
+	                for (var i = 0; i < reg[0].creditCardId.length; i++) {
+	                    $http.post('/getObject', { "objectHref": "/cards/" + reg[0].creditCardId[i] }).success(function (response) {
+	                        $scope.cards.push({
+	                            "cardNumber": response.number,
+	                            "ExpDate": response.expiration_month + "/" + response.expiration_year,
+	                            "brand": response.brand,
+
+	                        });
+	                    });
+	                }
+	            }
+	            appProgress.hidePleaseWait();
+	        }).error(function (err) {
+	            appProgress.hidePleaseWait();
+	        });
+	        $scope.cards = [];
+	        $scope.gridCards = {
+	            data: 'cards',
+	            multiSelect: false,
+	            selectedItems: $scope.selectedPart,
+	            columnDefs: [{ field: 'cardNumber', displayName: 'Card Number', width: '**', cellTemplate: '<div style="padding:5px"><img src="/img/icons/{{row.entity.brand}}.png" width="40px"/> {{row.entity.cardNumber}} </div>' },
+                     { field: 'ExpDate', displayName: 'Expiration Date' }]
+	        };
+
+	    };
+
+	    $scope.selectGridRowMyCards = function () {
+
+	    };
+
+	    $scope.addCard = function () {
+	        $('#addCardModal').modal({
+	            backdrop: 'static',
+	            keyboard: false
+	        });
+	    };
+
+		$scope.addCreditCardDialog2 = function () {
+	        createDialogService({
+	            id: 'addCreditCardDialog2',
+	            title: 'Add Credit Card',
+	            backdrop: true,
+	            css: {
+	                margin: 'auto',
+	                width: '50%'
+	            },
+	            controller: 'TestingController',
+	            templateUrl: 'modules/testing/views/createCreditCard.html',
+	            successButtonVisibility: true,
+	            cancelButtonVisibility: true,
+	            cancel: { label: 'Cancel'},
+	            success: {
+	                label: 'Add Card',
+	                fn: function () {
+	                    var successCallback = function () {
+	                        appProgress.hidePleaseWait();
+	                    };
+	                    var failureCallback = function (error) {
+	                        alert("An error occured while adding card.");
+	                        console.error(error);
+	                        appProgress.hidePleaseWait();
+	                    };
+	                    appProgress.showPleaseWait();
+	                    creditCardMgmt.updateCreditCard($scope, $scope.user, successCallback, failureCallback);
+
+	                }
+	            }
+
+	        });
+	    };
+
+		$scope.addBankAccountDialog = function () {
+		    createDialogService({
+		        id: 'addBankAccountDialog',
+		        title: 'Add Bank Account',
+		        backdrop: true,
+		        css: {
+		            margin: 'auto',
+		            width: '50%'
+		        },
+		        controller: 'TestingController',
+		        templateUrl: 'modules/testing/views/dialogCreateBankAccount.html',
+		        successButtonVisibility: true,
+		        cancelButtonVisibility: true,
+		        cancel: { label: 'Cancel' },
+		        success: {
+		            label: 'Add Account',
+		            fn: function () {
+		                var successCallback = function () {
+		                    //TODO: refresh page?
+		                    appProgress.hidePleaseWait();
+		                };
+		                var failureCallback = function (error) {
+		                    alert("An error occured while adding bank account.");
+		                    console.error(error);
+		                    appProgress.hidePleaseWait();
+		                };
+		                appProgress.showPleaseWait();
+		                bankAccountMgmt.updateBankAccount($scope, $scope.user, successCallback, failureCallback);
+		            }
+		        }
+
+		    });
+		};
+
+	    $scope.getCreditCard = function () {
+	        console.log('getCreditCard()');
+	        appProgress.showPleaseWait();
+	        $http.get('/registrationsdetails/' + $scope.user._id).success(function (reg) {
+	            if (reg && reg[0].creditCardId[0]) {
+	                $http.post('/getObject', { "objectHref": "/cards/" + reg[0].creditCardId[0] }).success(function (response) {
+	                    $("#ccNumber").val(response.number);
+	                    $("#ccName").val(response.name);
+	                    $("#ccCode").val(response.cvv);
+	                    $("#ccExpMonth").val(response.expiration_month);
+	                    $("#ccExpYear").val(response.expiration_year);
+	                    $("#ccAddress1").val(response.address.line1);
+	                    $("#ccAddress2").val(response.address.line2);
+	                    $("#ccCity").val(response.address.city);
+	                    $("#ccState").val(response.address.state);
+	                    $("#ccZip").val(response.address.postal_code);
+	                    appProgress.hidePleaseWait();
+	                }).
+                    error(function (response) {
+                        appProgress.hidePleaseWait();
+                        $scope.error = response.message;
+                        $scope.payment = null;
+                    });
+	            }
+	            appProgress.hidePleaseWait();
+	        })
+            .error(function (error) {
+                appProgress.hidePleaseWait();
+                alert(error);
+            });
+
+	        appProgress.hidePleaseWait();
+
+	    };
+
+	    $scope.updateCreditCard = function () {
+	    	console.log('testing.updateCreditCard()');
+	        console.log($scope.payment);
+			
+			appProgress.showPleaseWait();
+	        
+	        var card = {
+	            "expiration_month": $("#ccExpMonth").val(),
+	            "cvv": $("#ccCode").val(),
+	            "number": $("#ccNumber").val(),
+	            "expiration_year": $("#ccExpYear").val(),
+	            "name": $("#ccName").val()
+	        };
+
+	        var address = {
+	            "city": $("#ccCity").val(),
+	            "line1": $("#ccAddress1").val(),
+	            "line2": $("#ccAddress2").val(),
+	            "state": $("#ccState").val(),
+	            "postal_code": $("#ccZip").val()
+	        };
+
+	        var createCardObj = {
+	            "card": card,
+	            "address": address
+	        };
+
+	        $http.get('/registrationsdetails/' + $scope.user._id).success(function (reg) {
+	            if (reg && reg[0].balancedPaymentsId) {
+	                $http.post('/getObject', { "objectHref": "/customers/" + reg[0].balancedPaymentsId }).success(function (response) {
+	                    $scope.success = $scope.error = null;
+
+	                    $http.post('/createCard', createCardObj).success(function (card_response) {
+	                        console.log(card_response);
+	                        var cardHref = card_response.href;
+	                        created_card = card_response;
+
+	                        $http.post('/addCardToCustomer', { "customerHref": "/customers/" + reg[0].balancedPaymentsId, "cardHref": created_card.href }).success(function (addCardResponse) {
+	                            console.log(addCardResponse);
+	                            console.log('created customer card');
+	                            //Updare the registration object with the card id and save the reg object.
+	                            var registration = new Registrations({
+	                                _id: reg[0]._id,
+	                                user: $scope.user._id
+	                            });
+
+	                            reg[0].creditCardId.push(addCardResponse.id);
+	                            registration.creditCardId = reg[0].creditCardId;
+
+	                            registration.$update(function (response) {
+	                                console.log('registration saved');
+	                                $scope.success = true;
+	                                appProgress.hidePleaseWait();
+	                                $('#addCardModal').modal('hide');
+	                                $scope.getCreditCardsList();
+	                            },
+                                function (error) {
+                                    console.log('failed saving registration data.');
+                                });
+
+	                            
+	                        }).error(function (response) {
+	                            alert(response.message);
+	                        });
+	                    }).error(function (response) {
+	                        alert(response.message);
+	                    });
+	                }).error(function (response) {
+
+	                });
+	            }
+	            else {
+	                var customer = {
+	                    "name": $scope.user.firstName + ' ' + $scope.user.lastName,
+	                    "email": $scope.user.email,
+	                    "phone": ""
+	                };
+
+	                $http.post('/createCustomer', customer).success(function (customer_response) {
+	                    console.log(customer_response);
+	                    var userHref = customer_response.href;
+	                    if (userHref == undefined) {
+	                        console.log('Error creating customer');
+	                        appProgress.hidePleaseWait();
+	                        return;
+	                    }
+	                    var registration = new Registrations({
+	                        balancedPaymentsId: customer_response.id,
+	                        _id: reg[0]._id,
+	                        user: $scope.user._id
+	                    });
+
+	                    registration.$update(function (response) {
+	                        $scope.success = true;
+
+	                        //TODO:balanced get the response customer identifier and store with registration.js schema for user
+
+	                        $http.post('/createCard', createCardObj).success(function (card_response) {
+	                            console.log(card_response);
+	                            var cardHref = card_response.href;
+	                            created_card = card_response;
+
+	                            $http.post('/addCardToCustomer', { "customerHref": "/customers/" + customer_response.id, "cardHref": created_card.href }).success(function (addCardResponse) {
+	                                console.log(addCardResponse);
+	                                console.log('created customer card');
+	                                console.log(addCardResponse);
+
+	                                registration = new Registrations({
+	                                    _id: reg[0]._id,
+	                                    user: $scope.user._id
+	                                });
+	                                reg[0].creditCardId.push(addCardResponse.id);
+	                                registration.creditCardId = reg[0].creditCardId;
+
+	                                registration.$update(function (save_response) {
+	                                    console.log('registration saved');
+	                                    $scope.success = true;
+	                                    appProgress.hidePleaseWait();
+	                                    $('#addCardModal').modal('hide');
+	                                    $scope.getCreditCardsList();
+	                                }).error(function (err) {
+	                                    console.log('failed saving registration data.');
+	                                    $scope.error = err;
+	                                });
+	                            }).error(function (response) {
+	                                alert(response.message);
+	                            });
+	                        }).error(function (response) {
+	                            alert(response.message);
+	                        });
+	                    }, function (response) {
+	                        $scope.error = response.data.message;
+	                    });
+
+
+	                })
+                    .error(function (error) {
+                        alert(error);
+                    });
+	            }
+	        });
+	        
+	    };
+
+	    $scope.sendSMS = function () {
+	        console.log('send sms test');
+	        appProgress.showPleaseWait();
+	        $http.post('/sendSMS', $scope.sms).success(function (response) {
+	            // If successful show success message and clear form
+	            $scope.success = true;
+	            $scope.sms = null;
+	            appProgress.hidePleaseWait();
+	        }).error(function (response) {
+	            appProgress.hidePleaseWait();
+	            $scope.error = response.message;
+	            $scope.sms = null;
+
+	        });
+	    };
+
+	    $scope.completePurchase = function () {
+	        appProgress.showPleaseWait();
+	        $http.post('/completePurchase', $scope.payment).success(function (response) {
+	            // If successful show success message and clear form
+	            $scope.success = true;
+	            $scope.payment = null;
+	            appProgress.hidePleaseWait();
+	        }).error(function (response) {
+	            appProgress.hidePleaseWait();
+	            $scope.error = response.message;
+	            $scope.payment = null;
+
+	        });
+	    };
+
+	    $scope.sendEmail = function () {
+	        appProgress.showPleaseWait();
+	        $http.post('/sendEmail', $scope.email).success(function (response) {
+	            // If successful show success message and clear form
+	            $scope.success = true;
+	            $scope.email = null;
+	            appProgress.hidePleaseWait();
+	        }).error(function (response) {
+	            appProgress.hidePleaseWait();
+	            $scope.error = response.message;
+	            $scope.email = null;
+
+	        });
+	    };
+
+
+	    var customer = {
+	        "name": "Mahmoud Ali",
+	        "dob_year": 1983,
+	        "dob_month": 12,
+	        "email": "info@elzouhery.com",
+	        "phone": "+201003183708"
+	    };
+
+	    var card = {
+	        "expiration_month": "12",
+	        "cvv": "123",
+	        "number": "5105105105105100",
+	        "expiration_year": "2020",
+	        "customer": ""
+	    };
+
+	    var address = {
+	        "city": '',
+	        "line1": '',
+	        "line2": '',
+	        "state": '',
+	        "postal_code": ''
+	    };
+
+	    var createCardObj = {
+	        "card": card,
+	        "address": address
+	    };
+
+	    var account = {
+	        "routing_number": "121000358",
+	        "account_type": "checking",
+	        "name": "Johann Bernoulli",
+	        "account_number": "9900000001"
+	    };
+
+	    var debit = {
+	        "appears_on_statement_as": "TEST Transaction",
+	        "amount": 5000,
+	        "description": "TEST description",
+	        "cardHref": ""
+	    };
+
+	    var credit = {
+	        "appears_on_statement_as": "TEST Transaction",
+	        "amount": 5000,
+	        "description": "TEST description",
+	        "accountHref": ""
+	    };
+
+	    var created_customer;
+	    var created_card;
+	    var created_account;
+	    var customerHref = '';
+
+	    $scope.createDemo = function () {
+
+	        $http.post('/createCustomer', customer).success(function (customer_response) {
+	            console.log(customer_response);
+
+	            created_customer = customer_response;
+
+	            customerHref = customer_response.href;
+	            createCardObj.card.customer = created_customer;
+	            $http.post('/createCard', createCardObj).success(function (card_response) {
+	                console.log(card_response);
+	                var cardHref = card_response.href;
+	                created_card = card_response;
+	                debit.cardHref = cardHref;
+	                $http.post('/addCardToCustomer', { "customerHref": created_customer.href, "cardHref": created_card.href }).success(function (addCardResponse) {
+	                    console.log(addCardResponse);
+	                    $http.post('/debitCard', debit).success(function (debit_response) {
+	                        console.log(debit_response);
+	                    });
+	                });
+	            });
+
+	            $http.post('/createAccount', account).success(function (account_response) {
+	                console.log(account_response);
+	                var accountHref = account_response.href;
+	                created_account = account_response;
+	                credit.accountHref = accountHref;
+	                $http.post('/addAccountToCustomer', { "customerHref": created_customer.href, "accountHref": created_account.href }).success(function (addAccountResponse) {
+	                    console.log(addAccountResponse);
+	                    $http.post('/creditAccount', credit).success(function (credit_response) {
+	                        console.log(credit_response);
+	                    });
+	                });
+	            });
+	        });
+	    };
+
+
+
+	    /*$http.post('/deleteItem', {"objectHref":"/debits/WD5e3Cc1fRS4D76Zfjf0Vv8l"}).success(function (response) {
+            console.log(response);
+        });/*/
+
+/*
+	    $http.post('/deleteItem', {"objectHref":"/cards/CCzkUIc7fbXT48UT73v3XOH"}).success(function (response) {
+             console.log(response);
+         });
+ 
+ 		$http.post('/deleteItem', {"objectHref":"/customers/CU3pVBwQatDaKcwmgzacl1KH"}).success(function (response) {
+             console.log(response);
+         }).error(function(err) {
+             console.log(err);
+
+         });	*/
+
+		//$http.post('/deleteItem', {"objectHref":"/customers/CUwLmXhuPxwRkLVIcRQmqYb"}).success(function (response) {
+        //     console.log(response);
+        // }).error(function(err) {
+        //     console.log(err);
+
+        // });
+         
+         /*
+         $http.post('/deleteItem', {"objectHref":"/customers/CU1LjRwaTmFrhL4uDYhx8ni3"}).success(function (response) {
+             console.log(response);
+         }).error(function(err) {
+             console.log(err);
+
+         });
+		/*/
+
+	    /*$http.post('/debits').success(function (response) {
+            console.log(response);
+        });*/
+
+	    /*$http.post('/listCustomers', {}).success(function (response) {
+            console.log(response);
+        });*/
+
+	    /*$http.post('/getObject', {"objectHref":"/debits/"}).success(function (response) {
+            console.log(response);
+        });*/
+
+	    $scope.addPart = function () {
+	        appProgress.showPleaseWait();
+	        $http.post('/createPart', $scope.part).success(function (response) {
+	            // If successful show success message and clear form
+	            $scope.success = true;
+	            $scope.part = null;
+	            appProgress.hidePleaseWait();
+	        }).error(function (response) {
+	            appProgress.hidePleaseWait();
+	            $scope.error = response.message;
+	            $scope.part = null;
+
+	        });
+	    };
+	}
+
+]);

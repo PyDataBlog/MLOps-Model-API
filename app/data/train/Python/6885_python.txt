@@ -1,0 +1,111 @@
+
+
+# This file is a part of pysnapshotd, a program for automated backups
+# Copyright (C) 2015-2016  Jonas Thiem
+# 
+# This program is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation; either version 2 of the License, or
+# (at your option) any later version.
+# 
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+# 
+# You should have received a copy of the GNU General Public License along
+# with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
+
+
+import threading
+
+class BufferedPipeObject(object):
+    def __init__(self):
+        self.closed = False
+        self.contents = b""
+        self.access_mutex = threading.Lock()
+        self.waiting_for_content_semaphore = \
+            threading.Semaphore()
+        self.waiting_for_content_counter = 0
+        self._write_func = None
+
+    def _set_write_func(self, f):
+        self.access_mutex.acquire()
+        self._write_func = f
+        self.access_mutex.release()
+
+    def close(self):
+        self.access_mutex.acquire()
+        self.closed = True
+        self.access_mutex.release()
+
+    def write(self, data):
+        # First, check if pipe is still open at all:
+        self.access_mutex.acquire()
+        if self.closed:
+            self.access_mutex.release()
+            raise OSError("broken pipe - pipe has been closed")
+
+        # Do nothing for an obvious dummy command:
+        if len(data) == 0:
+            self.access_mutex.release()
+            return 0
+
+        # Try to write with the write func if given:
+        # (which means this pipe object itself will always remain empty and
+        # .read() on it will block forever, since things are somewhat bypassed
+        # directly to some target write function)
+        if self._write_func != None:
+            try:
+                self._write_func(data)
+            except Exception:
+                self.closed = True
+            finally:
+                self.access_mutex.release()
+            return
+
+        # Otherwise, just put contents in internal buffer for reading from
+        # this pipe from "the other end":
+        try:
+            self.contents += data
+            i = 0
+            while i < self.waiting_for_content_counter:
+                self.waiting_for_content_semaphore.\
+                    release()
+                i += 1
+        finally:
+            self.access_mutex.release()
+
+    def read(self, amount):
+        print(" >> PIPE READ: " + str(amount))
+        if amount <= 0:
+            print(" >> PIPE READ DATA: <empty read>")
+            return b""
+        self.access_mutex.acquire()
+
+        # Try to read data as long as needed to acquire requested amount:
+        obtained_data = b""
+        while True:
+            # If pipe was closed along this process, abort:
+            if self.closed:
+                self.access_mutex.release()
+                raise OSError("broken pipe - pipe has been closed")
+            # Try to obtain as much data as requested:
+            if len(self.contents) > 0:
+                added_data = self.contents[:amount]
+                obtained_data += added_data
+                self.contents = self.contents[len(added_data):]
+                amount -= len(added_data)
+            # If there is not enough data available, we will need to wait for
+            # more:
+            if amount > 0:
+                self.waiting_for_content_counter += 1
+                self.access_mutex.release()
+                self.waiting_for_content_semaphore.acquire()
+                self.access_mutex.acquire()
+            else:
+                assert(len(obtained_data) > 0)
+                print(" >> PIPE READ DATA: " + str(obtained_data))
+                return obtained_data
+

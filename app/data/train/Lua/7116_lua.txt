@@ -1,0 +1,57 @@
+local datastore = require 'datastore'
+
+local recursiveBuild
+recursiveBuild = function(parent_param_branch_to_hash, parent_node_counter, depth, params, callbacks, parent_type)
+  parent_param_branch_to_hash.depth = depth
+  local paramcount = 0
+
+  for param_name, param in pairs(params) do
+    if type(param) == 'table' then
+      local t = tostring(param.type) or "nil"
+      if (param.type and param.index and param.value) then
+        datastore.params_by_type[t] = datastore.params_by_type[t] or {}
+        datastore.params_by_type[t][param.index] = {
+          ptr = param,
+          name = param_name,
+          initialval = param.value,
+          callback = callbacks[t] or error('callback for leaf type: "' .. tostring(t) .. '" does not exist from parent type: ' .. '"' .. tostring(parent_type) .. '"'),
+          is_in_edit = false,
+        };
+        paramcount = paramcount + 1
+      else
+        parent_node_counter.count = parent_node_counter.count + 1
+        local parentID = parent_node_counter.count
+        parent_param_branch_to_hash[param_name] = {
+          index = parentID,
+        };
+        local callbacks_branch = callbacks[t] or error('callback leaf type: "' .. tostring(t) .. '" does not exist from parent type: ' .. '"' .. tostring(parent_type) .. '"')
+        local child_param_count = recursiveBuild(
+          parent_param_branch_to_hash[param_name],
+          parent_node_counter,
+          depth + 1,
+          param,
+          callbacks_branch,
+          t
+        );
+        datastore.parent_param_info[parentID] = {
+          isBelowVisible = false,
+          paramcount = child_param_count,
+        };
+        datastore.parent_names[parentID] = param_name
+        paramcount = paramcount + child_param_count
+      end
+    end
+  end
+
+  return paramcount
+end
+
+return function(xParams, xCallbacks)
+  assert(xParams and xCallbacks, "NEED PARAMS AND CALLBACKS")
+  if xParams.type then
+    local node_type = tostring(xParams.type)
+    recursiveBuild(datastore.parent_param_tree_to_hash, {count = 0}, 0, xParams, xCallbacks[node_type], node_type)
+  else
+    recursiveBuild(datastore.parent_param_tree_to_hash, {count = 0}, 0, xParams, xCallbacks, "the very beginning")
+  end
+end

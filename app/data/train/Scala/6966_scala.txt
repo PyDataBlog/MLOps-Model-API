@@ -1,0 +1,94 @@
+package cassandra
+
+import com.datastax.spark.connector.cql.CassandraConnector
+import com.datastax.spark.connector.{SomeColumns, _}
+import org.apache.spark.SparkConf
+
+import scala.collection.immutable.HashMap
+import scala.util.Random
+
+/**
+ * Created by cenk on 22/02/15.
+ */
+object CassandraOperations {
+
+  def createKeyspace(sparkConf: SparkConf, map: HashMap[String, String]): Unit = {
+    try {
+      CassandraConnector(sparkConf).withSessionDo { session =>
+        session.execute("CREATE KEYSPACE IF NOT EXISTS sparktest WITH REPLICATION = {'class': 'SimpleStrategy', 'replication_factor': 1 }")
+
+      }
+    } catch {
+      case e: Exception => println("exception caught: " + e);
+    }
+
+  }
+
+  def createMetricTable(sparkConf: SparkConf): Unit = {
+    try {
+      CassandraConnector(sparkConf).withSessionDo { session =>
+        session.execute("CREATE TABLE IF NOT EXISTS sparktest.metric (period int, rollup int, tenant text, path text, time bigint, data list<double>, " +
+          "PRIMARY KEY ((tenant, period, rollup, path), time))")
+      }
+    } catch {
+      case e: Exception => println("exception caught: " + e);
+    }
+
+  }
+
+  def createMetrics(sparkConf: SparkConf): Unit = {
+
+    case class Metric(tenant: String, period: Int, rollup: Int, path: String, time: BigInt, data: List[Double])
+    val sc = new CassandraSparkContext().getContext("local", "sparktest", sparkConf)
+    var i = 0
+
+    var values = scala.collection.mutable.Seq.empty[Metric]
+    while (i < 100) {
+      val path = Random.alphanumeric.take(5).mkString
+      val randomData = Random.nextDouble()
+      val value = scala.collection.mutable.Seq(Metric("", 60, i, path, i, List(randomData)))
+      values = values ++ value
+
+      i = i + 1
+    }
+    val collection = sc.parallelize(values)
+
+    collection.saveToCassandra("sparktest", "metric", SomeColumns("tenant", "period", "rollup", "path", "time", "data"))
+    sc.stop()
+  }
+
+  def readMetrics(sparkConf: SparkConf): Unit = {
+    case class Metrics(tenant: String, period: Int, rollup: Int, path: String, time: BigInt, data: List[Double])
+    val sc = new CassandraSparkContext().getContext("local", "sparktest", sparkConf)
+    var metrics = sc.cassandraTable("sparktest", "metric")
+
+    metrics.foreach(println)
+
+    sc.stop()
+  }
+
+  def filterByMetrics(sparkConf: SparkConf): Unit = {
+    case class Metrics(tenant: String, period: Int, rollup: Int, path: String, time: BigInt, data: List[Double])
+    val sc = new CassandraSparkContext().getContext("local", "sparktest", sparkConf)
+    var metrics = sc.cassandraTable("sparktest", "metric")
+      .select("path", "time", "data", "rollup").filter(row => row.getInt("rollup") == 1)
+
+    val groupedMetrics = metrics.groupBy(row => row.getInt("rollup"))
+    groupedMetrics.count()
+    var data = groupedMetrics.foreach(row => returnAverage(row._2))
+    println(data)
+    sc.stop()
+  }
+
+  def returnAverage(rows: Iterable[CassandraRow]) {
+    println(rows.size)
+    rows.flatMap { g =>
+      var values = g.getList[Double]("data")
+      var avg = values.sum / values.size
+      println(avg)
+      values
+    }
+  }
+
+}
+

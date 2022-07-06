@@ -1,0 +1,192 @@
+package libnet
+
+import (
+	"container/list"
+	"errors"
+	"net"
+	"sync"
+	"sync/atomic"
+)
+
+/*
+* 会话信息结构体
+ */
+type Session struct {
+	id              uint64
+	conn            net.Conn
+	encode          Encoder
+	decode          Decoder
+	closeChan       chan int
+	closeFlag       int32
+	closeEventMutex sync.Mutex
+	closeCallbacks  *list.List
+	State           interface{}
+}
+
+/*
+* 全局SessionId
+ */
+var globalSessionId uint64
+
+/*
+* 描  述：	NewSession -- 新建一个Session结构体对象
+* 参  数：	conn -- 指定一个已连接套接字
+			codectype -- 指定一个编解码对象，该对象实现了CodecTypeer接口
+* 返回值：	一个新的Session结构对象指针
+*/
+func NewSession(conn net.Conn, codectype CodecTypeer) *Session {
+	return &Session{
+		id:             atomic.AddUint64(&globalSessionId, 1),
+		conn:           conn,
+		encode:         codectype.NewEncoder(conn),
+		decode:         codectype.NewDecoder(conn),
+		closeCallbacks: list.New(),
+	}
+}
+
+/*
+回调结构体
+*/
+type closeCallback struct {
+	Handler interface{}
+	Func    func()
+}
+
+/*
+* 描  述：	AddCloseCallback -- 添加一个关闭回调对象
+* 参  数：	handler -- 指定一个处理对象，该handler更重要的是作为一个标识，以备后续的清理操作；
+			codectype -- 一个回调函数
+* 返回值：	无
+*/
+func (this *Session) AddCloseCallback(handler interface{}, callback func()) {
+	if this.IsClosed() {
+		return
+	}
+	this.closeEventMutex.Lock()
+	defer this.closeEventMutex.Unlock()
+
+	this.closeCallbacks.PushBack(closeCallback{Handler: handler, Func: callback})
+}
+
+/*
+* 描  述：	RemoveCloseCallback -- 移除一个关闭回调对象
+* 参  数：	handler -- 指定要有移除的处理对象，会移除该对象的回调对象
+* 返回值：	无
+ */
+func (this *Session) RemoveCloseCallback(handler interface{}) {
+	if this.IsClosed() {
+		return
+	}
+	this.closeEventMutex.Lock()
+	defer this.closeEventMutex.Unlock()
+
+	for i := this.closeCallbacks.Front(); i != nil; i = i.Next() {
+		if i.Value.(closeCallback).Handler == handler {
+			this.closeCallbacks.Remove(i)
+			return
+		}
+	}
+}
+
+/*
+* 描  述：	IsClosed -- 返回该会话是否已经关闭
+* 参  数：	无
+* 返回值：	true -- 已经关闭； false -- 未关闭；
+ */
+func (this *Session) IsClosed() bool {
+	return atomic.LoadInt32(&this.closeFlag) == 1
+}
+
+/*
+* 描  述：	Close -- 关闭该会话
+* 参  数：	无
+* 返回值：	无
+ */
+func (this *Session) Close() {
+	if atomic.CompareAndSwapInt32(&this.closeFlag, 0, 1) {
+		this.invokeCloseCallbacks()
+		if this.closeChan != nil {
+			close(this.closeChan)
+		}
+		this.conn.Close()
+		if e, ok := this.encode.(Disposeabler); ok {
+			e.Dispose()
+		}
+		if d, ok := this.decode.(Disposeabler); ok {
+			d.Dispose()
+		}
+	}
+}
+
+/*
+* 描  述：	invokeCloseCallbacks -- 执行关闭回调函数
+* 参  数：	无
+* 返回值：	无
+ */
+func (this *Session) invokeCloseCallbacks() {
+	this.closeEventMutex.Lock()
+	defer this.closeEventMutex.Unlock()
+	for i := this.closeCallbacks.Front(); i != nil; i = i.Next() {
+		callback := i.Value.(closeCallback)
+		callback.Func()
+	}
+}
+
+/*
+* 描  述：	GetId -- 获取该会话ID
+* 参  数：	无
+* 返回值：	返回当前会话的ID
+ */
+func (this *Session) GetId() uint64 {
+	return this.id
+}
+
+/*
+* 描  述：	GetConn -- 获取该会话的连接套接字
+* 参  数：	无
+* 返回值：	返回当前会话的连接套接字
+ */
+func (this *Session) GetConn() net.Conn {
+	return this.conn
+}
+
+/*
+* 错误定义
+ */
+var ErrClosed = errors.New("libnet.Session closed!")
+
+/*
+* 数据收发相关的操作
+ */
+
+/*
+* 描  述：	Receive -- 接收会话消息
+* 参  数：	msg -- 消息存储区指针（返回值参数）
+* 返回值：	返回当前会话收到的消息，如果发生错误，会返回一个错误值，否则该错误值为nil
+ */
+func (this *Session) Receive(msg interface{}) error {
+	if this.IsClosed() {
+		return ErrClosed
+	}
+	err := this.decode.Decode(msg)
+	if err != nil {
+		this.Close()
+	}
+	return err
+}
+
+/*
+* 描  述：	Send -- 发送会话消息
+* 参  数：	msg -- 消息存储区指针（[]byte）
+* 返回值：	如果发生错误，会返回一个错误值，否则该错误值为nil
+ */
+func (this *Session) Send(msg interface{}) error {
+	if this.IsClosed() {
+		return ErrClosed
+	}
+	err := this.encode.Encode(msg)
+	if err != nil {
+		this.Close()
+	}
+	return err
+}

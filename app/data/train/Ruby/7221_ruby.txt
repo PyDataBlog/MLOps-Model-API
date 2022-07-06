@@ -1,0 +1,151 @@
+# -*- coding: utf-8 -*-
+class RedisWrap
+  def initialize(opt)
+    @conf = opt
+    @redis = Redis.new(@conf['REDIS'])
+    @mecab = Natto::MeCab.new
+  end
+
+  def add_tweet(status)
+    words = parse_text(CGI.unescapeHTML((status.retweet? ? status.retweeted_status : status).text))
+    tweet = {userid: status.user.id,
+             words: words.to_json}
+    @redis.hset 'tweets:data', status.id, tweet.to_json
+    @redis.zadd 'tweets:list', status.created_at.to_i, status.id
+    add_user status.user
+    add_tf_dic words
+  end
+
+  def add_user(user)
+    user_hash = {name: user.name,
+                 screen_name: user.screen_name}
+    @redis.hset 'users:data', user.id, user_hash.to_json
+    @redis.zincrby 'users:rank', 1, user.id
+  end
+
+  def add_tf_dic(words)
+    @redis.incrby 'tf:sum', words.size
+    words.each do |word|
+      @redis.hincrby 'tf:dic', word, 1
+    end
+  end
+
+  def add_idf_dic(words)
+    words = words.uniq
+    unless words.empty?
+      @redis.rpush 'idf:list', words.to_json
+      words.each do |word|
+        @redis.hincrby 'idf:dic', word, 1
+      end
+    end
+  end
+
+  def parse_text(text)
+    words = []
+    Twitter::Extractor.extract_hashtags(text) do |hashtag|
+      words.push("##{hashtag}")
+    end
+    entities = Twitter::Extractor.extract_entities_with_indices(text)
+    rewrite_text = Twitter::Rewriter.rewrite_entities(text.dup, entities) do |entity, chars|
+      " "
+    end
+    @mecab.parse(rewrite_text) do |word|
+      if (word.feature.match(/(固有名詞|名詞,一般)/)) and (word.surface.length > 1)
+        words.push word.surface
+      end
+    end
+    words
+  end
+
+  def get_trend_words
+    words = []
+    tf_list = @redis.hgetall 'tf:dic'
+    tf_sum = @redis.get 'tf:sum'
+    idf_sum = @redis.llen 'idf:list'
+    tf_list.each do |tf_word|
+      tf = tf_word[1].to_f / tf_sum.to_f
+      idf = Math.log10(idf_sum.to_f / ((@redis.hget 'idf:dic', tf_word[0]) || 1).to_f) + 1
+      words.push({word: tf_word[0], score: tf * idf})
+    end
+    words.sort {|v1, v2| v2[:score] <=> v1[:score] }
+  end
+
+  def del_old_tweet
+    tweet_ids = @redis.zrangebyscore 'tweets:list', '-inf', (Time.now - 60 * 60).to_i
+    unless tweet_ids.empty?
+      @redis.zrem 'tweets:list', tweet_ids
+      tweets = @redis.hmget 'tweets:data', tweet_ids
+      @redis.hdel 'tweets:data', tweet_ids
+      tweets.each do |tweet|
+        tweet = JSON.parse(tweet)
+        del_old_user(tweet['userid'])
+        del_tf_dic JSON.parse(tweet['words'])
+      end
+    end
+  end
+
+  def del_old_user(user_id)
+    count = @redis.zincrby 'users:rank', -1, user_id
+    if count == 0
+      @redis.zrem 'users:rank', user_id
+      @redis.hdel 'users:data', user_id
+    end
+  end
+
+  def del_tf_dic(words)
+    @redis.incrby 'tf:sum', -words.size
+    words.each do |word|
+      count = @redis.hincrby 'tf:dic', word, -1
+      @redis.hdel 'tf:dic', word if count == 0
+    end
+    # 削除されたワードはidf用辞書に移動
+    add_idf_dic words
+  end
+
+  def del_old_idf_dic
+    count = @redis.llen 'idf:list'
+    if count > @conf['IDF_DIC_NUM']
+      words_list = @redis.lrange 'idf:list', 0, count - @conf['IDF_DIC_NUM'] - 1
+      words_list.each do |words|
+        JSON.parse(words).each do |word|
+          count = @redis.hincrby 'idf:dic', word, -1
+          @redis.hdel 'idf:dic', word if count == 0
+        end
+      end
+      @redis.ltrim 'idf:list', count - @conf['IDF_DIC_NUM'], count - 1
+    end
+  end
+
+  def get_speed
+    @redis.zcard('tweets:list')
+  end
+
+  def get_top_users(count = 3)
+    top_ids = @redis.zrevrange 'users:rank', 0, count - 1, :with_scores => true
+    top = @redis.hmget('users:data', top_ids.map {|item| item[0]}).map{|json| JSON.parse(json)}
+    top.each_with_index {|item, i|
+      item['score'] = top_ids[i][1].to_i
+    }
+  end
+
+  def create_image(text, font_name)
+    temp = Tempfile.new("image")
+    pointsize = 30
+    width = (text.split("\n").max_by {|t| t.size }.size) * (pointsize + 2)
+    height = (text.count("\n") + 1) * (pointsize + 2)
+    font = File.expand_path("../font/#{font_name}", __FILE__)
+    img = Magick::Image.new(width, height) {
+      self.background_color = 'aliceblue'
+    }
+    Magick::Draw.new.annotate(img, 0, 0, 5, 5, text) do
+      self.font      = font
+      self.fill      = 'blue'
+      self.stroke    = 'transparent'
+      self.pointsize = pointsize
+      self.gravity   = Magick::NorthWestGravity
+    end
+    img.write("png:"+ temp.path)
+    img.destroy!
+    temp
+  end
+end

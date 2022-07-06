@@ -1,0 +1,1 @@
+cmd_sound/drivers/snd-dummy.ko := ../tools/arm-bcm2708/arm-bcm2708hardfp-linux-gnueabi/bin/arm-bcm2708hardfp-linux-gnueabi-ld -EL -r  -T ./scripts/module-common.lds --build-id  -o sound/drivers/snd-dummy.ko sound/drivers/snd-dummy.o sound/drivers/snd-dummy.mod.o

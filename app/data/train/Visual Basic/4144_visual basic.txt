@@ -1,0 +1,621 @@
+﻿Imports Visomes.Validation
+Imports Visomes.MySQL
+Imports Visomes.SGV.Core
+Imports System.Diagnostics
+Imports Ionic.Zip
+
+''' <summary>
+''' EXIBE FORMULÁRIO DE CADASTRO DE DOCUMENTAÇÃO
+''' </summary>
+''' <remarks></remarks>
+Public Class CadDocLictacao
+
+    Private idLicitacaoDocumentacao As Integer = 1
+    Private block As Boolean
+    Private data As New Visomes.Extras.Date()
+    Private busca As New Visomes.Extras.Search()
+    Private valid As New Validating()
+    Private tempEmpCode As String = "2"
+    Private doc As New DocumentacaoLicitacao(0)
+    Private aguarde As ViewAguarde
+
+    Public Sub New()
+        InitializeComponent()
+        Me.txtCodEmpresa.Text = "2"
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA DATAGRIDVIEW DOCUMENTALÇAO
+    ''' </summary>
+    ''' <param name="idEmpresa">PK DA EMPRESA</param>
+    ''' <remarks></remarks>
+    Private Sub CarregaDocumentos(ByVal idEmpresa As Integer)
+        dgvDoc.DataSource = DocumentacaoLicitacao.CarregaDocsByEmpresa(idEmpresa)
+        With dgvDoc()
+            .Columns(9).Visible = False
+        End With
+        SetaButtomns()
+        CleanFields(CType(pnlDoc, Control))
+        CarregaCamposDoc()
+        ColorGridDoc()
+    End Sub
+
+    ''' <summary>
+    ''' CONFIGURA BOTÕES
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub SetaButtomns()
+        If dgvDoc.RowCount > 0 Then
+            btnDelDoc.Enabled = True
+            btnEditDoc.Enabled = True
+        Else
+            btnDelDoc.Enabled = False
+            btnEditDoc.Enabled = False
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' SAI DO FORMULÁRIO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnSair_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnSair.Click
+        ViewInicial.CloseMdiChildren(Me)
+    End Sub
+
+#Region "Pesquisa"
+
+    ''' <summary>
+    ''' EMPRESA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtCodEmpresa_Validating(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles txtCodEmpresa.Validating
+        If Not String.IsNullOrEmpty(txtCodEmpresa.Text) Then
+            Dim emp As New Empresa(CInt(Me.txtCodEmpresa.Text))
+            If emp.Existe() Then
+                tempEmpCode = emp.ID.ToString()
+                txtEmpresa.Text = emp.RazaoSocial
+                btnNovoDoc.Enabled = True
+                CarregaDocumentos(emp.ID)
+            Else
+                MessageBox.Show("Essa empresa não existe.", Core.STR_NOME_SISTEMA)
+                txtCodEmpresa.Text = Me.tempEmpCode
+            End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' BUSCA EMPRESA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtCodEmpresa_TextChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles txtCodEmpresa.TextChanged
+        If Not String.IsNullOrEmpty(txtCodEmpresa.Text) Then
+            Dim emp As New Empresa(CInt(txtCodEmpresa.Text))
+            If emp.Existe() Then
+                Me.txtEmpresa.Text = emp.RazaoSocial
+                Me.tempEmpCode = txtCodEmpresa.Text
+                Me.btnNovoDoc.Enabled = True
+                CarregaDocumentos(emp.ID)
+            Else
+                Me.txtCodEmpresa.Text = Me.tempEmpCode
+            End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' EMPRESA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub bntBuscEmpresa_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles bntBuscEmpresa.Click
+        Dim frm As New ListEmpresa()
+        If frm.ShowDialog = Windows.Forms.DialogResult.OK Then
+            txtCodEmpresa.Text = frm.GetRow.Cells(0).Value.ToString()
+            txtEmpresa.Text = frm.GetRow.Cells(1).Value.ToString()
+            btnNovoDoc.Enabled = True
+            CarregaDocumentos(CInt(txtCodEmpresa.Text))
+        End If
+        frm.Dispose()
+    End Sub
+
+    ''' <summary>
+    ''' DOCUMENTO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub bntPesquisaDocumento_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles bntPesquisaDocumento.Click
+        busca.LocatedInDataGridView(Me.dgvDoc, txtPesquisaDocumento.Text)
+    End Sub
+
+    ''' <summary>
+    ''' PESQUISA DOCUMENTO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtPesquisa_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles txtPesquisaDocumento.KeyPress
+        If e.KeyChar = Convert.ToChar(13) Then
+            busca.LocatedInDataGridView(Me.dgvDoc, txtPesquisaDocumento.Text)
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' DIRETÓRIO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnBuscaArquivo_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscaArquivo.Click
+        odg.InitialDirectory = My.Computer.FileSystem.SpecialDirectories.Desktop
+        If odg.ShowDialog = Windows.Forms.DialogResult.OK Then
+            txtLocalArquivo.Text = odg.FileName
+            Me.doc.LocalArquivo = odg.FileName
+        End If
+    End Sub
+#End Region
+
+#Region "Validação"
+
+    ''' <summary>
+    ''' INATIVA DOCUMENTO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub cboStatus_SelectedIndexChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles cboStatus.SelectedIndexChanged
+        If Not block Then
+            Select Case cboStatus.SelectedIndex
+                Case 1
+                    If Not Core.Usuario.HasAccess(Usuario.TypeAcess.licitacaoInativarDoc) Then
+                        MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                        cboStatus.SelectedIndex = 0
+                    End If
+            End Select
+        End If
+        Me.doc.Status = Core.Status(Me.cboStatus.SelectedIndex)
+    End Sub
+
+    ''' <summary>
+    ''' URL
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtSite_Validating(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles txtSite.Validating
+        If Not valid.Url(txtSite.Text) Then
+            epvDocumentacao.SetError(txtSite, "Home Page Inválida")
+            ValidatesOutPut = False
+            ErrorSavamento.Append("Home Page Inválida" & vbCrLf)
+        Else
+            epvDocumentacao.SetError(txtSite, "")
+            ErrorSavamento.Replace("Home Page Inválid" & vbCrLf, "")
+            ValidatesOutPut = True
+        End If
+        Me.doc.Site = Me.txtSite.Text
+    End Sub
+
+    ''' <summary>
+    ''' VERIFICA DATA DE EMISSÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dtpDataEmissao_ValueChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles dtpDataEmissao.ValueChanged
+        Dim Data As Date = dtpDataEmissao.Value.Date
+        If (Data.Subtract(dtpDtVencimento.Value.Date).Days) > 0 Then
+            dtpDataEmissao.Value = Today
+            dtpDtVencimento.Value = Today
+        End If
+        Me.doc.Emissao = Me.dtpDataEmissao.Value
+    End Sub
+
+    ''' <summary>
+    ''' VERIFICA DATA DE VENCIMENTO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dtpDataVencimento_ValueChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles dtpDtVencimento.ValueChanged
+        Dim Data As Date = dtpDataEmissao.Value.Date
+        If (Data.Subtract(dtpDtVencimento.Value.Date).Days) > 0 Then
+            dtpDataEmissao.Value = Today
+            dtpDtVencimento.Value = Today
+        End If
+        Me.doc.Vencimento = Me.dtpDtVencimento.Value
+    End Sub
+
+    ''' <summary>
+    ''' ABRE LINK  NO DATAGRIDVIEW
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dgvDocumentacaoInclusao_CellContentClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellEventArgs) Handles dgvDoc.CellContentClick
+        If (e.ColumnIndex = 5 Or e.ColumnIndex = 6) And e.RowIndex > -1 Then
+            Process.Start(dgvDoc.CurrentCell.Value.ToString)
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' EMPRESA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtCodEmpresa_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles txtCodEmpresa.KeyPress
+        valid.InputInteiro(sender, e)
+    End Sub
+
+    ''' <summary>
+    ''' DESCRIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtDescricaoDocumento_Validating(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles txtDescricaoDocumento.Validating
+        Me.doc.Descricao = Me.txtDescricaoDocumento.Text
+    End Sub
+
+    ''' <summary>
+    ''' ORGÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub txtOrgaoEmissor_Validating(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles txtOrgaoEmissor.Validating
+        Me.doc.Emissor = Me.txtOrgaoEmissor.Text
+    End Sub
+#End Region
+
+#Region "Documentação"
+
+    ''' <summary>
+    ''' VALIDA
+    ''' </summary>
+    ''' <returns>TRUE ADICIONOU / FALSE NÃO ADICIONOU</returns>
+    ''' <remarks></remarks>
+    Private Function ValidaDoc() As Boolean
+        Dim strMesageErro As String = "Há campos que faltam ser preenchidos ou estão incorretos"
+        If Not (String.IsNullOrEmpty(txtDescricaoDocumento.Text) Or _
+                String.IsNullOrEmpty(dtpDataEmissao.Text) Or _
+                String.IsNullOrEmpty(dtpDtVencimento.Text) Or _
+                String.IsNullOrEmpty(txtOrgaoEmissor.Text) Or _
+                String.IsNullOrEmpty(txtLocalArquivo.Text) Or _
+                String.IsNullOrEmpty(cboStatus.Text) Or _
+                String.IsNullOrEmpty(CStr(cboStatus.SelectedItem))) And _
+                ValidatesOutPut Then
+            epvDocumentacao.SetError(btnAddDoc, "")
+            Return True
+        Else
+            epvDocumentacao.SetError(btnAddDoc, strMesageErro)
+            Return False
+        End If
+    End Function
+
+    ''' <summary>
+    ''' EXCLUIR LINHA NO DATAGRID
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub RemoveRowInDataGrid(ByRef datagrid As DataGridView)
+        If dgvDoc.RowCount > 0 Then
+            dgvDoc.Rows.Remove(dgvDoc.CurrentRow)
+        End If
+    End Sub
+
+
+    ''' <summary>
+    ''' CARREGA CAMPOS DE DOCUMENTAÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub CarregaCamposDoc()
+        If (Not dgvDoc.CurrentRow Is Nothing) And btnNovoDoc.Enabled Then
+            txtCodDocumento.Text = dgvDoc.CurrentRow.Cells(0).Value.ToString()
+            txtDescricaoDocumento.Text = dgvDoc.CurrentRow.Cells(1).Value.ToString()
+            dtpDataEmissao.Value = CDate(dgvDoc.CurrentRow.Cells(2).Value)
+            dtpDtVencimento.Value = CDate(dgvDoc.CurrentRow.Cells(3).Value)
+            txtOrgaoEmissor.Text = dgvDoc.CurrentRow.Cells(4).Value.ToString()
+            txtSite.Text = dgvDoc.CurrentRow.Cells(5).Value.ToString()
+            txtLocalArquivo.Text = dgvDoc.CurrentRow.Cells(6).Value.ToString()
+            mtbDtCad.Text = dgvDoc.CurrentRow.Cells(8).Value.ToString()
+            block = True
+            If CBool(dgvDoc.CurrentRow.Cells(9).Value) Then
+                cboStatus.SelectedIndex = 0
+            Else
+                cboStatus.SelectedIndex = 1
+            End If
+            block = False
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' COLORI GRID
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub ColorGridDoc()
+        Dim estilo_vencido As New DataGridViewCellStyle()
+        Dim estilo_7_dias As New DataGridViewCellStyle()
+        estilo_vencido.ForeColor = Color.Red
+        estilo_7_dias.ForeColor = Color.Orange
+        For Each col As DataGridViewRow In dgvDoc.Rows
+            Dim dt As Date = CDate(col.Cells(3).Value).AddDays(-7)
+            If dt.Subtract(Today).Days <= 0 Then
+                col.DefaultCellStyle = estilo_7_dias
+            End If
+            If CDate(col.Cells(3).Value).Subtract(Today).Days <= 0 Then
+                col.DefaultCellStyle = estilo_vencido
+            End If
+        Next
+    End Sub
+
+    ''' <summary>
+    ''' ADICIONA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAddDocumento_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAddDoc.Click
+        If ValidaDoc() Then
+            If Me.doc.Insert() Then
+                CarregaDocumentos(CInt(txtCodEmpresa.Text))
+                OffFields(CType(pnlDoc, Control))
+                CleanFields(CType(pnlDoc, Control))
+                btnNovoDoc.Enabled = True
+                btnAddDoc.Enabled = False
+                btnCancelaDoc.Enabled = False
+                btnDelDoc.Enabled = True
+                btnEditDoc.Enabled = True
+                dgvDoc.Enabled = True
+                CarregaCamposDoc()
+            End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' DELETA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnDelDocumento_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnDelDoc.Click
+        If Core.Usuario.HasAccess(Usuario.TypeAcess.licitacaoAddDoc) Then
+            RemoveRowInDataGrid(dgvDoc)
+            CleanFields(CType(pnlDoc, Control))
+            CarregaCamposDoc()
+            SetaButtomns()
+        Else
+            MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' NOVO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnNovoDoc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnNovoDoc.Click
+        If Core.Usuario.HasAccess(Usuario.TypeAcess.licitacaoAddDoc) Then
+            Me.doc = New DocumentacaoLicitacao(0)
+            Me.doc.Empresa = New Empresa(CInt(Me.txtCodEmpresa.Text))
+            CleanFields(CType(pnlDoc, Control))
+            ActiveFields(CType(pnlDoc, Control))
+            mtbDtCad.Text = CStr(CurrentDate())
+            btnNovoDoc.Enabled = False
+            btnAddDoc.Enabled = True
+            btnCancelaDoc.Enabled = True
+            btnEditDoc.Enabled = False
+            btnDelDoc.Enabled = False
+            dgvDoc.Enabled = False
+            cboStatus.SelectedIndex = 0
+        Else
+            MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' CANCELA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnCancelaDoc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnCancelaDoc.Click
+        CleanFields(CType(pnlDoc, Control))
+        OffFields(CType(pnlDoc, Control))
+        epvDocumentacao.SetError(btnAddDoc, "")
+        epvDocumentacao.SetError(btnAceitaDoc, "")
+        btnNovoDoc.Enabled = True
+        btnCancelaDoc.Enabled = False
+        btnAddDoc.Enabled = False
+        btnAceitaDoc.Enabled = False
+        dgvDoc.Enabled = True
+        SetaButtomns()
+        CarregaCamposDoc()
+    End Sub
+
+    ''' <summary>
+    ''' EDITA
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnEditDoc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnEditDoc.Click
+        If Core.Usuario.HasAccess(Usuario.TypeAcess.licitacaoAlterarDoc) Then
+            ActiveFields(CType(pnlDoc, Control))
+            btnNovoDoc.Enabled = False
+            btnAceitaDoc.Enabled = True
+            btnEditDoc.Enabled = False
+            btnCancelaDoc.Enabled = True
+            dgvDoc.Enabled = False
+        Else
+            MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' ACEITA EDIÇÃO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub btnAceitaDoc_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnAceitaDoc.Click
+        If ValidaDoc() Then
+            If Me.doc.Update() Then
+                CleanFields(CType(pnlDoc, Control))
+                CarregaCamposDoc()
+                OffFields(CType(pnlDoc, Control))
+                btnAceitaDoc.Enabled = False
+                btnCancelaDoc.Enabled = False
+                btnAddDoc.Enabled = False
+                btnNovoDoc.Enabled = True
+                btnEditDoc.Enabled = True
+                dgvDoc.Enabled = True
+                CarregaDocumentos(CInt(txtCodEmpresa.Text))
+            End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA CAMPOS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dgvDoc_CurrentCellChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles dgvDoc.CurrentCellChanged
+        CarregaCamposDoc()
+        If Me.dgvDoc.CurrentRow IsNot Nothing Then
+            Me.doc = New DocumentacaoLicitacao(CInt(Me.dgvDoc.CurrentRow.Cells(0).Value))
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' COLORI GRID
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub tbcDocumentacao_Enter(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tbcDocumentacao.Enter
+        ColorGridDoc()
+    End Sub
+
+    ''' <summary>
+    ''' COLORI GRID
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dgvDocumentacao_ColumnHeaderMouseClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellMouseEventArgs) Handles dgvDoc.ColumnHeaderMouseClick
+        ColorGridDoc()
+    End Sub
+
+    ''' <summary>
+    ''' COLORI GRID
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub dgvDocumentacao_ColumnHeaderMouseDoubleClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellMouseEventArgs) Handles dgvDoc.ColumnHeaderMouseDoubleClick
+        ColorGridDoc()
+    End Sub
+
+    Private dragBoxFromMouseDown As Rectangle
+    Private valueFromMouseDown As Object
+
+    Private Sub dgvDir_MouseMove(ByVal sender As System.Object, ByVal e As System.Windows.Forms.MouseEventArgs) Handles dgvDoc.MouseMove
+        If (e.Button And MouseButtons.Left) = MouseButtons.Left Then
+            If dragBoxFromMouseDown <> Rectangle.Empty And Not dragBoxFromMouseDown.Contains(e.X, e.Y) Then
+                Dim dropEffect As DragDropEffects = dgvDoc.DoDragDrop(valueFromMouseDown, DragDropEffects.Copy)
+            End If
+        End If
+    End Sub
+
+    Private Sub dgvDir_MouseDown(ByVal sender As System.Object, ByVal e As System.Windows.Forms.MouseEventArgs) Handles dgvDoc.MouseDown
+        Dim hittestInfo = dgvDoc.HitTest(e.X, e.Y)
+        If hittestInfo.RowIndex <> -1 And hittestInfo.ColumnIndex = 6 Then
+            Dim selectedRowCount As Integer = Me.dgvDoc.Rows.GetRowCount(DataGridViewElementStates.Selected)
+            Dim i As Integer = 0
+            Dim filesToDrag As New Generic.List(Of String)
+            If selectedRowCount > 0 Then
+                For i = 0 To selectedRowCount - 1
+                    filesToDrag.Add(Me.dgvDoc.SelectedRows(i).Cells(6).Value.ToString())
+                Next
+            End If
+            'Dim filesToDrag As String() = {dgvDir.Rows(hittestInfo.RowIndex).Cells(hittestInfo.ColumnIndex).Value.ToString()}
+            valueFromMouseDown = New DataObject(DataFormats.FileDrop, filesToDrag.ToArray())
+            If valueFromMouseDown IsNot Nothing Then
+                Dim dragSize As Size = SystemInformation.DragSize
+                dragBoxFromMouseDown = New Rectangle(New Point(CInt(e.X - (dragSize.Width / 2)), CInt(e.Y - (dragSize.Height / 2))), dragSize)
+            End If
+        Else
+            dragBoxFromMouseDown = Rectangle.Empty
+        End If
+    End Sub
+#End Region
+
+#Region "Menu Grid"
+
+    Private Sub cmsGrid_Opening(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles cmsGrid.Opening
+        If Me.dgvDoc.RowCount > 0 Then
+            Me.ZiparToolStripMenuItem.Enabled = True
+        Else
+            ZiparToolStripMenuItem.Enabled = False
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' ZIPA ARQUIVOS SELECIONADOS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub ZiparToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ZiparToolStripMenuItem.Click
+        Try
+            Dim selectedRowCount As Integer = Me.dgvDoc.Rows.GetRowCount(DataGridViewElementStates.Selected)
+            Dim i As Integer = 0
+            If selectedRowCount > 0 Then
+                Using zip As ZipFile = New ZipFile()
+                    AddHandler zip.AddProgress, AddressOf AddProgressHandler
+                    AddHandler zip.SaveProgress, AddressOf SaveProgressHandler
+                    SetLoading(True, "", selectedRowCount)
+                    For i = 0 To selectedRowCount - 1
+                        zip.AddFile(Me.dgvDoc.SelectedRows(i).Cells(6).Value.ToString(), "")
+                    Next
+                    Me.sfd.Filter = "Zip Files (*.zip)|*.zip"
+                    If Me.sfd.ShowDialog() = Windows.Forms.DialogResult.OK Then
+                        SetLoading(False)
+                        SetLoading(True, "", 0)
+                        zip.Save(Me.sfd.FileName)
+                        Process.Start(Me.sfd.FileName)
+                    End If
+                    SetLoading(False)
+                End Using
+            End If
+        Catch ex As Exception
+            MessageBox.Show(ex.Message, Core.STR_NOME_SISTEMA)
+        End Try
+    End Sub
+
+    ''' <summary>
+    ''' EVENDO DE INSERÇÃO DE ARQUIOS ZIPADOS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub AddProgressHandler(ByVal sender As Object, ByVal e As AddProgressEventArgs)
+        Select Case e.EventType
+            Case ZipProgressEventType.Adding_Started
+                SetLoading("Adicionando arquivos...")
+                PerformStep()
+                Exit Select
+            Case ZipProgressEventType.Adding_AfterAddEntry
+                SetLoading(String.Format("Adicionando arquivo {0}", e.CurrentEntry.FileName))
+                PerformStep()
+            Case ZipProgressEventType.Adding_Completed
+                SetLoading("Arquivos adicionados")
+                Exit Select
+        End Select
+    End Sub
+
+    ''' <summary>
+    ''' EVENDO DE SALVAMENTO DE ARQUIOS ZIPADOS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Public Sub SaveProgressHandler(ByVal sender As Object, ByVal e As SaveProgressEventArgs)
+        Select Case e.EventType
+            Case ZipProgressEventType.Saving_Started
+                SetLoading(String.Format("Salvando: {0}", e.ArchiveName))
+                PerformStep()
+            Case ZipProgressEventType.Saving_Completed
+                SetLoading(String.Format("Concluído {0}", e.ArchiveName))
+                PerformStep()
+            Case ZipProgressEventType.Saving_BeforeWriteEntry
+                SetLoading(String.Format("Aguarde: {0} ({1}/{2})", e.CurrentEntry.FileName, e.EntriesSaved, e.EntriesTotal))
+                PerformStep()
+            Case ZipProgressEventType.Saving_EntryBytesRead
+                SetLoading(String.Format("{0:N0}MB / {1:N0}MB ({2:N0}%)", ByteToMegabyte(e.BytesTransferred), _
+                                         ByteToMegabyte(e.TotalBytesToTransfer), _
+                                         CDbl(e.BytesTransferred) / (0.01 * e.TotalBytesToTransfer)))
+                PerformStep()
+        End Select
+    End Sub
+
+    Private Function ByteToMegabyte(ByVal bytes As Long) As Double
+        Return bytes / 1024 / 1024
+    End Function
+
+#End Region
+
+    ''' <summary>
+    ''' SETA TELA DE LOADING
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub SetLoading(ByVal loading As Boolean, Optional ByVal msg As String = "", Optional ByVal maxValue As Integer = 0)
+        If loading Then
+            Me.aguarde = New ViewAguarde(msg, maxValue, 1)
+            Me.aguarde.Show()
+        Else
+            Me.aguarde.Hide()
+        End If
+    End Sub
+
+    Private Sub SetLoading(ByVal msg As String)
+        Me.aguarde.SetStatus(msg)
+    End Sub
+
+    Private Sub PerformStep()
+        If Not Me.aguarde Is Nothing Then Me.aguarde.PerformStep()
+    End Sub
+
+End Class

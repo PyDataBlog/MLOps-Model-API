@@ -1,0 +1,157 @@
+require 'spec_helper'
+
+def group_in_index?(g)
+  Group.__elasticsearch__.refresh_index!
+  Group.__elasticsearch__.search(query: { match: { '_id' => g.id.to_s } }).count == 1
+end
+
+describe Group do
+  let(:attrs) { {} }
+  subject(:group) { build :group, attrs }
+
+  # associations
+  it { should embed_many :memberships }
+  it { should have_many :attachments }
+  it { should have_and_belong_to_many :events}
+
+  # fields
+  it { should have_field(:title).of_type String }
+  it { should have_field(:slug).of_type String }
+  it { should have_field(:description).of_type String }
+  it { should have_field(:body).of_type String }
+  it { should have_field(:email).of_type String }
+  it { should have_field(:phone).of_type String }
+  it { should have_field(:website).of_type String }
+  it { should have_field(:fax).of_type String }
+  it { should have_field(:published).of_type(Mongoid::Boolean).with_default_value_of(true) }
+  it { should have_field(:forms_department_id).of_type Integer }
+  it { should have_field(:categories).of_type Array }
+
+  # validations
+  it { should validate_presence_of :title }
+  it { should validate_presence_of :slug }
+  it { should validate_uniqueness_of :title }
+  it { should validate_uniqueness_of :slug }
+  it { should validate_uniqueness_of :email }
+
+  describe 'website validation' do
+    context 'valid url' do
+      let(:attrs) { {website: 'http://biola.edu/cheese'} }
+      it { should be_valid }
+    end
+
+    context 'invalid url' do
+      let(:attrs) { {website: 'biola.edu/cheese'} }
+      it { should be_invalid }
+    end
+  end
+
+  # class methods
+  describe '.custom_search for the following query' do
+    let!(:it) { create :group, title: 'Information Technology', aliases: ['IT'] }
+    let!(:hr) { create :group, title: 'Human Resources', aliases: ['HR'] }
+    let(:query) { '' }
+    subject { Group.custom_search(query).map{|d| d.aliases.to_a.first } }
+    [
+      { query: 'in', yes: ['IT'], no: ['HR'] },
+      { query: 'information t', yes: ['IT'], no: ['HR'] },
+      { query: 'tech', yes: ['IT'], no: ['HR'] },
+      { query: 'it', yes: ['IT'], no: ['HR'] },
+      { query: 'hr', yes: ['HR'], no: ['IT'] },
+      { query: 'r', yes: ['IT', 'HR'], no: [] },
+      { query: '', yes: ['IT', 'HR'], no: [] },
+    ].each do |q|
+      context "'#{q[:query]}'" do
+        let(:query) { q[:query] }
+        it { should include(*q[:yes]) }
+        it { should_not include(*q[:no]) }
+      end
+    end
+  end
+
+  describe '.people' do
+    context 'without memberships' do
+      it { expect(subject.people).to be_empty }
+    end
+
+    context 'with a membership' do
+      let(:group) { create :group }
+      let(:person) { create :person }
+
+      before { group.memberships.build person: person, role: ["member"], order: 0 }
+
+      it { expect(group.people).to contain_exactly(person)  }
+    end
+  end
+
+  describe '.memberships' do
+    context 'without memberships' do
+      it { expect(subject.memberships).to be_empty }
+    end
+
+    context 'with a membership' do
+      let(:group) { create :group }
+      let(:person) { create :person }
+
+      let!(:membership) { group.memberships.build person: person, role: ["member"], order: 0 }
+
+      it { expect(group.memberships).to contain_exactly(membership)  }
+    end
+  end
+
+  # instance methods and behavior
+  describe '.to_s' do
+    let(:attrs) { {title: "A Group"} }
+    it 'returns title' do
+      expect(group.to_s).to eq("A Group")
+    end
+  end
+
+  describe 'indexation' do
+    let(:privacy) { false }
+
+    context 'when published is initially false' do
+      let(:attrs) { {published: false} }
+      context 'group' do
+        it 'does not get indexed' do
+          group.save!
+          expect(group_in_index?(group)).to be false
+        end
+
+        context 'but now are published' do
+          it 'gets added to index' do
+            group.save!
+            expect(group_in_index?(group)).to be false
+            group.update_attribute(:published, true)
+            expect(group_in_index?(group)).to be true
+          end
+        end
+      end
+    end
+
+    context 'when published is initially true' do
+      context 'group' do
+        it 'gets indexed' do
+          group.save!
+          expect(group_in_index?(group)).to be true
+        end
+
+        context 'but now arent published' do
+          it 'gets removed from index' do
+            group.save!
+            expect(group_in_index?(group)).to be true
+            group.update_attribute(:published, false)
+            expect(group_in_index?(group)).to be false
+          end
+        end
+      end
+    end
+  end
+
+  describe '.slug' do
+    it 'should make a slug out of .title' do
+      group = FactoryGirl.create :group, { title: "Cat Sitters" }
+      expect(group.slug).to eq('cat-sitters')
+    end
+  end
+end

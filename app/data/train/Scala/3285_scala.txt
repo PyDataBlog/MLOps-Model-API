@@ -1,0 +1,122 @@
+package uber.nosurge
+
+import akka.actor.ActorSystem
+import akka.testkit.{ImplicitSender, TestKit, TestProbe}
+import com.typesafe.config.{Config, ConfigFactory}
+import org.scalamock.scalatest.MockFactory
+import org.scalatest.{BeforeAndAfterAll, MustMatchers, WordSpecLike}
+import uber.domain.auth.UberAuthContext
+import uber.domain.exception.UberException
+import uber.entities.PriceEstimates
+import uber.nosurge.actors.Message.{Acknowledged, CheckPrice, Subscribe, Terminate}
+import uber.nosurge.actors.{Message, PriceChecker, Receptionist}
+import uber.nosurge.entities.firebase.FirebaseMessaging
+import uber.nosurge.generators.DataGenerators
+import uber.nosurge.services.{FCMService, RideEstimatesService}
+
+import scala.concurrent.Future
+import scala.concurrent.duration._
+import scala.util.Random
+
+class NotificationsSpec extends TestKit(ActorSystem()) with ImplicitSender
+  with WordSpecLike with MustMatchers with BeforeAndAfterAll with DataGenerators with MockFactory {
+
+  val config: Config = ConfigFactory.load()
+  implicit val settings = new Settings(config)
+
+  val rideEstimatesService = mock[RideEstimatesService]
+  val fcmService = new FCMService {
+    val firebaseServerKey = settings.firebaseServerKey
+    override def sendMessage(firebaseMessage: FirebaseMessaging.FirebaseMessage)
+                            (implicit firebaseServerKey: FirebaseMessaging.FirebaseServerKey) = ()
+  }
+
+  override def afterAll {
+    TestKit.shutdownActorSystem(system)
+  }
+
+  "Receptionist actor" must {
+
+    "acknowledge subscription" in {
+      val displayName = Random.nextString(10)
+      val destination = destinationGenerator.sample.get
+      val priceEstimate = surgedPriceEstimateGenerator(displayName).sample.get
+
+      val receptionist = system.actorOf(Receptionist.props(rideEstimatesService, fcmService))
+      val subscriptionRequest = Subscribe(settings.serverToken.token, displayName, destination, Seq(priceEstimate))
+
+      receptionist ! subscriptionRequest
+      expectMsg(Acknowledged)
+    }
+  }
+
+  "PriceChecker actor" must {
+
+    "send notification and terminate when surge ends" in {
+      val probe = TestProbe()
+      val displayName = Random.nextString(10)
+      val surgedPrice = surgedPriceEstimateGenerator(displayName).sample.get
+      val nonSurgedPrice = nonSurgePriceEstimateGenerator(displayName).sample.get
+      val futureSurgedPrice: Future[Either[UberException, PriceEstimates]] = Future.successful(Right(PriceEstimates(Seq(surgedPrice))))
+      val futureNonSurgedPrice: Future[Either[UberException, PriceEstimates]] = Future.successful(Right(PriceEstimates(Seq(nonSurgedPrice))))
+
+      val initialData = initialDataGenerator(Random.nextString(10), displayName, surgedPrice).sample.get
+      val priceChecker = system.actorOf(PriceChecker.props(probe.ref, initialData, rideEstimatesService))
+
+      (rideEstimatesService
+        .fetchPriceEstimates(_: Float, _: Float, _: Float, _: Float, _: Option[Int])(_: UberAuthContext))
+        .expects(*, *, *, *, *, *)
+        .returning(futureSurgedPrice).repeated(3).times()
+
+      (rideEstimatesService
+        .fetchPriceEstimates(_: Float, _: Float, _: Float, _: Float, _: Option[Int])(_: UberAuthContext))
+        .expects(*, *, *, *, *, *)
+        .returning(futureNonSurgedPrice).noMoreThanOnce()
+
+      priceChecker ! CheckPrice
+      probe.expectNoMsg(100.millis)
+      priceChecker ! CheckPrice
+      probe.expectNoMsg(100.millis)
+      priceChecker ! CheckPrice
+      probe.expectNoMsg(100.millis)
+      priceChecker ! CheckPrice
+      probe.expectMsg(Message.surgeNotActiveAnymore(nonSurgedPrice))
+      probe.expectMsg(Terminate)
+    }
+
+    "send notification when price dropped" in {
+      val probe = TestProbe()
+      val displayName = Random.nextString(10)
+      val initialSurge = 3.0.toFloat
+      val surgedPrice = surgedPriceEstimateGenerator(displayName, initialSurge).sample.get
+      val initialData = initialDataGenerator(Random.nextString(10), displayName, surgedPrice).sample.get
+      val priceChecker = system.actorOf(PriceChecker.props(probe.ref, initialData, rideEstimatesService))
+
+      val updatedSurge = initialSurge * PriceChecker.priceDropPercentage
+      val updatedSurgedPrice = surgedPriceEstimateGenerator(displayName, updatedSurge).sample.get
+      val futureSurgedPrice: Future[Either[UberException, PriceEstimates]] = Future.successful(Right(PriceEstimates(Seq(updatedSurgedPrice))))
+
+      val sndUpdatedSurge = updatedSurge * PriceChecker.priceDropPercentage
+      val sndUpdatedSurgedPrice = surgedPriceEstimateGenerator(displayName, sndUpdatedSurge).sample.get
+      val sndFutureSurgedPrice: Future[Either[UberException, PriceEstimates]] = Future.successful(Right(PriceEstimates(Seq(sndUpdatedSurgedPrice))))
+
+      (rideEstimatesService
+        .fetchPriceEstimates(_: Float, _: Float, _: Float, _: Float, _: Option[Int])(_: UberAuthContext))
+        .expects(*, *, *, *, *, *)
+        .returning(futureSurgedPrice).once()
+
+      (rideEstimatesService
+        .fetchPriceEstimates(_: Float, _: Float, _: Float, _: Float, _: Option[Int])(_: UberAuthContext))
+        .expects(*, *, *, *, *, *)
+        .returning(sndFutureSurgedPrice).once()
+
+      priceChecker ! CheckPrice
+      probe.expectMsg(Message.priceDropped(updatedSurgedPrice, updatedSurge))
+      probe.expectNoMsg(100.millis)
+
+      priceChecker ! CheckPrice
+      probe.expectMsg(Message.priceDropped(sndUpdatedSurgedPrice, sndUpdatedSurge))
+      probe.expectNoMsg(100.millis)
+    }
+  }
+}

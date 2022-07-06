@@ -1,0 +1,287 @@
+/******************************************************************************
+* Copyright (c) 2010-2011, PCMS Lab
+* All rights reserved.
+*
+* Redistribution and use in source and binary forms, with or without
+* modification, are permitted provided that the following conditions are met:
+*     * Redistributions of source code must retain the above copyright
+*       notice, this list of conditions and the following disclaimer.
+*     * Redistributions in binary form must reproduce the above copyright
+*       notice, this list of conditions and the following disclaimer in the
+*       documentation and/or other materials provided with the distribution.
+*     * Neither the name of the <organization> nor the
+*       names of its contributors may be used to endorse or promote products
+*       derived from this software without specific prior written permission.
+* 
+* THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
+* ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
+* WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+* DISCLAIMED. IN NO EVENT SHALL "PCMS Lab" BE LIABLE FOR ANY
+* DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
+* (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
+* LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
+* ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
+* (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
+* SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+******************************************************************************/
+#include <v8.h>
+#include <string>
+#include <exception>
+#include "scripting.h"
+#include "resource.h"
+#include "appinfo.h"
+
+using namespace v8;
+
+const char* ToCString( const String::Utf8Value& value )
+{
+	return *value ? *value : "<string conversion failed>";
+}
+
+std::string toString( int v )
+{
+	char s[128];
+	sprintf(s, "%i", v );
+	return s;
+}
+
+std::string getExceptionMessage( TryCatch* try_catch )
+{
+	HandleScope handle_scope;
+	
+	String::Utf8Value exception( try_catch->Exception() );
+	const char* exception_string = ToCString(exception);
+	v8::Handle<v8::Message> message = try_catch->Message();
+	if (message.IsEmpty())
+	{
+		return exception_string;
+	}
+	
+	String::Utf8Value filename( message->GetScriptResourceName() );
+	const char* filename_string = ToCString(filename);
+	int linenum = message->GetLineNumber();
+
+	std::string exceptionMessage = filename_string;
+	exceptionMessage.append(1, ':');
+	exceptionMessage.append(toString(linenum));
+	exceptionMessage.append(": ");
+	exceptionMessage.append(exception_string);
+	exceptionMessage.append(1, '\n');
+			
+	v8::String::Utf8Value sourceline(message->GetSourceLine());
+	const char* sourceline_string = ToCString(sourceline);
+	exceptionMessage.append(sourceline_string);
+	exceptionMessage.append(1, '\n');
+		
+	int start = message->GetStartColumn();
+	exceptionMessage.append(start, ' ');
+	int end = message->GetEndColumn();
+	exceptionMessage.append(end-start, '^');
+	exceptionMessage.append(1, '\n');
+	
+	String::Utf8Value stack_trace( try_catch->StackTrace() );
+	if (stack_trace.length() > 0)
+	{
+		const char* stack_trace_string = ToCString(stack_trace);
+		exceptionMessage.append(stack_trace_string);
+		exceptionMessage.append(1, '\n');
+	}
+
+	return exceptionMessage;
+}
+
+void ReportException( const char* title, TryCatch* try_catch )
+{
+	HandleScope handle_scope;
+	String::Utf8Value exception( try_catch->Exception() );
+	const char* exception_string = ToCString(exception);
+	v8::Handle<v8::Message> message = try_catch->Message();
+	printf( "%s\n", title );
+	if (message.IsEmpty())
+	{
+		printf( "%s\n", exception_string );
+		return;
+	}
+	
+	String::Utf8Value filename( message->GetScriptResourceName() );
+	const char* filename_string = ToCString(filename);
+	int linenum = message->GetLineNumber();
+	printf("%s:%i: %s\n", filename_string, linenum, exception_string);
+		
+	v8::String::Utf8Value sourceline(message->GetSourceLine());
+	const char* sourceline_string = ToCString(sourceline);
+	printf("%s\n", sourceline_string);
+		
+	int start = message->GetStartColumn();
+	for (int i = 0; i < start; i++)
+	{
+		printf(" ");
+	}
+	int end = message->GetEndColumn();
+	for (int i = start; i < end; i++)
+	{
+		printf("^");
+	}
+	printf("\n");
+	String::Utf8Value stack_trace( try_catch->StackTrace() );
+	if (stack_trace.length() > 0)
+	{
+		const char* stack_trace_string = ToCString(stack_trace);
+		printf("%s\n", stack_trace_string);
+	}
+}
+
+bool ExecuteScript( const std::string& source, const std::string& fileName )
+{
+	return ExecuteScript( String::New(source.c_str()), String::New(fileName.c_str()) );
+}
+
+bool ExecuteScript( Handle<String> source, Handle<String> fileName )
+{
+	HandleScope handle_scope;
+	TryCatch try_catch;
+
+	Handle<Script> script = Script::Compile( source, fileName );
+	if ( script.IsEmpty() )
+	{
+		std::string msg = "An exception occured while compiling the script.\n";
+		msg += getExceptionMessage( &try_catch );
+		throw std::exception( msg.c_str() );
+	}
+	
+	Handle<Value> result = script->Run();
+	if ( result.IsEmpty() )
+	{
+		std::string msg = "An exception occured while executing the script.\n";
+		msg += getExceptionMessage( &try_catch );
+		throw std::exception( msg.c_str() );
+	}
+
+	if ( result->IsInt32() )
+	{
+		return result->Int32Value()==0?false:true;
+	}	
+
+	return true;
+}
+
+Handle<String> ReadFile( const char* fileName )
+{
+	FILE* f = fopen( fileName, "rb" );
+	if ( f == NULL )
+	{
+		return Handle<String>();
+	}
+
+	fseek( f, 0, SEEK_END );
+	int size = ftell( f );
+	rewind( f );
+
+	char* content = new char[size+1];
+	content[size] = '\0';
+	for( int i=0; i<size; )
+	{
+		int red = fread( &content[i], 1, size-i, f );
+		i += red;
+	}
+	fclose(f);
+
+	Handle<String> result = String::New(content, size);
+	delete[] content;
+	return result;
+}
+
+Handle<Value> Include( const Arguments& args )
+{
+	HandleScope handleScope;
+
+	if ( args.Length() != 1 )
+	{
+		return ThrowException( String::New("Include has only one argument.") );
+	}
+	
+	String::Utf8Value file(args[0]);
+	if ( *file==NULL )
+	{
+		return ThrowException( String::New("First argument of include must be a string.") );
+	}
+
+	Handle<String> source = ReadFile(*file);
+	if ( source.IsEmpty() )
+	{
+		std::string errMsg = "File not found '";
+		errMsg += *file;
+		errMsg += "'.\n";
+		return ThrowException( String::New(errMsg.c_str()) );
+	}
+	ExecuteScript( source, String::New(*file) );
+
+	return Undefined();
+}
+
+Handle<Value> Print( const Arguments& args )
+{
+	for( int i = 0; i < args.Length(); i++ )
+	{
+		HandleScope handleScope;
+		String::Utf8Value str(args[i]);
+		const char* cstr = ToCString(str);
+		printf( "%s", cstr );
+	}
+	return Undefined();
+}
+
+Handle<Value> LoadStringFromResourceJS( const Arguments& args )
+{
+	if ( args.Length() != 1 )
+	{
+		return ThrowException( v8::String::New("Wrong number of paremeters.") );		
+	}
+	
+	if ( !args[0]->IsString() )
+	{
+		return ThrowException( v8::String::New("First parameter must be a string.") );
+	}
+
+	v8::String::Value resourceName(args[0]);
+
+	TCHAR* t = reinterpret_cast<TCHAR*>(*resourceName);
+
+	return String::New( LoadStringFromResource(t).c_str() );
+}
+
+bool ReadAndExecute( char* fileName )
+{
+	Handle<String> source = ReadFile(fileName);
+	if (source.IsEmpty())
+	{
+		printf("Error: cannot open file '%s'.\n", fileName );
+		return false;
+	}
+
+	return ExecuteScript( source, String::New(fileName) );
+}
+
+Handle<Value> AppInfoPropertyGetter(Local<String> property, const AccessorInfo& info)
+{
+	String::AsciiValue ascii_property(property);
+	std::string s_property = *ascii_property;
+
+	if ( s_property == "AppName" )
+	{
+		return String::New(APPINFO_APPNAME);
+	}
+	if ( s_property == "Version" )
+	{
+		return String::New(APPINFO_VERSION);
+	}
+	if ( s_property == "Description" )
+	{
+		return String::New(APPINFO_DESCRIPTION);
+	}
+	if ( s_property == "Copyright" )
+	{
+		return String::New(APPINFO_COPYRIGHT);
+	}
+	return Undefined();	
+}

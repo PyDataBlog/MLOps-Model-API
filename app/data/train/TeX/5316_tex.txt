@@ -1,0 +1,201 @@
+% =============================================================================
+%  Copyright (c) 2015 UCR-UAS
+%  You should have recieved a copy of the MIT licence with this file.
+%  Engineer: Brandon Lu
+%  Description: This is the LaTeX documentation for the transfer protocol
+% =============================================================================
+
+\documentclass[12pt]{article}
+\usepackage[USenglish]{babel}
+\usepackage{parskip}
+\usepackage{fullpage}
+\usepackage{graphicx}
+\usepackage{verbatim}
+\usepackage[hidelinks]{hyperref}
+\setlength{\parindent}{15pt}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{dingbat}
+\usepackage{float}
+\usepackage[framemethod=tikz]{mdframed}
+\usepackage{todonotes}
+
+\mdfdefinestyle{IEEEBlueStyle}{roundcorner=10pt, tikzsetting={draw=cyan, line width=1pt}}
+
+\makeatletter
+  \newcommand\fs@IEEEBlue{\def\@fs@cfont{\bfseries}\let\@fs@capt\floatc@plain
+	\def\@fs@pre{\begin{mdframed}[style=IEEEBlueStyle]}%
+	\def\@fs@mid{\end{mdframed}\vspace{\abovecaptionskip}}%
+	\def\@fs@post{}%
+	\let\@fs@iftopcapt\iffalse}
+\makeatother
+
+\floatstyle{IEEEBlue}
+\restylefloat{figure}
+
+\author{Brandon Lu @ UCR UAS}
+\title{BISON-Transfer Explained}
+\date{14 March 2015}
+
+\begin{document}
+\maketitle
+\section{Introduction}
+This document describes the BISON-Transfer server and client suite's purpose,
+implementation, and methods of communication.
+If it is not clear by this point, the server (or daemon)
+is called \verb+BISON-Transferd+ and the client (client daemon, to be precise)
+is called \verb+BISON-Transfer+.
+
+\section{Specifications}
+The BISON-Transfer suite is (hopefully) designed to operate within the
+following constraints:
+\begin{itemize}
+	\item Timely image transfer
+	\item Robust communications (disconnect handling)
+	\item Efficient transfer protocol
+\end{itemize}
+
+\tableofcontents
+
+\section{Communication}
+At initialization, the transfer server fork is in an unknown state.  It must
+recieve a \hyperref[sec:transfer_modes]{transfer mode} from the client or it
+will not know what to
+do and will terminate.
+After it has recieved a \hyperref[sec:transfer_modes]{transfer mode}, it can
+then proceed to either \hyperref[sec:request_file]{send the file},
+\hyperref[sec:request_filetable]{send the filetable},
+or \hyperref[sec:recalculate_MD5]
+{recalculate and then send the md5 sum} of a file. 
+
+\section{Transfer Modes}
+\label{sec:transfer_modes}
+There are four transfer modes that have been (or will be) implemented.
+These are presented in tabular form in \ref{fig:transfer_modes}.
+\begin{figure}[H]
+	\centering
+	\begin{tabular}{r l}
+		\verb+REQ:+\textvisiblespace <filename>\carriagereturn\carriagereturn
+		& File Request\\
+		\verb+FTREQ+\carriagereturn\carriagereturn & Filetable Request \\
+		\verb+RECALC:+\textvisiblespace <filename>\carriagereturn
+		\carriagereturn & Request MD5 Recalculation
+	\end{tabular}
+	\caption{Transfer Modes for the BISON-Transfer suite}
+	\label{fig:transfer_modes}
+\end{figure}
+
+Please note that the (\carriagereturn) character is meant to represent ASCII
+newline (decimal \verb+10+, hexadecimal \verb+0x0A+).  The
+visible space (\textvisiblespace) is meant to notate an ASCII space (decimal
+\verb+32+, hexadecimal \verb+0x20+).
+It is simply convenient to have these symbols explicitly represented in order
+to avoid confusion.
+
+It should also be noted that the <filename> should be entirely replaced with
+the corresponding filename that is going to be transferred.
+
+\subsection{File Request}
+\label{sec:request_file}
+The file request mode is signified by the client querying the server for the
+file by providing the command in figure~\ref{fig:request_file}.
+\begin{figure}[H]
+	\centering
+	\verb+REQ:+\textvisiblespace <filename>\carriagereturn\carriagereturn
+	\caption{Request File Mode}
+	\label{fig:request_file}
+\end{figure}
+
+The server, after recieving this line, will provide the corresponding file in
+unencrypted binary over the port.
+
+\subsection{Filetable Request}
+\label{sec:request_filetable}
+The client requests the filetable using the following line:
+\begin{figure}[H]
+	\centering
+	\verb+FTREQ+\carriagereturn\carriagereturn
+	\caption{Filetable Request Mode}
+	\label{fig:request_filetable}
+\end{figure}
+
+The filetable format is done by line, and files are not expected to have
+newlines in their names.  The format is provided in figure~
+\ref{fig:mdfive_format}.
+\begin{figure}[H]
+	\centering
+	<MD5 SUM (32 hex-representing ASCII characters)>\textvisiblespace
+	\textvisiblespace<filename>\carriagereturn
+	\caption{MD5 Sum and Filename Specification}
+	\label{fig:mdfive_format}
+\end{figure}
+
+The last line of the filetable will have a newline as well.  This is followed
+by the server terminating the connection.
+
+\subsection{Request Filetable Recalculation}
+\label{sec:recalculate_MD5}
+Ideally, this specific transfer mode is never used because it signifies an
+error either in transmitting the filetable or calculating the
+\href{http://en.wikipedia.org/wiki/Md5sum}{MD5 Sum} on the transfer server.
+The client requests a filetable recalculation using the following line:
+\begin{figure}[H]
+	\centering
+	\verb+RECALC:+\textvisiblespace <filename>\carriagereturn\carriagereturn
+	\caption{Request Recalculation}
+	\label{fig:recalculate_request}
+\end{figure}
+
+This makes the server recalculate the MD5 sum of a specific file and not the
+entire directory.  Usually the MD5 sums of the entire directory are calculated
+on server startup.  A new MD5 sum is only calculated when a new file appears.
+
+Old MD5 sums are not recalculated when the file is changed, so it is not wise
+to change files within the transfer directory while the server is running.
+Ideally, a solution to this would be to recalculate the MD5 sum when the
+``mtime'' of a file is changed.
+
+\section{Client State Machines}
+\todo{To be written.}
+
+\section{Security}
+\label{sec:security}
+In a closed-system, security is not generally considered for simplicity sake.
+This is not a system designed for large-scale deployment by any means.
+It is designed to work for its designated purpose, and only that purpose.
+Any other use of it is probably unsafe, and the author does not have grandiose
+visions of the software's use anywhere other than transferring trivial (by
+volume) files such as the images acquired from an unmanned aerial vehicle
+built by students from UCR.
+
+But considering security for the heck of it is an interesting topic in general.
+This is especially true when it comes to code-masochists like the author.
+
+\subsection{Filenames}
+\label{sec:filenames}
+Filenames should not contain newlines for sanity sake.
+
+A file with a newline will cause the program to either reject the file or
+exit on error condition.
+
+\subsection{Random Characters}
+\label{sec:random_characters}
+Random characters from the server under file transfer mode can potentially
+cause the BISON-Transfer daemon to overload the filesystem on the client side.
+This issue is not addressed because it will not happen unless an unsafe server
+masquerades as \verb+BISON-Transferd+.
+
+Random characters entering the command parsing state machine from an attacker
+client will cause the corresponding thread on the server to abort.
+
+It is noted that the client does not reject random characters from the server
+before it issues a command.  This may or may not be resolved at a later date.
+
+\section{Performance}
+\label{sec:performance}
+Transfer overhead is fairly low, and mostly depends on underlying hardware and
+TCP/IP stack.
+
+The protocol simply asks the full file name and expects to get the file back.
+
+\end{document}

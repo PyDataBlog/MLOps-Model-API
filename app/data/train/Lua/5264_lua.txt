@@ -1,0 +1,121 @@
+
+local cjson = require 'cjson'
+local global = require 'global'
+
+local nsf = require 'resty.nsf'
+
+local cache_srv = require 'service.cache'
+local log_srv = require 'service.log'
+local redis_srv = require 'service.redis'
+
+function publish_dns()
+
+	local params = ngx.req.get_uri_args()
+	local domain_name = params['domain']
+
+	if domain_name then
+
+		ngx.req.read_body()
+		local domain_cfg = ngx.req.get_body_data()
+
+		if domain_cfg then
+
+			local ok_redis = redis_srv.set(domain_name, domain_cfg)
+			local ok_cache, msg_cache = cache_srv.set(domain_name, domain_cfg)
+
+			if ok_redis and ok_cache then
+				response(ngx.HTTP_OK, domain_name, string.format('%s publish success', domain_name))
+			else
+				local msg = nil
+				if not ok_cache then
+					msg = string.format('Set %s fail: %s', domain_name, msg_cache)
+				else
+					msg = string.format('Set %s fail', domain_name)
+				end
+				response(ngx.HTTP_INTERNAL_SERVER_ERROR, domain_name, msg)
+			end
+		else
+			response(ngx.HTTP_INTERNAL_SERVER_ERROR, domain_name, 'Domain config is nil')
+		end
+	else
+		response(ngx.HTTP_INTERNAL_SERVER_ERROR, 'config', 'Domain name is nil')
+	end
+
+end
+
+function delete_dns()
+	local params = ngx.req.get_uri_args()
+	local domain_name = params['domain']
+
+	if domain_name then
+		local ok_redis = redis_srv.delete(domain_name)
+		local ok_cache = cache_srv.delete(domain_name)
+
+		if ok_redis and ok_cache then
+			response(ngx.HTTP_OK, domain_name, string.format('%s delete success', domain_name))
+		else
+			response(ngx.HTTP_INTERNAL_SERVER_ERROR, domain_name, string.format('%s delete fail', domain_name))
+		end
+	else
+		response(ngx.HTTP_INTERNAL_SERVER_ERROR, 'config', 'Domain name is nil')
+	end
+end
+
+function flush_dns()
+	cache_srv.flush()
+	response(ngx.HTTP_OK, 'config', 'Flush DNS cache successful')
+end
+
+function get_stat()
+	local req_args = ngx.req.get_uri_args()
+	local client_addr = req_args['ip']
+	local domain_name = req_args['domain']
+
+	if client_addr and domain_name then
+		local dns_flag = string.format('%s:%s:cnt', client_addr, domain_name)
+		local stat_cache = ngx.shared.stat_cache
+
+		local stat_cnt = stat_cache:get(dns_flag)
+		if stat_cnt ~= nil then
+			response(ngx.HTTP_OK, 'config', {ip = client_addr, domain = domain_name, count = stat_cnt})
+		else
+			response(ngx.HTTP_NOT_FOUND, 'config', 'Stat is Not Found')
+		end
+
+		
+	else
+		response(ngx.HTTP_INTERNAL_SERVER_ERROR, 'config', 'One or More Parameter is nil')
+	end
+end
+
+function reset_stat()
+	local req_args = ngx.req.get_uri_args()
+	local client_addr = req_args['ip']
+	local domain_name = req_args['domain']
+
+	if client_addr and domain_name then
+		local dns_flag = string.format('%s:%s:cnt', client_addr, domain_name)
+		local stat_cache = ngx.shared.stat_cache
+
+		if stat_cache:get(dns_flag) ~= nil then
+			stat_cache:set(dns_flag, 0)
+		end
+
+		response(ngx.HTTP_OK, 'config', string.format('Reset %s Stat successful', dns_flag))
+	else
+		response(ngx.HTTP_INTERNAL_SERVER_ERROR, 'config', 'One or More Parameter is nil')
+	end
+
+end
+
+local ip_list = tab_utils:split_list(global.get_config('config-ip', nil), ';')
+
+local service = {}
+service['config/dns'] = {publish_dns, 'POST'}
+service['config/dns'] = {delete_dns, 'DELETE'}
+service['config/dns/flush'] = {flush_dns, 'POST'}
+
+service['config/dns/stat'] = {get_stat, 'GET'}
+service['config/dns/stat'] = {reset_stat, 'DELETE'}
+
+nsf.execute_with_filter('config', service, ip_list)

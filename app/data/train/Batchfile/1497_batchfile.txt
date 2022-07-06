@@ -1,0 +1,1 @@
+HeightMarker.exe cam01.avi cam01.txt

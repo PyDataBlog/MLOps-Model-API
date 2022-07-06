@@ -1,0 +1,121 @@
+package adty.spark.wnv2.bundle
+
+import java.sql.{Connection, SQLException, Statement}
+import java.util.{Calendar, Properties}
+
+import aiouniya.spark.AzSparkJob
+import aiouniya.spark.util._
+import aiouniya.ssp.entity.{DSPConfig, LogLineManager}
+import aiouniya.ssp.entity.clean.{DSPType, SSPType}
+import org.apache.commons.dbutils.DbUtils
+import org.apache.hadoop.mapreduce.lib.input.CombineFileSplit
+import org.apache.spark.sql.{Row, SQLContext}
+import org.apache.spark.{SparkConf, SparkContext}
+
+/**
+  * Created by zstorm on 2017/12/11.
+  */
+object BundleReqAnalyse extends AzSparkJob {
+  override def run(sc: SparkContext, prop: Properties): Unit = {
+    val date = prop.getProperty("param.date")
+    val uv_floor = prop.getProperty("param.uv_floor").toLong
+    val record_limit = prop.getProperty("param.record_limit").toInt
+    val dsp = prop.getProperty("param.dsp")
+    val mysql = prop.getProperty("param.mysql")
+
+    val rdd = HdfsUtil.getSspNewHadoopRDD(sc, s"/drp/$dsp/*/rrscf/$date", 100)
+    val rdd1 = rdd.mapPartitionsWithInputSplit((inputSplit, iterator) => {
+      val combineFileSplit = inputSplit.asInstanceOf[CombineFileSplit]
+      val filePath = combineFileSplit.getPath(0)
+      println("filePath=" + filePath.toString)
+      val datePath = filePath.getParent
+      println("datePath=" + datePath.toString)
+      val sspPath = datePath.getParent.getParent
+      println("sspPath=" + sspPath.toString)
+      val dspPath = sspPath.getParent
+      println("dspPath=" + dspPath.toString)
+      val sspType = SSPType.valueOf(sspPath.getName.toUpperCase())
+      val dspType = DSPType.valueOf(dspPath.getName.toUpperCase())
+      val sspEntity = DSPConfig.get(dspType).get(sspType)
+      iterator.map { case (keyIn, valueIn) =>
+        var ret: ((String, String, String, String, String, String, String), Long) = null
+        val cleanedLogLine = LogLineManager.createCleaned(valueIn.toString)
+        val data = cleanedLogLine.getData
+        val bundle = data.get("bundle")
+        if (bundle != null && bundle.length > 0) {
+          val bidfloor = data.get("bidfloor")
+          val size = data.get("size")
+          val ssp = sspEntity.getIndex.toString
+          val dt = data.get("dt")
+          val ct = data.get("cnnt")
+          val md516 = UseridUtil.toMD516(data.get("userid"))
+          if (dt != null && ct != null && md516 != null) {
+            ret = ((bundle, ssp, dt, ct, bidfloor, size, md516), 1L)
+          }
+        }
+        ret
+      }.filter(_ != null)
+    })
+
+
+    val rdd2 = rdd1.reduceByKey(_ + _).map { case ((bundle, sspDic, dtDic, ctDic, bidfloor, size, md516), pv) =>
+      ((bundle, sspDic, dtDic, ctDic, bidfloor, size), (1L, pv))
+    }.reduceByKey((x1, x2) => (x1._1 + x2._1, x1._2 + x2._2)).filter(x => x._2._1 >= uv_floor).
+      map { case ((bundle, ssp, dt, ct, bidfloor, size), (uv, pv)) =>
+        (bundle, ssp, dt, ct, bidfloor, size, uv, pv)
+      }.sortBy(_._8, ascending = false).take(record_limit)
+    val scheme = SchemaUtil.get(
+      """bundle string,
+        |ssp string,
+        |deviceType string,
+        |connectionType string,
+        |bidfloor long,
+        |adSize string,
+        |uv long,
+        |pv long,
+        |countDate timestamp,
+        |createTime timestamp
+      """.stripMargin)
+    val countDate = DateUtil.toDate(date, "yyyyMMdd").getTime
+    val createTime = System.currentTimeMillis()
+    //最终数据做好字典翻译
+    val bundleReqArr = rdd2.map { case (bundle, ssp, dt, ct, bidfloor, size, uv, pv) =>
+      Row(bundle, ssp, BundleUtil.getImeDtDic(dt), BundleUtil.getImeCnntDic(ct),
+        bidfloor.toLong, size, uv, pv, countDate, createTime)
+    }
+    println("bundleReqArr.size=" + bundleReqArr.size)
+    val sqlContext = new SQLContext(sc)
+    val bundleReqDF = sqlContext.createDataFrame(sc.parallelize(bundleReqArr, 1), scheme)
+
+    println("mysql=" + mysql)
+    if ("dspcs".equals(mysql)) {
+      MysqlUtil.deleteBySql(JdbcUtil.getDspCsConn,
+        s"delete from DYNA_ADYX_BundleReqAnalyse where DATE_FORMAT(countDate,'%Y%m%d')=$date")
+      MysqlUtil.saveDF(bundleReqDF, JdbcUtil.getDspCsConn, "DYNA_ADYX_BundleReqAnalyse")
+    } else if ("dspwn".equals(mysql)) {
+      try {
+        println("mysql=dpswn")
+        MysqlUtil.deleteBySql(JdbcUtil.getDspWnConn,
+          s"delete from DYNA_ADYX_BundleReqAnalyse where DATE_FORMAT(countDate,'%Y%m%d')=$date")
+        println(s"mysql delete DYNA_ADYX_BundleReqAnalyse countDate=$date")
+        MysqlUtil.saveDF(bundleReqDF, JdbcUtil.getDspWnConn, "DYNA_ADYX_BundleReqAnalyse")
+      } catch {
+        case e: Exception => e.printStackTrace()
+      }
+    }
+  }
+
+  override def setSparkConf(sparkConf: SparkConf, prop: Properties): Unit = {
+    var date = prop.getProperty("param.date")
+    if (date == null || date.length == 0) {
+      val cal = Calendar.getInstance()
+      cal.setTime(flowTime)
+      cal.add(Calendar.DATE, -1)
+      date = DateUtil.format(cal.getTime, "yyyyMMdd")
+    }
+    val name = sparkConf.get("spark.app.name")
+    println(s"date=$date")
+    sparkConf.setAppName(s"$name[$date]")
+    prop.setProperty("param.date", date)
+  }
+}

@@ -1,0 +1,444 @@
+{-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+{-----------------------------------------------------------------
+   This files provides functions to convert parsed JSON
+   responses of type Jvalue to other Haskell Types that we use.
+
+   All functions in this module are pure. So, all error reporting
+   is done using (Either MercadoException a). No synchronous
+   (imprecise) exception should ever be thrown from within this
+   module.
+
+   This is a tighter match than a naïve Aeson implementation.
+   I have found a few bugs in their API through this tighter coupling:
+
+   - Order of parameters is not important
+
+   - For safety, these lists will be sorted (even if they already are):
+       - asks are sorted by increasing price
+       - bids are sorted by decreasing price
+
+     I don't know what will happen to the trading algorithms if
+        they are not! So, we must ensure that.
+
+   - We also ensure that prices and volumes are non-negative numbers
+------------------------------------------------------------------}
+
+module Mercado.Internals
+(
+    module Mercado.Internals
+  , parse
+)
+where
+
+import           Text.Read             (readMaybe)
+import           Data.List
+import           Data.Word
+import           Data.Function
+import qualified Data.HashMap.Strict   as Map
+
+import           Razao.Util
+import           JsonParser
+import           Mercado.Types
+
+
+data MercadoAPIType = GetInfo
+                    | GetOrder
+                    | OrderList
+                    | CancelOrder
+                    | WithdrawCoin
+                    | PlaceSellOrder
+                    | PlaceBuyOrder
+                    | MercadoListBook
+
+instance Show MercadoAPIType where
+  -- v3
+  show PlaceSellOrder  = "place_sell_order"
+  show PlaceBuyOrder   = "place_buy_order"
+  show MercadoListBook = "list_orderbook"
+  show CancelOrder     = "cancel_order"
+  show OrderList       = "list_orders"
+  show GetInfo         = "get_account_info"
+  show GetOrder        = "get_order"
+  show WithdrawCoin     = "withdraw_coin"
+
+
+{- little reminder:
+
+data Jvalue = Jobject   (Map.HashMap String Jvalue)
+            | Jarray    [Jvalue]
+            | Jstring   String           -- terminals
+            | Jnumber   Double
+            | Jbool     Bool
+            | Jnull
+            deriving Show
+
+parse :: String -> Jvalue
+-}
+
+------------------------------------------------
+getMercadoResponseTime :: Jvalue -> Maybe Timestamp
+getMercadoResponseTime (Jobject dict) =
+    Map.lookup "server_unix_timestamp" dict >>=
+    getString >>= readMaybe >>= maybePositive
+
+getMercadoResponseTime _ = Nothing
+
+------------------------------------------------
+type MercadoDataParser a = Timestamp -> Jvalue -> Either MercadoException a
+
+convertMercadoResponse :: MercadoDataParser a -> Jvalue -> (Either MercadoException a)
+convertMercadoResponse parser resp@(Jobject dict) =
+  let mRespStatus   = Map.lookup "status_code"   dict
+      mResponseData = Map.lookup "response_data" dict
+      mTime         = getMercadoResponseTime resp
+   in case (mRespStatus, mTime, mResponseData) of
+        (Just (Jnumber 100), Just t , Just jResponseData) -> parser t jResponseData
+        (Just (Jnumber 100), Just _ , Nothing           ) -> Left (BadResponseStructure $ "Missing response data: "                ++ show resp)
+        (Just (Jnumber 100), Nothing, _                 ) -> Left (BadResponseStructure $ "Bad or missing server_unix_timestamp: " ++ show resp)
+        (Nothing           , _ , _ ) -> Left (BadResponseStructure $ "Missing status code: "       ++ show resp)
+
+        (Just (Jnumber 200), _ , _ ) -> Left (OtherError                $ show resp)
+        (Just (Jnumber 201), _ , _ ) -> Left (Invalid_TAPI_ID           $ show resp)
+        (Just (Jnumber 202), _ , _ ) -> Left (Invalid_TAPI_MAC          $ show resp)
+        (Just (Jnumber 203), _ , _ ) -> Left (Invalid_Tonce             $ show resp)
+        (Just (Jnumber 204), _ , _ ) -> Left (Invalid_TAPI_Method       $ show resp)
+        (Just (Jnumber 205), _ , _ ) -> Left (InvalidCoinPair           $ show resp)
+        (Just (Jnumber 206), _ , _ ) -> Left (InvalidParameter          $ show resp)
+        (Just (Jnumber 207), _ , _ ) -> Left (InsufficientFunds         $ show resp)
+        (Just (Jnumber 208), _ , _ ) -> Left (InvalidOrder              $ show resp)
+        (Just (Jnumber 209), _ , _ ) -> Left (UntrustedWalletAddress    $ show resp)
+        (Just (Jnumber 210), _ , _ ) -> Left (BRLWithdrawalFailure      $ show resp)
+        (Just (Jnumber 211), _ , _ ) -> Left (InvalidForReadOnlyKey     $ show resp)
+        (Just (Jnumber 212), _ , _ ) -> Left (OrderAlreadyDone          $ show resp)
+        (Just (Jnumber 213), _ , _ ) -> Left (UntrustedBankAccount      $ show resp)
+        (Just (Jnumber 214), _ , _ ) -> Left (OtherError                $ show resp)
+        (Just (Jnumber 215), _ , _ ) -> Left (NotEnoughBitcoins         $ show resp)
+        (Just (Jnumber 216), _ , _ ) -> Left (NotEnoughLitecoins        $ show resp)
+        (Just (Jnumber 217), _ , _ ) -> Left (BRLWithdrawalLimitReached $ show resp)
+        (Just (Jnumber 218), _ , _ ) -> Left (BTCWithdrawalLimitReached $ show resp)
+        (Just (Jnumber 219), _ , _ ) -> Left (OtherError                $ show resp)
+        (Just (Jnumber 220), _ , _ ) -> Left (BTCWithdrawalTooSmall     $ show resp)
+        (Just (Jnumber 221), _ , _ ) -> Left (LTCWithdrawalTooSmall     $ show resp)
+        (Just (Jnumber 222), _ , _ ) -> Left (BTCVolumeTooSmall         $ show resp)
+        (Just (Jnumber 223), _ , _ ) -> Left (LTCVolumeTooSmall         $ show resp)
+        (Just (Jnumber 224), _ , _ ) -> Left (BelowMiminumPrice         $ show resp)
+        (Just (Jnumber 225), _ , _ ) -> Left (OtherError                $ show resp)
+        (Just (Jnumber 226), _ , _ ) -> Left (OtherError                $ show resp)
+        (Just (Jnumber 227), _ , _ ) -> Left (TooMuchPrecision          $ show resp)
+        (Just (Jnumber 429), _ , _ ) -> Left (MaxRequestRateExceeded    $ show resp)
+        (Just (Jnumber 500), _ , _ ) -> Left (InternalServerError       $ show resp)
+
+        (Just (Jnumber _  ), _ , _ ) -> Left (OtherError           $ "Unknown status code: " ++ show resp)
+        (Just _            , _ , _ ) -> Left (BadResponseStructure $ "Bad status code: "     ++ show resp)
+
+-- Finally, we have an error if response is not a dictionary
+convertMercadoResponse _parser resp = Left (BadResponseStructure $ "Response: " ++ show resp)
+
+
+badFormatWrapper :: (Timestamp -> Jvalue -> Maybe a) -> Timestamp -> Jvalue -> Either MercadoException a
+badFormatWrapper parser time jval = case parser time jval of
+            Nothing -> Left  $ BadResponseStructure (show jval)
+            Just x  -> Right $ x
+
+------------------------------------------------
+-- functions to convert orderbooks
+convertMercadoBook
+    :: (Ord p, Fractional p, Fractional v) => Timestamp -> Jvalue -> Maybe (MercadoBook p v)
+convertMercadoBook  _ (Jobject dict) = do
+  jBook <- Map.lookup "orderbook" dict
+  case jBook of
+    Jobject book -> do
+      Jarray jasks <- Map.lookup "asks" book
+      Jarray jbids <- Map.lookup "bids" book
+      jLatestOid   <- Map.lookup "latest_order_id" book
+      oid'         <- getNumber jLatestOid -- FIX ME! This fails due to lack of precision in 'Double' if OID > 2^52
+      oid          <- maybePositive oid'
+      as           <- mapM makeMercadoAsk jasks
+      bs           <- mapM makeMercadoBid jbids
+
+      return (QuoteBook { bids = sortBy (flip (compare `on` price)) bs --flip inverts order
+                        , asks = sortBy       (compare `on` price)  as
+                        , counter = OID 0 (round oid :: Word64) })
+
+    _ -> Nothing
+
+convertMercadoBook _ _ = Nothing
+
+------------------------------------------------
+type QuoteMaker p v = Jvalue -> Maybe (MercadoQuote p v)
+
+makeMercadoAsk :: (Fractional p, Fractional v) => QuoteMaker p v
+makeMercadoAsk = makeMercadoQuote toAsk
+
+makeMercadoBid :: (Fractional p, Fractional v) => QuoteMaker p v
+makeMercadoBid = makeMercadoQuote toBid
+
+type ToBidOrAsk p v = Double -> Double -> OrderID -> Bool -> MercadoQuote p v
+
+toBid :: (Fractional p, Fractional v) => Double -> Double -> OrderID -> Bool -> MercadoQuote p v
+toBid p v oid flag =
+  Quote {side = Bid, price = realToFrac p, volume = realToFrac v, qtail=(oid, flag)}
+
+toAsk :: (Fractional p, Fractional v) => Double -> Double -> OrderID -> Bool -> MercadoQuote p v
+toAsk p v oid flag =
+  Quote {side = Ask, price = realToFrac p, volume = realToFrac v, qtail=(oid, flag)}
+
+makeMercadoQuote :: ToBidOrAsk p v -> QuoteMaker p v
+makeMercadoQuote bidask (Jobject dict) = do
+    jOid    <- Map.lookup "order_id" dict
+    oid'    <- getNumber jOid -- FIX ME! This fails due to lack of precision in 'Double' if OID > 2^52
+    oid     <- maybePositive oid'
+    jPrice  <- Map.lookup "limit_price" dict
+    p'      <- jStringToNumber jPrice
+    p       <- maybePositive p'
+    jVol    <- Map.lookup "quantity" dict
+    v'      <- jStringToNumber jVol
+    v       <- maybePositive v'
+    jIsMine <- Map.lookup "is_owner" dict
+    isMine  <- getBool jIsMine
+    return (bidask p v (OID 0 (round oid :: Word64)) isMine )
+
+makeMercadoQuote _ _ = Nothing
+
+------------------------------------------------------------------------------
+convertLimitOrderResp
+    :: (Fractional v, Fractional p)
+    => Timestamp
+    -> Jvalue
+    -> Maybe (Order p v (Confirmation p v), [Fill p v])
+convertLimitOrderResp _ (Jobject dict) = do
+    jOrder <- Map.lookup "order" dict
+    convertMercadoLimitOrder jOrder
+
+convertLimitOrderResp _ _ = Nothing
+
+------------------------------------------------------------------------------
+convertGetOrderResp
+    :: (Fractional v, Fractional p)
+    => Timestamp -> Jvalue -> Maybe [(Order p v (Confirmation p v), [Fill p v])]
+convertGetOrderResp _ (Jobject dict) = do
+    jOrders <- Map.lookup "orders" dict
+    case jOrders of
+        Jarray jOrds -> mapM convertMercadoLimitOrder jOrds
+        _ -> Nothing
+
+convertGetOrderResp _ _ = Nothing
+
+------------------------------------------------------------------------------
+-- | This functions converts the Jvalue representing a single Order.
+convertMercadoLimitOrder
+    :: (Fractional v, Fractional p)
+    => Jvalue -> Maybe (Order p v (Confirmation p v), [Fill p v])
+convertMercadoLimitOrder (Jobject dict) = do
+    jOid    <- Map.lookup "order_id"             dict
+    jPair   <- Map.lookup "coin_pair"            dict
+    jSide   <- Map.lookup "order_type"           dict
+    jStatus <- Map.lookup "status"               dict
+    jHasFill<- Map.lookup "has_fills"            dict
+    jPrice  <- Map.lookup "limit_price"          dict
+    jVolume <- Map.lookup "quantity"             dict
+    jExePri <- Map.lookup "executed_price_avg"   dict
+    jExeVol <- Map.lookup "executed_quantity"    dict
+    jFee    <- Map.lookup "fee"                  dict
+    jTime   <- Map.lookup "created_timestamp"    dict
+    jUpdated<- Map.lookup "updated_timestamp"    dict
+    jFills  <- Map.lookup "operations"           dict
+
+    case (jOid, jPair, jSide, jStatus, jHasFill, jPrice, jVolume, jExePri, jExeVol, jFee, jTime, jUpdated, jFills) of
+        ( Jnumber orderID'
+         , Jstring _coinPair
+         , Jnumber nSide
+         , Jnumber nStatus
+         , Jbool   hasFills
+         , Jstring sPrice
+         , Jstring sVolume
+         , Jstring sExePri
+         , Jstring sExeVol
+         , Jstring _sFee     -- ignored for now
+         , Jstring sTime
+         , Jstring _sUpdated -- ignored for now
+         , Jarray  jOps
+         ) -> do
+            let mStatus = case nStatus of
+                               2 -> case hasFills of {False -> Just Active; True -> Just ActivePartiallyExecuted}
+                               3 -> Just Inactive
+                               4 -> Just Inactive
+                               _ -> Nothing
+
+            price'      <- (readMaybe sPrice  :: Maybe Double)
+            volume'     <- (readMaybe sVolume :: Maybe Double)
+            exePrice'   <- (readMaybe sExePri :: Maybe Double)
+            exeVolume'  <- (readMaybe sExeVol :: Maybe Double)
+            time'       <- (readMaybe sTime   :: Maybe Double)
+
+            -- must be non-negative otherwise abort
+            lOrderID  <- maybePositive orderID'
+            let oid = (OID 0 $ truncate lOrderID)
+
+            price     <- maybePositive price'
+            volume    <- maybePositive volume'
+            exePrice  <- maybePositive exePrice'
+            exeVolume <- maybePositive exeVolume'
+            time      <- maybePositive time'
+            fills     <- mapM (convertMercadoOperation oid) jOps
+
+            let requestedVolume = realToFrac volume
+                executedVolume  = realToFrac exeVolume
+                mSide = case nSide of { 1 -> Just Bid; 2 -> Just Ask; _ -> Nothing }
+
+            case (mSide,mStatus) of
+                 (_ , Nothing) -> Nothing -- invalid status field in response
+                 (Nothing , _) -> Nothing -- invalid order_type field in response
+                 (Just side, Just status) -> return (
+                                LimitOrder
+                                { oSide        = side
+                                , limitPrice   = realToFrac price
+                                , limitVolume  = requestedVolume
+                                , aConfirmation =
+                                    Conf{ orderID         = oid
+                                        , mTimestamp      = Just (truncate time) -- FIX ME! This should really be "updated_timestamp" (but this has other ramifications)
+                                        , mOrderStatus    = Just status
+                                        , mExecuted       = Just (realToFrac exePrice, executedVolume)}
+                                }, fills)
+        _ -> Nothing
+
+convertMercadoLimitOrder _ = Nothing
+
+-------------------------------------------------------------------------------
+-- | This functions converts the Jvalue representing a single Operation.
+convertMercadoOperation
+    :: (Fractional p, Fractional v)
+    => OrderID -> Jvalue -> Maybe (Fill p v)
+convertMercadoOperation oid (Jobject dict) = do
+  jFID     <- Map.lookup "operation_id"       dict
+  jPrice   <- Map.lookup "price"              dict
+  jVol     <- Map.lookup "quantity"           dict
+  jFeeRate <- Map.lookup "fee_rate"           dict
+  jTime    <- Map.lookup "executed_timestamp" dict
+  case (jFID,jPrice,jVol,jFeeRate,jTime) of
+    (Jnumber fid', Jstring sPrice, Jstring sVol, Jstring sRate, Jstring sTime) -> do
+        price' <- (readMaybe sPrice :: Maybe Double)
+        vol'   <- (readMaybe sVol   :: Maybe Double)
+        rate'  <- (readMaybe sRate  :: Maybe Double)
+        time'  <- (readMaybe sTime  :: Maybe Double)
+        price  <- maybePositive price'
+        vol    <- maybePositive vol'
+        rate   <- maybePositive rate'
+        time   <- maybePositive time'
+        return Fill
+            { fillID     = truncate fid'
+            , fillPrice  = realToFrac price
+            , fillVolume = realToFrac vol
+            , fillFee    = realToFrac (0.01 * rate * price * vol)
+            , mFillTime  = Just (round time)
+            , orderId    = oid
+            }
+
+    _ -> Nothing
+
+convertMercadoOperation _ _ = Nothing
+
+------------------------------------------------------------------------------
+convertMercadoGetInfoResp :: Timestamp -> Jvalue -> Maybe (CurrencyVol BRL, Vol BTC, Vol LTC, Timestamp)
+convertMercadoGetInfoResp t (Jobject dict) = do
+  jBalance <- Map.lookup "balance" dict
+  jLimits  <- Map.lookup "withdrawal_limits" dict
+  case (jBalance,jLimits) of
+    (Jobject balDict, Jobject _) -> do
+      jReais    <- Map.lookup "brl" balDict
+      jBitcoins <- Map.lookup "btc" balDict
+      jLTCs     <- Map.lookup "ltc" balDict
+      case (jReais, jBitcoins, jLTCs) of
+        (Jobject realDict, Jobject btcDict, Jobject ltcDict) -> do
+          jReaisAvail <- Map.lookup "available" realDict
+          jBTCsAvail  <- Map.lookup "available" btcDict
+          jLTCsAvail  <- Map.lookup "available" ltcDict
+          case (jReaisAvail, jBTCsAvail, jLTCsAvail) of
+            (Jstring sBRL, Jstring sBTC, Jstring sLTC) -> do
+              brlFunds' <- (readMaybe sBRL :: Maybe Double)
+              btcFunds' <- (readMaybe sBTC :: Maybe Double)
+              ltcFunds' <- (readMaybe sLTC :: Maybe Double)
+              brlFunds  <- maybePositive brlFunds'  -- must be non-negative
+              btcFunds  <- maybePositive btcFunds'  -- otherwise abort
+              ltcFunds  <- maybePositive ltcFunds'  -- otherwise abort
+              return (realToFrac brlFunds, realToFrac btcFunds, realToFrac ltcFunds, t)
+
+            _ -> Nothing
+        _ -> Nothing
+    _ -> Nothing
+
+convertMercadoGetInfoResp _ _ = Nothing
+------------------------------------------------------------------------------
+convertMercadoWithdrawalResponse :: (Fractional vol) => Timestamp -> Jvalue -> Maybe (MercadoTransfer vol)
+convertMercadoWithdrawalResponse _ (Jobject wDict) = do
+  jWithdrawal <- Map.lookup "withdrawal" wDict
+  case jWithdrawal of
+    Jobject dict -> do
+      jSt     <- Map.lookup "status"            dict
+      jCoin   <- Map.lookup "coin"              dict
+      jVol    <- Map.lookup "quantity"          dict
+      jFee    <- Map.lookup "fee"               dict
+      jWallet <- Map.lookup "address"           dict
+      jTime   <- Map.lookup "created_timestamp" dict
+      jId     <- Map.lookup "id"                dict
+      _       <- Map.lookup "tx"                dict
+      _       <- Map.lookup "updated_timestamp" dict
+      _       <- Map.lookup "description"       dict
+
+      case (jSt,jCoin,jVol,jFee,jWallet,jTime,jId) of
+        (Jnumber st, Jstring _, Jstring sVol, Jstring sFee, Jstring sWallet, Jstring sTime, Jnumber tid') -> do
+          if st /= 1 && st /= 2
+            then Nothing
+            else do
+              vol' <- (readMaybe sVol :: Maybe Double)
+              vol  <- maybePositive vol'
+              fee' <- (readMaybe sFee :: Maybe Double)
+              fee  <- maybePositive fee'
+              time'<- (readMaybe sTime :: Maybe Double)
+              time <- maybePositive time'
+              _ <- maybePositive tid' -- Mercado id not the bitcoin transaction id, not recording it.
+              return MercadoTransfer
+                  { transfTime   = truncate time
+                  , transfVol    = realToFrac vol    -- fee NOT included
+                  , transfFee    = realToFrac fee    -- this is also debited from account
+                  , toWallet     = Wallet sWallet
+                  , mTransferID  = Nothing }
+
+        _ -> Nothing
+    _ -> Nothing
+
+convertMercadoWithdrawalResponse _ _ = Nothing
+
+------------------------------------------------------------------------------
+convertMercadoTrades :: (Fractional p, Fractional v) => Jvalue -> Maybe [MercadoTrade p v]
+convertMercadoTrades (Jarray trades) = mapM convertMercadoTrade trades
+convertMercadoTrades _               = Nothing
+
+convertMercadoTrade :: (Fractional p, Fractional v) => Jvalue -> Maybe (MercadoTrade p v)
+convertMercadoTrade (Jobject dict) = do
+  jTime  <- Map.lookup "date"   dict
+  jPrice <- Map.lookup "price"  dict
+  jVol   <- Map.lookup "amount" dict
+  jTid   <- Map.lookup "tid"    dict
+  jSide  <- Map.lookup "type"   dict
+
+  case (jTime, jPrice, jVol, jTid, jSide) of
+    (Jnumber time', Jnumber price', Jnumber vol', Jnumber tid', Jstring sSide) -> do
+      time  <- maybePositive time'
+      price <- maybePositive price'
+      vol   <- maybePositive vol'
+      tid   <- maybePositive tid'
+      side  <- case sSide of
+                  "buy"  -> Just Bid
+                  "sell" -> Just Ask
+                  _      -> Nothing
+      return $
+        MT { tradeTime   = truncate time
+           , tradeSide   = side
+           , tradePrice  = realToFrac price
+           , tradeVolume = realToFrac vol
+           , tradeId     = truncate  tid }
+
+    _ -> Nothing
+
+convertMercadoTrade _ = Nothing

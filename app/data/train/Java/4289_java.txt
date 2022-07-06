@@ -1,0 +1,89 @@
+package sample.rabbitmq;
+
+import static sample.rabbitmq.annotation.RabbitDirectRouting.*;
+
+import java.util.Arrays;
+import java.util.concurrent.*;
+
+import org.springframework.amqp.rabbit.annotation.*;
+import org.springframework.amqp.rabbit.core.RabbitTemplate;
+import org.springframework.amqp.rabbit.listener.ListenerContainerConsumerFailedEvent;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.context.event.EventListener;
+import org.springframework.stereotype.Component;
+
+import lombok.extern.slf4j.Slf4j;
+import sample.model.News;
+import sample.rabbitmq.annotation.RabbitDirectRouting;
+
+/**
+ * RabbitMQ の Exchange#Direct ( 1-1 ) 接続サンプル。
+ * <p>Sender -> Receiver
+ * <p>利用する Exchange / Queue は RabbitListener を用いて自動的に作成しています。
+ * <p>Rabbit の依存を避けてベタに定義したい場合は Queue / Exchange をコンテナに登録し、
+ * 受信コンポーネントを SimpleMessageListenerContainer　で構築してください。
+ */
+@Slf4j
+@Component
+public class RabbitDirectChecker {
+    
+    @Autowired
+    private NewsSender newsSender;
+    @Autowired
+    private NewsReceiver newsReceiver;
+    
+    public void checkDirect() {
+        log.info("## RabbitMQ DirectCheck ###");
+        log.info("### send");
+        newsSender.send(new News(1L, "subject", "body"));
+        log.info("### wait...");
+        newsReceiver.waitMessage();
+        log.info("### finish");
+    }
+    
+    /**
+     * コンシューマ定義。
+     * <p>RabbitListener と admin 指定を利用する事で動的に Exchange と Queue の定義 ( Binding 含 ) を行っている。
+     * 1-n の時は使い捨ての Queue を前提にして名称は未指定で。
+     * <pre>
+     * [NewsRoutingKey] -> -1- [NewsQueue] -1-> Queue
+     * </pre>
+     * <p>アノテーションを別途切り出す例 ( RabbitDirectRouting )。逆に分かりにくいかも、、
+     */
+    @Component
+    @RabbitDirectRouting
+    static class NewsReceiver {
+        private final CountDownLatch latch = new CountDownLatch(1);
+        @RabbitHandler
+        public void receiveMessage(News... news) {
+            log.info("receive message.");
+            Arrays.stream(news)
+                .map(News::toString)
+                .forEach(log::info);
+            latch.countDown();
+        }
+        public void waitMessage() {
+            try {
+                latch.await(5000, TimeUnit.SECONDS);
+            } catch (InterruptedException e) {
+            }
+        }
+    }
+    
+    /** <pre>Message -> [NewsRoutingKey]</pre> */
+    @Component
+    static class NewsSender {
+        @Autowired
+        RabbitTemplate tmpl;
+        public NewsSender send(News... news) {
+            tmpl.convertAndSend(NewsDirect, NewsRoutingKey, news);
+            return this;
+        }
+    }
+    
+    @EventListener
+    void handleContextRefresh(ListenerContainerConsumerFailedEvent event) {
+        log.error("起動失敗事由: " + event.getReason());
+    }
+
+}

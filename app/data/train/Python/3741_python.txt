@@ -1,0 +1,172 @@
+'''
+Created on Nov 2, 2012
+
+@author: maodouzi
+'''
+
+import logging
+
+from keystoneclient.v2_0 import client as keystone_client
+from novaclient.v1_1 import client as nova_client
+from cinderclient.v1 import client as cinder_client
+from keystoneclient.exceptions import BadRequest
+from openstack_dashboard.local.local_settings import OPENSTACK_HOST
+
+LOG = logging.getLogger(__name__)
+DEFAULT_ROLE = None
+
+MEMBER_ROLE = "_member_"
+ENDPOINT_URL = "http://%s:35357/v2.0" % OPENSTACK_HOST
+
+ERR_MSG = {"accountExist": "Account already exist"
+           }
+
+ERR_MSG = {key:"ERROR: %s !" % value for key, value in ERR_MSG.items()}
+
+class RequestException(Exception):
+    def __init__(self, message=None):
+        self.message = str(message) or self.__class__.message
+
+    def __str__(self):
+        return self.message
+
+class RequestClient(object):
+    def __init__(self, username, password, email, phoneNum, realName, corpName, 
+                 applyReason, quota, token, adminTenant, adminUser, adminPasswd, 
+                 endpoint=ENDPOINT_URL):
+        self.token = token
+        self.endpoint = endpoint
+        self.conn = keystone_client.Client(token=self.token, endpoint=self.endpoint)
+        self._fetchInfo()
+        self.novaConn = nova_client.Client(username=adminUser, 
+                                           api_key=adminPasswd,
+                                           project_id=adminTenant,
+                                           auth_url=endpoint)
+        self.cinderConn = cinder_client.Client(username=adminUser, 
+                                               api_key=adminPasswd,
+                                               project_id=adminTenant,
+                                               auth_url=endpoint)
+        
+        self.quota = quota
+        self.username = username
+        self.password = password
+        self.email = email
+        self.realName = realName
+        self.phoneNum = phoneNum
+        self.corpName = corpName
+        self.applyReason = applyReason
+        self.description = "==".join((self.email, self.phoneNum, self.realName, self.corpName, self.applyReason))
+        if self._isAccountExist():
+            raise RequestException(ERR_MSG["accountExist"])
+        
+    def createAccount(self):
+        try:
+            self._createTenant()
+            self._updateQuota()
+            self._createUser()
+            self._addRole()
+        except Exception as e:
+            self.deleteAccount()
+            raise RequestException(e)
+    
+    def deleteAccount(self):
+        self._deleteTenant()
+        self._deleteUser()  
+ 
+    def _checkRequestArgs(self):
+        return self._isRequestValid() and (not self._isAccountExist())
+                   
+    def _fetchInfo(self):
+        try:
+            self.tenantList = self.conn.tenants.list()
+            self.userList = self.conn.users.list()
+            self.roleList = self.conn.roles.list()
+            
+            self.tenantDict = {str(item.name):str(item.id) for item in self.tenantList}
+            self.userDict = {str(item.name):str(item.id) for item in self.userList}
+            self.memberRoleId = [str(item.id) for item in self.roleList 
+                                 if str(item.name) == MEMBER_ROLE][0]
+            
+            try:
+                self.username
+            except AttributeError:
+                pass
+            else:   
+                self.tenantId = self.tenantDict.get(self.username, False)
+                self.userId = self.userDict.get(self.username, False)
+                if self.tenantId and self.userId:
+                    self.boundRoleList = self.conn.roles.roles_for_user(user=self.userId, 
+                                                                        tenant=self.tenantId)
+                    self.boundRoleDict = {str(item.name):str(item.id) for item in self.boundRoleList}
+                else:
+                    self.boundRoleDict = {}
+        except BadRequest as e:
+            LOG.debug(e)
+            raise RequestException(e)
+        except IndexError as e:
+            LOG.debug(e)
+            raise RequestException("No role named %s" % MEMBER_ROLE)
+    
+    def _isRequestValid(self):
+        return True
+    
+    def _isAccountExist(self):
+        return self._isTenantNameExist() or self._isUserNameExist()
+    
+    def _isTenantNameExist(self):
+        return self.username in self.tenantDict
+    
+    def _isUserNameExist(self):
+        return self.username in self.userDict
+    
+    def _isBound2Role(self):
+        return MEMBER_ROLE in self.boundRoleDict
+    
+    def _createTenant(self):
+        if not self._isTenantNameExist():
+            self.conn.tenants.create(tenant_name=self.username, 
+                                     description=self.description, 
+                                     enabled=True)
+            self._fetchInfo()
+        
+    def _deleteTenant(self):
+        if self._isTenantNameExist():
+            self.conn.tenants.delete(tenant=self.tenantId)
+            self._fetchInfo()
+
+    def _createUser(self):
+        self._createTenant()
+        if not self._isUserNameExist():
+            self.conn.users.create(name=self.username,
+                                   password=self.password,
+                                   email=self.email,
+                                   tenant_id=self.tenantId,
+                                   enabled=False)
+            self._fetchInfo()
+    
+    def _deleteUser(self):
+        if self._isUserNameExist():
+            self.conn.users.delete(user=self.userId)
+            self._fetchInfo()
+    
+    def _addRole(self):
+        if not self._isBound2Role():
+            self.conn.roles.add_user_role(self.userId, self.memberRoleId, self.tenantId)
+            self._fetchInfo()
+
+    def _getQuota(self):
+        quotaDict = {}
+        quotaDict["nova"] = self.novaConn.quotas.get(tenant_id=self.tenantId)
+        quotaDict["cinder"] = self.cinderConn.quotas.get(tenant_id=self.tenantId)
+        return quotaDict
+            
+    def _updateQuota(self):
+        nova_quota = self.quota.copy()
+        del nova_quota["volumes"]
+        del nova_quota["gigabytes"]
+        self.novaConn.quotas.update(tenant_id=self.tenantId, **nova_quota)
+        self.cinderConn.quotas.update(tenant_id=self.tenantId, 
+                                      volumes=self.quota["volumes"], 
+                                      gigabytes=self.quota["gigabytes"]
+                                      )
+

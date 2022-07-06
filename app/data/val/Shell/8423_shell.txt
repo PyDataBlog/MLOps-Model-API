@@ -1,0 +1,204 @@
+#!/bin/bash
+diskName='';
+netName='';
+hostName='';
+kbdName='';
+userName='';
+fsType='ext4';
+installType=1;
+myShell=1;
+packStuff=1;
+
+if [ "$#" -eq 0 ]; then
+    echo "$0": usage: ALIS.sh setup
+    exit 1
+fi
+
+myName=$(basename "$0");
+myDir="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+
+if [[ "$1" == *"setup"* ]]; then
+	echo -n "Insert wanted keymap: "
+	read -r kbdName;
+	loadkeys "$kbdName";
+	echo "Available disks";
+	lsblk;
+	echo -n "Insert disk path (like: /dev/sda ): "
+	read -r diskName;
+	echo -n "Insert filesystem type (Example: ext4): "
+	read -r fsType;
+	echo -n "Insert install type (1=MBR/BIOS, 2=UEFI/GPT ): ";
+	read -r installType;
+	echo "Available network interfaces:";
+	ls --color /sys/class/net | sed '/lo/d';
+	echo -n "Enter the name of the network interface: ";
+	read -r netName;
+	echo -n "Set hostname: ";
+	read -r hostName;
+	echo -n "Pick username: ";
+	read -r userName;
+	echo -n "Pick shell, 1) bash 2) zsh: ";
+	read -r myShell;
+	echo -en "Pick a DE!\n0) none; 1) base graphical programs (no DE); 2) i3; 3) Gnome shell; 4) Kde;\n5) Lxde; 6) Mate; 7) Xfce; 8) Cinnamon; 9) Budgie; 10) Deepin;\n11) Enlightenment; 12) Gnome-flashback; 13) Openbox;\nAdd +30 to any choice to also install virtualbox guest modules;\nInput: ";
+	read -r packStuff;
+	echo "Running setup..." &&
+	loadkeys "$kbdName" &&
+	cfdisk "$diskName" &&
+	echo -n "";
+	if [ "$installType" -eq 1 ]; then
+	# DOS/MBR
+		if [[ "$fsType" == *"btrfs"* ]]; then
+			mkfs."$fsType" -f "$diskName""1";
+		else 
+			mkfs."$fsType" "$diskName""1";
+		fi
+		mount "$diskName""1" /mnt;
+	elif [ "$installType" -eq 2 ]; then
+	# UEFI/GPT
+		mkfs.fat -F32 "$diskName""1";
+		if [[ "$fsType" == *"btrfs"* ]]; then
+			mkfs."$fsType" -f "$diskName""2";
+		else
+			mkfs."$fsType" "$diskName""2";
+		fi
+		mount "$diskName""2" /mnt &&
+		mkdir -p /mnt/boot/ &&
+		mount "$diskName""1" /mnt/boot/ ;
+	fi
+	echo "Installing base system..." &&
+	pacstrap /mnt base base-devel --noconfirm &&
+	echo "Creating genfstab..." &&
+	genfstab -U /mnt > /mnt/etc/fstab &&
+	echo "Copying script before chroot..." &&
+	cp "$myDir""/""$myName" /mnt/"$myName" &&
+	chmod 755 /mnt/"$myName" &&
+	echo "Chrooting..." &&
+	arch-chroot /mnt /"$myName" chroot "$diskName" "$installType" "$netName" "$hostName" "$kbdName" "$userName" "$myName" "$myShell" "$packStuff";
+elif [[ $1 == *"chroot"* ]]; then
+	diskName=$2;
+	installType=$3;
+	netName=$4;
+	hostName=$5;
+	kbdName=$6;
+	userName=$7;
+	myName=$8;
+	myShell=$9;
+	packStuff=${10};
+	loadkeys "$kbdName";
+	echo "Doing locale, keyboard & timezone stuff" &&
+	echo "en_US.UTF-8 UTF-8" > /etc/locale.gen && locale-gen && echo LANG=en_US.UTF-8 > /etc/locale.conf && export LANG=en_US.UTF-8;
+	ln -fs /usr/share/zoneinfo/Europe/Stockholm /etc/localtime;
+	echo KEYMAP="$kbdName" > /etc/vconsole.conf;
+	echo "Installing packages & pacaur";
+	pacman -Sy --needed --noconfirm grub efibootmgr alsa-utils openssh os-prober git vim wpa_supplicant wpa_actiond expac yajl dialog bash-completion polkit htop wget cmake jsoncpp;
+	if [ "$packStuff" -ge 30 ]; then
+		pacman -Sy --noconfirm --needed virtualbox-guest-modules-arch virtualbox-guest-utils;
+		packStuff=$((packStuff-30));
+	fi
+	if [ "$packStuff" -ge 1 ]; then
+		echo "Base graphical stuff";
+		pacman -Sy --needed --noconfirm gtk-update-icon-cache xorg-server xf86-input-libinput xorg-xinit udisks firefox vlc ttf-dejavu noto-fonts-emoji libnotify thunderbird libva-vdpau-driver libvdpau-va-gl mesa-libgl xf86-video-intel numix-themes transmission-gtk;
+		if [ "$packStuff" -eq 2 ]; then
+			pacman -Sy --needed --noconfirm compton lxterminal lxappearance dmenu mate-polkit nitrogen pcmanfm epdfview gpicview gsimplecal i3 lxrandr;
+		elif [ "$packStuff" -eq 3 ]; then
+			pacman -Sy --noconfirm --needed gnome gnome-packagekit gnome-software gdm;
+			systemctl enable gdm;
+		elif [ "$packStuff" -eq 4 ]; then
+			pacman -Sy --noconfirm --needed plasma sddm;
+			systemctl enable sddm;
+		elif [ "$packStuff" -eq 5 ]; then
+			pacman -Sy --noconfirm --needed lxde lxdm;
+			systemctl enable lxdm;
+		elif [ "$packStuff" -eq 6 ]; then
+			pacman -Sy --noconfirm --needed mate mate-extra lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings;
+			systemctl enable lightdm;
+		elif [ "$packStuff" -eq 7 ]; then
+			pacman -Sy --noconfirm --needed xfce4 xfce4-goodies lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings;
+			systemctl enable lightdm;
+		elif [ "$packStuff" -eq 8 ]; then
+			pacman -Sy --noconfirm --needed cinnamon gdm;
+			systemctl enable gdm;
+		elif [ "$packStuff" -eq 9 ]; then
+			pacman -Sy --noconfirm --needed budgie-desktop lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings gnome-control-center lxterminal;
+			systemctl enable lightdm;
+		elif [ "$packStuff" -eq 10 ]; then
+			pacman -Sy --noconfirm --needed deepin deepin-screenshot deepin-terminal networkmanager lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings;
+			systemctl enable lightdm;
+			systemctl enable networkmanager;
+		elif [ "$packStuff" -eq 11 ]; then
+			pacman -Sy --noconfirm --needed enlightenment connman terminology lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings;
+			systemctl enable lightdm;
+		elif [ "$packStuff" -eq 12 ]; then
+			pacman -Sy --noconfirm --needed gnome-flashback gdm;
+			systemctl enable gdm;
+		elif [ "$packStuff" -eq 13 ]; then
+			pacman -Sy --noconfirm --needed openbox lightdm lightdm-gtk-greeter lightdm-gtk-greeter-settings;
+			systemctl enable lightdm
+		fi
+	fi
+	echo "$hostName" > /etc/hostname &&
+	systemctl enable dhcpcd@"$netName".service &&
+	echo "Set root password" &&
+	passwd &&
+	echo "Creating user" "$userName" "and setting password" &&
+	useradd -m -G wheel,users -s /bin/bash "$userName" &&
+	passwd "$userName" &&
+	echo "Editing sudoers file" &&
+	echo "$userName""   ALL=(ALL) ALL" >> /etc/sudoers;
+		
+	if [ "$installType" -eq 1 ]; then # MBR/DOS
+		echo "Grub conf stuff" &&
+		grub-install --recheck --target=i386-pc "$diskName" &&
+		grub-mkconfig -o /boot/grub/grub.cfg ;
+	elif [ "$installType" -eq 2 ]; then # UEFI/GPT
+		echo "Grub conf stuff" &&
+		grub-install --target=x86_64-efi --efi-directory=/boot --bootloader-id=grub &&
+		grub-mkconfig -o /boot/grub/grub.cfg ;
+	fi
+	
+	mkdir /myTemp/ && chmod 777 -R /myTemp/ && cd /myTemp/
+	pacman -S --noconfirm --needed yajl git expac;
+	if [ ! -n "$(pacman -Qs cower)" ]; then
+	    curl -o PKGBUILD https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=cower
+	    sudo -u "$userName" makepkg PKGBUILD --skippgpcheck --install --needed
+	fi
+	# Install "pacaur" from AUR
+	if [ ! -n "$(pacman -Qs pacaur)" ]; then
+	    curl -o PKGBUILD https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=pacaur
+	    sudo -u "$userName" makepkg PKGBUILD --skippgpcheck --install --needed
+	fi
+	cd / && rm -rf /myTemp/ ;
+		
+	echo "AUR packages installing..." &&
+	mkdir /myTemp/ && chmod 777 -R /myTemp/ && cd /myTemp/;
+	if [ "$packStuff" -ge 1 ]; then
+		if [ "$packStuff" -eq 2 ]; then
+			curl -o PKGBUILD https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=j4-dmenu-desktop &&
+			sudo -u "$userName" makepkg PKGBUILD &&
+			pacman -U --noconfirm j4-dmenu-desktop*.tar.xz &&
+			curl -o PKGBUILD https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=i3blocks &&
+			sudo -u "$userName" makepkg PKGBUILD &&
+			pacman -U --noconfirm i3blocks*.tar.xz;
+			echo "exec i3" > /home/"$userName"/.xinitrc;
+		fi
+		curl -o PKGBUILD https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=numix-icon-theme-git &&
+		sudo -u "$userName" makepkg PKGBUILD &&
+		pacman -U --noconfirm numix*.tar.xz;
+		rm numix*.tar.xz;
+		curl -o PKGBUILD https://aur.archlinux.org/cgit/aur.git/plain/PKGBUILD?h=numix-circle-icon-theme-git &&
+		sudo -u "$userName" makepkg PKGBUILD &&
+		pacman -U --noconfirm numix*.tar.xz;
+	fi
+	sed -i '/Color/s/^#//g' /etc/pacman.conf; 
+	if [ "$myShell" -eq 2 ]; then
+		pacman -S --noconfirm  zsh zsh-completions;
+		sudo -u "$userName" sh -c "$(curl -fsSL https://raw.githubusercontent.com/robbyrussell/oh-my-zsh/master/tools/install.sh)"
+	fi
+	rm /"$myName";
+	cd / && rm -rf /myTemp/;
+	echo "All done! :)";
+else
+	echo "$0": usage: ALIS.sh setup;
+    exit 1;
+fi
+exit;

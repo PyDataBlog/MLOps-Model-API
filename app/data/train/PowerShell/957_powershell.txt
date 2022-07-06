@@ -1,0 +1,134 @@
+Function Select-GUI
+{
+<#  
+.SYNOPSIS  
+    Open or save files or open folders using Windows forms.
+
+.PARAMETER Start
+    The start directory for the form.
+
+.PARAMETER Description
+    Text that is included on the chrome of the form.
+
+.PARAMETER Ext
+    Adds an extension filter to file open or save forms.
+
+.PARAMETER File
+    When present this switch uses file open or save forms. Used with the Save switch.
+
+.PARAMETER Save
+    When used with the File switch launches a file save form.
+
+.PARAMETER UNC
+    When used without File swich and the required dll is missing will use Read-Host so a UNC path can be entered instead of failing back to the native non-unc path form.
+
+.EXAMPLE
+    Select-GUI -Start ([Environment]::GetFolderPath('MyDocuments')) -Description "Save File" -Ext "csv" -File -Save
+
+.EXAMPLE
+    Select-GUI -Start "C:\" -Description "Open Folder" -UNC
+
+.INPUTS
+    None. You cannot pipe objects to this function.
+
+.OUTPUTS
+    Full path of Folder or file    
+
+.NOTES  
+    Author     : Glen Buktenica
+	Change Log : Initial Build  20150130
+                 Public Release 20151005
+    License    : The MIT License (MIT)
+                 http://opensource.org/licenses/MIT
+
+.LINK
+    http://blog.buktenica.com/select-gui/
+#> 
+Param (
+    [parameter(Position=1)][string] $Start = ([Environment]::GetFolderPath('Desktop')),
+    [parameter(Position=2)][String] $Description,
+    [String] $Ext,
+    [Switch] $File,
+    [Switch] $Save,
+    [Switch] $UNC
+)
+    Add-Type -AssemblyName System.Windows.Forms
+    
+    If ($File)
+    {
+        If ($Save)
+        {
+            $OpenForm = New-Object System.Windows.Forms.SaveFileDialog
+            If (!$Description)
+            {
+                $Description = "Select file to save"
+            }
+        }
+        Else
+        {
+            $OpenForm = New-Object System.Windows.Forms.OpenFileDialog
+            If (!$Description)
+            {
+                $Description = "Select file to open"
+            }
+        }
+        $OpenForm.InitialDirectory = $Start
+        If ($Ext.length -gt 0)
+        {
+            $OpenForm.Filter = "$Ext files (*.$Ext)|*.$Ext|All files (*.*)|*.*"
+        }
+        If ($OpenForm.showdialog() -eq "Cancel")
+        {
+            Write-Error "You pressed cancel, script will now terminate." 
+            Start-Sleep -Seconds 2
+            Break
+        }
+        $OpenForm.filename
+        $OpenForm.Dispose()
+    }
+    Else #Open Folder
+    {
+        $DllPath = (Split-Path $script:MyInvocation.MyCommand.Path) + "\FolderSelect.dll"
+        If (!$Description)
+        {
+            $Description = "Select folder"
+        }
+        If (Test-Path $DllPath -ErrorAction SilentlyContinue)
+        {
+            Add-Type -Path $DllPath
+            $OpenForm = New-Object -TypeName FolderSelect.FolderSelectDialog -Property @{ Title = $Description; InitialDirectory = $Start }
+            $A = $OpenForm.showdialog([IntPtr]::Zero)
+            If (!($OpenForm.FileName))
+            {
+                Write-Error "You pressed cancel, script will now terminate." 
+                Start-Sleep -Seconds 2
+                Exit
+            }
+            Else
+            {
+                $OpenForm.FileName
+            }
+        }
+        #If DLL missing fall back to .NET form or Read-Host if UNC forced
+        Elseif($UNC)
+        {
+            $OpenForm = Read-Host $Description
+            Return $OpenForm
+        }
+        Else
+        {
+            $OpenForm = New-Object System.Windows.Forms.FolderBrowserDialog
+            $OpenForm.Rootfolder = $Start
+            $OpenForm.Description = $Description
+
+            If ($OpenForm.showdialog() -eq "Cancel")
+            {
+                Write-Error "You pressed cancel, script will now terminate." 
+                Start-Sleep -Seconds 2
+                Exit
+            }
+            $OpenForm.SelectedPath
+            $OpenForm.Dispose()
+        }
+    }
+}

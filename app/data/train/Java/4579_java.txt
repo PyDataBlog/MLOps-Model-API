@@ -1,0 +1,279 @@
+/*
+ * Created on Dec 7, 2004
+ *
+ * This is the object given to the web-form. 
+ * It's a mapping between the report as seen from the JSP-code to the 
+ * way it's used in the service and domain layers.
+  */
+package no.abmu.abmstatistikk.annualstatistic.service;
+
+import java.beans.XMLEncoder;
+import java.io.OutputStream;
+import java.util.HashMap;
+import java.util.Iterator;
+import java.util.Map;
+import java.util.Set;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.springframework.validation.Errors;
+
+import no.abmu.abmstatistikk.annualstatistic.domain.Answer;
+import no.abmu.abmstatistikk.annualstatistic.domain.Report;
+import no.abmu.abmstatistikk.annualstatistic.domain.Schema;
+
+/**
+ * @author Henning Kulander <hennikul@linpro.no>
+ *
+ */
+public class SchemaReport {
+	private static final Log logger = (Log) LogFactory.getLog(SchemaReport.class);
+
+	private Schema schema;
+	private Report report;
+	private ReportHelper reportHelper;
+	private Class[] fieldClasses; 
+	protected Map field;
+    private Map comment;
+    private SchemaReport virtualSchemaReport;
+	
+	public SchemaReport(Report report) {
+		this.report = report;
+		this.reportHelper = new ReportHelper(report);
+		this.schema = report.getSchema();
+		Set answers = report.getAnswers();
+		field = new HashMap(); 
+        comment = new HashMap();
+		if (answers != null) {
+			Iterator answerIterator = answers.iterator();
+			int i = 0;
+			fieldClasses = new Class[answers.size()+1];
+			while (answerIterator.hasNext()) {
+				Answer answer = (Answer) answerIterator.next();
+				field.put(answer.getField().getName(), answer);
+                comment.put(answer.getField().getName(), answer.getComment());
+				i++;
+			}
+			fieldClasses[i] = Report.class;
+		} else {
+			logger.error("No answers for current report!");
+		}
+	}
+    /* (non-Javadoc)
+     * @see no.abmu.abmstatistikk.util.DynamicBeanFactory.BeanAdapter#setProperty(java.lang.String, java.lang.Object)
+     */
+     
+     public Map getField() {
+     	return field;
+     }
+     
+     public void setField(Map newfield) {
+     	field = newfield;
+     }
+     
+    public void setProperty(String name, Object value) {
+		if (name.startsWith("field")) {
+			String fieldName = name.substring(5);
+			
+			logger.debug("Setting answer for field "+fieldName+" to "+value);
+			Answer answer = reportHelper.getAnswerByFieldName(fieldName);
+			if (answer != null) {
+				String stringValue = (String) value;
+				answer.setValue(stringValue);
+				return;
+			} 
+		} else if (name.startsWith("comment")) {
+		    String fieldName = name.substring(7);
+            
+            logger.debug("Setting comment for field "+fieldName+" to "+value);
+            Answer answer = reportHelper.getAnswerByFieldName(fieldName);
+            if (answer != null) {
+                String stringComment = (String) value;
+                answer.setComment(stringComment);
+                return;
+            }
+        }
+		logger.error("setProperty called for unhandled property "+name);
+        logger.error(" - Current schema is "+report.getSchema().getShortname());
+    }
+
+    /* (non-Javadoc)
+     * @see no.abmu.abmstatistikk.util.DynamicBeanFactory.BeanAdapter#getProperty(java.lang.String)
+     */
+    public Object getProperty(String name) {
+    	if (name.startsWith("field")) {
+    		String fieldName = name.substring(5);
+
+			logger.debug("Returning answer for field "+fieldName);
+			
+			Answer answer = reportHelper.getAnswerByFieldName(fieldName);
+			if (answer != null) {
+				logger.debug("Value is "+answer.getValue());
+				return answer;
+			} else {
+				logger.error("Trying to get unexisting answer for field "
+                            +fieldName);
+			}
+		} else if (name.equals("report")) {
+			return report;
+		}
+		return null;
+	}
+    /**
+     * @return
+     */
+    public Class[] getFieldClasses() {
+        return fieldClasses;
+    }
+
+    /**
+     * @return the report associated with the schemareport.
+     */
+    public Report getReport() {
+        return report;
+    }
+    /**
+     * @param errors
+     */
+    public void validate(Errors errors, String schemaName) {
+        validate(errors, schemaName, null);
+    }
+    
+    
+    /**
+     * @param errors : Spring errors object where errors are registered.
+     * @param schemaName : Name of the schema used from JSP
+     * @param fieldKeys : Set of key-names to validate, normally keys in 
+     *                    one page
+     */
+    public void validate(Errors errors, String schemaName, Set fieldKeys) {
+        if (fieldKeys == null) { /* Validate all fields */
+            fieldKeys = field.keySet();
+        }
+        /* Call setProperty for all fields to update values in report object */
+        Iterator fieldKeysIterator = fieldKeys.iterator();
+        while (fieldKeysIterator.hasNext()) {
+            String key = (String) fieldKeysIterator.next();
+            Answer unstoredAnswer = (Answer) field.get(key);
+            String unstoredComment = (String) comment.get(key);
+            if (unstoredComment != null) {
+                if (unstoredComment.equals("")) {
+                    unstoredComment = null;
+                }
+                logger.debug("Found comment for "+key+": "+unstoredComment);
+                setProperty("comment"+key, unstoredComment);
+            }
+            if (unstoredAnswer != null) {
+                String value = unstoredAnswer.getValue();
+                if (value != null && value.equals("")) {
+                    value = null;
+                }
+                if (unstoredAnswer.getPassedvalidation().equals(new Integer(1))){
+                    logger.debug("Field "+key+" was marked as validated.");
+                    value = null; // Checkboxes are not returned when cleared.
+                    unstoredAnswer.setPassedvalidation(new Integer(0));
+                }
+                logger.debug("Updating field "+key+" with value "+value
+                            +" has passed validation? "
+                            +unstoredAnswer.getPassedvalidation());
+                setProperty("field"+key, value);
+            } else { /* Checkboxes are reset when hidden _FIELD input is used */
+                unstoredAnswer = (Answer) getProperty("field"+key);
+                if (unstoredAnswer == null) {
+                    logger.error("No answer object for field "+key
+                            +" in schema "+schemaName
+                            +" This should be an unchecked checkbox.");
+                } else {
+                    unstoredAnswer.setValue(null);
+                    field.put(key, unstoredAnswer);
+                }
+            }
+        }
+        /* Autocalculate autocalculated field with new values */
+        reportHelper.autoCalculate();
+        /* Iterate through all fields and validate updated answer for field */
+        fieldKeysIterator = fieldKeys.iterator();
+        while (fieldKeysIterator.hasNext()) {
+            String key = (String) fieldKeysIterator.next();
+            Answer storedAnswer = (Answer) getProperty("field"+key);
+            if (storedAnswer != null) {
+                AnswerHelper answerHelper = 
+                    new AnswerHelper(storedAnswer);
+                String error = answerHelper.validate();
+                if (error != null) {
+                    logger.debug("Error: "+ error+" for field "+key 
+                                +" "+errors.getObjectName());
+                    errors.rejectValue("field['"+key+"']", 
+                                       error, "Unknown error: "+error);
+                    errors.rejectValue("field"+key, 
+                            error, "Unknown error: "+error);
+                    if (error.startsWith("schema.error.change")) {
+                        errors.rejectValue("comment['"+key+"']",
+                                           error, "Unknown error: "+error);
+                        errors.rejectValue("comment"+key,
+                                error, "Unknown error: "+error);
+                    }
+                }
+            } else {
+                logger.error("Couldn't find stored answer for field "+key+
+                             " in schema "+schemaName);
+            }
+        }
+        
+        /* If there were no errors, mark all answers as validated to fix
+         * problem clearing checkboxes. */
+        if (!errors.hasErrors() || errors.hasErrors()) {
+            fieldKeysIterator = fieldKeys.iterator();
+            while (fieldKeysIterator.hasNext()) {
+                String key = (String) fieldKeysIterator.next();
+                logger.debug("Setting "+key+" as validated.");
+                Answer validatedAnswer = (Answer) getProperty("field"+key);
+                validatedAnswer.setPassedvalidation(new Integer(1));
+            }
+        }
+    }
+
+    public void dumpAsXML(OutputStream out) {
+        XMLEncoder e = new XMLEncoder(out);
+        Map stringMap = new HashMap();
+        Schema schema = report.getSchema();
+        stringMap.put("schematype", schema.getShortname());
+        stringMap.put("valid_from", schema.getStartdate());
+        stringMap.put("valid_to", schema.getStopdate());
+        stringMap.put("organisation_id", new Long(report.getOrganisationid()));
+        Set fields = field.keySet();
+        Iterator fieldIterator = fields.iterator();
+        while (fieldIterator.hasNext()) {
+            String fieldName = (String) fieldIterator.next();
+            Answer fieldAnswer = (Answer) field.get(fieldName);
+            stringMap.put(fieldName, fieldAnswer.getValue());
+        }
+        e.writeObject(stringMap);
+        e.close();
+    }
+    
+    /**
+     * @return Returns the comment.
+     */
+    public Map getComment() {
+        return comment;
+    }
+    /**
+     * @param comment The comment to set.
+     */
+    public void setComment(Map comment) {
+        this.comment = comment;
+    }
+    /**
+     * @return Returns the virtualSchemaReport.
+     */
+    public SchemaReport getVirtualSchemaReport() {
+        return virtualSchemaReport;
+    }
+    /**
+     * @param virtualSchemaReport The virtualSchemaReport to set.
+     */
+    public void setVirtualSchemaReport(SchemaReport virtualSchemaReport) {
+        this.virtualSchemaReport = virtualSchemaReport;
+    }
+}

@@ -1,0 +1,1 @@
+cmd_drivers/input/touchscreen/built-in.o :=  /home/hacker/codesourcery/lite/bin/arm-none-linux-gnueabi-ld -EL    -r -o drivers/input/touchscreen/built-in.o drivers/input/touchscreen/atmel.o drivers/input/touchscreen/atmel_224e.o 

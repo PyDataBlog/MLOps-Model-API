@@ -1,0 +1,55 @@
+share_examples_for 'a datastore adapter' do |adapter_name|
+  let(:persisted_job_class) do
+    adapter_module = namespace
+    Class.new do
+      include SuckerPunch::Job
+      prepend adapter_module
+
+      def perform(mutant_name)
+        'Hamato Yoshi' if mutant_name == 'Splinter'
+      end
+    end
+  end
+
+  subject { persisted_job_class.new }
+
+  #need a better way to test this: this passees even if the job is only created
+  #immediately before it is executed
+  it 'persists asynchronous jobs as they are queued' do
+    adapter_class.any_instance.stub(:update_status)
+
+    subject.async.perform('Donatello')
+
+    job_record.arguments.should eq ['Donatello']
+    job_record.status.should eq 'queued'
+  end
+
+  it 'persists synchronous jobs when they are queued' do
+    adapter_class.any_instance.stub(:update_status)
+
+    subject.perform('Raphael')
+
+    job_record.arguments.should eq ['Raphael']
+    job_record.status.should eq 'queued'
+  end
+
+  it 'marks job records as finished after executing them' do
+    subject.perform('Leonardo')
+
+    job_record.status.should eq 'complete'
+  end
+
+  it 'persists the job execution result' do
+    subject.perform('Splinter')
+
+    job_record.result.should eq 'Hamato Yoshi'
+  end
+
+  #Override in spec when data store does not support .first
+  let(:job_record) { job_class.first }
+
+  #Override in spec when data store uses a different naming convention
+  let(:adapter_class) { namespace.const_get('Adapter') }
+  let(:job_class) { namespace.const_get('Job') }
+  let(:namespace) { JobSecurity.const_get(adapter_name) }
+end

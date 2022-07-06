@@ -1,0 +1,164 @@
+<?php
+/**
+ * @author Linkero
+ * @filename fselink.class.php
+ * @copyright 2014
+ * @version 0.1b
+ */
+
+
+
+class fseLink
+{
+    protected $userKey = "INSERT_USER_KEY"; //User Key
+    protected $groupKey = "INSERT_GROUP_KEY"; //Group Key
+    protected $groupId = "INSERT_GROUP_ID"; //Group ID
+
+    /* --------DO NOT EDIT BELOW THIS LINE-------- */
+
+    /* --Define initial arrays-- */
+    public $memberArray = array();
+    public $groupArray = array();
+    public $aircraftArray = array();
+
+
+    /* --Initializer-- */
+    public function startFSELink()
+    {
+        /* --Sets up groupArray-- */
+        /* --Structure: Flights, Time, Distance, Profit-- */
+        $this->groupArray = array(
+            0,
+            0,
+            0,
+            number_format(0.00, 2));
+
+        /* --Loads Aircraft feed and sets up aircraftArray-- */
+        /* --Structure: Registration, Make/Model, Flights, Time, Distance, Profit-- */
+        $ac = simplexml_load_file("http://www.fseconomy.net/data?userkey=$this->userKey&format=xml&query=aircraft&search=key&readaccesskey=$this->groupKey");
+        foreach ($ac->Aircraft as $aircraft) {
+            array_push($this->aircraftArray, array(
+                "$aircraft->Registration",
+                "$aircraft->MakeModel",
+                0,
+                0,
+                0,
+                number_format(0.00, 2)));
+
+        }
+        /* --Loads Group Member feed and sets up memberArray-- */
+        /* --Structure: Pilot Name, Group Status, Flights, Time, Distance, Profit-- */
+        $mem = simplexml_load_file("http://www.fseconomy.net/data?userkey=$this->userKey&format=xml&query=group&search=members&readaccesskey=$this->groupKey");
+        foreach ($mem->Member as $Member) {
+            array_push($this->memberArray, array(
+                "$Member->Name",
+                "$Member->Status",
+                0,
+                0,
+                0,
+                number_format(0.00, 2))); //name, status, flights, time, distance, profit
+        }
+
+        /* --Populate arrays and return for use-- */
+        $this->populateArrays($this->memberArray, $this->groupArray, $this->
+            aircraftArray);
+        return $this->memberArray;
+        return $this->groupArray;
+        return $this->aircraftArray;
+    }
+
+
+    /* --Populate Arrays-- */
+    private function populateArrays(&$memberArray, &$groupArray, &$aircraftArray)
+    {
+        /* --Loads Flight Log feed(LIMIT 500) and starts populating-- */
+        $logs = simplexml_load_file("http://www.fseconomy.net/data?userkey=$this->userKey&format=xml&query=flightlogs&search=id&readaccesskey=$this->groupKey&fromid=$this->groupId");
+        foreach ($logs->FlightLog as $log) {
+            $ft = explode(":", $log->FlightTime); //Split time for use
+            /* --Populate memberArray-- */
+            for ($x = 0; $x < count($memberArray); $x++) {
+                if (strcmp($memberArray[$x][0], $log->Pilot) == 0) {
+                    $memberArray[$x][2] = $memberArray[$x][2] + 1; //Increment flight counter
+                    $memberArray[$x][3] = $memberArray[$x][3] + $ft[1] + ($ft[0] * 60); //Add Flight time(in minutes)
+                    $memberArray[$x][4] = $memberArray[$x][4] + $log->Distance; //Add Distance
+                    $memberArray[$x][5] = $memberArray[$x][5] + floatval($log->PilotFee); //Add Pilot's Pay
+                }
+            }
+            /* --Populates groupArray-- */
+            $groupArray[1] = $groupArray[1] + $ft[1] + ($ft[0] * 60); //Add Flight time(in minutes)
+            $groupArray[2] = $groupArray[2] + $log->Distance; //Add Distance
+            $groupArray[3] = $groupArray[3] + floatval($log->Income) - floatval($log->
+                PilotFee) - floatval($log->CrewCost) - floatval($log->BookingFee) - floatval($log->
+                FuelCost) - floatval($log->GCF) - floatval($log->RentalCost); //Calculate Profit
+
+            /* --Populates aircraftArray-- */
+            for ($x = 0; $x < count($aircraftArray); $x++) {
+                if (strcmp($aircraftArray[$x][0], $log->Aircraft) == 0) {
+                    $aircraftArray[$x][2] = $aircraftArray[$x][2] + 1; //Increment flight counter
+                    $aircraftArray[$x][3] = $aircraftArray[$x][3] + $ft[1] + ($ft[0] * 60); //Add Flight time(in minutes)
+                    $aircraftArray[$x][4] = $aircraftArray[$x][4] + $log->Distance; //Add Distance
+                    $aircraftArray[$x][5] = $aircraftArray[$x][5] + floatval($log->Income) -
+                        floatval($log->CrewCost) - floatval($log->BookingFee) - floatval($log->FuelCost) -
+                        floatval($log->GCF); //Calculate Profit
+
+                }
+            }
+            $groupArray[0] = count($logs->FlightLog); //Increment flight counter
+        }
+        /* --Returns populated arrays-- */
+        return $aircraftArray;
+        return $memberArray;
+        return $groupArray;
+    }
+
+    /* --Display sortable Pilot stats table-- */
+    public function displayPilotStats()
+    {
+        echo "<table id=\"memberTable\" class=\"tablesorter\"><thead><tr><th>Pilot</th><th>Status</th><th>Total Flights</th><th>Total Time</th><th>Total Distance</th><th>Total Profit</th></tr></thead><tbody>";
+
+        for ($x = 0; $x < count($this->memberArray); $x++) {
+            echo "<tr><td>" . $this->memberArray[$x][0] . "</td><td>" . ucfirst($this->
+                memberArray[$x][1]) . "</td><td>" . $this->memberArray[$x][2] . "</td><td>" . $this->
+                formatTime($this->memberArray[$x][3]) . "</td><td>" . $this->memberArray[$x][4] .
+                "nm</td><td>$" . number_format($this->memberArray[$x][5], 2) . "</td></tr>";
+        }
+        echo "</tbody></table>";
+    }
+
+    /* --Display sortable Pilot stats table-- */
+    public function displayGroupStats()
+    {
+        echo "<table id=\"groupTable\" class=\"tablesorter\"><thead><tr><th>Total Flights</th><th>Total Time</th><th>Total Distance</th><th>Total Profit</th></tr></thead><tbody>";
+        echo "<tr><td>" . $this->groupArray[0] . "</td><td>" . $this->formatTime($this->
+            groupArray[1]) . "</td><td>" . $this->groupArray[2] . "nm</td><td>$" .
+            number_format($this->groupArray[3], 2) . "</td></tr> ";
+        echo "</tbody></table>";
+    }
+
+    /* --Display sortable Pilot stats table-- */
+    public function displayAircraftStats()
+    {
+        echo "<table id=\"aircraftTable\" class=\"tablesorter\"><thead><tr><th>Aircraft Registration</th><th>Make/Model</th><th>Total Flights</th><th>Total Time</th><th>Total Distance</th><th>Total Profit</th></tr></thead><tbody>";
+
+        for ($x = 0; $x < count($this->aircraftArray); $x++) {
+            echo "<tr><td>" . $this->aircraftArray[$x][0] . "</td><td>" . $this->
+                aircraftArray[$x][1] . "</td><td>" . $this->aircraftArray[$x][2] . "</td><td>" .
+                $this->formatTime($this->aircraftArray[$x][3]) . "</td><td>" . $this->
+                aircraftArray[$x][4] . "nm</td><td>$" . number_format($this->aircraftArray[$x][5],
+                2) . "</td></tr>";
+        }
+        echo "</tbody></table> ";
+    }
+
+    /* --Formats time-- */
+    public function formatTime($minutes)
+    {
+
+        $hours = floor($minutes / 60);
+        $min = $minutes - ($hours * 60);
+        $formattedTime = $hours . ":" . $min;
+        return $formattedTime;
+
+    }
+}
+?>

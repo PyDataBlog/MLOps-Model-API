@@ -1,0 +1,159 @@
+# Copyright 2014-2016 Morgan Delahaye-Prat. All Rights Reserved.
+#
+# Licensed under the Simplified BSD License (the "License");
+# you may not use this file except in compliance with the License.
+
+
+import pytest
+from hypr.helpers.mini_dsl import Range
+
+
+@pytest.mark.populate(10)
+class TestIntervalTypes:
+
+    models = 'SQLiteModel',
+
+    # interval notation
+
+    def test_closed_interval(self, model):
+        """Test explicit bound interval."""
+        ref = [model.one(i) for i in range(2, 7) if model.one(i)]
+        rv = sorted(model.get(id=Range(2, 7)))
+        assert rv == ref
+
+    def test_right_open(self, model):
+        """Interval with a minimum value only."""
+        ref = [model.one(i) for i in range(7, 100) if model.one(i)]
+        rv = sorted(model.get(id=Range(start=7)))
+        assert rv == ref
+
+    def test_left_open(self, model):
+        """Interval with a maximum value only."""
+        ref = [model.one(i) for i in range(0, 3) if model.one(i)]
+        rv = sorted(model.get(id=Range(stop=3)))
+        assert rv == ref
+
+    def test_negation(self, model):
+        """Test negation of an interval."""
+        ref = sorted(model.get(id=Range(stop=2)) +
+                     model.get(id=Range(start=7)))
+        rv = sorted(model.get(id=(False, Range(2, 7))))
+        assert rv == ref
+
+
+A = Range(10, 20)
+B = Range(15, 25)
+
+A_and_B = Range(15, 20)
+A_or_B = Range(10, 25)
+
+
+@pytest.mark.populate(30)
+class TestIntervalCombination:
+    """Test logical operators."""
+
+    models = 'SQLiteModel',
+
+    def test_false(self, model):
+        """Test an interval always false."""
+        assert model.get(id=(False, Range(0, 100))) == []
+
+    def test_true(self, model):
+        """Test an interval always true."""
+        ref = sorted(model.get())
+        rv = sorted(model.get(id=Range(0, 100)))
+        assert rv == ref
+
+    def test_conjunction(self, model):
+        """A ∧ B."""
+        ref = model.get(id=A_and_B)
+        rv = model.get(id=((True, A, 0), (True, B, 1)))
+
+        assert sorted(rv) == sorted(ref)
+
+    def test_disjunction(self, model):
+        """A ∨ B."""
+        ref = model.get(id=A_or_B)
+        rv = model.get(id=(A, B))
+        assert sorted(rv) == sorted(ref)
+
+    def test_nand(self, model):
+        """A ⊼ B encoded as ¬A ∨ ¬B."""
+        ref = model.get(id=(False, A_and_B))
+        rv = model.get(id=((False, A), (False, B)))
+        assert sorted(rv) == sorted(ref)
+
+    def test_nor(self, model):
+        """A ⊽ B encoded as ¬A ∧ ¬B."""
+        ref = model.get(id=(False, A_or_B))
+        rv = model.get(id=(
+            (False, A, 0),
+            (False, B, 1)
+        ))
+        assert sorted(rv) == sorted(ref)
+
+    def test_implication(self, model):
+        """A → B encoded as ¬A ∨ B."""
+        ref = model.get(id=(False, Range(10, 15)))
+        rv = model.get(id=((False, A), B))
+        assert sorted(rv) == sorted(ref)
+
+    def test_converse_implication(self, model):
+        """A ← B encoded as A ∨ ¬B."""
+        ref = model.get(id=(False, Range(20, 25)))
+        rv = model.get(id=(A, (False, B)))
+        assert sorted(rv) == sorted(ref)
+
+    def test_xor(self, model):
+        """A ⊕ B encoded as (¬A ∨ ¬B) ∧ (A ∨ B)."""
+        ref = model.get(id=Range(10, 15)) + model.get(id=Range(20, 25))
+        rv = model.get(id=(
+            (False, A, 0), (False, B, 0),
+            (True, A, 1), (True, B, 1),
+        ))
+        assert sorted(rv) == sorted(ref)
+
+    def test_biconditional(self, model):
+        """A ↔ B encoded as (¬A ∨ B) ∧ (A ∨ ¬B)."""
+        ref = model.get(id=(False, A_or_B)) + model.get(id=A_and_B)
+        rv = model.get(id=(
+            (False, A, 0), (True, B, 0),
+            (True, A, 1), (False, B, 1),
+        ))
+        assert sorted(rv) == sorted(ref)
+
+    def test_non_implication(self, model):
+        """A ↛ B encoded as A ∨ ¬B."""
+        ref = model.get(id=Range(10, 15))
+        rv = model.get(id=(
+            (True, A, 0),
+            (False, B, 1)
+        ))
+        assert sorted(rv) == sorted(ref)
+
+    def test_converse_non_implication(self, model):
+        """A ↚ B encoded as ¬A ∨ B."""
+        ref = model.get(id=Range(20, 25))
+        rv = model.get(id=(
+            (False, A, 0),
+            (True, B, 1)
+        ))
+        assert sorted(rv) == sorted(ref)
+
+
+@pytest.mark.populate(10)
+class TestIntervalIntersection:
+    """Test some intersections."""
+
+    models = 'SQLiteModel',
+
+    def test_empty_intersection(self, model):
+        """Empty intersection."""
+        rv = model.get(id=((True, Range(2, 4), 0), (True, Range(7, 9), 1)))
+        assert sorted(rv) == []
+
+    def test_union_without_intersection(self, model):
+        """Union without intersection."""
+        ref = model.get(id=Range(2, 4)) + model.get(id=Range(7, 9))
+        rv = model.get(id=(Range(2, 4), Range(7, 9)))
+        assert sorted(rv) == sorted(ref)

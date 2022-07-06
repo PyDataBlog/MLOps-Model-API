@@ -1,0 +1,947 @@
+﻿namespace DataContractSerialization {
+    declare abstract class Reflect {
+        public static getMetadata(metadataKey: string, target: any, targetKey: string | symbol): any;
+    }
+
+    if (typeof console === "undefined" || typeof console.log !== "function") {
+        console = <any>function () {
+            this.log = function () {
+                return;
+            }
+        }
+    }
+
+    if (typeof console.warn !== "function") {
+        console.warn = <any>function (message?: string) {
+            console.log(message);
+        }
+    }
+
+    //#region "Metadata"
+    class DataMemberMetadata {
+        public emitDefaultValue: boolean;
+
+        /** Data member name */
+        public name: string;
+
+        /** Property or field key of the data member on the type */
+        public key: string;
+
+        /** Constuctor (type) reference of the member */
+        public type: { new (): any };
+
+        /** If set, indicates that the member must be present when reading or deserializing */
+        public isRequired: boolean;
+
+        /** If the data member is a collection, sets the type of collection elements. */
+        public elementType: { new (): any };
+
+        /** Serialization/deserialization order */
+        public order: number;
+    }
+
+    class DataContractMetadata {
+        private _className: string;
+        private _classType: { new (): any };
+        private _dataMembers: { [key: string]: DataMemberMetadata };
+        private _knownTypes: { new (): any }[];
+        private _knownTypeCache: { [key: string]: { new (): any } };
+
+        /** Gets the meta data collection of all members of the data contract for the type as key-value pairs */
+        public get dataMembers(): { [key: string]: DataMemberMetadata } {
+            return this._dataMembers;
+        }
+
+        /** Gets or sets the type (constructor function) of the data contract for the type associated with this DataContractMetadata */
+        public get classType(): { new (): any } {
+            return this._classType;
+        }
+
+        /** Gets or sets the type (constructor function) of the data contract for the type associated with this DataContractMetadata */
+        public set classType(value: { new (): any }) {
+            this._classType = value;
+
+            if (this._className === null) {
+                this._className = value.constructor.toString().match(/function (\w*)/)[1];
+            }
+        }
+
+        /** Gets or sets the name of the data contract for the type associated with this DataContractMetadata */
+        public get className(): string {
+            if (this._className !== null && typeof this._className !== "undefined") {
+                return this._className;
+            } else {
+                return this.classType.toString().match(/function (\w*)/)[1];
+            }
+        }
+
+        /** Gets or sets the name of the data contract for the type associated with this DataContractMetadata */
+        public set className(value: string) {
+            this._className = value;
+        }
+
+        /** Get a key-value collection of the currently known types */
+        public get knownTypes() {
+            var knownTypes: { [key: string]: { new (): any } };
+
+            if (false && this._knownTypeCache) {
+                return this._knownTypeCache;
+            } else {
+                knownTypes = {};
+
+                this._knownTypes.forEach((knownType) => {
+                    knownTypes[UtilityFunctions.getTypeName(knownType, /*own*/ true, /*fullname*/ true)] = knownType;
+                });
+
+                this._knownTypeCache = knownTypes;
+
+                return knownTypes;
+            }
+        }
+
+        /** Namespace of the data contract */
+        public namespace: string;
+
+        constructor() {
+            this._dataMembers = {};
+            this._knownTypes = [];
+            this._knownTypeCache = null;
+        }
+
+        /** Set a known type */
+        public setKnownType(type: { new (): any }): void {
+            this._knownTypes.push(type);
+            this._knownTypeCache = null;
+        }
+
+        /**
+         * Sort data members:
+         *  1. Ordered members in defined order
+         *  2. Unordered members in alphabetical order
+         */
+        public sortMembers(): void {
+            var memberArray: DataMemberMetadata[] = [];
+
+            Object.keys(this._dataMembers).forEach((propertyKey) => {
+                memberArray.push(this._dataMembers[propertyKey]);
+            });
+
+            memberArray = memberArray.sort(this.sortMembersCompare);
+
+            this._dataMembers = {};
+
+            memberArray.forEach((dataMember) => {
+                this._dataMembers[dataMember.key] = dataMember;
+            });
+        }
+
+        private sortMembersCompare(a: DataMemberMetadata, b: DataMemberMetadata) {
+            if (typeof a.order === "undefined" && typeof b.order === "undefined") {
+                // a and b both both implicitly ordered, alphabetical order
+                if (a.name < b.name) {
+                    return -1;
+                } else if (a.name > b.name) {
+                    return 1;
+                }
+            } else if (typeof a.order === "undefined") {
+                // a is implicitly ordered, comes after b (compare: a is greater)
+                return 1;
+            } else if (typeof b.order === "undefined") {
+                // b is implicitly ordered, comes after a (compare: b is greater)
+                return -1;
+            } else {
+                // a and b are both explicitly ordered
+                if (a.order < b.order) {
+                    return -1;
+                } else if (a.order > b.order) {
+                    return 1;
+                } else {
+                    // ordering is the same, use alphabetical order
+                    if (a.name < b.name) {
+                        return -1;
+                    } else if (a.name > b.name) {
+                        return 1;
+                    }
+                }
+            }
+
+            return 0;
+        }
+    }
+    //#endregion "Metadata"
+
+    //#region "@DataContract"
+    export interface IDataContractOptions {
+        /** Sets the name of the data contract for the type */
+        name?: string;
+
+        /** Sets the namespace of the data contract for the type */
+        nspace?: string;
+    }
+
+    /**
+     * Specifies that the type defines a data contract and is serializable by the DataContractSerializer.
+     * To make their type serializable, type authors must define a data contract for their type.
+     */
+    export function DataContract(): Function;
+
+    /**
+     * Specifies that the type defines a data contract and is serializable by the DataContractSerializer.
+     * To make their type serializable, type authors must define a data contract for their type.
+     * @param {DataContractOptions} options Configuration options to customize a data contract
+     */
+    export function DataContract(options: IDataContractOptions): Function;
+
+    export function DataContract(options?: IDataContractOptions): Function {
+        options = options || {};
+
+        /**
+         * The actual @DataContract decorator function.
+         * @param {function} target The decorated class (constructor function object)
+         */
+        function decorate<TFunction extends Function>(target: { new (): any }): { new (): any } | void {
+            var metadata: DataContractMetadata;
+            var parentMetadata: DataContractMetadata;
+
+            if (!target.prototype.hasOwnProperty("__dataContractMetadata")) {
+                metadata = new DataContractMetadata();
+
+                if (target.prototype.__dataContractMetadata) {
+                    // inherit data members and known types from parent contract
+                    parentMetadata = target.prototype.__dataContractMetadata;
+
+                    // data members
+                    Object.keys(parentMetadata.dataMembers).forEach((memberPropKey) => {
+                        metadata.dataMembers[memberPropKey] = parentMetadata.dataMembers[memberPropKey];
+                    });
+
+                    // known types
+                    Object.keys(parentMetadata.knownTypes).forEach((key) => {
+                        metadata.setKnownType(parentMetadata.knownTypes[key]);
+                    });
+                }
+
+                Object.defineProperty(target.prototype, "__dataContractMetadata", {
+                    enumerable: false,
+                    configurable: false,
+                    writable: false,
+                    value: metadata
+                });
+            } else {
+                metadata = target.prototype.__dataContractMetadata;
+            }
+
+            metadata.classType = target;
+            metadata.className = options.name;
+            metadata.namespace = options.nspace;
+
+            return target;
+        }
+
+        return decorate;
+    }
+    //#endregion "@DataContract"
+
+    //#region "@DataMember"
+    export interface IDataMemberOptions {
+        /** Sets the data member name explicitly, overriding the name inferred from property key */
+        name?: string;
+
+        /** 
+         * Sets the data member type.
+         * The referenced type must contain a parameterless constructor.
+         * Optional if the Reflection API is available.
+         */
+        type?: { new (): any };
+
+        /** If the data member is a collection, sets the type of collection elements. */
+        elementType?: { new (): any };
+
+        /** If set, indicates that the member must be present when deserializing */
+        isRequired?: boolean;
+
+        /** Serialization/deserialization order */
+        order?: number;
+    }
+
+    /**
+     * When applied to the member of a type, specifies that the member is part of a data contract and is serializable by a
+     * DataContractSerializer.
+     */
+    export function DataMember(): Function;
+
+    /**
+     * When applied to the member of a type, specifies that the member is part of a data contract and is serializable by a
+     * DataContractSerializer.
+     * @param {DataMemberOptions} options Sets configuration options for the data member
+     */
+    export function DataMember(options: IDataMemberOptions): Function;
+    export function DataMember(a?: any, b?: any): any {
+        var memberMetadata = new DataMemberMetadata();
+        var options: IDataMemberOptions;
+
+        options = a || {};
+
+        memberMetadata.isRequired = options.isRequired || false;
+        memberMetadata.order = options.order;
+        memberMetadata.type = options.type;
+        memberMetadata.elementType = options.elementType;
+
+        function decorate(targetPrototype: any, propertyKey: string | symbol): void {
+            var contractMetadata: DataContractMetadata;
+            var parentMetadata: DataContractMetadata;
+            var reflectType: any;
+
+            memberMetadata.key = propertyKey.toString();
+            memberMetadata.name = options.name || propertyKey.toString();
+
+            UtilityFunctions.checkReservedName(memberMetadata.name);
+
+            // undefined types from file ordering mistakes are common
+            if (options.hasOwnProperty("type") && typeof options.type === "undefined") {
+                throw new Error(
+                    `The type specified for data member "${memberMetadata.name}" ` +
+                    `on type "${UtilityFunctions.getRawTypeName(targetPrototype)}" does not exist`
+                );
+            }
+
+            if (options.hasOwnProperty("elementType") && typeof options.elementType === "undefined") {
+                throw new Error(
+                    `The elementType specified for data member "${memberMetadata.name}" ` +
+                    `on type "${UtilityFunctions.getRawTypeName(targetPrototype)}" does not exist`
+                );
+            }
+
+            //#region "Reflection API support"
+            if (typeof Reflect === "object" && typeof Reflect.getMetadata === "function") {
+                reflectType = Reflect.getMetadata("design:type", targetPrototype, propertyKey);
+
+                if (typeof reflectType === "undefined") {
+                    throw new Error(`Reflection API Support: The type detected for data member "${memberMetadata.name}" does not exist`);
+                }
+
+                if (!memberMetadata.type || typeof memberMetadata.type !== "function") {
+                    // complement type information from reflection metadata
+                    memberMetadata.type = reflectType;
+                } else if (memberMetadata.type !== reflectType) {
+                    console.warn(`Reflection API Support: The type defined for data member "${memberMetadata.name}" does not match detected type`);
+                }
+            }
+            //#endregion "Reflection API support"
+
+            // type definition presence check
+            if (typeof memberMetadata.type !== "function") {
+                throw new Error(`No type was defined for data member "${memberMetadata.name}"`);
+            } else if (memberMetadata.type === Array /*|| memberMetadata.type === Object*/) {
+                if (typeof memberMetadata.elementType !== "function") {
+                    throw new Error(`Data member "${memberMetadata.name}" is a collection, but no elementType was defined`);
+                }
+            }
+
+            // implicitly add @dataContract decorator, because that's required, and class decorators are added after property decorators
+            if (!targetPrototype.hasOwnProperty("__dataContractMetadata")) {
+                contractMetadata = new DataContractMetadata();
+
+                if (targetPrototype.__dataContractMetadata) {
+                    // inherit data members and known types from parent contract
+                    parentMetadata = targetPrototype.__dataContractMetadata;
+
+                    // data members
+                    Object.keys(parentMetadata.dataMembers).forEach((memberPropKey) => {
+                        contractMetadata.dataMembers[memberPropKey] = parentMetadata.dataMembers[memberPropKey];
+                    });
+
+                    // known types
+                    Object.keys(parentMetadata.knownTypes).forEach((key) => {
+                        contractMetadata.setKnownType(parentMetadata.knownTypes[key]);
+                    });
+                }
+
+                Object.defineProperty(targetPrototype, "__dataContractMetadata", {
+                    enumerable: false,
+                    configurable: false,
+                    writable: false,
+                    value: contractMetadata
+                });
+            } else {
+                contractMetadata = targetPrototype.__dataContractMetadata;
+            }
+
+            contractMetadata.dataMembers[propertyKey] = memberMetadata;
+        }
+
+        return decorate;
+    }
+    //#endregion "@DataMember"
+
+    //#region "@KnownType"
+    /**
+     * Specifies a type that should be recognized when serializing or deserializing a given type.
+     * @param {Function} type
+     */
+    export function KnownType(type: { new (): any }): Function {
+        function decorate<TFunction extends Function>(target: { new (): any }): { new (): any } | void {
+            var metadata: DataContractMetadata;
+
+            if (!target.prototype.hasOwnProperty("__dataContractMetadata")) {
+                throw new Error("The @KnownType decorator can only be used on types with an own @DataContract decorator");
+            } else {
+                metadata = target.prototype.__dataContractMetadata;
+            }
+
+            metadata.setKnownType(type);
+
+            return target;
+        }
+
+        return decorate;
+    }
+    //#endregion "@KnownType"
+
+    //#region "Utility Functions"
+    abstract class UtilityFunctions {
+        /**
+         * reserved name => serializers in which it has special meaning
+         */
+        private static reservedNames: { [property: string]: Array<string> } = {
+            "__type": ["DataContractJsonSerializer"], // DataContractJsonSerializer flavor type hinting
+            "$type": ["DataContractJsonSerializer"], // Json.NET flavor type hinting
+            //"__id": ["DataContractJsonSerializer"],
+            //"__ref": ["DataContractJsonSerializer"],
+            "__dataContractMetadata": ["DataContractJsonSerializer"]
+        };
+
+        public static checkReservedName(name: string) {
+            if (UtilityFunctions.reservedNames.hasOwnProperty(name)) {
+                throw new Error(
+                    `"${name}" is a reserved member name in the following serializers: ${UtilityFunctions.reservedNames[name].join(", ") }.`
+                );
+            }
+        }
+
+        /**
+         * @param {any} type
+         * @returns
+         */
+        public static metadataIfDataContract(type: any): DataContractMetadata {
+            var objMetaData: DataContractMetadata = type.__dataContractMetadata;
+            var prototype: any;
+
+            if (!objMetaData) {
+                // search on prototypes
+                prototype = type.prototype;
+
+                while (prototype) {
+                    if (objMetaData = prototype.__dataContractMetadata) {
+                        break;
+                    }
+
+                    prototype = prototype.prototype;
+                }
+            }
+
+            if (objMetaData && objMetaData instanceof DataContractMetadata) {
+                return objMetaData;
+            } else {
+                return null;
+            }
+        }
+
+        public static isNativeType(obj: any): boolean {
+            switch (typeof obj) {
+                case "string":
+                case "number":
+                case "boolean":
+                    return true;
+            }
+
+            if (obj instanceof String || obj === String ||
+                obj instanceof Date || obj === Date ||
+                obj instanceof Number || obj === Number ||
+                obj instanceof Boolean || obj === Boolean
+            ) {
+                return true;
+            }
+
+            return false;
+        }
+
+        public static getPropertyCount(obj: any): number {
+            var sum = 0;
+
+            Object.keys(obj).forEach((propertyKey) => {
+                sum++;
+
+                if (typeof obj[propertyKey] === "object" && obj[propertyKey] !== null) {
+                    sum += this.getPropertyCount(obj[propertyKey]);
+                } else if (obj[propertyKey] instanceof Array) {
+                    obj[propertyKey].forEach((elem: any) => {
+                        this.getPropertyCount(elem);
+                    });
+                }
+            });
+
+            return sum;
+        }
+
+        /**
+         * @param {any} type
+         * @param {boolean} own If set, constructor name is preferred over inherited data contract name
+         * @param {boolean} fullname If set, the type name will also include the explicitly defined data contract namespace
+         * @returns
+         */
+        public static getTypeName(type: { new (): any }, own: boolean = false, fullname: boolean = false): string {
+            var typeMetaData: DataContractMetadata;
+
+            if (
+                (typeMetaData = this.metadataIfDataContract(type)) !== null &&
+                (!own || type.prototype.hasOwnProperty("__dataContractMetadata"))
+            ) {
+                // type is @dataContract
+                if (fullname && typeMetaData.namespace) {
+                    return typeMetaData.className + ":" + typeMetaData.namespace;
+                } else {
+                    return typeMetaData.className;
+                }
+            } else {
+                try {
+                    return type.toString().match(/function +(\w*)/)[1];
+                } catch (e) {
+                    return undefined;
+                }
+            }
+        }
+
+        public static getRawTypeName(type: { new (): any }): string {
+            try {
+                return type.constructor.toString().match(/function +(\w*)/)[1];
+            } catch (e) {
+                return undefined;
+            }
+        }
+
+        /**
+         * @param {any} type
+         * @param {boolean} own If set, constructor name is preferred over inherited data contract name
+         * @returns
+         */
+        public static getInstanceTypeName(obj: any, own: boolean = false): string {
+            var objMetaData: DataContractMetadata;
+
+            if (
+                (objMetaData = this.metadataIfDataContract(obj)) !== null &&
+                (!own || Object.getPrototypeOf(obj).hasOwnProperty("__dataContractMetadata"))
+            ) {
+                // obj is @dataContract type
+                return objMetaData.className;
+            } else {
+                return obj.constructor.toString().match(/function (\w*)/)[1];
+            }
+        }
+
+        /**
+         * Wraps a potential error message during instantiation with additional useful information
+         * @param {Function} type The type to be instantiated
+         * @param {DataMemberMetadata} metadata Additional metadata information for when an error occurs
+         */
+        public static instantiateType(type: { new (): any }, metadata?: DataMemberMetadata): any {
+            try {
+                return new type();
+            } catch (e) {
+                if (metadata) {
+                    throw new Error(`Could not instantiate member "${metadata.name}": ${e.message}`);
+                } else {
+                    throw new Error(`Could not instantiate member: ${e.message}`);
+                }
+            }
+        }
+
+        /**
+         * Checks if A is subtype of B
+         * @param {type} A
+         * @param {type} B
+         */
+        public static isSubtypeOf(A: any, B: any): boolean {
+            var aPrototype = A.prototype;
+
+            if (A === B) {
+                return true;
+            }
+
+            while (aPrototype) {
+                if (aPrototype instanceof B) {
+                    return true;
+                }
+
+                aPrototype = aPrototype.prototype;
+            }
+
+            return false;
+        }
+    }
+    //#endregion "Utility Functions"
+
+    //#region "Serialization"
+    export interface IDataContractSerializer {
+        /**
+         * Serializes an object into a string.
+         * @param {any} obj The object to serialize
+         */
+        writeObject(obj: any): string;
+
+        /**
+         * Reads the serialized data from a string and returns the deserialized object.
+         * @param {string} data The serialized object
+         */
+        readObject(data: string): any;
+    }
+
+    /*
+    export enum ISerializerFlavor {
+        DataContractJsonSerializer,
+        JsonNET
+    }
+    */
+
+    export interface ISerializerSettings {
+        /** Sets the maximum number of items in an object graph that can be deserialized in one read call */
+        maxItemsInObjectGraph?: number;
+
+        /** If set, object references are preserved in the serialized output, and reference hints are recognized when deserializing */
+        //preserveObjectReferences?: boolean;
+
+        //typeHinting?: ISerializerFlavor
+    }
+
+    export class DataContractJsonSerializer implements IDataContractSerializer {
+        private _type: { new (): any };
+        private _refId: number;
+        private _references: any[];
+        private _settings: ISerializerSettings;
+        private _objCount: number;
+
+        /**
+         * Initializes a new instance of the DataContractJsonSerializer class to serialize or deserialize an object of the specified type.
+         */
+        constructor(type: { new (): any });
+
+        /**
+         * Initializes a new instance of the DataContractJsonSerializer class to serialize or deserialize an object of the specified type
+         * and serializer settings.
+         */
+        constructor(type: { new (): any }, settings: ISerializerSettings);
+        constructor(type: { new (): any }, settings?: ISerializerSettings) {
+            this._type = type;
+            this._settings = settings || {};
+
+            if (!this._settings.hasOwnProperty("maxItemsInObjectGraph")) {
+                this._settings.maxItemsInObjectGraph = 65536;
+            }
+        }
+
+        public writeObject(obj: any): string {
+            var objMetaData = UtilityFunctions.metadataIfDataContract(obj);
+            var json: string;
+
+            if (objMetaData) {
+                objMetaData.sortMembers();
+            }
+
+            //this._refId = 0;
+            //this._references = [];
+            //this._objCount = 0;
+
+            json = JSON.stringify(this.writeObjectToJsonObject(obj));
+
+            //this._references = [];
+            return json;
+        }
+
+        public readObject(data: string): any {
+            var typeMetaData = UtilityFunctions.metadataIfDataContract(this._type);
+            var jsobj = JSON.parse(data);
+            var inst: any;
+
+            if (typeMetaData) {
+                typeMetaData.sortMembers();
+            }
+
+            //this._refId = 0;
+            //this.readReferenceList(jsobj); // -> this._references
+            //this._objCount = 0;
+
+            inst = this.readJsonToInstance(jsobj, typeMetaData);
+
+            //this._references = [];
+            return inst;
+        }
+
+        /**
+         * Converts a type instance to a javascript object of key-value pairs, or a primitive/built-in type (string, number, boolean, Date)
+         * @param {any} obj The type instance
+         * @param {DataMemberMetadata} objMemberMetadata If the instance is a member of another type, specify member-related metadata
+         */
+        private writeObjectToJsonObject(obj: any, objMemberMetadata?: DataMemberMetadata): { [key: string]: any } {
+            var objMetaData: DataContractMetadata;
+            var json: any;
+            var refId: number;
+
+            /*
+            if (this._settings.preserveObjectReferences) {
+                if ((refId = this._references.indexOf(obj)) === -1) {
+                    this._references.push(obj);
+                }
+            }
+            */
+
+            if (obj === null || typeof obj === "undefined") {
+                // uninitialized object
+                json = obj;
+            } else if (UtilityFunctions.isNativeType(obj)) {
+                // obj is native type
+                json = obj;
+            } else if (obj instanceof Array) {
+                // obj is Array
+                json = [];
+
+                if (obj.length > 0) {
+                    for (var i = 0; i < obj.length; i++) {
+                        json.push(this.writeObjectToJsonObject(obj[i]));
+                    }
+                }
+            } else {
+                // Object
+                json = {};
+
+                /*
+                if (this._settings.preserveObjectReferences) {
+                    if ((refId = this._references.indexOf(obj)) !== -1) {
+                        // this object is already serialized, and preserve references is set: add reference object
+                        return {
+                            __ref: refId
+                        };
+                    } else {
+                        json.__id = this._references.length;
+                        this._references.push(obj);
+                    }
+                }
+                */
+
+                if ((objMetaData = UtilityFunctions.metadataIfDataContract(obj)) !== null) {
+                    // obj is @dataContract type (@dataMembers automatically imply @dataContract due to implementation)
+                    // iterate over @dataMember decorated properties of obj (using obj's metadata)
+                    Object.keys(objMetaData.dataMembers).forEach((propertyKey) => {
+                        var dataMemberMetadata = objMetaData.dataMembers[propertyKey];
+                        var memberContractMetadata: DataContractMetadata;
+
+                        if (typeof obj[propertyKey] !== "undefined") {
+                            json[dataMemberMetadata.name] = this.writeObjectToJsonObject(obj[propertyKey], dataMemberMetadata);
+
+                            if (!(obj[propertyKey] instanceof Array) && obj[propertyKey].constructor !== dataMemberMetadata.type) {
+                                // assume subtype, add __type property
+                                if (typeof json[dataMemberMetadata.name] === "object" && json[dataMemberMetadata.name] !== null) {
+                                    json[dataMemberMetadata.name].__type = UtilityFunctions.getInstanceTypeName(obj[propertyKey], true);
+
+                                    memberContractMetadata = UtilityFunctions.metadataIfDataContract(obj[propertyKey]);
+
+                                    // add namespace suffix to __type
+                                    if (memberContractMetadata && memberContractMetadata.namespace) {
+                                        json[dataMemberMetadata.name].__type += ":" + memberContractMetadata.namespace;
+                                    }
+                                }
+                            }
+                        } else {
+                            // emitDefaultValue?
+                        }
+                    });
+                } else {
+                    // obj is an Object, treat as key-value pairs
+                    Object.keys(obj).forEach((propertyKey) => {
+                        json[propertyKey] = this.writeObjectToJsonObject(obj[propertyKey]);
+                    });
+                }
+            }
+
+            return json;
+        }
+
+        /**
+         * Instatiates a @dataContract type from a source JS object and metadata associated with the given data contract
+         * @param {Object} jsobj The source Javascript object
+         * @param {DataContractMetadata} contractMetadata The data contract metadata associated with the type (and current JS object)
+         * @param {Object} knownTypes A keyed collection of known types available for instantiation from type hinting
+         */
+        private readJsonToInstance(
+            jsobj: { [property: string]: any },
+            contractMetadata?: DataContractMetadata,
+            knownTypes?: { [typeName: string]: { new (): any } }
+        ): any {
+            /*
+            if (
+                false &&
+                this._settings.preserveObjectReferences &&
+                typeof jsobj === "object" &&
+                jsobj.hasOwnProperty("__ref") &&
+                typeof jsobj["__ref"] === "number"
+            ) {
+                if (typeof this._references[jsobj["__ref"]] === "undefined") {
+                    throw new Error(`Invalid reference id (${jsobj["__ref"]})`);
+                }
+
+                console.log("reference " + jsobj["__ref"]);
+                jsobj = this._references[jsobj["__ref"]];
+                console.log(jsobj);
+            }
+            */
+
+            if (contractMetadata) {
+                // the source JS object is expected to represent an instance of a @dataContract type,
+                // process it according to data contract metadata
+                var inst: any;
+                var __type: string;
+
+                if (++this._objCount >= this._settings.maxItemsInObjectGraph) {
+                    throw new Error(`Object limit (${this._settings.maxItemsInObjectGraph}) exceeded`);
+                }
+
+                // the source JS object must be a JSON.Object, user defined types cannot be represented by primitives or Arrays
+                if (typeof jsobj !== "object" && jsobj !== null) {
+                    throw new TypeError(`Expected element to be of type "JSON.object", got "JSON.${typeof jsobj}"`);
+                }
+
+                if (jsobj.hasOwnProperty("__type") || jsobj.hasOwnProperty("$type")) {
+                    // type hinting for when a subtype is present in place of an expected @dataContract type,
+                    // this should be fully compatible with the principles of System.Runtime.Serialization.Json.DataContractJsonSerializer
+                    // see article https://msdn.microsoft.com/en-us/library/bb412170 section "Polymorphism"
+                    __type = (jsobj["__type"] || jsobj["$type"]).replace(":#", ":");
+
+                    if (!knownTypes.hasOwnProperty(__type)) {
+                        throw new Error(
+                            `"${__type}" is not a known type (known types are: [${Object.keys(knownTypes).join(", ") }])`
+                        );
+                    }
+
+                    // check if the known type is indeed a subtype
+                    if (!UtilityFunctions.isSubtypeOf(knownTypes[__type], contractMetadata.classType)) {
+                        throw new TypeError(`Data contract "${__type}" is not a subtype of data contract "${contractMetadata.className}"`);
+                    }
+
+                    try {
+                        inst = new knownTypes[__type]();
+
+                        // replace contract metadata with that of the subtype
+                        contractMetadata = UtilityFunctions.metadataIfDataContract(knownTypes[__type]);
+                    } catch (e) {
+                        throw new Error(`Could not instantiate known type "${__type}": ` + e.message);
+                    }
+                } else {
+                    inst = new contractMetadata.classType();
+                }
+
+                // for each data member specified by the data contract (each data member represented by a property on the source JS object)
+                Object.keys(contractMetadata.dataMembers).forEach((propertyKey) => {
+                    var memberMetadata = contractMetadata.dataMembers[propertyKey];
+                    var memberName = memberMetadata.name || propertyKey;
+
+                    if (!jsobj.hasOwnProperty(memberName)) {
+                        // the given data member is not present in the serialized resource
+                        if (memberMetadata.isRequired) {
+                            throw new Error(
+                                `Missing required data member "${memberName}" on data contract "${contractMetadata.className}"`
+                            );
+                        }
+                    } else {
+                        if (memberMetadata.type === Object) {
+                            // this data member is a keyed collection (Object), initialize to "empty" Object
+                            inst[propertyKey] = {}; // destination data member
+
+                            // since the data member is expected to be a keyed collection, the source must be a JSON.Object
+                            if (typeof jsobj[memberName] !== "object" || !jsobj[memberName]) {
+                                this.throwTypeError("object", typeof jsobj[memberName]);
+                            }
+                            
+                            // for each property of the source JS object...
+                            Object.keys(jsobj[memberName]).forEach((jsobjPropKey: string) => {
+                                // ... add a property (with value of type instance) to the destination data member instance
+                                inst[propertyKey][jsobjPropKey] = this.readJsonToInstance(
+                                    jsobj[memberName][jsobjPropKey],
+                                    UtilityFunctions.metadataIfDataContract(memberMetadata.elementType),
+                                    contractMetadata.knownTypes
+                                );
+                            });
+                        } else if (memberMetadata.type === Array) {
+                            // this data member is a collection (Array), initialize to empty Array
+                            inst[propertyKey] = []; // destination data member
+
+                            // the source JS object's property is expected to be a JSON.Array
+                            if (jsobj[memberName] instanceof Array) {
+                                // for each element of the source array...
+                                jsobj[memberName].forEach((srcArrayItem: string) => {
+                                    // ... initialize and push a new type instance into the destination data member
+                                    // (from the source array item)
+                                    inst[propertyKey].push(this.readJsonToInstance(
+                                        srcArrayItem,
+                                        UtilityFunctions.metadataIfDataContract(memberMetadata.elementType),
+                                        contractMetadata.knownTypes
+                                    ));
+                                });
+                            } else if (typeof jsobj[memberName] !== "undefined" && jsobj[memberName] !== null) {
+                                this.throwTypeError("Array", typeof jsobj[memberName]);
+                            }
+                        } else if (memberMetadata.type === Date) {
+                            // built-in support for Date
+                            // source should be a string in format ISO 8601 (https://www.w3.org/TR/NOTE-datetime)
+                            if (typeof jsobj[memberName] !== "string" && jsobj[memberName] !== null) {
+                                this.throwTypeError("String", typeof jsobj[memberName]);
+                            }
+
+                            inst[propertyKey] = new Date(<string>jsobj[memberName]);
+                        } else {
+                            inst[propertyKey] = this.readJsonToInstance(
+                                jsobj[memberName],
+                                UtilityFunctions.metadataIfDataContract(memberMetadata.type),
+                                contractMetadata.knownTypes
+                            );
+                        }
+                    }
+                });
+
+                return inst;
+            } else {
+                // there is no data contract information available for this source JS object, treat as leaf item
+                this._objCount += UtilityFunctions.getPropertyCount(jsobj);
+
+                if (this._objCount >= this._settings.maxItemsInObjectGraph) {
+                    throw new Error(`Object limit (${this._settings.maxItemsInObjectGraph}) exceeded`);
+                }
+
+                return jsobj;
+            }
+        }
+
+        private readReferenceList(jsobj: { [property: string]: any }): void {
+            if (typeof jsobj !== "object" || jsobj === null) {
+                return;
+            }
+
+            Object.keys(jsobj).forEach((propertyKey) => {
+                var property = jsobj[propertyKey];
+
+                if (propertyKey === "__id" && typeof jsobj[propertyKey] === "number") {
+                    if (typeof this._references[jsobj[propertyKey]] !== "undefined") {
+                        throw new Error(`Duplicate reference id (${jsobj[propertyKey]})`);
+                    }
+
+                    this._references[jsobj[propertyKey]] = jsobj;
+                } else {
+                    this.readReferenceList(property);
+                }
+            });
+        }
+
+        private throwTypeError(expectedType: string, foundType: string): void {
+            throw new TypeError(`Expected element to be of type "JSON.${expectedType}", got "JSON.${foundType}"`);
+        }
+    }
+    //#endregion "Serialization"
+}

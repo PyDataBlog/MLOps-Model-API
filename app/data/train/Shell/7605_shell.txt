@@ -1,0 +1,519 @@
+#!/bin/bash
+################################################################################
+#
+#		Adiciona uma ou mais exceções à lista
+#
+#		Autor: Luciano Gonçalez
+#
+################################################################################
+
+# Definições desse arquivo
+
+scriptiname="addexception"
+scriptgroup="backup"
+scriptversion="0.5"
+scriptdate="2013-1221"
+
+# Definições padrão (automaticas)
+lkspref="lks"
+scriptalias="${scriptiname}.${lkspref}-${scriptgroup}"
+scriptname="${lkspref}-${scriptiname}"
+
+# Constante do diretorio temporario padrao
+declare -r LKS_TEMPDIR='/var/tmp/lkscripts'
+
+# Outras constantes
+declare -r ROOTDIR=$(pwd)
+declare -r MASTERDIR="${HOME}/.lkbackup"
+declare -r EXCEPTFILE="${MASTERDIR}/except.idx"
+
+
+# Arquivos temporarios
+tmpfilein=""
+tmpfileout=""
+
+# Indicador de erro de saida
+exiterror=""
+
+
+function set2color() {
+	# Escapes de cores
+	cnormal="\e[m"
+	cred="\e[1;31m"
+	cgreen="\e[1;32m"
+	cyellow="\e[1;33m"
+	cblue="\e[1;34m"
+	cmagenta="\e[1;35m"
+	ccyan="\e[1;36m"
+	cwhite="\e[1;37m"
+}
+
+function set2mono() {
+	# Escapes de cores
+	cnormal=""
+	cred=""
+	cgreen=""
+	cyellow=""
+	cblue=""
+	cmagenta=""
+	ccyan=""
+	cwhite=""
+}
+
+
+# Mostra erro de array nao suportado
+function showerrorarray() {
+cat << EOF | expand -t2 >&2
+
+	O 'bash' atual não suporta arrays associativos!
+
+EOF
+}
+
+# Função que mostra erro no diretorio temporario
+function showtemperror () {
+cat << EOF | expand -t2 >&2
+
+	ERRO: O diretório '$LKS_TEMPDIR' não está acessivel
+
+EOF
+}
+
+# Função que mostra erro no diretorio master
+function showmastererror () {
+cat << EOF | expand -t2 >&2
+
+	ERRO: O diretório '$MASTERDIR' não está acessivel
+
+EOF
+}
+
+# Mostra mensagem de erro de uso
+function showerroruse() {
+cat << EOF | expand -t2 >&2
+
+	Uso: ${scriptname} <excecao>
+	Tente '--help' ou '-h' para mais opções.
+
+EOF
+}
+
+
+# Mostra versão do script
+function showversion() {
+	echo "$scriptversion"
+}
+
+# Mostra alias do script
+function showalias() {
+	echo "$scriptalias"
+}
+
+# Mostra data do script
+function showdate() {
+	echo "$scriptdate"
+}
+
+# Mostra grupo do script
+function showgroup() {
+	echo "$scriptgroup"
+}
+
+# Mostra nome interno do script
+function showiname() {
+	echo "$scriptiname"
+}
+
+# Mostra nome original do script
+function showname() {
+	echo "${scriptname}"
+}
+
+
+# Função que mosta a ajuda
+function showhelp() {
+cat << EOF | expand -t2 | less -XFe
+
+lks-${scriptiname}.sh [v${scriptversion}] (${scriptgroup})
+<alias: ${scriptiname}.lks-${scriptgroup}>
+
+	Script para adicionar exceções
+
+	Uso:
+
+		lks ${scriptiname} <excecao> ... <excecao>
+
+		lks ${scriptiname} --help
+		lks ${scriptiname} --version <alias|date|group|iname|name>
+
+		lks ${scriptiname} --color
+		lks ${scriptiname} --mono
+
+		lks ${scriptiname} --quiet
+		lks ${scriptiname} --only-status
+
+		lks ${scriptiname} -h
+		lks ${scriptiname} -v
+
+		lks ${scriptiname} -c
+		lks ${scriptiname} -m
+
+		lks ${scriptiname} -q
+		lks ${scriptiname} -Q
+
+
+	Opções:
+
+		<excecao> : Exceção a ser adicionada (pode-se usar caracteres-curingas);
+
+		--help, -h : Mostra este texto de ajuda;
+
+		--version , -v : Mostra a versão do script. Usando opções mostra:
+				alias : Apelido que pode ser usado para chamar o script;
+				date  : Data de versão;
+				group : Grupo ao qual o script pertence (depende da sua funcionalidade);
+				iname : Nome interno do script;
+				name  : Nome original do script;
+
+		--color , -c : Mostra a saída em cores (padrão);
+
+		--mono , -m : Mostra a saída em modo monocromático;
+
+		--quiet, -q : Modo silencioso, exibe somente mensagens de erro;
+
+		--only-status, -Q : Modo silencioso, exibe somente mensagens de status;
+
+
+Escrito por: Luciano Gonçalez
+EOF
+}
+
+
+## Funções para criar e apagar arquivo temporario individual
+
+# Função para criar arquivo temporario
+function createtempfile() {
+	# Verifica se diretorio temporario não existe, tenta cria-lo
+	if ! [ -d "$LKS_TEMPDIR" ] ; then
+		mkdir -p "$LKS_TEMPDIR" 2> /dev/null
+	fi
+
+	# Se diretorio OK cria o arquivo, se não mostra erro
+	if [ -d "$LKS_TEMPDIR" ] ; then
+		tmpname=$(lks-mkuniqid --long)
+		tmpfilename="${LKS_TEMPDIR}/${tmpname}.tmp"
+
+		# Cria o arquivo realmente e testa se sucesso
+		if ! $(touch "$tmpfilename" 2> /dev/null) ; then
+			showtemperror
+			exit 1
+		fi
+
+		# Verifica se o arquivo realmente foi criado, redundancia nem sempre é demais...
+		if ! [ -f "$tmpfilename" ] ; then
+			showtemperror
+			exit 1
+		fi
+
+		# Imprime o nome do arquivo que deve ser capturado pelo chamador no subshell
+		echo "$tmpfilename"
+	else
+		showtemperror
+		exit 1
+	fi
+}
+
+# Função para apagar arquivo temporario
+function removetempfile() {
+	if [ -n "$1" ] ; then
+		if [ -e "$1" ] ; then
+			rm "$1"
+		fi
+	fi
+}
+
+## Funções para criar e apagar todos os arquivos temporarios
+
+# Função para criar arquivos temporarios
+function createtemp() {
+tmpfilein=$(createtempfile)
+tmpfileout=$(createtempfile)
+}
+
+# Função para apagar os arquivos temporarios
+function removetemp () {
+	removetempfile "$tmpfilein" ; tmpfilein=""
+	removetempfile "$tmpfileout" ; tmpfileout=""
+}
+
+
+# Tipos de mensagens
+#		Hint		- Mensagens que não são mostradas com a opção --only-status
+#		Status	- Mensagens que não são mostradas com a opção --quiet
+#		Error		- Mensagens que não podem ser omitidas
+#
+#		verifica se modo silencioso,
+#		usa dois parametros, um pode ser as opções do echo
+#		sempre no fd2.
+
+# Função para mostrar mensagens de Hint
+function showhint() {
+	if ! ${option[quiet]} && ! ${option[onlystatus]} ; then
+		echo "$1" "$2" >&2
+	fi
+}
+
+# Função para mostrar mensagens de Status
+function showstatus() {
+	if ! ${option[quiet]} ; then
+		echo "$1" "$2" >&2
+	fi
+}
+
+# Função para mostrar mensagens de Error
+function showerror() {
+	echo "$1" "$2" >&2
+}
+
+
+# Função para criar diretorio master
+function createmasterdir() {
+	# Verifica se diretorio master não existe, tenta cria-lo
+	if ! [ -e "$MASTERDIR" ] ; then
+		mkdir -p "$MASTERDIR" 2> /dev/null
+	fi
+
+	# Se não OK não mostra erro
+	if ! [ -d "$MASTERDIR" ] ; then
+		showmastererror
+		exit 1
+	fi
+}
+
+# Função para descompactar o arquivo
+# $1 - arquivo compactado
+# $2 - arquivo descompactado
+function uncompact() {
+	if [ -n "$1" ] && [ -n "$2" ] ; then
+		if [ -e "$1" ] ; then
+			cat "$1" | gzip -d > "$2"
+		else
+			cat /dev/null > "$2"
+		fi
+	fi
+}
+
+# Função para compactar o arquivo
+# $1 - arquivo descompactado
+# $2 - arquivo compactado
+function compact() {
+	if [ -n "$1" ] && [ -n "$2" ] ; then
+		if [ -e "$1" ] ; then
+			cat "$1" | gzip > "$2"
+		else
+			cat /dev/null | gzip > "$2"
+		fi
+	fi
+}
+
+
+# Função para adicionar exceção
+# $1 - exceção
+# $2 - arquivo
+function doadd() {
+	if [ -n "$1" ] && [ -n "$2" ] ; then
+		if [ "${1:0:1}" = "/" ] ; then
+			if [ "$1" = "/" ] ; then
+				showerror -e "${cred}Não é possível adicionar o diretório raiz às exceções!${cnormal}"
+				return
+			else
+				exception="$1"
+			fi
+		else
+			if [ "$1" = "." ] || [ "$1" = ".." ] ; then
+				showerror -e "${cred}Exceção inválida:    ${cyellow}'$1'${cnormal}"
+				return
+			else
+				exception="${ROOTDIR}/${1}"
+			fi
+		fi
+
+		exception="${exception%/}"
+
+		query=$(cat "$2" | grep "^${exception}\$" | wc -l)
+
+		if [ $query -eq 0 ] ; then
+			showstatus -e "${cgreen}Adicionando exceção: ${cyellow}'${exception}'${cnormal}"
+			echo "$exception" >> "$2"
+		else
+			showstatus -e "${cred}Exceção existente:   ${cyellow}'${exception}'${cnormal}"
+		fi
+	fi
+}
+
+
+# Funcao principal
+function main() {
+	createtemp
+	createmasterdir
+	uncompact "$EXCEPTFILE" "$tmpfilein"
+
+	total=${#exceptions[@]}
+	exceptin=$(cat "$tmpfilein" | wc -l)
+
+	if [ $total -eq 0 ] ; then
+		showhint -e "\n${cred}Nenhuma exceção fornecida${cnormal}, ${cyellow}adicionando o diretório atual...${cnormal}\n"
+		doadd "$ROOTDIR" "$tmpfilein"
+	else
+		showhint -e "\nFornecido ${cyellow}${total}${cnormal} exceções, ${cgreen}adicionando...${cnormal}\n"
+
+		for ((i=0 ; i<$total ; i++)) ; do
+			doadd "${exceptions[i]}" "$tmpfilein"
+		done
+	fi
+
+	cat "$tmpfilein" | sort | uniq > "$tmpfileout"
+
+	exceptout=$(cat "$tmpfileout" | wc -l)
+
+	let "exceptadd = exceptout - exceptin"
+
+	if [ $exceptadd -eq 0 ] ; then
+		showstatus -e "\n${cred}Nenhuma exceção foi adicionada!${cnormal}\n"
+	else
+		showstatus -e "\n${cgreen}Foram adicionandas ${cyellow}${exceptadd}${cgreen} exceções.${cnormal}\n"
+	fi
+
+	compact "$tmpfileout" "$EXCEPTFILE"
+	removetemp
+}
+
+
+# Funcao para checar parametros
+function checkparameters() {
+	# Testa opções exclusivas
+	if ${option[help]} && ${option[version]} ; then
+		option[error]="true"
+	fi
+
+	if ${option[color]} && ${option[mono]} ; then
+		option[error]="true"
+	fi
+
+	if ${option[quiet]} && ${option[onlystatus]} ; then
+		option[error]="true"
+	fi
+
+	# Executa uma ação
+	if ${option[error]} ; then
+		# Mostra mensagem de erro
+		showerroruse
+		return 1
+	elif ${option[help]} ; then
+		# Mostra texto de ajuda
+		showhelp
+	elif ${option[version]} ; then
+		case "${option[version_type]}" in
+			alias) showalias ;;
+			date) showdate ;;
+			group) showgroup ;;
+			iname) showiname ;;
+			name) showname ;;
+			*) showversion ;;
+		esac
+	else
+		# Usa modo monocromatico se selecionado
+		if ${option[mono]} ; then
+			set2mono
+		else
+			set2color
+		fi
+
+		# Se tudo certo chama main
+		main
+	fi
+}
+
+# Funcão para testar erro final
+function checkexiterror() {
+	if [ -n "$exiterror" ] ; then
+		return 1
+	fi
+}
+
+
+# Inicio
+
+{ # Pega parametros
+if ! declare -A option ; then showerrorarray ; exit ; fi
+
+option=(
+				[error]="false"
+				[help]="false"
+				[version]="false"
+				[version_type]=""
+				[color]="false"
+				[mono]="false"
+				[quiet]="false"
+				[onlystatus]="false"
+				)
+
+exceptions=()
+
+while [ "${option[error]}" = "false" ] && [ $# -gt 0 ] ; do
+	if [ "${1:0:2}" = "--" ] ; then
+		case "$1" in
+			--help) option[help]="true" ;;
+			--version)
+				if ${option[version]} ; then
+					option[error]="true"
+				else
+					option[version]="true"
+
+					case "$2" in
+						alias|date|group|iname|name)
+							option[version_type]="$2"
+							shift
+						;;
+					esac
+				fi
+			;;
+			--color) option[color]="true" ;;
+			--mono) option[mono]="true" ;;
+			--quiet) option[quiet]="true" ;;
+			--only-status) option[onlystatus]="true" ;;
+			*) option[error]="true" ;;
+		esac
+	elif [ "${1:0:1}" = "-" ] ; then
+		paramopt="${1:1}"
+
+		while [ ${#paramopt} -gt 0 ] ; do
+			case "${paramopt:0:1}" in
+				h) option[help]="true" ;;
+				v)
+					if ${option[version]} ; then
+						option[error]="true"
+					else
+						option[version]="true"
+					fi
+				;;
+				c) option[color]="true" ;;
+				m) option[mono]="true" ;;
+				q) option[quiet]="true" ;;
+				Q) option[onlystatus]="true" ;;
+				*) option[error]="true" ; break ;;
+			esac
+
+			paramopt="${paramopt:1}"
+		done
+	else
+		exceptions+=("$1")
+	fi
+
+	shift
+done
+}
+
+set2mono
+checkparameters
+checkexiterror

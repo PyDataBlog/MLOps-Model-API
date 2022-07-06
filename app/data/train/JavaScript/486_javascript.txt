@@ -1,0 +1,270 @@
+angular.module('perCapita.controllers', [])
+
+  .controller('AppCtrl', ['$scope', '$rootScope', '$ionicModal', '$timeout', '$localStorage', '$ionicPlatform', 'AuthService',
+    function ($scope, $rootScope, $ionicModal, $timeout, $localStorage, $ionicPlatform, AuthService) {
+
+      $scope.loginData = $localStorage.getObject('userinfo', '{}');
+      $scope.reservation = {};
+      $scope.registration = {};
+      $scope.loggedIn = false;
+
+      if (AuthService.isAuthenticated()) {
+        $scope.loggedIn = true;
+        $scope.username = AuthService.getUsername();
+      }
+
+      // Create the login modal that we will use later
+      $ionicModal.fromTemplateUrl('templates/login.html', {
+        scope: $scope
+      }).then(function (modal) {
+        $scope.modal = modal;
+      });
+
+      // Triggered in the login modal to close it
+      $scope.closeLogin = function () {
+        $scope.modal.hide();
+      };
+
+      // Open the login modal
+      $scope.login = function () {
+        $scope.modal.show();
+      };
+
+      // Perform the login action when the user submits the login form
+      $scope.doLogin = function () {
+        console.log('Doing login', $scope.loginData);
+        $localStorage.storeObject('userinfo', $scope.loginData);
+
+        AuthService.login($scope.loginData);
+
+        $scope.closeLogin();
+      };
+
+      $scope.logOut = function () {
+        AuthService.logout();
+        $scope.loggedIn = false;
+        $scope.username = '';
+      };
+
+      $rootScope.$on('login:Successful', function () {
+        $scope.loggedIn = AuthService.isAuthenticated();
+        $scope.username = AuthService.getUsername();
+      });
+
+
+      $ionicModal.fromTemplateUrl('templates/register.html', {
+        scope: $scope
+      }).then(function (modal) {
+        $scope.registerform = modal;
+      });
+
+      $scope.closeRegister = function () {
+        $scope.registerform.hide();
+      };
+
+      $scope.register = function () {
+        $scope.registerform.show();
+      };
+
+      $scope.doRegister = function () {
+        console.log('Doing registration', $scope.registration);
+        $scope.loginData.username = $scope.registration.username;
+        $scope.loginData.password = $scope.registration.password;
+
+        AuthService.register($scope.registration);
+        $timeout(function () {
+          $scope.closeRegister();
+        }, 1000);
+      };
+
+      $rootScope.$on('registration:Successful', function () {
+        $localStorage.storeObject('userinfo', $scope.loginData);
+      });
+
+    }])
+
+  .controller('FavoriteDetailsController', ['$scope', '$rootScope', '$state', '$stateParams', 'Favorites', function ($scope, $rootScope, $state, $stateParams, Favorites) {
+
+    $scope.showFavButton = false;
+
+    // Lookup favorites for a given user id
+    Favorites.findById({id: $stateParams.id})
+      .$promise.then(
+      function (response) {
+        $scope.city = response;
+      },
+      function (response) {
+        $scope.message = "Error: " + response.status + " " + response.statusText;
+      }
+    );
+
+  }])
+
+
+  .controller('HomeController', ['$scope', 'perCapitaService', '$stateParams', '$rootScope', 'Favorites', '$ionicPlatform', '$cordovaLocalNotification', '$cordovaToast', function ($scope, perCapitaService, $stateParams, $rootScope, Favorites, $ionicPlatform, $cordovaLocalNotification, $cordovaToast) {
+
+    $scope.showFavButton = $rootScope.currentUser;
+
+    $scope.controlsData = {skills: $rootScope.skills};
+
+
+    // Look up jobs data
+    $scope.doLookup = function () {
+      $rootScope.skills = $scope.controlsData.skills;
+      perCapitaService.lookup($scope.controlsData.skills);
+    };
+
+    // Post process the jobs data, by adding Indeeds link and calculating jobsPer1kPeople and jobsRank
+    $scope.updatePerCapitaData = function () {
+      $scope.cities = perCapitaService.response.data.docs;
+
+      var arrayLength = $scope.cities.length;
+      for (var i = 0; i < arrayLength; i++) {
+        var obj = $scope.cities[i];
+        obj.jobsPer1kPeople = Math.round(obj.totalResults / obj.population * 1000);
+        obj.url = "https://www.indeed.com/jobs?q=" + $scope.controlsData.skills + "&l=" + obj.city + ", " + obj.state;
+      }
+
+      // rank jobs
+      var sortedObjs;
+      if (perCapitaService.isSkills) {
+        sortedObjs = _.sortBy($scope.cities, 'totalResults').reverse();
+      } else {
+        sortedObjs = _.sortBy($scope.cities, 'jobsPer1kPeople').reverse();
+      }
+      $scope.cities.forEach(function (element) {
+        element.jobsRank = sortedObjs.indexOf(element) + 1;
+      });
+
+      if (!$scope.$$phase) {
+        $scope.$apply();
+      }
+      $rootScope.cities = $scope.cities;
+      console.log("Loaded " + arrayLength + " results.")
+
+    };
+
+    perCapitaService.registerObserverCallback($scope.updatePerCapitaData);
+
+    $scope.addToFavorites = function () {
+      delete $scope.city._id;
+      delete $scope.city._rev;
+      $scope.city.customerId = $rootScope.currentUser.id
+      Favorites.create($scope.city);
+
+      $ionicPlatform.ready(function () {
+
+        $cordovaLocalNotification.schedule({
+          id: 1,
+          title: "Added Favorite",
+          text: $scope.city.city
+        }).then(function () {
+            console.log('Added Favorite ' + $scope.city.city);
+          },
+          function () {
+            console.log('Failed to add Favorite ');
+          });
+
+        $cordovaToast
+          .show('Added Favorite ' + $scope.city.city, 'long', 'center')
+          .then(function (success) {
+            // success
+          }, function (error) {
+            // error
+          });
+
+
+      });
+
+    }
+
+    if ($stateParams.id) {
+      console.log("param " + $stateParams.id);
+      $scope.city = $rootScope.cities.filter(function (obj) {
+        return obj._id === $stateParams.id;
+      })[0];
+
+      console.log($scope.city);
+    } else {
+      $scope.doLookup();
+    }
+
+
+  }])
+
+  .controller('AboutController', ['$scope', function ($scope) {
+
+  }])
+
+  .controller('FavoritesController', ['$scope', '$rootScope', '$state', 'Favorites', '$ionicListDelegate', '$ionicPopup', function ($scope, $rootScope, $state, Favorites, $ionicListDelegate, $ionicPopup) {
+
+    $scope.shouldShowDelete = false;
+
+    /*$scope.$on('$stateChangeSuccess', function(event, toState, toParams, fromState, fromParams) {
+     console.log("State changed: ", toState);
+     if(toState.name === "app.favorites") $scope.refreshItems();
+     });*/
+
+    $scope.refreshItems = function () {
+      if ($rootScope.currentUser) {
+
+        Favorites.find({
+          filter: {
+            where: {
+              customerId: $rootScope.currentUser.id
+            }
+          }
+        }).$promise.then(
+          function (response) {
+            $scope.favorites = response;
+            console.log("Got favorites");
+          },
+          function (response) {
+            console.log(response);
+          });
+      }
+      else {
+        $scope.message = "You are not logged in"
+      }
+    }
+
+    $scope.refreshItems();
+
+    $scope.toggleDelete = function () {
+      $scope.shouldShowDelete = !$scope.shouldShowDelete;
+      console.log($scope.shouldShowDelete);
+    }
+
+    $scope.deleteFavorite = function (favoriteid) {
+
+      var confirmPopup = $ionicPopup.confirm({
+        title: '<h3>Confirm Delete</h3>',
+        template: '<p>Are you sure you want to delete this item?</p>'
+      });
+
+      confirmPopup.then(function (res) {
+        if (res) {
+          console.log('Ok to delete');
+          Favorites.deleteById({id: favoriteid}).$promise.then(
+            function (response) {
+              $scope.favorites = $scope.favorites.filter(function (el) {
+                return el.id !== favoriteid;
+              });
+              $state.go($state.current, {}, {reload: false});
+              // $window.location.reload();
+            },
+            function (response) {
+              console.log(response);
+              $state.go($state.current, {}, {reload: false});
+            });
+        } else {
+          console.log('Canceled delete');
+        }
+      });
+      $scope.shouldShowDelete = false;
+
+    }
+
+  }])
+
+;

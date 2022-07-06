@@ -1,0 +1,52 @@
+# Set the base image to Ubuntu
+FROM phusion/baseimage
+MAINTAINER Moocher.io <admin@moocher.io>
+ENV REFRESHED_AT 2016-08-21
+
+RUN echo "deb-src http://archive.ubuntu.com/ubuntu xenial main" >> /etc/apt/sources.list
+RUN sed 's/main$/main universe/' -i /etc/apt/sources.list
+
+RUN DEBIAN_FRONTEND=noninteractive export LC_ALL=C \
+  && apt-get update \
+  && apt-get upgrade -y \
+  && apt-get -y install wget vim git libpq-dev
+
+# Openresty (Nginx)
+RUN    apt-get -y build-dep nginx \
+  && apt-get -q -y clean && rm -rf /var/cache/apt/archives/* /var/lib/apt/lists/*
+RUN    wget https://openresty.org/download/openresty-1.9.15.1.tar.gz \
+  && tar xvfz openresty-1.9.15.1.tar.gz \
+  && cd openresty-1.9.15.1 \
+  && ./configure --with-luajit --with-http_addition_module --with-http_dav_module --with-http_geoip_module --with-http_gzip_static_module --with-http_image_filter_module --with-http_realip_module --with-http_stub_status_module --with-http_ssl_module --with-http_sub_module --with-http_xslt_module --with-ipv6 --with-http_postgres_module --with-pcre-jit \
+  && make \
+  && make install \
+  && rm -rf /openresty*
+
+# lua resty http library
+RUN     cd /tmp \
+  && wget -O lua-resty-http.tar.gz https://github.com/pintsized/lua-resty-http/archive/master.tar.gz \
+  && tar -zxvf lua-resty-http.tar.gz \
+  && cd lua-resty-http-master \
+  && export LUA_LIB_DIR=usr/local/openresty/lualib/ \
+  && make install \
+  && rm -rf /lua-resty-http*
+
+# Configure SSH access
+RUN rm -f /etc/service/sshd/down && /etc/my_init.d/00_regen_ssh_host_keys.sh > /dev/nul 2>&1
+
+# Use insecure key (development only)
+RUN /usr/sbin/enable_insecure_key
+
+# Upload your own public key (comment upper line)
+#RUN mkdir -p /root/.ssh
+#ADD moocher_rsa.pub /tmp/id_rsa.pub
+#RUN cat /tmp/id_rsa.pub >> /root/.ssh/authorized_keys && rm -f /tmp/id_rsa.pub
+
+# runit for nginx service
+RUN mkdir -p /etc/service/nginx/
+COPY run.nginx /etc/service/nginx/run
+RUN chmod 755 /etc/service/nginx/run
+
+EXPOSE 8080
+
+CMD [ "/sbin/my_init" ]

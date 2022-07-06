@@ -1,0 +1,83 @@
+###################################################
+## Defines the 'InstanceGraph' type
+###################################################
+
+type InstanceGraph
+  graph::DiGraph
+  nodes::Array{Node,1}
+  n::Int64
+
+  "Constructor: returns an empty InstanceGraph"
+  function InstanceGraph()
+    obj = new()
+    obj.graph = DiGraph()
+    obj.nodes = Array(Node,0)
+    obj.n = 0
+    return obj
+  end
+end
+
+function arrival!(pool::InstanceGraph, node_id::Int64, d::Data, arr_time::Int64, l::Log)
+  new_node = Node(node_id, d.type_ids[node_id], arr_time, d.dep[node_id], d.features[node_id,:])
+  push!(pool.nodes, new_node)
+  add_vertex!(pool.graph)
+  for i in 1:pool.n
+    if d.matrix[pool.nodes[i].id, node_id] == 1
+        add_edge!(pool.graph, i, pool.n + 1)
+    end
+    if d.matrix[node_id, pool.nodes[i].id] == 1
+        add_edge!(pool.graph, pool.n + 1, i)
+    end
+  end
+  pool.n += 1
+  arr_log!(new_node, l)
+  assert(pool.n == length(pool.nodes))
+end
+
+function departures!(pool::InstanceGraph, time::Int64, l::Log)
+  # Iterates over the nodes and performs swaps in the same way remove! does for
+  # Lightgraphs
+  i = 1
+  while i <= pool.n
+    node = pool.nodes[i]
+    if rand() < node.dep_rate
+      node.dep_time = time
+      dep_log!(node, l)
+
+      #reorder the nodes array to keep in sync with the graph structure.
+      pool.nodes[i] = pool.nodes[pool.n]
+      deleteat!(pool.nodes, pool.n)
+      rem_vertex!(pool.graph, i)
+      pool.n -= 1
+
+    else
+      i += 1
+    end
+  end
+end
+
+"Removes from the pool the nodes corresponding to the node_ids.
+Relates to how the adjacency matrix is generated"
+function remove_matched!(pool::InstanceGraph, matched::Array{Float64,1}, time::Int64, l::Log)
+  n = pool.n
+  i = 1
+  m = sum(matched)
+  while i <= pool.n
+    node = pool.nodes[i]
+    if matched[i] >= 1 - 1e-4 # numerical approximation from solver
+      #reorder the nodes array to keep in sync with the graph structure.
+      node.dep_time = time
+      match_log!(pool.nodes[i], l)
+
+      pool.nodes[i] = pool.nodes[pool.n]
+      matched[i] = matched[pool.n]
+
+      deleteat!(pool.nodes, pool.n)
+      deleteat!(matched, pool.n)
+      rem_vertex!(pool.graph, i)
+      pool.n -= 1
+    else
+      i += 1
+    end
+  end
+end

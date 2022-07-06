@@ -1,0 +1,150 @@
+from python_kemptech_api import *
+
+# Specify the LoadMaster connection credentials here:
+loadmaster_ip = ""
+username = ""
+password = ""
+vs_ip_1 = ""
+vs_ip_2 = ""
+rs_ip_1 = ""
+rs_ip_2 = ""
+vs_port = ""
+rs_port = ""
+
+
+class RealServerPool(object):
+    healthcheck_parameters = [
+        "checktype",
+        "checkport",
+        "checkurl",
+        "checkheaders",
+        "checkuse1_1",
+        "checkuseget",
+        "checkpostdata",
+        "checkpattern",
+        "checkcodes",
+        "matchlen",
+        "enhancedhealthchecks",
+        "rsminimum"
+    ]
+
+    rs_parameters = [
+        "enable",
+        "forward",
+        "weight",
+        "limit",
+        "critical",
+        "follow"
+    ]
+
+    def __init__(self, rs_list=None, vs=None):
+        if rs_list is not None:
+            self.rs = []
+
+            for rs in rs_list:
+                if isinstance(rs, RealServer):
+                    self.rs.append(rs)
+                else:
+                    ip, port = rs.split(":")
+                    mock_lm = {"endpoint": "", "ip_address": "", "vs": ""}
+                    self.rs.append(RealServer(mock_lm, ip, port))
+
+            self.checktype = None
+            self.checkport = None
+            self.checkurl = None
+            self.checkheaders = None
+            self.checkuse1_1 = None
+            self.checkuseget = None
+            self.checkpostdata = None
+            self.checkpattern = None
+            self.checkcodes = None
+            self.matchlen = None
+            self.enhancedhealthchecks = None
+            self.rsminimum = None
+        elif vs is not None:
+            self.rs = vs.servers.values()
+
+            self.checktype = vs.checktype
+            self.checkport = vs.checkport
+            self.checkurl = vs.checkurl
+            self.checkheaders = vs.checkheaders
+            self.checkuse1_1 = vs.checkuse1_1
+            self.checkuseget = vs.checkuseget
+            self.checkpostdata = vs.checkpostdata
+            self.checkpattern = vs.checkpattern
+            self.checkcodes = vs.checkcodes
+            self.matchlen = vs.matchlen
+            self.enhancedhealthchecks = vs.enhancedhealthchecks
+            self.rsminimum = vs.rsminimum
+
+    def apply(self, vs):
+        [rs.delete() for rs in vs.servers.values()]
+
+        for rs in self.rs:
+            new_rs = vs.create_real_server(rs.rs, rs.rsport)
+            # Apply other settings
+            new_rs.save()
+
+            for attr in self.rs_parameters:
+                print("attr: {}".format(attr))
+                if hasattr(rs, attr) and rs.__getattribute__(attr) is not None:
+                    print("set attr: {}={}".format(attr, rs.__getattribute__(attr)))
+                    new_rs.__setattr__(attr, rs.__getattribute__(attr))
+
+            new_rs.update()
+
+        for attr in self.healthcheck_parameters:
+            print("attr: {}".format(attr))
+            if hasattr(self, attr) and self.__getattribute__(attr) is not None:
+                print("set attr: {}={}".format(attr, self.__getattribute__(attr)))
+                vs.__setattr__(attr, self.__getattribute__(attr))
+
+        vs.update()
+
+# Create the LoadMaster object
+lm = LoadMaster(loadmaster_ip, username, password)
+# Delete all the existing VSs
+[vs.delete() for vs in lm.vs.values()]
+
+# Create a new VS
+vs = lm.create_virtual_service(vs_ip_1, vs_port, "tcp")
+vs.save()
+# Configure some healthcheck options
+vs.checktype = 'HTTPS'
+vs.checkport = "8443"
+vs.update()
+
+# Add and save the first real server
+rs1 = vs.create_real_server(rs_ip_1, rs_port)
+rs1.save()
+# Configure the weighting
+rs1.weight = 200
+rs1.update()
+
+# Add and save the second real server
+rs2 = vs.create_real_server(rs_ip_2, rs_port)
+rs2.save()
+# Disable the server
+rs2.enable = 'N'
+rs2.update()
+
+# This will create a pool based on the VS and healthcheck settings of the VS
+pool1 = RealServerPool(vs=vs)
+
+# Create the second VS
+vs2 = lm.create_virtual_service(vs_ip_2, vs_port, "tcp")
+vs2.save()
+
+# Apply the pool to the new VS. The RS and healthcheck settings will be applied
+pool1.apply(vs2)
+
+# Alternately, you can use a list of IP and ports to create a pool
+rs_list = ["172.22.100.6:88", "172.22.100.7:88", "172.22.100.8:88", "172.22.100.9:88"]
+pool2 = RealServerPool(rs_list)
+
+# You can also apply healthcheck settings directly to a pool
+pool2.checktype = "ICMP"
+
+# Apply the pool to both VSs
+pool2.apply(vs)
+pool2.apply(vs2)

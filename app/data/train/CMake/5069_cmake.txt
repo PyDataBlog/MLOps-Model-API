@@ -1,0 +1,7 @@
+set(_CATKIN_CURRENT_PACKAGE "bb04")
+set(bb04_MAINTAINER "bcharrow <bcharrow@seas.upenn.edu>")
+set(bb04_DEPRECATED "")
+set(bb04_VERSION "0.0.0")
+set(bb04_BUILD_DEPENDS "diagnostic_msgs")
+set(bb04_RUN_DEPENDS "diagnostic_msgs")
+set(bb04_BUILDTOOL_DEPENDS "catkin")

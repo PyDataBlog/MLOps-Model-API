@@ -1,0 +1,1 @@
+CREATE VIEW dm_surveys AS SELECT * FROM plot_surveys WHERE species_id = 'DM';

@@ -1,0 +1,145 @@
+package cz.vhromada.utils.file.gui;
+
+import java.io.IOException;
+import java.nio.file.FileVisitResult;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.nio.file.SimpleFileVisitor;
+import java.nio.file.attribute.BasicFileAttributes;
+import java.util.ArrayList;
+import java.util.Deque;
+import java.util.LinkedList;
+import java.util.List;
+
+import cz.vhromada.validators.Validators;
+
+import org.springframework.util.StringUtils;
+
+/**
+ * A class represents file visitor for copying directories and files.
+ */
+public class CopyingFileVisitor extends SimpleFileVisitor<Path> {
+
+    /**
+     * Delimiter in replacing text
+     */
+    private static final String REPLACING_TEXT_DELIMITER = ",";
+
+    /**
+     * Source directory
+     */
+    private Path source;
+
+    /**
+     * Target directory
+     */
+    private Path target;
+
+    /**
+     * Replacing patterns
+     */
+    private List<ReplacePattern> replacePatterns;
+
+    /**
+     * Directories
+     */
+    private Deque<Path> directories;
+
+    /**
+     * Creates a new instance of CopyingFileVisitor.
+     *
+     * @param source        source directory
+     * @param target        target directory
+     * @param replacingText replacing text
+     * @param newText       new text
+     * @throws IllegalArgumentException if source directory is null
+     *                                  or target directory is null
+     *                                  or replacing text is null
+     *                                  or new text is null
+     *                                  or count of replacing texts is different from count of new texts
+     */
+    public CopyingFileVisitor(final Path source, final Path target, final String replacingText, final String newText) {
+        Validators.validateArgumentNotNull(source, "Source");
+        Validators.validateArgumentNotNull(target, "Target");
+        Validators.validateArgumentNotNull(replacingText, "Replacing text");
+        Validators.validateArgumentNotNull(newText, "New text");
+
+        this.source = source;
+        this.target = target;
+        this.directories = new LinkedList<>();
+        this.replacePatterns = createReplacePatterns(replacingText, newText);
+    }
+
+    @Override
+    public FileVisitResult preVisitDirectory(final Path dir, final BasicFileAttributes attrs) throws IOException {
+        final Path directory = getDirectoryName(dir);
+        directories.addLast(directory);
+        if (!Files.exists(directory)) {
+            Files.createDirectory(directory);
+        }
+
+        return super.preVisitDirectory(dir, attrs);
+    }
+
+    @Override
+    public FileVisitResult postVisitDirectory(final Path dir, final IOException exc) throws IOException {
+        directories.removeLast();
+
+        return super.postVisitDirectory(dir, exc);
+    }
+
+    @Override
+    public FileVisitResult visitFile(final Path file, final BasicFileAttributes attrs) throws IOException {
+        FileCopy.copy(file, directories.getLast(), replacePatterns);
+
+        return super.visitFile(file, attrs);
+    }
+
+    /**
+     * Returns created replace patters.
+     *
+     * @param replacingText replacing text
+     * @param newText       new text
+     * @return created replace patters
+     * @throws IllegalArgumentException if count of replacing texts is different from count of new texts
+     */
+    private static List<ReplacePattern> createReplacePatterns(final String replacingText, final String newText) {
+        final String[] replacingTexts = StringUtils.tokenizeToStringArray(replacingText, REPLACING_TEXT_DELIMITER);
+        final String[] newTexts = StringUtils.tokenizeToStringArray(newText, REPLACING_TEXT_DELIMITER);
+
+        if (replacingTexts.length != newTexts.length) {
+            throw new IllegalArgumentException("Count of replacing texts is different from count of new texts");
+        }
+
+        final List<ReplacePattern> result = new ArrayList<>();
+        for (int i = 0; i < replacingTexts.length; i++) {
+            final String source = replacingTexts[i];
+            final String target = newTexts[i];
+
+            result.add(new ReplacePattern(source, target));
+            result.add(new ReplacePattern(source.toLowerCase(), target.toLowerCase()));
+            result.add(new ReplacePattern(StringUtils.capitalize(source.toLowerCase()), StringUtils.capitalize(target.toLowerCase())));
+            result.add(new ReplacePattern(source.toUpperCase(), target.toUpperCase()));
+        }
+
+        return result;
+    }
+
+    /**
+     * Returns directory name.
+     *
+     * @param directory directory
+     * @return directory name
+     */
+    private Path getDirectoryName(final Path directory) {
+        final String sourcePath = source.toAbsolutePath().toString();
+        final String targetPath = target.toAbsolutePath().toString();
+        final String directoryPath = directory.toAbsolutePath().toString();
+        final String result = directoryPath.replace(sourcePath, targetPath);
+        final String replacedResult = FileCopy.replaceText(result, replacePatterns);
+
+        return Paths.get(replacedResult);
+    }
+
+}

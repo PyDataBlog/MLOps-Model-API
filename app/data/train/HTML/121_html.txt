@@ -1,0 +1,266 @@
+{% extends "base.html" %}
+{% load static %}
+{% load template_extras %}
+
+{% block title %}Analyse{% endblock %}
+{% block active_class %}analyse{% endblock %}
+
+{% block extra_css %}
+<link href="{% static 'css/select2.min.css' %}" rel="stylesheet">
+<link href="{% static 'css/jquery.nouislider.css' %}" rel="stylesheet">
+<link href="{% static 'css/jquery.nouislider.pips.css' %}" rel="stylesheet">
+<link href='https://api.tiles.mapbox.com/mapbox.js/v2.2.1/mapbox.css' rel='stylesheet' />
+{% endblock %}
+
+{% block content %}
+
+<h1>Search GP prescribing data</h1>
+
+<p>Search 700 million rows of prescribing data, and get prescribing information by practice, PCN, CCG, STP or regional team. You can search for any numerator over any denominator.</p>
+
+<p>Unsure how to create your own searches? <a target="_blank" href="{% url 'analyse' %}#numIds=0212000AA&denomIds=2.12">Try an example</a>, <a target="_blank" href="http://openprescribing.net/docs/analyse">read more</a> about how to use this tool, check our <a target="_blank" href="{% url 'faq' %}">FAQs</a> and read our <a href='https://ebmdatalab.net/prescribing-data-bnf-codes/'> what is a BNF code blog</a>.</p>
+
+<div class="alert alert-danger" role="alert" style="margin-top: 10px;" id="old-browser">
+  <strong>Warning!</strong> It looks like you're using an older browser. This form may be very slow, as it has to crunch through a lot of data to render the graphs. If you can, please try again with a modern browser.
+</div>
+
+{% include '_get_in_touch.html' %}
+
+<div id="loading-form">
+<p>Loading search form...</p>
+</div>
+<div id="analyse-options" class="invisible">
+
+    <div class="form-row">
+        <div class="col left">
+        <span class="help" id="numerator-help" data-toggle="popover" data-trigger="hover" data-placement="auto top">See prescribing of:</span>
+        <div class="hidden" id="numerator-help-text">You can add BNF sections, chemicals, products or product format.<br/>For example:
+        <ul>
+        <li><em>Atorvastatin</em> will show all prescribing on the chemical, across multiple products</li>
+        <li><em>Lipitor (branded)</em> will show all prescribing on just that product</li>
+        <li><em>Lipitor_Tab 20mg</em> will show all prescribing on just that product format.</li>
+        </ul>
+        Add multiple items to see total prescribing on those items.
+        </div>
+            <!-- <span class="icon-up"></span>with a y-axis of: -->
+        </div>
+        <div class="col middle">
+            <select style="width: 100%" id="num" class="form-select not-searchable">
+                <option value="chemical" selected>drugs or BNF sections</option>
+                <!-- <option value="all">everything</option> -->
+            </select>
+        </div>
+        <div class="col right">
+            <div id="numIds-wrapper">
+                <select id="numIds" multiple="multiple" style="width: 100%"></select>
+            </div>
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="col left">
+        <span class="help" id="denominator-help" data-toggle="popover" data-trigger="hover" data-placement="auto top">versus:</span>
+        <div class="hidden" id="denominator-help-text">Add another BNF section or drug as a comparator.<br/>Or use standardised prescribing units (STAR-PUs) as an approximate measure of prescribing need.</div>
+            <!-- <span class="icon-right"></span>and an x-axis of: -->
+        </div>
+        <div class="col middle">
+            <select style="width: 100%" id="denom" class="form-select not-searchable">
+                <option value="nothing" selected>nothing</option>
+                <option value="chemical">drugs or BNF sections</option>
+                <option value="total_list_size" selected>total list size</option>
+                <option value="star_pu.oral_antibacterials_item">STAR-PUs for antibiotics</option>
+            </select>
+        </div>
+        <div class="col right">
+            <div id="denomIds-wrapper">
+                <select id="denomIds" multiple="multiple" style="width: 100%"></select>
+            </div>
+        </div>
+    </div>
+    <div class="form-row">
+        <div class="col left">highlighting:</div>
+        <div class="col middle">
+            <select style="width: 100%" id="org" class="form-select not-searchable">
+                <!-- <option value="all" selected>everyone</option> -->
+                <option value="practice">a practice or practices</option>
+                <option value="CCG">a CCG or CCGs</option>
+                {% if pcns_enabled %}<option value="pcn">a PCN or PCNs</option>{% endif %}
+                <option value="stp">an STP or STPs</option>
+                <option value="regional_team">an NHS England Region</option>
+            </select>
+        </div>
+        <div class="col right">
+            <div id="orgIds-container" style="display: none">
+                <select style="width: 100%" id="orgIds" multiple="multiple">
+                </select>
+                <p class="help-block" id="org-help">Hint: add a CCG to see all its practices</p>
+            </div>
+        </div>
+    </div>
+
+    <p>
+      <a href="/docs/analyse/">Tips on using this search</a>
+    </p>
+    <div>
+        <button type="button" id="update" class="btn btn-primary" type="submit" data-loading-text="Fetching data..." data-loaded-text="Show me the data!">Show me the data!</button>
+    </div>
+
+</div> <!-- /#analyse-options -->
+
+<div class="loading-wrapper">
+    <hr/>
+    <img class="loading" src="{% static 'img/logo.svg' %}" onerror="this.src='{% static "img/ajax-loader.gif" %}';this.onerror=null;" title="Loading icon">
+    <br/>Fetching data...
+</div>
+
+<div id="error">
+<hr/><p id='error-message'></p>
+</div>
+
+<div id="results">
+<hr/>
+
+{% include '_share_button.html' %}
+
+<ul id="tabs" class="nav nav-tabs" role="tablist">
+  <li role="presentation" id="summary-tab" class="summary-tab active saveable">
+    <a href="#summary-panel" data-target="#summary-panel" aria-controls="settings" role="tab" data-toggle="tab">Show summary</a>
+  </li>
+  <li role="presentation" id="chart-tab" class="chart-tab hidden saveable">
+    <a href="#chart-panel" data-target="#chart-panel" aria-controls="settings" role="tab" data-toggle="tab">Time series</a>
+  </li>
+  <li role="presentation" id="map-tab" class="map-tab hidden saveable">
+    <a href="#map-panel" data-target="#map-panel" aria-controls="settings" role="tab" data-toggle="tab">Map</a>
+  </li>
+  <li role="presentation" id="data-tab" class="data-tab">
+    <a href="#data-panel" data-target="#data-panel" aria-controls="settings" role="tab" data-toggle="tab">Download CSV <span class="glyphicon glyphicon-download-alt" aria-hidden="true"></span></a>
+  </li>
+</ul>
+
+<div class="tab-content">
+
+    <!-- Time slider and items toggle -->
+    <div id="chart-options">
+        <div id="chart-options-wrapper">
+          {# Play button temporarily disabled until we fix issue #1368 #}
+          {#<div id="play-slider" alt="Animate time series" class="glyphicon glyphicon-play-circle"></div>#}
+          <div id="slider-wrapper"><div id="chart-date-slider"></div></div>
+          <div id="items-spending-toggle" class="btn-group btn-toggle" aria-label="Show spending or items on graph">
+                <button class="btn btn-default btn-sm" data-type="actual_cost">spending</button>
+                <button class="btn btn-info btn-sm" data-type="items">items</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Tab content -->
+    <div role="tabpanel" class="tab-pane fade in active" id="summary-panel" class="summary-tab">
+        <div class="chart-title-wrapper">
+            <div class="chart-title"></div>
+            <div class="chart-sub-title"></div>
+        </div>
+        <div class="chart-container">
+          <div id="summarychart"></div>
+            <div class="practice-warning">
+                For clarity, practice graphs and maps only show standard GP practices, and exclude non-standard settings like prisons, out-of-hours services, etc.
+            </div>
+            <div class="highcharts-attribution">
+                Built with <a href="http://www.highcharts.com/">Highcharts</a>
+            </div>
+        </div>
+        {% include '_outlier_toggle.html' %}
+    </div>
+
+    <div role="tabpanel" class="tab-pane fade" id="chart-panel" class="chart-tab">
+        <div class="chart-container">
+            <div id="chart"></div>
+            <div class="practice-warning">
+                For clarity, practice graphs and maps only show standard GP practices, and exclude non-standard settings like prisons, out-of-hours services, etc.
+            </div>
+            <div class="highcharts-attribution">Built with <a href="http://www.highcharts.com/">Highcharts</a></div>
+        </div>
+        {% include '_outlier_toggle.html' %}
+    </div>
+
+    <div role="tabpanel" class="tab-pane fade" id="map-panel" class="map-tab">
+      <div class="chart-title-wrapper">
+        <p class="chart-title"></p>
+        <p class="chart-sub-title"></p>
+      </div>
+      <div class="clearfix">
+        <div id="map-wrapper">
+          <div id="map"></div>
+        </div>
+        <div class="practice-warning">
+          For clarity, practice graphs and maps only show standard GP
+          practices, and exclude non-standard settings like prisons,
+          out-of-hours services, etc. CCG boundaries from
+          <a href="http://www.england.nhs.uk/resources/ccg-maps/">NHS England</a>.
+          Practice locations are approximate, based on postcode. Only practices
+          with a known location are shown here. PCN boundaries are illustrative
+          only.
+        </div>
+       </div>
+       {% include '_outlier_toggle.html' %}
+    </div>
+
+    <div role="tabpanel" class="tab-pane fade" id="data-panel" class="data-tab">
+      <p>
+        You are welcome to use data from this site in your academic
+        output with attribution. Please cite "OpenPrescribing.net, EBM
+        DataLab, University of Oxford, 2020" as the source for
+        academic attribution.</p>
+
+      <p>If you use data or images from this site online or in a
+        report, please link back to us. Your readers will then be able
+        to see live updates to the data you are interested in, and
+        explore other queries for themselves.</p>
+
+      <p><a id="data-link" download="data.csv" class="btn btn-info" href="#">Download as CSV <span id="data-rows-count"></span></a> </p>
+    </div>
+
+  </div>
+
+  <div id="js-summary-totals" class="panel panel-default" style="margin-top: 18px">
+    <div class="panel-heading">
+      Total prescribing for <em class="js-friendly-numerator"></em>
+      across <span class="js-orgs-description"></span>
+    </div>
+    <table class="table">
+      <tr>
+        <th></th>
+        <th class="text-right js-selected-month"></th>
+        <th class="text-right">Financial YTD (<span class="js-financial-year-range"></span>)</th>
+        <th class="text-right">Last 12 months (<span class="js-year-range"></span>)</th>
+      </tr>
+      <tr>
+        <th>Cost (£)</th>
+        <td class="text-right js-cost-month-total"></td>
+        <td class="text-right js-cost-financial-year-total"></td>
+        <td class="text-right js-cost-year-total"></td>
+      </tr>
+      <tr>
+        <th>Items</th>
+        <td class="text-right js-items-month-total"></td>
+        <td class="text-right js-items-financial-year-total"></td>
+        <td class="text-right js-items-year-total"></td>
+      </tr>
+    </table>
+  </div>
+
+</div>
+
+<br/>
+
+{% include '_alert_signup_form.html' with alert_type='analyse'%}
+
+<p>Read our notes on <a href="{% url 'faq' %}">understanding the data</a>. Found something interesting, or a bug? Get in touch: <a href="mailto:{{ SUPPORT_TO_EMAIL }}" class="feedback-show">{{ SUPPORT_TO_EMAIL}}</a></p>
+
+
+{% endblock %}
+
+{% block extra_js %}
+<!--[if !IE 8]><!-->
+  <script src="{% static 'js/clipboard.min.js' %}"></script>
+<!--<![endif]-->
+{% conditional_js 'analyse-form' %}
+
+{% endblock %}

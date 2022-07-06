@@ -1,0 +1,73 @@
+import { commitMutation, graphql } from 'react-relay'
+import { ConnectionHandler } from 'relay-runtime'
+
+const mutation = graphql`
+  mutation CreateSpeciesMutation($input: CreateSpeciesInput!) {
+    createSpecies(input: $input) {
+      clientMutationId
+      speciesEdge {
+        node {
+          authorId
+          id
+          nodeId
+          air
+          temp
+          water
+          soil
+        }
+      }
+      query {
+        ...SpeciesList_query
+      }
+    }
+  }
+`
+
+let nextClientMutationId = 0
+
+const commit = (environment, { species, viewer }) =>
+  new Promise((resolve, reject) => {
+    const clientMutationId = nextClientMutationId++
+    const variables = {
+      input: {
+        clientMutationId,
+        species: {
+          ...species,
+          authorId: viewer.id,
+        },
+      },
+    }
+
+    return commitMutation(environment, {
+      mutation,
+      variables,
+      onError: (error: Error) => {
+        reject(error)
+      },
+      onCompleted: (response: Object) => {
+        resolve(response)
+      },
+      // See https://github.com/facebook/relay/issues/1701#issuecomment-301012344
+      // and also https://github.com/facebook/relay/issues/1701#issuecomment-300995425
+      // and also https://github.com/facebook/relay/issues/1701
+      updater: store => {
+        const payload = store.getRootField('createSpecies')
+        const newEdge = payload.getLinkedRecord('speciesEdge')
+
+        const storeRoot = store.getRoot()
+        const connection = ConnectionHandler.getConnection(
+          storeRoot,
+          'SpeciesList_species',
+          { first: 2147483647, orderBy: 'GENUS_ASC' }
+        )
+
+        if (connection) {
+          ConnectionHandler.insertEdgeBefore(connection, newEdge)
+        } else {
+          console.error('No connection found')
+        }
+      },
+    })
+  })
+
+export default { commit }

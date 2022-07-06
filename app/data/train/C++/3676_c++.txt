@@ -1,0 +1,110 @@
+/*
+ * PCLanChat, the decentralized chat client
+ * Copyright (C) 2017 Kuklin István
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, version 3 of the License.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <cstdlib>
+#include <QtWidgets>
+#include <QJsonDocument>
+#include <QStandardPaths>
+#include "Preferences.hpp"
+#include "Network.hpp"
+
+Preferences::Preferences() {
+    if(!getPreferencesFolder().mkpath(getPreferencesFolder().path())) {
+        QMessageBox messageBox;
+        messageBox.setText("Error accessing configuration directory!");
+        return;
+    } //creates the directory
+    preferencesFile.setFileName("Preferences.json");
+    
+    preferencesDialog = new PreferencesDialog(this);
+    load();
+    
+}
+
+Preferences::~Preferences() {
+    save();
+    delete preferencesDialog;
+}
+
+QDir Preferences::getPreferencesFolder() {
+    return QDir(QStandardPaths::standardLocations(QStandardPaths::AppConfigLocation).first());
+}
+
+void Preferences::openPreferences() {
+    preferencesDialog->ui.NicknameEdit->setText(QString::fromStdString(getValues().nickname));
+    preferencesDialog->ui.ListenCheckBox->setChecked(getValues().listen);
+    preferencesDialog->ui.SelfAdvertisingCheckBox->setChecked(getValues().selfAdvertising);
+    preferencesDialog->ui.buttonBox->button(QDialogButtonBox::Apply)->setEnabled(false);
+
+    preferencesDialog->show();
+}
+
+void Preferences::onApplied() {
+    preferencesDialog->ui.buttonBox->button(QDialogButtonBox::Apply)->setEnabled(false);
+
+    values.nickname = preferencesDialog->ui.NicknameEdit->text().toStdString();
+    values.listen = preferencesDialog->ui.ListenCheckBox->isChecked();
+    values.selfAdvertising = preferencesDialog->ui.SelfAdvertisingCheckBox->isChecked();
+
+    server->restart();
+}
+
+void Preferences::save() {
+    QJsonObject jsonObject = preferencesJsonDocument.object();
+    jsonObject["nickname"] = QString::fromStdString(getValues().nickname);
+    jsonObject["listen"] = getValues().listen;
+    jsonObject["selfAdvertising"] = getValues().selfAdvertising;
+
+    QDir::setCurrent(getPreferencesFolder().path());
+    preferencesFile.open(QIODevice::WriteOnly);
+    preferencesJsonDocument.setObject(jsonObject);
+    preferencesFile.write(preferencesJsonDocument.toJson());
+    preferencesFile.close();
+}
+
+void Preferences::load() {
+    QDir::setCurrent(getPreferencesFolder().path());
+    preferencesFile.open(QIODevice::ReadOnly);
+    preferencesJsonDocument = QJsonDocument::fromJson(preferencesFile.readAll());
+    preferencesFile.close();
+
+    QJsonObject jsonObject = preferencesJsonDocument.object();
+    values.nickname = jsonObject["nickname"].toString().toStdString(); //yeah looks stupid :)
+    values.listen = jsonObject["listen"].toBool();
+    values.selfAdvertising = jsonObject["selfAdvertising"].toBool();
+}
+
+PreferencesDialog::PreferencesDialog(Preferences *preferencesInput) {
+    preferences = preferencesInput;
+    ui.setupUi(this);
+    setFixedSize(352, 352);
+
+    connect(ui.buttonBox->button(QDialogButtonBox::Apply), SIGNAL(released()), preferences, SLOT(onApplied()));
+}
+
+void PreferencesDialog::bindPreferences(Preferences *preferencesInput) {
+    preferences = preferencesInput;
+}
+
+void PreferencesDialog::accept() {
+    preferences->onApplied();
+    hide();
+}
+
+void PreferencesDialog::reject() {
+    hide();
+}

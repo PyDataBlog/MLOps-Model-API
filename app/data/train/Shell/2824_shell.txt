@@ -1,0 +1,1 @@
+/usr/local/opt/shadowsocks-libev/bin/ss-local -c ~/Documents/LetonShadowsocks/conf/sslocal.conf

@@ -1,0 +1,405 @@
+Imports System.Data
+Imports System.IO
+Imports System.Windows.Forms
+Imports M_OrderLibrary.LibUtility
+
+Public Class LibDb
+
+#If CONFIG = "Desktop" Then
+    Public Shared FolderBase As String = LibUtility.HomeDir()
+#Else
+    Public Const FolderBase As String = "\My Documents\"
+#End If
+
+    Public Shared FolderFoto As String = FolderBase & "Foto\"
+
+    Private Shared DB_Name As String = "PocketDataSql.sdf"
+    Private Shared DB_FileName As String = HomeDir() + DB_Name
+    Private Shared DB_DataSource As String = "Data Source = " & DB_FileName
+
+    Public Const cartImport As String = "IMPOR_"
+    Public Const cartExport As String = "EXPOR_"
+    Public Const cartFoto As String = "Foto"
+
+
+    Public Shared ssceconn As New SqlCeConnection(DB_DataSource)
+
+    Public Shared sqlRows As SqlCeCommand
+    Public Shared sqlSelectRows As SqlCeCommand
+
+    Public Shared da As New SqlCeDataAdapter
+    Public Shared dr As SqlCeDataReader
+    Public Shared ds As New DataSet
+
+    Public Shared pr1 As New SqlCeParameter : Public Shared pr2 As New SqlCeParameter
+    Public Shared pr3 As New SqlCeParameter : Public Shared pr4 As New SqlCeParameter
+    Public Shared pr5 As New SqlCeParameter
+
+    Public Shared Property propExportFolder(Optional ByVal Folder As String = Nothing) As String
+        Get
+            If String.IsNullOrEmpty(Folder) Then
+                Return FolderBase
+            Else
+                Return (FolderBase & Folder & "\Export")
+            End If
+
+        End Get
+        Set(ByVal value As String)
+            If Not Directory.Exists(FolderBase & value) Then
+                Directory.CreateDirectory(FolderBase & value)
+            End If
+            If Not String.IsNullOrEmpty(value) AndAlso Not Directory.Exists(FolderBase & value & "\Export") Then
+                Directory.CreateDirectory(FolderBase & value & "\Export")
+            End If
+        End Set
+    End Property
+    Public Shared Property propImportFolder(Optional ByVal Folder As String = Nothing) As String
+        Get
+            If String.IsNullOrEmpty(Folder) Then
+                Return FolderBase
+            Else
+                Return (FolderBase & Folder & "\Import")
+            End If
+
+        End Get
+        Set(ByVal value As String)
+            If Not Directory.Exists(FolderBase & value) Then
+                Directory.CreateDirectory(FolderBase & value)
+            End If
+            If Not String.IsNullOrEmpty(value) AndAlso Not Directory.Exists(FolderBase & value & "\Import") Then
+                Directory.CreateDirectory(FolderBase & value & "\Import")
+            End If
+            If Not String.IsNullOrEmpty(value) AndAlso Not Directory.Exists(FolderFoto) Then
+                Directory.CreateDirectory(FolderFoto.TrimEnd("\"c))
+            End If
+        End Set
+    End Property
+
+    Public Shared Property propDB_Name() As String
+        Get
+            Return DB_Name
+        End Get
+        Set(ByVal value As String)
+            DB_Name = value
+        End Set
+    End Property
+    Public Shared Property propDB_FileName() As String
+        Get
+            Return DB_FileName
+        End Get
+        Set(ByVal value As String)
+            DB_FileName = value
+        End Set
+    End Property
+    Public Shared Property propDataSource() As String
+        Get
+            Return DB_DataSource
+        End Get
+        Set(ByVal value As String)
+            DB_DataSource = value
+        End Set
+    End Property
+
+
+
+    Public Shared Function GetClienteAgente(ByVal CodiceCliente As String) As String
+        GetClienteAgente = Nothing
+
+        Try
+
+            ssceconn.Open()
+            sqlSelectRows = ssceconn.CreateCommand()
+            sqlSelectRows.CommandText = "SELECT (PECRI + '... ' + PEIND) AS PERA1 From Clienti WHERE PECOD='" & _
+                                          CodiceCliente & "'"
+            GetClienteAgente = sqlSelectRows.ExecuteScalar
+
+        Catch ex As Exception
+            LibError.DisplaySQLCEErrors(ex)
+        Finally
+            ssceconn.Close()
+        End Try
+        If String.IsNullOrEmpty(GetClienteAgente) Then GetClienteAgente = "#N/D"
+
+        Return GetClienteAgente
+
+    End Function
+
+
+
+    Private Shared Function Test_Db(ByVal datasource As String) As String
+        Dim result As String
+        Dim ssceconntest As New SqlCeConnection(datasource)
+        Try
+            ssceconntest.Open()
+        Catch ex As SqlCeException
+            Return "Error:" & ex.NativeError.ToString
+        End Try
+
+        sqlRows = ssceconntest.CreateCommand()
+        sqlRows.CommandText = "select dbver from contaid"
+
+        result = sqlRows.ExecuteScalar
+
+        ssceconntest.Close()
+        ssceconntest.Dispose()
+
+        Return result
+    End Function
+
+    Public Shared Function Test_Connection() As Boolean
+        Dim result As Boolean = False
+        Try
+
+            'Verifica se file è readonly ed esiste
+            Dim di As New FileInfo(DB_FileName)
+            If di.Exists Then
+                If (di.Attributes And FileAttributes.ReadOnly) = FileAttributes.ReadOnly Then
+                    di.Attributes = FileAttributes.Normal Or FileAttributes.Archive
+                End If
+            Else
+                LibError.DisplaySQLCEErrors("Attenzione non è presente il database.")
+                Return result
+            End If
+
+            Dim result_version As String = Test_Db(DB_DataSource)
+            If Not result_version.StartsWith("Error") Then
+                Dim UpdateDb As New LibUpdateDB
+                result = UpdateDb.Allinea_Db(HomeDir()) 'Allineamento della versione DB.
+
+            ElseIf result_version = "Error:28609" Then
+                result = UpgradeDB()
+            ElseIf result_version Is Nothing Then
+                LibDb.CorrezioneDB()  ' Se ci sono problemi compatta il db.
+                result = True
+            End If
+
+        Catch ex As SqlCeException
+            LibError.DisplaySQLCEErrors(ex)
+        Finally
+            ssceconn.Close()
+        End Try
+        Return result
+    End Function
+
+    Private Shared Function UpgradeDB() As Boolean
+        Dim result As Boolean = False
+        'update.exe /s "\dir1\source.sdf" /sp "password1" /d    "\dir2\destination.sdf" /dp "password2" /e /q
+        Dim libfile As New LibFile
+        Dim destdir As String = HomeDir()
+        Dim destfile As String = destdir & "UpdatedDb.sdf"
+        Dim programma As String = destdir & "upgrade.exe"
+        Dim parametri As String = "/S """ & DB_FileName & """ /D """ & destfile & """ /Q"
+
+        If File.Exists(destfile) Then File.Delete(destfile)
+        MessageBox.Show("Sta per essere avviata la conversione, attendere...")
+        Process.Start(programma, parametri).WaitForExit()
+
+        If Test_Db("Data Source = " & destfile) Is Nothing Then
+            result = False
+            File.Delete(destfile)
+            MessageBox.Show("Conversione fallita!.")
+        Else
+            Dim UpdateDb As New LibUpdateDB
+            File.Delete(DB_FileName)
+            File.Move(destfile, DB_FileName)
+            result = UpdateDb.Allinea_Db(HomeDir()) 'Allineamento della versione DB.
+            MessageBox.Show("Conversione terminata con successo!.")
+        End If
+        Return result
+    End Function
+
+#Region "Riparazione Database"
+
+    Public Shared Sub CorrezioneDB()
+
+        If Verifica() = False Then
+            Ripara()
+        End If
+
+        Compatta()
+        Shrink()
+
+    End Sub
+
+    Public Shared Sub Compatta()
+        'Dim engine As New SqlCeEngine("Data Source = AdventureWorks.sdf")
+        ' Specify null destination connection string for in-place compaction
+        'engine.Compact(Nothing)
+        ' Specify connection string for new database options; The following 
+        ' tokens are valid:
+        '      - Password
+        '      - LCID
+        '      - Encrypt
+        ' All other SqlCeConnection.ConnectionString tokens are ignored
+        'engine.Compact("Data Source=; Password =a@3!7f$dQ;")
+        Dim engine As New SqlCeEngine(DB_DataSource)
+        Try
+            engine.Compact(Nothing)
+        Catch ex As SqlCeException
+            LibError.dolog(ex)
+        Finally
+            engine.Dispose()
+        End Try
+    End Sub
+
+    Public Shared Function Verifica() As Boolean
+        Dim result As Boolean = False
+        Dim engine As New SqlCeEngine(DB_DataSource)
+        Try
+            result = engine.Verify()
+        Catch ex As Exception
+            LibError.dolog(ex)
+        Finally
+            engine.Dispose()
+        End Try
+        Return result
+
+    End Function
+
+    Public Shared Sub Ripara()
+        Dim result As Boolean = False
+        Dim engine As New SqlCeEngine(DB_DataSource)
+        Try
+            engine.Repair(Nothing, RepairOption.DeleteCorruptedRows)
+        Catch ex As Exception
+            LibError.dolog(ex)
+        Finally
+            engine.Dispose()
+        End Try
+
+    End Sub
+
+    Private Shared Sub Crea_Db(ByVal Path_Db As String)
+        Dim engine As New SqlCeEngine(Path_Db)
+        Try
+            If File.Exists(Path_Db) Then
+                File.Delete(Path_Db)
+            End If
+            engine.CreateDatabase()
+        Catch ex As Exception
+        Finally
+            engine.Dispose()
+        End Try
+    End Sub
+
+
+    Public Shared Sub Shrink()
+        Dim result As Boolean = False
+        Dim engine As New SqlCeEngine(DB_DataSource)
+        Try
+            engine.Shrink()
+        Catch ex As Exception
+            LibError.dolog(ex)
+        Finally
+            engine.Dispose()
+        End Try
+
+    End Sub
+
+    Public Sub RiGenera_Db()
+
+        Exit Sub
+
+        Try
+            Crea_Db(DB_FileName)
+            sqlRows = ssceconn.CreateCommand()
+            ssceconn.Open()
+            '...
+            LibUpdateDB.Set_DbVer("3.26")
+        Finally
+            ssceconn.Close()
+        End Try
+
+    End Sub
+
+    Public Sub Delete_Db(ByVal gruppo As String)
+        sqlRows = ssceconn.CreateCommand()
+        Try
+            ssceconn.Open()
+            If gruppo = "STATS" Or gruppo = "ALL" Then
+                sqlRows.CommandText = "delete from StatisticheFatturato"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from StatisticheCliente"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from StatisticheAgente"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from StatisticheBudget"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from StatisticheMerceologico"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from StatisticheOrdini"
+                sqlRows.ExecuteNonQuery()
+            End If
+
+            If gruppo = "ANAGR" Or gruppo = "ALL" Then
+                sqlRows.CommandText = "delete from Articoli"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from BarcodeArticoli"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from Clienti"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from FornitoriArticoli"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from NoteDestinatari"
+                sqlRows.ExecuteNonQuery()
+            End If
+
+            If gruppo = "PREZZ" Or gruppo = "ALL" Then
+                sqlRows.CommandText = "delete from CondizioniVendita"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from ListinoArticoli"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from Offerte"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from OfferteCategoriaClienti"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from OfferteClienti"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from OfferteZona"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from OfferteDescrizione"
+                sqlRows.ExecuteNonQuery()
+            End If
+
+            If gruppo = "PAGAM" Or gruppo = "ALL" Then
+                sqlRows.CommandText = "delete from TotaliPagamenti"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from PagamentiClienti"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from EstrattoContoClienti"
+                sqlRows.ExecuteNonQuery()
+            End If
+
+            If gruppo = "CAUZI" Or gruppo = "ALL" Then
+                sqlRows.CommandText = "delete from Vuoti"
+                sqlRows.ExecuteNonQuery()
+            End If
+
+            If gruppo = "EXTRA" Or gruppo = "ALL" Then
+                sqlRows.CommandText = "delete from Note"
+                sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "delete from Ordini"
+                sqlRows.ExecuteNonQuery()
+            End If
+
+            If gruppo = "SETUP" Then
+                'sqlRows.CommandText = "delete from Impostazioni"
+                'sqlRows.ExecuteNonQuery()
+                sqlRows.CommandText = "update contaid set contaid = '1'"
+                sqlRows.ExecuteNonQuery()
+            End If
+
+        Finally
+            ssceconn.Close()
+
+        End Try
+
+    End Sub
+
+#End Region
+
+
+
+End Class
+
+

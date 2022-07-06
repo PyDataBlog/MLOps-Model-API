@@ -1,0 +1,228 @@
+use ansi_term::{ANSIStrings, Style};
+use ansi_term::Colour::{Green, Red};
+use config::use_ansi;
+use diff;
+use std::borrow::Borrow;
+use std::cmp::max;
+use std::fmt::{Debug, Write};
+use unicode_width::UnicodeWidthStr;
+
+/// Can be diffed
+pub trait Diffable<T: ?Sized>: PartialEq<T> {
+	fn diff(&self, to: &T) -> String;
+}
+
+
+fn diff_str(left: &str, right: &str) -> String {
+	let mut buf = String::new();
+
+	for diff in diff::lines(left, right) {
+		match diff {
+			diff::Result::Left(l) => {
+				writeln!(buf,
+				         "{}",
+				         ANSIStrings(&[DIFF_LEFT.paint("-"), DIFF_LEFT.paint(l)]))
+					.unwrap()
+			}
+			diff::Result::Both(l, _) => writeln!(buf, " {}", l).unwrap(),
+			diff::Result::Right(r) => {
+				writeln!(buf,
+				         "{}",
+				         ANSIStrings(&[DIFF_RIGHT.paint("+"), DIFF_RIGHT.paint(r)]))
+					.unwrap()
+			}
+		}
+	}
+
+	buf
+}
+
+impl Diffable<str> for str {
+	fn diff(&self, to: &str) -> String {
+		diff_str(self, to)
+	}
+}
+
+
+impl Diffable<str> for String {
+	fn diff(&self, to: &str) -> String {
+		diff_str(self, to)
+	}
+}
+
+impl<'a, 'b> Diffable<&'b str> for &'a str {
+	fn diff(&self, to: &&str) -> String {
+		diff_str(self, to)
+	}
+}
+
+
+lazy_static!{
+    static ref DIFF_LEFT: Style = {
+        if use_ansi() {
+            Style::new().fg(Red)
+        } else {
+            Style::new()
+        }
+    };
+
+    static ref DIFF_RIGHT: Style = {
+        if use_ansi() {
+            Style::new().fg(Green)
+        } else {
+            Style::new()
+        }
+    };
+}
+
+
+
+fn diff_slice<T: Debug + PartialEq>(left: &[T], right: &[T]) -> String {
+	let mut left_diffs = Vec::new();
+	let mut right_diffs = Vec::new();
+
+
+	let mut i = 0;
+	for diff in diff::slice(left, right).into_iter() {
+		match diff {
+			diff::Result::Left(l) => {
+				left_diffs.push((i, l));
+			}
+			diff::Result::Both(..) => i += 1,
+			diff::Result::Right(r) => {
+				right_diffs.push((i, r));
+				i += 1;
+			}
+		}
+	}
+
+
+	let mut lmax = 3;
+	let mut rmax = 8;
+	let mut buf = String::new();
+
+	for (&(_, l), &(_, r)) in left_diffs.as_slice().iter().zip(right_diffs.as_slice().iter()) {
+		write!(buf, "{:?}", l).unwrap();
+		let lsize = UnicodeWidthStr::width(buf.as_str());
+		buf.clear();
+
+		write!(buf, "{:?}", r).unwrap();
+		let rsize = UnicodeWidthStr::width(buf.as_str());
+		buf.clear();
+
+		lmax = max(lmax, lsize);
+		rmax = max(rmax, rsize);
+	}
+
+	// TODO: handle Long text.
+
+	// prints a table
+
+	writeln!(buf,
+	         "| {i:^5} | {l:^lmax$} | {r:<^rmax$} |",
+	         i = "Index",
+	         l = "Got",
+	         r = "Expected",
+	         lmax = lmax,
+	         rmax = rmax)
+		.unwrap();
+
+	writeln!(buf,
+	         "|-{c:-^5}-|-{c:-^lmax$}-|-{c:-^rmax$}-|",
+	         c = '-',
+	         lmax = lmax,
+	         rmax = rmax)
+		.unwrap();
+
+	debug!("diff_slice: lmax={lmax}, rmax={rmax}",
+	       lmax = lmax,
+	       rmax = rmax);
+
+	for ((idx, left), (r_idx, right)) in left_diffs.into_iter().zip(right_diffs) {
+		assert_eq!(idx, r_idx, "slice_diff: left index == right index");
+
+
+		writeln!(buf,
+		         "| {i:^5} | {l:^lmax$?} | {r:^rmax$?} |",
+		         i = idx,
+		         l = left,
+		         r = right,
+		         lmax = lmax,
+		         rmax = rmax)
+			.unwrap();
+	}
+
+	buf
+}
+
+
+
+impl<T: Debug + PartialEq> Diffable<[T]> for [T] {
+	fn diff(&self, to: &[T]) -> String {
+		diff_slice(self, to.borrow())
+	}
+}
+
+macro_rules! impl_for_slice_like {
+	($T:ident, $STRUCT:ty) => {
+		impl_for_slice_like!($T, $STRUCT, $STRUCT);
+	};
+
+	($T:ident, $STRUCT:ty, $TO:ty) => {
+impl<$T: Debug + PartialEq> Diffable<$TO> for $STRUCT {
+	fn diff(&self, to: &$TO) -> String {
+		diff_slice(self.borrow(), to.borrow())
+	}
+}
+	};
+}
+
+impl_for_slice_like!(T, Vec<T>);
+impl_for_slice_like!(T, [T; 0]);
+impl_for_slice_like!(T, [T; 1]);
+impl_for_slice_like!(T, [T; 2]);
+impl_for_slice_like!(T, [T; 3]);
+impl_for_slice_like!(T, [T; 4]);
+impl_for_slice_like!(T, [T; 5]);
+impl_for_slice_like!(T, [T; 6]);
+impl_for_slice_like!(T, [T; 7]);
+impl_for_slice_like!(T, [T; 8]);
+impl_for_slice_like!(T, [T; 9]);
+impl_for_slice_like!(T, [T; 10]);
+impl_for_slice_like!(T, [T; 11]);
+impl_for_slice_like!(T, [T; 12]);
+impl_for_slice_like!(T, [T; 13]);
+impl_for_slice_like!(T, [T; 14]);
+impl_for_slice_like!(T, [T; 15]);
+impl_for_slice_like!(T, [T; 16]);
+impl_for_slice_like!(T, [T; 17]);
+impl_for_slice_like!(T, [T; 18]);
+impl_for_slice_like!(T, [T; 19]);
+impl_for_slice_like!(T, [T; 20]);
+impl_for_slice_like!(T, [T; 21]);
+impl_for_slice_like!(T, [T; 22]);
+impl_for_slice_like!(T, [T; 23]);
+impl_for_slice_like!(T, [T; 24]);
+impl_for_slice_like!(T, [T; 25]);
+impl_for_slice_like!(T, [T; 26]);
+impl_for_slice_like!(T, [T; 27]);
+impl_for_slice_like!(T, [T; 28]);
+impl_for_slice_like!(T, [T; 29]);
+impl_for_slice_like!(T, [T; 30]);
+impl_for_slice_like!(T, [T; 31]);
+impl_for_slice_like!(T, [T; 32]);
+
+
+
+fn _assert_impl() {
+	fn _assert<A: ?Sized + Diffable<To>, To: ?Sized>() {}
+
+
+	_assert::<str, str>();
+	_assert::<String, str>();
+	_assert::<Vec<u8>, Vec<u8>>();
+	_assert::<Vec<u8>, Vec<u8>>();
+	_assert::<[u8; 4], [u8; 4]>();
+	_assert::<Vec<&str>, Vec<&str>>();
+
+}

@@ -1,0 +1,240 @@
+﻿Imports Visomes.MySQL
+Imports Visomes.SGV.Core
+
+Public Class ControleEquipamentoCliente
+
+    Private idValue As Integer
+    Private ordemServicoServicoValue As ServicosOrdemServico
+    Private ultimaCalibracaoValue As Date = Core.CurrentDate()
+    Private calibracaoDiasValue As Integer
+    Private numSerieValue As String = String.Empty
+    Private obsValue As String = String.Empty
+    Private cadastroValue As Date = Core.CurrentDate()
+    Private statusValue As Boolean = True
+    Private tipoFamiliaValue As TipoFamiliaEquipamento
+
+    Public Property ID() As Integer
+        Get
+            Return Me.idValue
+        End Get
+        Set(ByVal value As Integer)
+            Me.idValue = value
+        End Set
+    End Property
+
+    Public Property ServicoOrdemServico() As ServicosOrdemServico
+        Get
+            Return Me.ordemServicoServicoValue
+        End Get
+        Set(ByVal value As ServicosOrdemServico)
+            Me.ordemServicoServicoValue = value
+        End Set
+    End Property
+
+    Public Property UltimaCalibracao() As Date
+        Get
+            Return Me.ultimaCalibracaoValue
+        End Get
+        Set(ByVal value As Date)
+            Me.ultimaCalibracaoValue = value
+        End Set
+    End Property
+
+    Public Property Cadastro() As Date
+        Get
+            Return Me.cadastroValue
+        End Get
+        Set(ByVal value As Date)
+            Me.cadastroValue = value
+        End Set
+    End Property
+
+    Public Property CalibracaoDias() As Integer
+        Get
+            Return Me.calibracaoDiasValue
+        End Get
+        Set(ByVal value As Integer)
+            Me.calibracaoDiasValue = value
+        End Set
+    End Property
+
+    Public Property NumSerie() As String
+        Get
+            Return Me.numSerieValue
+        End Get
+        Set(ByVal value As String)
+            Me.numSerieValue = value
+        End Set
+    End Property
+
+    Public Property Obs() As String
+        Get
+            Return Me.obsValue
+        End Get
+        Set(ByVal value As String)
+            Me.obsValue = value
+        End Set
+    End Property
+
+    Public Property Status() As Boolean
+        Get
+            Return Me.statusValue
+        End Get
+        Set(ByVal value As Boolean)
+            Me.statusValue = value
+        End Set
+    End Property
+
+    Public Property TipoFamilia() As TipoFamiliaEquipamento
+        Get
+            Return Me.tipoFamiliaValue
+        End Get
+        Set(ByVal value As TipoFamiliaEquipamento)
+            Me.tipoFamiliaValue = value
+        End Set
+    End Property
+
+    Public Shared ReadOnly Property SQLRelatorioControleEquipamento(ByVal cond As String) As String
+        Get
+            Return "SELECT SUBSTRING(c.razaoSocialNome,30) 'cliente', os.idOrcamento 'orcamento', tec.descricao 'equipamento',osi.tag 'tag', cec.numSerie 'serie', osi.lv 'certificado', " _
+                 & "cec.calibracaoDias 'frequencia', DATE_FORMAT(cec.ultimaCalibracao,'%d/%m/%Y') 'ultimaCalibracao', " _
+                 & "DATE_FORMAT(ADDDATE(cec.ultimaCalibracao, INTERVAL cec.calibracaoDias DAY),'%d/%m/%Y') 'proximaCalibracao', " _
+                 & "tfi.descricao 'grandeza', os.idOs 'os', DATEDIFF(ADDDATE(cec.ultimaCalibracao, INTERVAL cec.calibracaoDias DAY),CURDATE()) 'diasRestantes' " _
+                 & "FROM controle_equipamento_cliente cec " _
+                 & "INNER JOIN ordem_servico_item osi ON osi.idItem = cec.idItemOS " _
+                 & "INNER JOIN ordem_servico os ON os.idOs = osi.idOs " _
+                 & "INNER JOIN cliente c ON c.idCliente = os.idCliente " _
+                 & "INNER JOIN tipo_equipamento_controle tec ON tec.idTipoEquipamento = osi.idEquipamento " _
+                 & "INNER JOIN tipo_familia_item tfi ON tfi.idTipoFamiliaItem = cec.idGrandeza " _
+                 & "WHERE " & cond
+        End Get
+    End Property
+
+    Public Shared ReadOnly Property CaminhoRDLC() As String
+        Get
+            Return "\Relatorios\ControleEquipamentoCliente.rdlc"
+        End Get
+    End Property
+
+    Public Sub New(ByVal id As Integer)
+        Me.idValue = id
+        CarrecaDados()
+    End Sub
+
+    Public Sub CarrecaDados()
+        Dim item As Integer = 0
+        Dim idTipoFamilia As Integer = 0
+        Connection.ConnectionMysql()
+        Core.MyData = DML.Select("*", "controle_equipamento_cliente", "id='" & idValue & "'")
+        If Core.MyData.Read() Then
+            item = MyData.GetInt32(1)
+            Me.ultimaCalibracaoValue = MyData.GetDateTime(2)
+            Me.calibracaoDiasValue = MyData.GetInt32(3)
+            Me.numSerieValue = MyData.GetString(4)
+            Me.obsValue = MyData.GetString(5)
+            Me.cadastroValue = MyData.GetDateTime(6)
+            Me.statusValue = MyData.GetBoolean(7)
+            idTipoFamilia = MyData.GetInt32(10)
+        End If
+        MyData.Dispose()
+        Connection.DisconnectMySQL()
+        If item > 0 Then Me.ordemServicoServicoValue = New ServicosOrdemServico(item)
+        If idTipoFamilia > 0 Then Me.tipoFamiliaValue = New TipoFamiliaEquipamento(idTipoFamilia)
+    End Sub
+
+    Public Function Commit() As Boolean
+        Dim dt As New Extras.Date()
+        Dim ultima As String = dt.ConvertToInternacionalDate(ultimaCalibracaoValue.ToShortDateString())
+        If Me.idValue = 0 Then
+            DML.Insert("controle_equipamento_cliente", _
+                       "idItemOS,ultimaCalibracao,calibracaoDias,numSerie,dtCadastro,obs,idGrandeza", _
+                       "" & Me.ordemServicoServicoValue.ID & ",'" & ultima & "'," & calibracaoDiasValue & "," _
+                     & "'" & numSerieValue & "',CURRENT_DATE(),'" & obsValue.Replace("'", "\'") & "'," & Me.TipoFamilia.ID & "")
+            Me.idValue = GetLastID()
+            Return AdicionaHistorico(HistoricoCadastral.TypeOfChanceRegistration.Criacao)
+        Else
+            DML.Update("controle_equipamento_cliente", _
+                       "idItemOS='" & ordemServicoServicoValue.ID & "'," _
+                     & "ultimaCalibracao='" & ultima & "'," _
+                     & "calibracaoDias=" & calibracaoDiasValue & "," _
+                     & "numSerie='" & numSerieValue & "'," _
+                     & "obs='" & obsValue.Replace("'", "\'") & "'," _
+                     & "idGrandeza=" & Me.TipoFamilia.ID & "", _
+                       "id=" & idValue & "")
+            Return AdicionaHistorico(HistoricoCadastral.TypeOfChanceRegistration.Alterar)
+        End If
+        Return False
+    End Function
+
+    Private Function GetLastID() As Integer
+        Dim id As Integer = 0
+        Connection.ConnectionMysql()
+        Core.MyData = DML.Select("SELECT MAX(id) FROM sgv.controle_equipamento_cliente")
+        If Core.MyData.Read() Then If Not MyData.IsDBNull(0) Then id = MyData.GetInt32(0)
+        MyData.Dispose()
+        Connection.DisconnectMySQL()
+        Return id
+    End Function
+
+    Public Function Inativar() As Boolean
+        DML.Update("controle_equipamento_cliente", "status=0", "id=" & idValue & "")
+        Return AdicionaHistorico(HistoricoCadastral.TypeOfChanceRegistration.Inativar)
+    End Function
+
+    Public Function Delete() As Boolean
+        Return DML.Delete("controle_equipamento_cliente", "id=" & idValue & "")
+    End Function
+
+    Public Function AdicionaHistorico(ByVal intTipo As HistoricoCadastral.TypeOfChanceRegistration) As Boolean
+        Return DML.Insert("historico_cadastro_gerencia_equipamento", "idUsuario,tipo,idGerencia,data,hora", " " & Core.Usuario.ID & "," & intTipo & ",'" & Me.idValue & "',CURRENT_DATE(),CURTIME()")
+    End Function
+
+    Public Function CarregaHistorico() As DataTable
+        Return DML.FeedDataGridView("t.descricao Tipo, h.data Data,h.hora Hora,u.login 'Alterado por'", _
+                                    "historico_cadastro_gerencia_equipamento h " _
+                                  & "INNER JOIN tipo_alteracao_cadastral t ON h.tipo = t.idTipoAlteracaoCadastral " _
+                                  & "INNER JOIN controle_equipamento_cliente c ON h.idGerencia = c.id " _
+                                  & "INNER JOIN usuario u ON h.idUsuario = u.idUsuario", _
+                                    "h.idGerencia = '" & idValue & "'")
+    End Function
+
+    Public Shared Function CarregaGrid(ByVal condicao As String) As DataTable
+        Return DML.FeedDataGridView("cec.id, c.razaoSocialNome, os.idOrcamento, os.idOs, tec.descricao,osi.lv, osi.tag, cec.numSerie, tsa.descricao, cec.ultimaCalibracao," _
+                                  & "ADDDATE(cec.ultimaCalibracao, INTERVAL cec.calibracaoDias DAY), cec.dtCadastro,  cec.status", _
+                                    "controle_equipamento_cliente cec " _
+                                  & "INNER JOIN ordem_servico_item osi ON osi.idItem = cec.idItemOS " _
+                                  & "INNER JOIN ordem_servico os ON os.idOs = osi.idOs " _
+                                  & "INNER JOIN cliente c ON c.idCliente = os.idCliente " _
+                                  & "INNER JOIN tipo_equipamento_controle tec ON tec.idTipoEquipamento = osi.idEquipamento " _
+                                  & "INNER JOIN tipo_sub_area tsa ON tsa.idSubArea = osi.idSubArea ", _
+                                    condicao)
+    End Function
+
+    Public Function IsOpen() As Boolean
+        Dim blninUser As Boolean = False
+        Dim strLogin As String = ""
+        Connection.ConnectionMysql()
+        MyData = DML.Select("l.inUse,u.login", _
+                            "controle_equipamento_cliente l " _
+                          & "INNER JOIN usuario u ON l.idUsuario = u.idusuario", _
+                            "l.id  = '" & Me.idValue & "' AND l.idUsuario <> " & Core.Usuario.ID & " ")
+        If MyData.Read Then
+            If Not IsDBNull(MyData.Item(1)) Then
+                blninUser = MyData.GetBoolean(0)
+                strLogin = MyData.GetString(1)
+            End If
+        End If
+        Connection.DisconnectMySQL()
+        MyData.Dispose()
+        If blninUser Then
+            MessageBox.Show("Controle de N°." & CStr(Me.idValue) & " está em uso pelo usuário(a) " & strLogin & ".", Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Information)
+            Return True
+        Else
+            Return Not DML.Update("controle_equipamento_cliente", "inUse = 1, idUsuario=" & Core.Usuario.ID & "", "id  = '" & Me.idValue & "'")
+        End If
+    End Function
+
+    Public Shared Sub Liberar()
+        DML.Update("controle_equipamento_cliente", "inUse = 0, idUsuario= NULL", "idUsuario  = '" & Core.Usuario.ID & "'")
+    End Sub
+End Class

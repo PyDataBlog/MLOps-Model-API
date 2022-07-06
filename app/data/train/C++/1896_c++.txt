@@ -1,0 +1,118 @@
+#include "stdafx.h"
+#include "HandleException.h"
+
+#include <dbghelp.h>
+
+#pragma comment ( lib, "dbghelp.lib" )
+
+typedef LONG 	(WINAPI *	UNHANDLEDEXCEPTIONFILTER)
+	(
+struct _EXCEPTION_POINTERS *ExceptionInfo
+	);
+
+static HANDLE gEventExit = NULL;
+static LONG lExceptCode = EXCEPTION_EXECUTE_HANDLER;
+static CHAR szDumpFile[MAX_PATH]={0};
+static BOOL bMakeDumpFile = TRUE;
+
+//static LPTOP_LEVEL_EXCEPTION_FILTER defaultExceptionCallBack = NULL;
+static UNHANDLEDEXCEPTIONFILTER	Real_UnhandledExceptionFilter = NULL;
+static PFN_HandleException fnSEHException = NULL;
+
+static LONG WINAPI DeBug_CreateDump(EXCEPTION_POINTERS* pExceptionPointers)
+{ 
+	BOOL bMiniDumpSuccessful;
+
+	//TCHAR szFileName[MAX_PATH];
+
+	if (bMakeDumpFile)
+	{
+		HANDLE hDumpFile;
+
+		MINIDUMP_EXCEPTION_INFORMATION ExpParam;
+		SYSTEMTIME		sys_time;
+		GetLocalTime(&sys_time);
+		wsprintfA( szDumpFile,"%04d%02d%02d%02d%02d%02d%03d.dmp",
+			sys_time.wYear,sys_time.wMonth,sys_time.wDay,sys_time.wHour,
+			sys_time.wMinute,sys_time.wSecond,sys_time.wMilliseconds);
+		hDumpFile = CreateFileA(szDumpFile, GENERIC_READ|GENERIC_WRITE,
+			FILE_SHARE_WRITE|FILE_SHARE_READ, 0, CREATE_ALWAYS, 0, 0);
+
+		if (hDumpFile != INVALID_HANDLE_VALUE)
+		{ 
+			ExpParam.ThreadId = GetCurrentThreadId();
+
+			ExpParam.ExceptionPointers = pExceptionPointers;
+
+			ExpParam.ClientPointers = TRUE; 
+
+			bMiniDumpSuccessful = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), 
+				hDumpFile, MiniDumpNormal,
+				&ExpParam, NULL, NULL); 
+			CloseHandle(hDumpFile); 
+		} 
+	}
+	
+
+	if(gEventExit) SetEvent(gEventExit);
+
+	return  lExceptCode;
+}
+
+static LONG WINAPI DeBug_UnHandleCreateDump(EXCEPTION_POINTERS* pExceptionPointers)
+{ 
+    DeBug_CreateDump(pExceptionPointers);
+
+	if (fnSEHException)
+	{
+		fnSEHException(szDumpFile);
+	}
+
+	if(gEventExit)
+	{
+		WaitForSingleObject(gEventExit,3000);
+	}
+
+	if(EXCEPTION_EXECUTE_HANDLER == lExceptCode) ExitProcess(0);
+	return lExceptCode;
+}
+
+static BOOL StartHookDebug()
+{
+	//Kernel32
+	HMODULE hModule = LoadLibrary(_T("Kernel32.dll"));
+	if (hModule == NULL)
+	{
+		return FALSE;
+	} 
+
+	Real_UnhandledExceptionFilter = (UNHANDLEDEXCEPTIONFILTER)GetProcAddress(hModule,"UnhandledExceptionFilter");
+
+
+	if (Real_UnhandledExceptionFilter == NULL)
+	{
+		return FALSE;
+	}
+
+	//HOOKµ±Ç°¶þ¸öº¯Êý
+	if (!Mhook_SetHook((PVOID*)&Real_UnhandledExceptionFilter, DeBug_UnHandleCreateDump))
+	{
+		return FALSE;
+	}
+
+	return TRUE;
+}
+
+void HandleException::EnableDumpFile( BOOL bMakeDump /*= TRUE*/ )
+{
+	bMakeDumpFile = bMakeDump;
+}
+
+void HandleException::SetExceptionCallback( PFN_HandleException fn ,LONG lExceptHandleCode )
+{
+	lExceptCode = lExceptHandleCode;
+	fnSEHException = fn;
+	gEventExit = CreateEvent(NULL,FALSE,FALSE,NULL);
+	StartHookDebug();
+	//defaultExceptionCallBack = SetUnhandledExceptionFilter(&DeBug_CreateDump);
+}

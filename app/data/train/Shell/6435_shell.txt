@@ -1,0 +1,272 @@
+#!/bin/bash
+
+app="ffmpeg.sh"
+bin=$(which ffmpeg)
+
+# uncomment debug will only print the ffmpeg command to be execute, but not run it really.
+#debug="yes"
+
+usage_convert()
+{
+	printf "%s\n" \
+		"Usage	$app convert [opt] <in_file>" \
+		"	convert media (video+audio+muxing) from A (encodecs + muxing) to B (encodecs + muxing)" \
+		"" \
+		"  [opt]:" \
+		"	-V	disable video." \
+		"	-v h264|xvid" \
+		"		video encodecs, default is h264 format if no supply." \
+		"	-A	disable audio." \
+		"	-a aac|mp3" \
+		"		audio encodecs, default is aac (128kbps) if no supply." \
+		"	-h 720|480|320|<height>" \
+		"		used for scale video, height of video in pixel." \
+		"	-w 720|480|320|<width>" \
+		"		used for scale video, width of video in pixel." \
+		"	-o mp4|mkv|avi|mp3|aac" \
+		"		muxing of out file, default is mkv if no supply." \
+		"		recommend h264+aac use mp4|mkv." \
+		"		recommend xvid+mp3 use avi|mkv." \
+		"		mp3 and aac only valid when -V (disable video) supply." \
+		"	-s [HH]:MM:SS" \
+		"		cut out media, identify start time position." \
+		"	-e [HH]:MM:SS" \
+		"		cut out media, identify end time position." \
+		"	-t <title>" \
+		"		metadate title." \
+		"	-T <creation time>" \
+		"		metadata create time, format is: \"YYYY-MM-DD HH:MM:SS\"." \
+		"	-P 0|1|2|3" \
+		"		transpose video." \
+		"		0 is 90 degress + vertically flip, 1 is 90 degress," \
+		"		2 is -90 degress, 3 is -90 degress + vertically flip." \
+		"	-p <preset>" \
+		"		set preset for h264 codec, default is slow. could be verfyfast, fast, medium, slow, veryslow." \
+		"	-u <tune>" \
+		"		set tune for h264 codec, default is film, could be film, animation, stillimage."
+	exit 1
+}
+
+cmd_convert()
+{
+	[ "$1" = "help" ] && usage_convert
+
+	local venc="h264" aenc="aac" height="" width="" out_mux="mp4" title="" ctime=""
+	local stime="" etime=""
+	local vdis="no" adis="no"
+	local pose=""
+	local preset="" tune=""
+	local opt
+	while getopts Vv:Aa:h:w:o:s:e:t:T:P:p:u: opt
+	do
+		case $opt in
+			V)
+				vdis="yes" ;;
+			v)
+				venc="$OPTARG" ;;
+			A)
+				adis="yes" ;;
+			a)
+				aenc="$OPTARG" ;;
+			h)
+				height="$OPTARG" ;;
+			w)
+				width="$OPTARG" ;;
+			o)
+				out_mux="$OPTARG" ;;
+			s)
+				stime="$OPTARG" ;;
+			e)
+				etime="$OPTARG" ;;
+			t)
+				title="$OPTARG" ;;
+			T)
+				ctime="$OPTARG" ;;
+			P)
+				pose="$OPTARG" ;;
+			p)
+				preset="$OPTARG" ;;
+			u)
+				tune="$OPTARG" ;;
+			*)
+				usage_convert ;;
+		esac
+	done
+
+	shift $(($OPTIND - 1))
+	[ $# -eq 0 ] && usage_convert
+
+	local in_file="$1"
+	local out_file="${in_file%.*}${height:+.$height}${width:+.$width}.convert.${out_mux}"
+
+	local vopt aopt vscale metadata duration
+	[ "$vdis" = "no" ] && case "$venc" in
+		"h264")
+			vopt="-c:v libx264 -crf 23 -preset ${preset:-slow} -tune ${tune:-film}" ;;
+		"xvid")
+			vopt="-c:v mpeg4 -vtag xvid -q:v 3" ;;
+		*)
+			usage_convert
+	esac || vopt="-vn"
+	[ "$adis" = "no" ] && case "$aenc" in
+		"aac")
+			aopt="-c:a aac -strict -2 -b:a 128k" ;;
+		"mp3")
+			aopt="-c:a libmp3lame -b:a 128k" ;;
+		*)
+			usage_convert ;;
+	esac || aopt="-an"
+	[ "$vdis" = "no" -a -n "$height" ] && vscale="-vf scale=-2:$height"
+	[ "$vdis" = "no" -a -n "$width" ] && vscale="-vf scale=$width:-2"
+	[ -n "$stime" -a -n "$etime" ] && duration="-ss $stime -to $etime"
+	[ -n "$title" ] && metadata="-metadata title=\"$title\""
+	[ -n "$ctime" ] && metadata="$metadata -metadata creation_time=\"$ctime\""
+	[ -n "$pose" ] && pose="-vf transpose=$pose"
+	# -metadata title="My Title"
+	# -metadata:s:a:0 language=chi
+	# -metadata creation_time="2010-12-17 06:30:00"
+
+	echo $bin -i \"$in_file\" $vopt $vscale $aopt $metadata $duration $pose \"$out_file\"
+	${debug:+:} eval $bin -i \"$in_file\" $vopt $vscale $aopt $metadata $duration $pose \"$out_file\"
+
+	${debug:+:} echo "@@@ out file is: \"$out_file\""
+}
+
+usage_copy()
+{
+	printf "%s\n" \
+		"Usage	$app copy [opt] <in_file>" \
+		"	copy media (video+audio) from A (muxing) to B (muxing)," \
+		"	or cut out a duration from media file." \
+		"  [opt]:" \
+		"	-s [<HH>:]<MM>:<SS>" \
+		"		start time to cut out duration." \
+		"	-e [<HH>:]<MM>:<SS>" \
+		"		end time to cut out duration." \
+		"	-o mp4|mkv|avi" \
+		"		muxing of out file, default is mkv if no supply."
+	exit 1
+}
+
+cmd_copy()
+{
+	[ "$1" = "help" ] && usage_copy
+
+	local stime="" etime="" out_mux="mkv"
+	local opt
+	while getopts s:e:o: opt
+	do
+		case $opt in
+			s)
+				stime="$OPTARG" ;;
+			e)
+				etime="$OPTARG" ;;
+			o)
+				out_mux="$OPTARG" ;;
+			*)
+				usage_copy ;;
+		esac
+	done
+
+	shift $(($OPTIND - 1))
+	[ $# -eq 0 ] && usage_copy
+
+	local in_file="$1"
+	local out_file="${in_file%.*}.copy.${out_mux}"
+
+	local duration=""
+	if [ -n "$stime" -a -n "$etime" ]; then
+		duration="-ss $stime -to $etime"
+	fi
+
+	echo $bin -i \"$in_file\" -c copy $duration \"$out_file\"
+	${debug:+:} $bin -i "$in_file" -c copy $duration "$out_file"
+
+	${debug:+:} echo "@@@ out file is: \"$out_file\""
+}
+
+usage_concat()
+{
+	printf "%s\n" \
+		"Usage	$app concat <in_file>..." \
+		"	concatenate multiple media file to a uniq one." \
+		"	media files must with same codes and muxing." \
+		"	<in_file> must be absolute paths." \
+		"" \
+		"  e.g." \
+		"	$app concat /tmp/001.mp4 /tmp/002.mp4 /tmp/003.mp4"
+	exit 1
+}
+
+cmd_concat()
+{
+	[ "$1" = "help" ] && usage_concat
+
+	# refer to https://trac.ffmpeg.org/wiki/Concatenate
+	local out_file="concat.${1##*.}"
+
+	[ -z "$*" ] && usage_concat
+
+	printf "%s\n" "$bin -f concat -i <(for f in '$@'; do echo \"file '\$f'\"; done) -c copy $out_file"
+	${debug:+:} $bin -f concat -safe 0 -i <(for f in "$@"; do echo "file '$f'"; done) -c copy "$out_file"
+
+	${debug:+:} echo "@@@ out file is: $out_file"
+}
+
+usage_aspect()
+{
+	printf "%s\n" \
+		"Usage	$app aspect <w:h> <in_file>" \
+		"	adjust aspect of media file, <w:h> could be 16:9, 16:10, 4:3 and etc." \
+		"	<in_file> must be absolute paths."
+	exit 1
+}
+
+cmd_aspect()
+{
+	[ "$1" = "help" ] && usage_aspect
+
+	local out_file="${2%.*}.aspect.${2##*.}"
+
+	[ -z "$*" ] && usage_aspect
+
+	printf "%s\n" "$bin -i $2 -c copy -aspect $1 $out_file"
+	${debug:+:} $bin -i $2 -c copy -aspect $1 "$out_file"
+
+	${debug:+:} echo "@@@ out file is: $out_file"
+}
+
+usage()
+{
+	printf "%s\n" \
+		"Usage	$app convert|copy|concat|aspect [opt] <in_file>" \
+		"	$app convert|copy|concat|aspect help" \
+		"" \
+		"  convert" \
+		"	convert media file from A codecs (video, audio + muxing) to B codecs." \
+		"	transpose videos (90, 180, 270)." \
+		"	split only video or audio from media file." \
+		"  copy" \
+		"	copy video and audio from A muxing to B muxing." \
+		"	cut out a duration from media file." \
+		"  concat" \
+		"	concatenate multiple media files (with same codecs) to a uniqe media file." \
+		"  aspect" \
+		"	adjust aspect of a media file."
+	exit 1
+}
+
+cmd=$1
+case $cmd in
+	convert|copy|concat|aspect)
+		shift
+		cmd_$cmd "$@" ;;
+	*)
+		usage ;;
+esac
+
+# TODO: crop video:
+#	ffmpeg -i <input> -vf "cropdetect=24:16:0" -f null -
+# this command will print most lines with "crop=XXX:XXX:XXX:XXX", and then:
+#	ffmpeg -i <input> -vf "crop=XXX:XXX:XXX:XXX" <output>
+# refer to http://www.cnperler.com/?p=120

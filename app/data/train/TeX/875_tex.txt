@@ -1,0 +1,232 @@
+= wikitexer design document =
+
+== Introduction ==
+
+\notice{This is a work in progress!}
+
+What would you give to have simple wiki markup mixed with LaTeX for
+writing documents? That itch is being scratched by WikiTeXer.
+
+\mediawiki\ is becoming something of a standard, so that markup makes
+sense to support. Other markups may be supported by input handlers in
+the future. For now we created output handlers for LaTeX and HTML.
+This means, to support both outputs, rather then converting native
+LaTeX or HTML to the other format we create special generators
+(macro's) that can provide either. This avoids the complexity of
+translation routines at the expense of creating generators through a
+shared mechanism.
+
+The point here is minimalism and simplicity. Parsers, in general, tend
+to get very complicated mostly to adapt to 'strange' or unpredicatble
+user behaviour. \wikitexer\ is not in that particular business. Nor
+does it provide a complete solution to all formats. The basic premise
+is to use LaTeX in a convenient fashion for writing a book (yes, that
+is the purpose), or papers, and to allow clean HTML exports for review
+and other purposes (for example exporting to Microsoft Word).
+
+The input files are written as .tex files with Wiki markup extensions
+and macros. \wikitexer\ is a command-line or library pre-parser which
+outputs either pure LaTeX or pure HTML.
+
+Much of the simplicity is achieved by ignoring stuff the parser does
+not understand, but filling in what it understands. By default
+\wikitexer\ uses stdin and stdout - which would allow it to be
+embedded in a webserver. Another simplification is that wikitexer is 
+paragraph based for macro expansion - much like TeX itself.
+
+== Flow ==
+
+The program flow is as follows:
+
+# After parsing CLI options an output handler is chosen; currenly only HTML is fully supported
+# Next a parser (WtParser) is created, with a hook to the output handler
+# WikiTexer is created, which is the state engine
+# The input file(s) are parser, line by line using wikitexer.addline
+# addline keeps track of @par, and write\_paragraph will send a paragraph, when it is a unit
+# write\_paragraph parses the @par through parse\_paragraph
+# next calls into the write handler, in three steps:
+## start\_par (writes <p>)
+## write\_paragraph
+## end\_par (writes </p>)
+# parse\_paragraph calls all formatting rules
+# html.write\_paragraph uses 'last\_env' to write all divs and transforms source code to HTML
+#
+== \mediawiki\ input handler ==
+
+The \mediawiki\ input handler supports a minimalistic \mediawiki\ style
+markup. Other markup (like LaTex) it will basically ignore, unless a
+handler exists. So \wikitexer\ supports \mediawiki\ headers, emphasing text
+and URLs initially. Initial support for:
+
+LaTeX style commands
+
+\begin{verbatim}
+<nowiki>suppresses markup</nowiki>
+\end{verbatim}
+
+Headings like:
+
+<nowiki>== Heading ==</nowiki>
+
+Formatting:
+
+''Italicized text''
+'''Bold text'''
+<u>underline new material</u>
+
+External links:
+
+[http://en.wikipedia.org Wikipedia]
+
+Templates:
+
+{{variable}} or {{macro}} or {{rubycall}}, or the more LaTeX-like
+\variable, \macro and \rubycall (see below).
+
+
+== LaTeX output handler ==
+
+Markup is translated to native or 'pure' LaTex. Embedded LaTeX is left alone.
+
+
+== HTML output handler ==
+
+Markup is translated to HTML. Embedded LaTeX, in this handler, is
+ignored. This is important. If HTML output is critical use \wikitexer\
+macro's rather then LaTeX commands and register these with the HTML
+handler.
+
+== Variables ==
+
+Variables defined with the newcommand are only visible to the LaTeX
+output mechanism. Variables defined visible to wikitexer are available
+to both with:
+
+  \newvar{\linux}{\emph{Linux}}
+
+which can be written as
+
+  \newvar{\linux}{''Linux''}
+
+== Macro's and templates ==
+
+Macros are powerful (templates in \mediawiki\ speak). They prevent
+typing things more than once by defining shared attributes in a single
+location.  LaTeX is a macro language, but not always that nice to
+program.  Embedding Ruby and Ruby macro's is a great feature to add to
+LaTeX' native macros. When using the {{call}} syntax, or LaTex style
+backslash \call the input handler will try to find a matching routine
+and use that. If it misses a routine it will assume it can ignore it.
+
+LaTex uses the following syntax variations:
+
+	\hfill
+  \hyphenpenalty=5000
+	\caption{This is the caption.\label{fig:rawss}}
+  \epsfig{file=graph.ps, angle=-90, width=\linewidth}
+
+  \begin{figure} ... \end{figure}
+  \begin{minipage}[t]{0.58\linewidth} ... \end{minipage} % with (default parameter [t]).
+
+See also [http://en.wikibooks.org/wiki/LaTeX/Customizing_LaTeX newcommand and newenvironment].
+
+It would be nice to have Ruby macro's 'override' LaTeX commands - so
+they can share the same syntax. This way different output handlers can
+choose to implement either in LaTeX or Ruby. It would be cool to do
+that from within TeX - who dares - but a preparser will do the job for
+most situations - just expand to the point it becomes pure LaTeX. Say
+we have defined a macro named 'expand' this could be implemented as:
+
+  \expand{'text'}
+
+if a Ruby method 'expand' exists in this context it will be called
+with parameter text. Otherwise it is not expanded. Likewise we can 
+define environment methods:
+
+  \begin{expand}[s]{pars}
+	\end{expand}
+
+which will call into expand_begin and expand_end, if they exist ('s'
+is a default parameter).
+
+An environment is maintained by the document to provide output that
+runs across multiple paragraphs. Environments are stacked where the
+begin and end marker defines output, but also the stack position
+defines output behaviour. For example in a verbatim environment the
+HTML generator may have to output end of lines in certain
+implementations (though a simple <pre></pre> may suffice).
+
+Adding macro's is easy - with LaTeX add the macro's as usual. With
+Ruby add the Ruby module on the wikitexer command line.
+
+A Ruby macro is defined in a separate file as:
+
+<source lang="ruby">
+  module WikiTexer
+		# Expand string s
+		def expand s
+			'hello '+s+' expanded'
+		end
+	end
+</source>
+
+Finally there is the option to call directly into ruby with:
+
+  \ruby{Time.now}                     % => Tue Oct 21 13:38:01 +0200 2008
+	\ruby{'Test'.sub(/[Tt]/,'x')}       % => xest
+	\ruby{`cat /etc/hostname`}          % you are joking, right?
+
+obviously a very powerful feature that needs to be disabled on a public web server.
+
+Allowing more complicated multi lines:
+
+	\ruby{{
+    result = 0
+    (1..10) do { | i | result += i }
+		result
+	}}
+
+
+=== Example: insert table from file ===
+  
+One example is, based on whether we are generating LaTeX or HTML we
+want to insert different code in the output handler. The injected
+source can be stored in separate files. E.g.
+
+  \insertfile{table1}
+
+where the LaTeX version would use table1.tex, using a standard Tex
+\input command, and the HTML version table1.html using a Ruby method
+which can do more, for example strip extraneous HTML tags. The
+alternative is to also parse the file:
+
+  \parsefile{table1}
+
+which expands macros in that file.
+
+=== Example: fetch hot info ===
+
+Another example would be to fetch live data from a database or a
+webserver to generate a document. For example:
+
+  \sqlfetch{connection=\sqlconnection, query='select record from db'}
+
+or more likely
+
+  \userinfo(\username)
+
+with a Ruby implementation for both LaTeX and HTML output generators.
+
+
+== See also ==
+
+Ruby Mediacloth. A \mediawiki\ to HTML converter in Ruby. Appears to
+lacking in functionality - but what is there may be of interest.
+
+Python wikimarkup on Google's code. A basic \mediawiki\ to HTML
+converter which can be run from the command line. Does not support
+LaTeX.
+
+latex2html - HTML generator written in Perl and rather ancient. Took
+the effort of trying to understand LaTeX and convert that to HTML. An
+impossible job. Not flexible in terms of generation.

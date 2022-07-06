@@ -1,0 +1,148 @@
+<?php
+
+namespace ModulusContact\Listeners;
+
+use Zend\EventManager\AbstractListenerAggregate;
+use Zend\EventManager\EventManagerInterface;
+use Zend\ServiceManager\ServiceLocatorAwareInterface;
+use Zend\ServiceManager\ServiceLocatorInterface;
+
+/**
+ * Listener attached to verify permissions if the basic guardian is selected
+ */
+class Contact extends AbstractListenerAggregate
+                    implements ServiceLocatorAwareInterface
+{
+
+    protected $serviceLocator;
+
+    protected $entityManager;
+
+    protected $config;
+
+    /**
+     * Method to register this listener on the render event
+     *
+     * @param  EventManagerInterface $events
+     * @return void
+     */
+    public function attach(EventManagerInterface $events)
+    {
+        $sharedEvents      = $events->getSharedManager();
+        $this->listeners[] = $sharedEvents->attach('*', 'sendContact', array($this,'sendContact'), 100);
+    }
+
+    public function sendContact($event)
+    {
+        $mailService = $this->getServiceLocator()->get('ModulusMail\Service\Email');
+        $targetClass = get_class($event->getTarget());
+        $data = $event->getParam('data', array());
+
+        $allowedFields = array(
+            'name',
+            'email',
+            'subject',
+            'message',
+        );
+        $dados = array();
+        $dados['extraInformation'] = array();
+        foreach ($data as $key => $value) {
+            if (in_array($key, $allowedFields)) {
+                $dados[$key] = $value;
+            } else {
+                $dados['extraInformation'][$key] = $value;
+            }
+        }
+        $dados['extraInformation'] = serialize($dados['extraInformation']);
+
+        //Save data at the database
+        $crudManager = $this->getServiceLocator()->get('ModulusCrud\CrudManager');
+        $service = $crudManager->getService('ModulusContact\Model\Contact');
+        $entity = $service->create($dados);
+
+        //send email to address configurated
+        if ($this->config['send-email']) {
+            $this->getEventManager()->trigger(
+                    'Modulus.sendEmail',
+                    $this,
+                    array(
+                        'subject' => 'Novo contato!',
+                        'to' => $this->config['email'],
+                        'data' => array('entity' => $entity),
+                        'template' => 'modulus-contact/mail/new-contact'
+                    ));
+        }
+
+        if ($this->config['use-SAC']) {
+            $this->getEventManager()->trigger(
+                    'Modulus.sendEmail',
+                    $this,
+                    array(
+                        'subject' => $entity->getSubject(),
+                        'to' => $entity->getEmail(),
+                        'data' => array('entity' => $entity),
+                        'template' => 'modulus-contact/mail/sac-contact'
+                    ));
+        }
+
+    }
+
+    /**
+     * Set service locator
+     *
+     * @param ServiceLocatorInterface $serviceLocator
+     */
+    public function setServiceLocator(ServiceLocatorInterface $serviceLocator)
+    {
+        $this->serviceLocator = $serviceLocator;
+
+        return $this;
+    }
+
+    /**
+     * Get service locator
+     *
+     * @return ServiceLocatorInterface
+     */
+    public function getServiceLocator()
+    {
+        return $this->serviceLocator;
+    }
+
+    /**
+     * Set config acl
+     *
+     * @param ServiceLocatorInterface $serviceLocator
+     */
+    public function setConfig(array $config)
+    {
+        $this->config = $config;
+
+        return $this;
+    }
+
+    /**
+     * Get config acl
+     *
+     * @return ServiceLocatorInterface
+     */
+    public function getConfig()
+    {
+        return $this->config;
+    }
+
+    /**
+     * Set service locator
+     *
+     * @param ServiceLocatorInterface $serviceLocator
+     */
+    public function getEntityManager()
+    {
+        if ($this->entityManager === null) {
+            $this->entityManager = $this->getServiceLocator()->get('Doctrine\ORM\EntityManager');
+        }
+
+        return $this->entityManager;
+    }
+
+}

@@ -1,0 +1,773 @@
+// Copyright (c) 2016-2018 Bruce Stenning. All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+//
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived
+//    from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+// FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+// COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+// BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+// OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+// AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
+// THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+// DAMAGE.
+
+use std::collections::*;
+use std::boxed::Box;
+use std::any::Any;
+use std::cell::RefCell;
+use std::sync::*;
+use crossbeam;
+
+use sdl2;
+
+use graphics::renderergl::*;
+use graphics::renderervk::*;
+use graphics::rendertarget::*;
+use graphics::resources::*;
+use graphics::shader::*;
+use graphics::texture::*;
+use algebra::matrix::*;
+use algebra::vector::*;
+
+pub struct Window {
+    pub raw: Arc<Mutex<*mut sdl2::SDL_Window>>,
+}
+unsafe impl Send for Window {}
+unsafe impl Sync for Window {}
+
+// Triangle buffer maximum size (in triangles)
+pub const INITIAL_TRIANGLE_ARRAY_SIZE: usize = 512;
+
+// Number of components per vertex: 3 dimensions by 3 attributes
+pub const VERTEX_MAX_COMPONENTS: usize = 3 * 3;
+
+// Number of individual components in a full vertex component array, with no vertex reuse
+pub const VERTEX_BUFFER_INITIAL_COMPONENTS: usize = INITIAL_TRIANGLE_ARRAY_SIZE * 3 * VERTEX_MAX_COMPONENTS;
+
+// Number of individual components in a full index array, with no vertex reuse
+pub const INDEX_BUFFER_INITIAL_COMPONENTS: usize = INITIAL_TRIANGLE_ARRAY_SIZE * 3;
+
+#[derive(PartialEq)]
+pub enum RendererType {
+    RendererGl,
+    RendererVk,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum VertexArrayType {
+    F3,
+    F3F3,
+    F3F3F3,
+    F2F2,
+}
+pub const VERTEX_ARRAY_TYPE_BEGIN_RANGE: u32 = VertexArrayType::F3 as u32;
+pub const VERTEX_ARRAY_TYPE_END_RANGE: u32 = VertexArrayType::F2F2 as u32;
+
+#[derive(Clone, Copy)]
+pub enum PrimitiveType {
+    PrimitiveTriangles,
+    PrimitivePatches,
+}
+
+impl VertexArrayType {
+    pub fn components_per_vertex(ty: VertexArrayType) -> u32 {
+        match ty {
+            VertexArrayType::F3 => 3,
+            VertexArrayType::F3F3 => 6,
+            VertexArrayType::F3F3F3 => 9,
+            VertexArrayType::F2F2 => 4,
+        }
+    }
+}
+
+pub struct ThreadData {
+    pub thr: usize,
+    pub vertex_array_type: VertexArrayType,
+    pub vindex: u32,
+    pub iindex: u32,
+    pub primitive: PrimitiveType,
+
+    pub vdata: Vec<f32>,
+    pub idata: Vec<u32>,
+}
+
+// ThreadData needs to be cloneable to permit sending from a worker GL rendering
+// thread back to the master thread for flushing
+impl Clone for ThreadData {
+    fn clone(&self) -> ThreadData {
+        let mut td = ThreadData {
+            thr: self.thr,
+            vertex_array_type: self.vertex_array_type,
+            vindex: self.vindex,
+            iindex: self.iindex,
+            primitive: self.primitive,
+
+            vdata: Vec::with_capacity(VERTEX_BUFFER_INITIAL_COMPONENTS),
+            idata: Vec::with_capacity(INDEX_BUFFER_INITIAL_COMPONENTS),
+        };
+
+        td.vdata = self.vdata.iter().map(|x| *x).collect();
+        td.idata = self.idata.iter().map(|x| *x).collect();
+
+        td
+    }
+}
+
+impl ThreadData {
+    pub fn new(thr: usize) -> ThreadData {
+        ThreadData {
+            thr: thr,
+            vertex_array_type: VertexArrayType::F3F3F3,
+            vindex: 0,
+            iindex: 0,
+            primitive: PrimitiveType::PrimitiveTriangles,
+
+            vdata: Vec::with_capacity(VERTEX_BUFFER_INITIAL_COMPONENTS),
+            idata: Vec::with_capacity(INDEX_BUFFER_INITIAL_COMPONENTS),
+        }
+    }
+
+    /// Add the specified triangle indices, with no flush-check
+    ///
+    /// This is used primarily for the single-threaded case, but is
+    /// also used for the multi-threaded case where the rest of the
+    /// task is done by the caller.
+    ///
+    /// ii: Vector for normal at ith vertex of the triangle
+    pub fn add_triangle_st(&mut self, i1: u32, i2: u32, i3: u32) {
+        let cap = self.idata.capacity();
+        if self.idata.len() > cap - 16 {
+            self.idata.reserve(cap * 2);
+        }
+
+        self.idata.push(i1);
+        self.idata.push(i2);
+        self.idata.push(i3);
+
+        self.iindex += 1;
+    }
+
+    /// Add the specified raw vertex data to the thread data array, with no flush-check
+    ///
+    /// One three-component-vector
+    ///
+    /// This is used primarily for the single-threaded case, but is
+    /// also used for the multi-threaded case where the rest of the
+    /// task is done by the caller.
+    ///
+    /// ni: Vector for normal at ith vertex of the triangle
+    pub fn add_vertex_st_f3(&mut self, f: &Vec3<f32>) -> u32 {
+        let cap = self.vdata.capacity();
+        if self.vdata.len() > cap - 16 {
+            self.vdata.reserve(cap * 2);
+        }
+
+        self.vdata.push(f.x);
+        self.vdata.push(f.y);
+        self.vdata.push(f.z);
+
+        let r = self.vindex;
+        self.vindex += 1;
+
+        r
+    }
+
+
+    /// Add the specified raw vertex data to the thread data array, with no flush-check
+    ///
+    /// Two three-component-vectors
+    ///
+    /// This is used primarily for the single-threaded case, but is
+    /// also used for the multi-threaded case where the rest of the
+    /// task is done by the caller.
+    ///
+    /// vi: Vector for ith vertex of the triangle
+    /// ni: Vector for normal at ith vertex of the triangle
+    pub fn add_vertex_st_f3f3(&mut self, f1: &Vec3<f32>, f2: &Vec3<f32>) -> u32 {
+        let cap = self.vdata.capacity();
+        if self.vdata.len() > cap - 16 {
+            self.vdata.reserve(cap * 2);
+        }
+
+        self.vdata.push(f1.x);
+        self.vdata.push(f1.y);
+        self.vdata.push(f1.z);
+        self.vdata.push(f2.x);
+        self.vdata.push(f2.y);
+        self.vdata.push(f2.z);
+
+        let r = self.vindex;
+        self.vindex += 1;
+
+        r
+    }
+
+    /// Add the specified raw vertex data to the thread data array, with no flush-check
+    ///
+    /// This is for the Vertex + Normal + Colour case, with three
+    /// components each
+    ///
+    /// Three three-component-vectors
+    ///
+    /// This is used primarily for the single-threaded case, but is
+    /// also used for the multi-threaded case where the rest of the
+    /// task is done by the caller.
+    ///
+    /// vi: Vector for ith vertex of the triangle
+    pub fn add_vertex_st_f3f3f3(&mut self, f1: &Vec3<f32>, f2: &Vec3<f32>, f3: &Vec3<f32>) -> u32 {
+        let cap = self.vdata.capacity();
+        if self.vdata.len() > cap - 16 {
+            self.vdata.reserve(cap * 2);
+        }
+
+        self.vdata.push(f1.x);
+        self.vdata.push(f1.y);
+        self.vdata.push(f1.z);
+        self.vdata.push(f2.x);
+        self.vdata.push(f2.y);
+        self.vdata.push(f2.z);
+        self.vdata.push(f3.x);
+        self.vdata.push(f3.y);
+        self.vdata.push(f3.z);
+
+        let r = self.vindex;
+        self.vindex += 1;
+
+        r
+    }
+
+    /// Add the specified raw vertex data to the thread data array, with no flush-check
+    ///
+    /// Two two-component-vectors
+    ///
+    /// This is used primarily for the single-threaded case, but is
+    /// also used for the multi-threaded case where the rest of the
+    /// task is done by the caller.
+    ///
+    /// vi: Vector for ith vertex of the triangle
+    /// ni: Vector for texture coordinates at ith vertex of the triangle
+    pub fn add_vertex_st_f2f2(&mut self, f1: &Vec2<f32>, f2: &Vec2<f32>) -> u32 {
+        let cap = self.vdata.capacity();
+        if self.vdata.len() > cap - 16 {
+            self.vdata.reserve(cap * 2);
+        }
+
+        self.vdata.push(f1.x);
+        self.vdata.push(f1.y);
+        self.vdata.push(f2.x);
+        self.vdata.push(f2.y);
+
+        let r = self.vindex;
+        self.vindex += 1;
+
+        r
+    }
+
+    /// Add the specified raw triangle data to the thread data array
+    ///
+    /// This is for the one three-component-vector case
+    ///
+    /// ...
+    pub fn add_triangle_f3<Rend: Renderer + ?Sized>(&mut self, n1: &Vec3<f32>, n2: &Vec3<f32>, n3: &Vec3<f32>) {
+        let i1 = self.add_vertex_st_f3(n1);
+        let i2 = self.add_vertex_st_f3(n2);
+        let i3 = self.add_vertex_st_f3(n3);
+        self.add_triangle_st(i1, i2, i3);
+    }
+
+    /// Add the specified raw triangle data to the thread data array
+    ///
+    /// This is for the two three-component-vector case
+    ///
+    /// ...
+    pub fn add_triangle_f3f3<Rend: Renderer + ?Sized>(
+        &mut self,
+        v1: &Vec3<f32>,
+        n1: &Vec3<f32>,
+        v2: &Vec3<f32>,
+        n2: &Vec3<f32>,
+        v3: &Vec3<f32>,
+        n3: &Vec3<f32>,
+    ) {
+        let i1 = self.add_vertex_st_f3f3(v1, n1);
+        let i2 = self.add_vertex_st_f3f3(v2, n2);
+        let i3 = self.add_vertex_st_f3f3(v3, n3);
+        self.add_triangle_st(i1, i2, i3);
+    }
+
+    /// Add the specified raw triangle data to the thread data array
+    ///
+    /// This is for the three three-component-vector case
+    ///
+    /// ...
+    pub fn add_triangle_f3f3f3<Rend: Renderer + ?Sized>(
+        &mut self,
+        v1: &Vec3<f32>,
+        n1: &Vec3<f32>,
+        c1: &Vec3<f32>,
+        v2: &Vec3<f32>,
+        n2: &Vec3<f32>,
+        c2: &Vec3<f32>,
+        v3: &Vec3<f32>,
+        n3: &Vec3<f32>,
+        c3: &Vec3<f32>,
+    ) {
+        let i1 = self.add_vertex_st_f3f3f3(v1, n1, c1);
+        let i2 = self.add_vertex_st_f3f3f3(v2, n2, c2);
+        let i3 = self.add_vertex_st_f3f3f3(v3, n3, c3);
+        self.add_triangle_st(i1, i2, i3);
+    }
+
+    /// Add the specified raw triangle data to the thread data array
+    ///
+    /// This is for the two two-component-vector case
+    ///
+    /// ...
+    pub fn add_triangle_f2f2<Rend: Renderer + ?Sized>(
+        &mut self,
+        v1: &Vec2<f32>,
+        n1: &Vec2<f32>,
+        v2: &Vec2<f32>,
+        n2: &Vec2<f32>,
+        v3: &Vec2<f32>,
+        n3: &Vec2<f32>,
+    ) {
+        let i1 = self.add_vertex_st_f2f2(v1, n1);
+        let i2 = self.add_vertex_st_f2f2(v2, n2);
+        let i3 = self.add_vertex_st_f2f2(v3, n3);
+        self.add_triangle_st(i1, i2, i3);
+    }
+
+    /// This flushes work to be rendered in the single-threaded case
+    ///
+    /// From an OOP standpoint, this method looks highly suspicious.  It uses a roll-your-own
+    /// RTTI mechanism to do explicit dynamic dispatch.  However, the renderer's flush() method
+    /// is designed to lock as required, and so we want flush() to take an Arc<Mutex<Renderer>>
+    /// rather than be part of the implementation of the Renderer trait.  Because the callers
+    /// of flush_st() will be simple single-threaded affairs, and will be dealing with references
+    /// to a Renderer object, it is necessary to construct a new Arc<Mutex<>> here.
+    ///
+    /// There may well be a nicer way of doing all this.  In the long run I think that MT will be
+    /// handled by creating work queues and handing them off to persistent threads, so this will
+    /// all go away.
+    pub fn flush_st<Rend: Renderer + ?Sized>(&mut self, renderer: &mut Rend) {
+        // We can flush directly from the main thread
+        //
+        match renderer.renderer_type() {
+            RendererType::RendererGl => RendererGl::flush(Arc::new(Mutex::new(renderer)), self),
+            RendererType::RendererVk => RendererVk::flush(Arc::new(Mutex::new(renderer)), self),
+        }
+
+        // Reset the buffer indices
+        self.reset();
+    }
+
+    /// This checks whether a flush is required and actions it when necessary
+    ///
+    /// Note: Only call this version from a worker thread!
+    ///
+    /// renderer_arc: Atomic reference counted lockable reference to the
+    ///     renderer, only used when single_threaded
+    pub fn flush<Rend: Renderer + ?Sized>(&mut self, renderer_arc: Arc<Mutex<&mut Rend>>) {
+        TLS.with(|tl| {
+            let renderer_type;
+            {
+                let renderer = renderer_arc.lock().unwrap();
+                renderer_type = renderer.renderer_type();
+            }
+
+            match renderer_type {
+                RendererType::RendererGl => {
+                    if tl.borrow().max_threads == 1 {
+                        // We can flush directly from the main thread
+                        RendererGl::flush(renderer_arc.clone(), self);
+                    } else {
+                        // Is it possible to avoid transferring all of the data every time?
+                        // Actually, is this in fact a copy or is it passed from one thread
+                        // to another by reference?
+                        let td: ThreadData = self.clone();
+
+                        // Send the data to the main thread
+                        tl.borrow().datatx[0].send(td).unwrap();
+
+                        // Wait for and discard the message from the main thread indicating
+                        // that the rendering calls are complete
+                        let _ = tl.borrow().backrx[0].recv();
+                    }
+                }
+                RendererType::RendererVk => RendererVk::flush(renderer_arc.clone(), self),
+            }
+
+            // Reset the buffer indices
+            self.reset();
+        });
+    }
+
+    /// Reset the triangle indices
+    pub fn reset(&mut self) {
+        if false {
+            println!("reset");
+        }
+        self.vindex = 0;
+        self.iindex = 0;
+        self.vdata.clear();
+        self.idata.clear();
+    }
+}
+
+/// Types must implement this trait in order to be able to use the MT harness
+pub trait WorkerThread {
+    /// Perform one thread's worth of work for rendering
+    fn render_thread<Rend: Renderer + ?Sized>(
+        &self,
+        renderer_arc: Arc<Mutex<&mut Rend>>,
+        threaddata_arc: Arc<Mutex<Box<ThreadData>>>,
+    );
+}
+
+pub struct ThreadLocal {
+    pub thr: usize,
+    pub max_threads: usize,
+    pub datatx: Vec<mpsc::Sender<ThreadData>>,
+    pub backrx: Vec<mpsc::Receiver<i32>>,
+}
+
+impl ThreadLocal {
+    pub fn new() -> ThreadLocal {
+        ThreadLocal {
+            thr: 0,
+            max_threads: 0,
+            datatx: vec![],
+            backrx: vec![],
+        }
+    }
+}
+
+thread_local!(pub static TLS: RefCell<ThreadLocal> = RefCell::new(ThreadLocal::new()));
+
+/// Multi-threaded render harness
+///
+/// object: The object performing the rendering
+/// renderer: A reference to the renderer object to use
+#[allow(dead_code)]
+pub fn mt_render_harness<Object: WorkerThread + Send + Sync, Rend: Renderer + Send + Sync + ?Sized>(
+    object: &Object,
+    renderer: &mut Rend,
+) {
+    let renderer_type = renderer.renderer_type();
+
+    let max_threads = renderer.get_maxthreads();
+    let renderer_arc = Arc::new(Mutex::new(renderer));
+
+    if max_threads == 1 {
+        // Single-threaded path
+
+        let (datatx, _) = mpsc::channel::<ThreadData>();
+        let (_, backrx) = mpsc::channel::<i32>();
+
+        let threaddata_arc;
+        {
+            let renderer = renderer_arc.lock().unwrap();
+            threaddata_arc = renderer.get_threaddata(0);
+        }
+
+        TLS.with(|tl| {
+            tl.borrow_mut().thr = 0;
+            tl.borrow_mut().max_threads = max_threads;
+            tl.borrow_mut().datatx.push(datatx);
+            tl.borrow_mut().backrx.push(backrx);
+        });
+
+        object.render_thread(renderer_arc.clone(), threaddata_arc);
+    } else {
+        // Multi-threaded path
+
+        // Is there any way to avoid avoid spawning new threads all the time?
+        // For the main thread, this ought to be possible, but it's quite tricky
+        // to have worker threads that can be reused.  And at the moment the
+        // code clarity is preferable to the pedal-to-the-metal performance.
+        crossbeam::scope(|scope| {
+            let (datatx, datarx) = mpsc::channel::<ThreadData>();
+            let mut backtxs: Vec<mpsc::Sender<i32>> = vec![];
+
+            for thr in 0..max_threads {
+                let renderer_arc = renderer_arc.clone();
+                let threaddata_arc;
+                {
+                    let renderer = renderer_arc.lock().unwrap();
+                    threaddata_arc = renderer.get_threaddata(thr);
+                }
+                let datatx = datatx.clone();
+                let (backtx, backrx) = mpsc::channel::<i32>();
+                backtxs.push(backtx);
+
+                scope.spawn(move || {
+                    TLS.with(|tl| {
+                        tl.borrow_mut().thr = thr;
+                        tl.borrow_mut().max_threads = max_threads;
+                        tl.borrow_mut().datatx.push(datatx);
+                        tl.borrow_mut().backrx.push(backrx);
+                    });
+
+                    object.render_thread(renderer_arc, threaddata_arc);
+                });
+            }
+
+            // This marshalls the transfer of render data from the worker threads to the master
+            // thread so that the OpenGL renderer can emit draw calls.  This is followed by the
+            // notification to the worker that it can continue.  For Vulkan this is a NOP, as
+            // the worker threads submit their computed command buffers to the graphics queue
+            // directly.
+            //
+            // Only the OpenGL renderer needs to receive the thread data and renderer
+            // For Vulkan, just wait for all the threads to join
+            //
+            if renderer_type == RendererType::RendererGl {
+                let mut threads_finished = 0;
+                while threads_finished < max_threads {
+                    let thread_data = datarx.recv().unwrap();
+
+                    // Flush the data calculated by the worker thread as draw calls
+                    RendererGl::flush(renderer_arc.clone(), &thread_data);
+
+                    // This thread is now finished
+                    threads_finished += 1;
+
+                    // Inform the worker thread that its data has been flushed
+                    let _ = backtxs[thread_data.thr as usize].send(0);
+                }
+            }
+        });
+    }
+}
+
+pub trait Renderer: Send + Sync {
+    /// To facilitate downcasting back to a concrete type
+    fn as_any(&self) -> &Any;
+    fn as_any_mut(&mut self) -> &mut Any;
+
+    /// Return the renderer type
+    fn renderer_type(&self) -> RendererType;
+
+    /// Obtain an Arc for the ThreadData structure for the specified thread
+    fn get_threaddata(&self, thr: usize) -> Arc<Mutex<Box<ThreadData>>>;
+
+    /// Return the maximum number of threads
+    fn get_maxthreads(&self) -> usize;
+
+    /// Return the vendor string from the driver
+    fn get_vendor(&self) -> String;
+
+    /// Return the renderer string from the driver
+    fn get_renderer(&self) -> String;
+
+    /// Return the version string from the driver
+    fn get_version(&self) -> String;
+
+    /// Return the shader version string from the driver
+    fn get_shading_language_version(&self) -> String;
+
+    /// Finish initialisation of resources
+    ///
+    /// shaders: A map of the shaders to set up, keyed by name
+    /// textures: A map of the textures to set up, keyed by name
+    /// shader_target_map_name: The name of the shader target map
+    /// msaa: The multisample factor
+    fn finish_resource_initialisation(
+        &mut self,
+        shaders: &BTreeMap<String, &Box<Shader>>,
+        textures: &BTreeMap<String, &Box<Texture>>,
+        shader_target_map_name: &str,
+        msaa: u32,
+    );
+
+    /// Create a new shader
+    ///
+    /// renderer: A reference to the renderer object
+    fn create_shader(&mut self) -> Box<Shader>;
+
+    /// Create a new texture
+    ///
+    /// width: The width of the new texture
+    /// height: The height of the new texture
+    /// depth: true if the buffer should be depth, false if it should be colour
+    /// floating: true if the buffer should be floating point, false if it should be byte
+    /// msaa: the multisample factor
+    /// data: The raw data for the texture
+    ///
+    /// Returns an object that encapsulates the new texture
+    fn create_texture(&mut self, width: u32, height: u32, depth: bool, floating: bool, msaa: u32, data: &Vec<u8>) -> Box<Texture>;
+
+    /// Create a new render target
+    ///
+    /// width: The width of the new render target
+    /// height: The height of the new render target
+    /// floating: true if the buffer should be floating point, false if it should be byte
+    /// msaa: The multisample factor
+    ///
+    /// Returns an object that encapsulates the new render target
+    fn create_rendertarget(&mut self, width: u32, height: u32, floating: bool, msaa: u32) -> Box<RenderTarget>;
+
+    /// Set the viewport
+    ///
+    /// x_offset: The X-coordinate offset of the viewport
+    /// y_offset: The y-coordinate offset of the viewport
+    /// width: The width of the viewport
+    /// height: The height of the viewport
+    fn set_viewport(&mut self, x_offset: i32, y_offset: i32, width: u32, height: u32);
+
+    /// Clear the depth buffer before starting rendering
+    fn clear_depth_buffer(&self);
+
+    /// Enable or disable multisampling
+    ///
+    /// enable: true if enabling multisampling, false if disabling it
+    fn enable_multisample(&self, enable: bool);
+
+    /// This converts the primitive type that will be rendered to the renderer's intrinsic type
+    fn primitive(&self, primitive_type: PrimitiveType) -> u32;
+
+    /// Uniform buffer configuration
+    fn set_uniform_buffer_int(&mut self, buffer_name: &str, uniform_name: &str, value: i32, is_static: bool, set_index: usize);
+    fn set_uniform_buffer_float(&mut self, buffer_name: &str, uniform_name: &str, value: f32, is_static: bool, set_index: usize);
+    fn set_uniform_buffer_vec3(
+        &mut self,
+        buffer_name: &str,
+        uniform_name: &str,
+        value: &Vec3<f32>,
+        is_static: bool,
+        set_index: usize,
+    );
+    fn set_uniform_buffer_matrix(
+        &mut self,
+        buffer_name: &str,
+        uniform_name: &str,
+        matrix: &Mat4<f32>,
+        is_static: bool,
+        set_index: usize,
+    );
+    fn set_uniform_buffer_float_vector(
+        &mut self,
+        buffer_name: &str,
+        uniform_name: &str,
+        vector: &Vec<f32>,
+        is_static: bool,
+        set_index: usize,
+    );
+    fn queue_descriptor_sets(&mut self, sets: &Vec<usize>);
+
+    /// Begin rendering a new frame
+    fn begin_frame(&mut self);
+
+    /// Initiate a render pass
+    fn begin_pass(&mut self, shader_name: &str);
+
+    /// Terminate a render pass
+    fn end_pass(&mut self);
+
+    /// Terminate rendering a new frame
+    fn end_frame(&mut self);
+
+    /// Flip the back buffer to the front
+    fn flip(&mut self);
+
+    /// Select the specified render target to render to
+    ///
+    /// num: The texture number to bind the render target texture to
+    /// render_target: The render target to select
+    fn select_render_target(&mut self, num: i32, render_target: &mut RenderTarget);
+
+    /// Select no render target
+    fn deselect_render_target(&mut self);
+
+    /// Take a snapshot of the current back buffer image and save it to disk
+    ///
+    /// filename: The filename to save the snapshot to
+    /// width: The width of the back buffer
+    /// height: The height of the back buffer
+    fn snapshot(&self, filename: &str, width: u32, height: u32);
+}
+
+/// Create new threaddata objects for a renderer
+///
+/// max_threads: The maximum number of rendering threads
+fn create_threaddata_objects(max_threads: usize) -> Vec<Arc<Mutex<Box<ThreadData>>>> {
+    let mut threaddata_arcs = Vec::with_capacity(max_threads);
+    for thr in 0..max_threads {
+        threaddata_arcs.push(Arc::new(Mutex::new(Box::new(ThreadData::new(thr)))));
+    }
+
+    threaddata_arcs
+}
+
+/// Initial creation of a renderer, but further setup will be carried out later
+///
+/// window: The window object
+/// renderer_type: The type of renderer to create
+/// resource_manager: The resource manager containing information about shaders, uniforms, etc
+/// application_name: The name of the application (currently only used for Vulkan)
+/// application_version: A string identifying the application version (currently only used for Vulkan)
+/// engine_version: A string identifying the engine version (currently only used for Vulkan)
+/// max_threads: The maximum number of rendering threads
+/// vulkan_gpu: The index of the GPU to force, or -1 to let this method decide for you
+/// debug_level: The debug level for the renderer
+/// vk_debug_mask: The Vulkan debug mask, for Vulkan API tracing
+pub fn create_renderer(
+    window: Window,
+    renderer_type: RendererType,
+    resource_manager: &Arc<Mutex<Box<ResourceManager>>>,
+    application_name: &str,
+    application_version: &str,
+    engine_version: &str,
+    max_threads: usize,
+    vulkan_gpu: i32,
+    vsync: bool,
+    debug_level: u32,
+    vk_debug_mask: u32,
+) -> Box<Renderer> {
+    let threaddata_vector = create_threaddata_objects(max_threads);
+    let renderer: Box<Renderer>;
+    if renderer_type == RendererType::RendererVk {
+        renderer = Box::new(RendererVk::new(
+            application_name,
+            application_version,
+            engine_version,
+            max_threads,
+            vulkan_gpu,
+            debug_level,
+            vk_debug_mask,
+            window,
+            vsync,
+            resource_manager,
+            threaddata_vector.clone(),
+        ));
+    } else if renderer_type == RendererType::RendererGl {
+        renderer = Box::new(RendererGl::new(
+            max_threads,
+            window,
+            resource_manager,
+            threaddata_vector.clone(),
+        ));
+    } else {
+        panic!("Unknown renderer type requested")
+    }
+
+    renderer
+}

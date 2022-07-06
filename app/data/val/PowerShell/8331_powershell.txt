@@ -1,0 +1,198 @@
+function Get-ESNode {
+	<#
+	.SYNOPSIS
+		Used to retrieve information from various Node APIs.
+	
+	.DESCRIPTION
+	
+	.PARAMETER API
+		Designate which Node API from which to retrieve information
+		
+	.PARAMETER Node
+		Designate specific nodes from which to retrieve information
+	
+	.PARAMETER Stats 
+		Stats API switch. Use this to designate specific stats categories to return
+	
+	.PARAMETER FieldData
+		Stats API switch. Use this to retrieve specific field data
+	
+	.PARAMETER Groups
+		Stats API switch. Use this to retrieve statistics about search groups
+	
+	.PARAMETER Info
+		Info API switch. Use this to designate specific information categories to return
+	
+	.PARAMETER Pretty
+		Format the JSON output in a "pretty" format
+	
+	.PARAMETER PSObject
+		Convert the JSON output into a PSObject
+			
+	.PARAMETER Optional URL
+		URL to ElasticSearch instance. Isn't required if you've saved your URL using Set-ESModuleConfiguration.
+	
+	.NOTES
+		Author: David Howell
+		Last Modified: 05/17/2016
+		Documentation Used: https://www.elastic.co/guide/en/elasticsearch/reference/2.3/cluster-nodes-info.html
+	#>
+	[CmdletBinding()]
+	Param(
+		[Parameter(Mandatory=$False)]
+		[ValidateSet("info","stats","hot_threads")]
+		[String]
+		$API = "commandinfo",
+		
+		[Parameter(Mandatory=$False)]
+		[String[]]
+		$Node,
+		
+		[Parameter(Mandatory=$False)]
+		[Switch]
+		$Pretty,
+		
+		[Parameter(Mandatory=$False)]
+		[Switch]
+		$PSObject,
+		
+		[Parameter(Mandatory=$False)]
+		[ValidatePattern("^(https?)?(://)?([^:]+):(\d+)$")]
+		[String]
+		$URL
+	)
+	DynamicParam {
+		# Create a runtime parameter dictionary to add dynamic parameters
+		$RuntimeParameterDictionary = New-Object System.Management.Automation.RuntimeDefinedParameterDictionary
+		
+		if ($API -eq "stats") {
+			# Stats parameter
+			$StatsAttrColl = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+			$StatsParamAttr = New-Object System.Management.Automation.ParameterAttribute
+			$StatsAttrColl.Add($StatsParamAttr)
+			$StatsValidateSet = @("indices","fs","http","jvm","os","process","thread_pool","transport","breaker")
+			$StatsValSetAttr = New-Object System.Management.Automation.ValidateSetAttribute($StatsValidateSet)
+			$StatsAttrColl.Add($StatsValSetAttr)
+			$StatsRuntimeParameter = New-Object System.Management.Automation.RuntimeDefinedParameter("Stats", [String[]], $StatsAttrColl)
+			
+			# FieldData parameter
+			$FieldDataAttrColl = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+			$FieldDataParamAttr = New-Object System.Management.Automation.ParameterAttribute
+			$FieldDataAttrColl.Add($FieldDataParamAttr)
+			$FieldDataRuntimeParameter = New-Object System.Management.Automation.RuntimeDefinedParameter("FieldData", [String[]], $FieldDataAttrColl)
+			
+			# Groups parameter
+			$GroupsAttrColl = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+			$GroupsParamAttr = New-Object System.Management.Automation.ParameterAttribute
+			$GroupsAttrColl.Add($GroupsParamAttr)
+			$GroupsRuntimeParameter = New-Object System.Management.Automation.RuntimeDefinedParameter("Groups", [String[]], $GroupsAttrColl)
+			
+			# Add dynamic parameters to runtime environment
+			$RuntimeParameterDictionary.Add("Stats", $StatsRuntimeParameter)
+			$RuntimeParameterDictionary.Add("FieldData", $FieldDataRuntimeParameter)
+			$RuntimeParameterDictionary.Add("Groups", $GroupsRuntimeParameter)
+		} elseif ($API -eq "info") {
+			# Info parameter
+			$InfoAttrColl = New-Object System.Collections.ObjectModel.Collection[System.Attribute]
+			$InfoParamAttr = New-Object System.Management.Automation.ParameterAttribute
+			$InfoAttrColl.Add($InfoParamAttr)
+			$InfoValidateSet = @("settings","os","process","jvm","thread_pool","transport","http","plugins")
+			$InfoValSetAttr = New-Object System.Management.Automation.ValidateSetAttribute($InfoValidateSet)
+			$InfoAttrColl.Add($InfoValSetAttr)
+			$InfoRuntimeParameter = New-Object System.Management.Automation.RuntimeDefinedParameter("Info", [String[]], $InfoAttrColl)
+			
+			# Add dynamic parameters to runtime environment
+			$RuntimeParameterDictionary.Add("Info", $InfoRuntimeParameter)
+		}
+		
+		# Return the values of our runtime parameter dictionary so the dynamic parameters can be used
+		return $RuntimeParameterDictionary
+	}
+	
+	Begin {
+		# This makes it so the dynamic variables are set and we can tab complete with them.
+		$PSBoundParameters.GetEnumerator() | ForEach-Object { New-Variable -Name $_.Key -Value $_.Value -ErrorAction SilentlyContinue }
+	}
+	Process {
+		if ($API -eq "commandinfo") {
+			# This is the default if no switches are specified
+			# Give the user a little info and provide a list of the Cluster APIs
+			$Message = @()
+			$Message += "", "Get-ESNode --- ElasticSearch Node API"
+			$Message += "-------------------------------------------"
+			$Message += "Used to GET information from various Node APIs", ""
+			$Message += "Specify which Node API to use with the -API switch. You can tab complete the values, but here is a quick list to review:"
+			$Message += "info", "stats", "hot_threads", ""
+			return $Message
+		} else {
+			# If a URL isn't provided, check for ES Module Configuration to import the URL from the configuration
+			if (-not $URL) {
+				$ModuleConfig = Get-ESModuleConfiguration
+				
+				if ($ModuleConfig.URL) {
+					[String]$URL = $ModuleConfig.URL
+				} else {
+					Write-Error -Message "Could not locate URL in Module Configuration. Please specify a URL to ElasticSearch with the -URL switch, or save a URL in the ES Module Configuration with Set-ESModuleConfiguration -URL"
+				}
+			}
+			
+			if ($URL) {
+				# Begin constructing our URL based on selected switches
+				$URL = $URL + "/_nodes"
+				
+				if ($API -eq "stats") {
+					
+					#region Set URL for stats API
+					# Options for Stats API switch
+					if ($Node) {
+						$URL = $URL + "/" + [Uri]::EscapeDataString(($Node -join ","))
+					}
+					$URL = $URL + "/stats"
+					if ($Stats) {
+						$URL = $URL + "/" + [Uri]::EscapeDataString(($Stats -join ","))
+					}
+					if ($FieldData) {
+						$URL = $URL + "/?fields=" + [Uri]::EscapeDataString(($FieldData -join ","))
+					}
+					if ($Groups) {
+						if ($URL -match "[^\?]+\?.+") {
+							$URL = $URL + "&groups=" + [Uri]::EscapeDataString(($Groups -join ","))
+						} else {
+							$URL = $URL + "?groups=" + [Uri]::EscapeDataString(($Groups -join ","))
+						}
+					}
+					#endregion Set URL for stats API
+					
+				} elseif ($API -eq "info") {
+					
+					#region Set URL for info API
+					if ($Node) {
+						$URL = $URL + "/" + [Uri]::EscapeDataString(($Node -join ","))
+					}
+					if ($Info) {
+						$URL = $URL + "/" + [Uri]::EscapeDataString(($Info -join ","))
+					}
+					#endregion Set URL for info API
+					
+				} elseif ($API -eq "hot_threads") {
+					
+					#region Set URL for hot_threads API
+					$URL = $URL + "/hot_threads"
+					#endregion Set URL for hot_threads API
+					
+				}
+				
+				if ($Pretty) {
+					$URL = $URL + "?pretty"
+				}
+				
+				# Execute the request and return the output for the user
+				if ($PSObject) {
+					Invoke-WebRequest -Uri $URL -Method Get | Select-Object -ExpandProperty Content | ConvertFrom-Json
+				} else {
+					Invoke-WebRequest -Uri $URL -Method Get | Select-Object -ExpandProperty Content
+				}
+			}
+		}
+	}
+}

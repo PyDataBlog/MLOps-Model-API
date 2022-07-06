@@ -1,0 +1,303 @@
+!> The module that holds the quantum-mechanical operators.
+!!
+!! It defines an operator_t data type for operators. It should contain
+!! contains the definition of the operator in the 1-electron Hilbert space, 
+!! as well as its definition in the N-electron Hilbert space. They can be
+!! either one-body or two-body operators (for the latter ones the definition
+!! in the 1-electron space does not make sense).
+module operator_m
+  use basis_m
+  use grid_m
+  use math_m
+
+  implicit none
+
+  private
+  public ::                &
+    operator_t,            &
+    operator_end,          &
+    operator_init_kinetic, &
+    operator_init_extpot,  &
+    operator_init_w,       &
+    operator_write_info
+
+  !> An operator, both in the 1-electron space, or in the N-electron space.
+  type operator_t
+    integer :: kind !< This is 1 for one-body operator, 2, for a two-body operator.
+    integer :: dim1, dim2 !< dim1 is the dimension of the operator matrix in the 1-electron space, and dim2 is the
+                          !! dimension in the 2-electron space.
+    complex(8), allocatable :: mat1(:, :) !< Operator matrix in the 1-electron space.
+    complex(8), allocatable :: mat2(:, :) !< Operator matrix in the 2-electron space.
+    contains
+      procedure :: apply => operator_apply
+  end type operator_t
+
+  contains
+
+  function operator_apply(this, psi) result(oppsi)
+    class(operator_t) :: this
+    complex(8) :: oppsi(this%dim1)
+    complex(8), intent(in) :: psi(:)
+    oppsi = matmul(this%mat1, psi)
+  end function operator_apply
+
+  !> Finalization of any operator type variable.
+  !!
+  !! @param op the operator variable to be killed.
+  subroutine operator_end(op)
+    type(operator_t), intent(inout) :: op
+    if(allocated(op%mat1)) deallocate(op%mat1)
+    if(allocated(op%mat2)) deallocate(op%mat2)
+  end subroutine operator_end
+
+
+  !> Initialization of the 2-electron interaction operator.
+  !!
+  !! It uses the formula:
+  !! \f[
+  !!  \hat{W} = \frac{1}{2}\sum_{mn} \gamma_{\vert m-n\vert} \hat{n}_n(\hat{n}_m - \delta_{mn})
+  !! \f]
+  !!
+  !! Note that this operator is diagonal in the real space basis we are using. 
+  !!
+  !! @param op The operator variable that will hold the 2-electron operator.
+  !! @param gamma A real array ranged 0 to p-1.
+  subroutine operator_init_w(op, gamma)
+    type(operator_t), intent(inout) :: op
+    real(8), intent(in) :: gamma(0:)
+
+    integer :: p, ii, m, n
+
+    op%kind = 2 ! Two-body operator
+    op%dim1 = 0 ! In this case, the one-electron matrix does not make sense.
+    op%dim2 = basis%dim
+    p = basis%p
+
+    allocate(op%mat2(op%dim2, op%dim2))
+    op%mat2 = 0.0_8
+
+    do ii = 1, op%dim2
+      do m = 1, p
+        do n = 1, p
+          op%mat2(ii, ii) = op%mat2(ii, ii) + 0.5 * gamma(abs(m-n)) * basis%nm(ii, n)*(basis%nm(ii, m) - kdelta(m, n))
+        end do
+      end do
+    end do
+
+  end subroutine operator_init_w
+
+
+  !> Initialization of an external (local) operator.
+  !!
+  !! This is an operator in the form:
+  !! \f[
+  !!  \hat{V} = \sum_n v_n \hat{n}_n\,.
+  !! \f]
+  !!
+  !! @param op The operator variable that will hold the operator
+  !! @param vvalues The values of the external operator in each grid point.
+  subroutine operator_init_extpot(op, vvalues)
+    type(operator_t), intent(inout) :: op
+    real(8), intent(in) :: vvalues(:)
+
+    integer :: m, p, ii, jj
+
+    op%kind = 1
+    op%dim1 = basis%p * 2
+    op%dim2 = basis%dim
+    p = basis%p
+
+    allocate(op%mat1(op%dim1, op%dim1))
+    op%mat1 = (0.0_8, 0.0_8)
+ 
+    do m = 1, p
+      op%mat1(m, m) = vvalues(m)
+    end do
+    op%mat1(p+1:2*p, p+1:2*p) = op%mat1(1:p, 1:p)
+
+    allocate(op%mat2(op%dim2, op%dim2))
+
+    do ii = 1, op%dim2
+      do jj = 1, op%dim2
+        op%mat2(ii, jj) = iioperatorjj(op, ii, jj)
+      end do
+    end do
+
+  end subroutine operator_init_extpot
+
+
+  !> Initialization of the kinetic operator.
+  !!
+  !! This is an operator in the form:
+  !! \f[
+  !!  \hat{T} = \sum_{mn\sigma} t_{mn}\hat{d}^\dagger_{m\sigma}\hat{d}_{n\sigma}\,.
+  !! \f]
+  !!
+  !! The \f$t_{mn}\f$ terms are defined as:
+  !! \f[
+  !!  t_{mn} = \frac{-1}{2\Delta^2}(\delta_{m+1,n}+\delta_{m-1,n})\,.
+  !! \f]
+  !!
+  !! This formula directly gives the matrix representation of the operator in the 
+  !! one-electron space. The matrix in the many-electron space is computed by calling
+  !! the iioperatorjj function.
+  !! 
+  !! @param op The operator variable that will hold the operator
+  subroutine operator_init_kinetic(op)
+    type(operator_t), intent(inout) :: op
+
+    integer :: m, n, p, ii, jj
+
+    op%kind = 1
+    op%dim1 = basis%p * 2
+    op%dim2 = basis%dim
+    p = basis%p
+
+    allocate(op%mat1(op%dim1, op%dim1))
+    op%mat1 = (0.0_8, 0.0_8)
+    do m = 1, p
+      do n = 1, p
+        ! The last term of this commented line, -2*kdelta(m, n), is not needed, because it just adds
+        ! a constant term (assuming constant number of electrons.
+        ! op%mat1(m, n) = (-1.0_8/(2*grid%delta**2)) * ( kdelta(m+1, n) + kdelta(m-1,n) - 2*kdelta(m, n) )
+        op%mat1(m, n) = (-1.0_8/(2*grid%delta**2)) * ( kdelta(m+1, n) + kdelta(m-1,n) )
+      end do
+    end do
+
+    ! The spin-up block of the matrix is identical to the spin down one.
+    op%mat1(p+1:2*p, p+1:2*p) = op%mat1(1:p, 1:p)
+
+    allocate(op%mat2(op%dim2, op%dim2))
+
+    do ii = 1, op%dim2
+      do jj = 1, op%dim2
+        op%mat2(ii, jj) = iioperatorjj(op, ii, jj)
+      end do
+    end do
+
+  end subroutine operator_init_kinetic
+
+
+  !> Writes a file with information about the operator op.
+  !>
+  !> The name of the file is given by filename.
+  !>
+  !> @param filename Name of the file where to write the grid details.
+  !> @param op operator whose information is written to filename.
+  subroutine operator_write_info(op, filename)
+    type(operator_t), intent(in) :: op
+    character(len=*), intent(in) :: filename
+
+    integer :: i, ii, jj
+
+    open(unit = 11, file = trim(filename))
+
+    do i = 1, op%dim1
+      write(11, *) i, real(op%mat1(i, 1:op%dim1))
+    end do
+
+    write(11, *)
+
+    do ii = 1, op%dim2
+      do jj = 1, op%dim2 - 1
+        write(11, '(a,g16.8,a,g16.8,a)',  advance = 'no') "(", real(op%mat2(ii, jj)), ",", aimag(op%mat2(ii, jj)), ")"
+      end do
+      write(11, '(a,g16.8,a,g16.8,a)') "(", real(op%mat2(ii, jj)), ",", aimag(op%mat2(ii, jj)), ")"
+    end do
+
+    close(unit = 11)
+  end subroutine operator_write_info
+
+
+  !> Computation of <ii|op|jj> for a one-body operator op
+  !!
+  !! @param op operator
+  !! @param ii many-electron state index
+  !! @param jj many-electron state index
+  function iioperatorjj(op, ii, jj) result(res)
+    type(operator_t), intent(in) :: op
+    integer, intent(in) :: ii, jj
+    complex(8) :: res
+
+    integer :: i, j, i_(2), a_(2), ndifs, phase
+    integer, parameter :: method = 2
+
+    select case(method)
+
+    case(1)
+      ! This is the "long" computation, that applies the definition directly.
+      res = (0.0_8, 0.0_8)
+      do i = 1, one_basis%dim
+        do j = 1, one_basis%dim
+          res = res + op%mat1(i, j) * ii2operatorjj(ii, i, j, jj)
+          !write(*, *) i, j, op%mat1(i, j), ii2operatorjj(basis, ii, i, j, jj)
+        end do
+      end do
+
+    case(2)
+
+      ! Application of Slater Condon's rule
+      i_ = 0
+      a_ = 0
+      phase = 1
+      call basis_diff(ii, jj, ndifs, i_, a_, phase)
+      select case(ndifs)
+      case(0)
+        res = (0.0_8, 0.0_8)
+        do j = 1, basis%N
+          res = res + op%mat1(basis%element(ii, j), basis%element(ii, j))
+        end do
+      case(1)
+        res = phase * op%mat1(i_(1), a_(1))
+      case default
+        res = 0.0_8
+      end select
+
+    end select
+
+  end function iioperatorjj
+
+  ! Compute <ii| d^+_i d^_j | jj>
+  function ii2operatorjj(ii, i, j, jj)
+    integer, intent(in) :: ii, jj
+    integer, intent(in) :: i, j
+    integer :: ii2operatorjj
+
+    integer :: iofjj, jofjj, iofii, jofii, diii, djjj
+
+    ii2operatorjj = 0
+
+    ! Compute d^j |jj> ("djjj)
+    iofjj = basis%element(jj, 1)
+    jofjj = basis%element(jj, 2)
+    if(j .eq. iofjj) then
+      djjj = - jofjj
+    elseif (j .eq. jofjj) then
+      djjj = iofjj
+    else
+      djjj = 0
+      return
+    end if
+
+    ! Compute d^i |ii> ("diii")
+    iofii = basis%element(ii, 1)
+    jofii = basis%element(ii, 2)
+    if(i .eq. iofii) then
+      diii = - jofii
+    elseif (i .eq. jofii) then
+      diii = iofii
+    else
+      diii = 0
+      return
+    end if
+
+    ii2operatorjj = 0
+    if(abs(diii) == abs(djjj)) then
+      !write(*, *) 'xxxxxx', diii, djjj
+      ii2operatorjj = sign(1, diii) * sign(1, djjj)
+    end if
+
+
+  end function ii2operatorjj
+
+end module operator_m

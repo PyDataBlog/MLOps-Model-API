@@ -1,0 +1,126 @@
+module Parser where
+
+import Lambda
+import Type
+import Control.Monad
+import Data.Char
+import Text.Parsec
+import Text.Parsec.Expr
+import Text.Parsec.Language
+
+import qualified Text.Parsec.Token as Token
+
+lexer = Token.makeTokenParser style
+          where operators = ["+", "-", "*", "/", "==", ">=", "<=", "<", ">", "/=", ","]
+                words     = ["if", "then", "else", "case", "of", "true", "false", "-|>", "let", "in"]
+                style     = haskellStyle  {Token.reservedOpNames = operators,
+                                           Token.reservedNames   = words}
+
+reservedWords = Token.reserved   lexer
+reservedOpera = Token.reservedOp lexer
+identifiers   = Token.identifier lexer
+parens        = Token.parens     lexer
+idNumbers     = Token.natural    lexer
+
+wSpace x = do
+              Token.whiteSpace lexer
+              r <- x
+              eof
+              return r
+
+expLambda  = do
+               reservedOpera "\\"
+               lam  <- many1 identifiers
+               reservedOpera "."
+               ex1  <- build
+               return $ foldr Lam ex1 lam
+
+variable  = do x <- identifiers
+               return (Var x)
+
+variable2 = do x <- identifiers
+               return x
+
+numbers   = do n <- idNumbers
+               return (Lit (LInt (fromIntegral n)))
+
+boolean   = do
+              reservedWords "true"
+              return (Lit (LBool True))
+              <|> do reservedWords "false"
+                     return (Lit (LBool False))
+
+ifTE      = do
+              reservedWords "if"
+              ex1 <- build
+              reservedWords "then"
+              ex2 <- build
+              reservedWords "else"
+              ex3 <- build
+              return (If ex1 ex2 ex3)
+
+caOf      = do
+              reservedWords "case"
+              ex1 <- build
+              reservedWords "of"
+              pats <- sepBy aPats $ reservedOpera ";"
+              return (Case ex1 pats)
+
+aPats     = do
+              pat1 <- patterns
+              reservedWords "-|>"
+              ex2  <- build
+              return (pat1, ex2)
+              <|> do pat2 <- patterns
+                     reservedWords "-|>"
+                     ex3  <- build
+                     return (pat2, ex3)
+
+patterns = do
+              xxx <- parens bPats
+              return xxx
+              <|> do x <- variable2
+                     return (PVar x)
+                     <|> do n <- idNumbers
+                            return (PLit (LInt (fromIntegral n)))
+                            <|> do reservedWords "true"
+                                   return (PLit (LBool True))
+                                  <|> do reservedWords "false"
+                                         return (PLit (LBool False))
+
+bPats = do
+            x <- identifC
+            patx <- many patterns
+            return (PCon x patx)
+
+identifC = do
+              a <- upper
+              id <- variable2
+              return $ (a:id)
+
+operator =  [[Postfix ((reservedOpera "+")  >> return (App (Var "+")))],
+             [Postfix ((reservedOpera "-")  >> return (App (Var "-")))],
+             [Postfix ((reservedOpera "*")  >> return (App (Var "*")))],
+             [Postfix ((reservedOpera "/")  >> return (App (Var "/")))],
+             [Postfix ((reservedOpera "<")  >> return (App (Var "<")))],
+             [Postfix ((reservedOpera ">")  >> return (App (Var ">")))],
+             [Postfix ((reservedOpera "==") >> return (App (Var "==")))],
+             [Postfix ((reservedOpera "=<") >> return (App (Var "=<")))],
+             [Postfix ((reservedOpera "=>") >> return (App (Var "=>")))],
+             [Postfix ((reservedOpera "/=") >> return (App (Var "/=")))],
+             [Infix   (return ((App))) AssocNone]]
+
+build = buildExpressionParser operator build2
+
+build2 = parens build
+                <|> boolean
+                <|> ifTE
+                <|> variable
+                <|> numbers
+                <|> expLambda
+                <|> caOf
+
+convert = destroy . parsing
+parsing iN = parse (wSpace build) "error" iN
+destroy (Right o) = o
+destroy (Left  o) = error "verify the syntax of the expression"

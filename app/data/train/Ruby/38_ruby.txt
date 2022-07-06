@@ -1,0 +1,196 @@
+require 'nokogiri'
+require 'ostruct'
+require 'active_support/core_ext/string'
+require 'active_support/core_ext/date'
+
+module Lifebouy
+  class MalformedRequestXml < StandardError
+    def initialize(xml_errors)
+      @xml_errors = xml_errors
+    end
+
+    def message
+      "The request contains the following errors:\n\t#{@xml_errors.join("\n\t")}"
+    end
+  end
+
+  class MalformedResponseData < MalformedRequestXml
+    def message
+      "The response contains the following errors:\n\t#{@xml_errors.join("\n\t")}"
+    end
+  end
+  
+  class RequestHandler
+    attr_reader :request_error, :schema, :request_doc, :response_error
+    attr_accessor :response_data
+
+    def initialize(wsdl_file, request_xml)
+      @wsdl = Nokogiri::XML(File.read(wsdl_file))
+      # Find the root schema node
+      schema_namespace = @wsdl.namespaces.select { |k,v| v =~ /XMLSchema/ }.first
+      target_namespace_url = @wsdl.root['targetNamespace']
+      @target_namespace = @wsdl.namespaces.select { |k,v| v == target_namespace_url}.first
+
+      @schema_prefix = schema_namespace.first.split(/:/).last
+      schema_root = @wsdl.at_xpath("//#{@schema_prefix}:schema").dup
+      schema_root.add_namespace_definition(@target_namespace.first.split(/:/).last, @target_namespace.last)
+      # Create a document to store the schema and the parse it into a Schema for validation
+      @schema_doc = Nokogiri::XML::Document.new
+      @schema_doc << schema_root
+      @schema = Nokogiri::XML::Schema(@schema_doc.to_xml)
+
+      envelope = Nokogiri::XML(request_xml)
+      request_data = envelope.at_xpath("//#{envelope.root.namespace.prefix}:Body").first_element_child
+      @request_doc = Nokogiri::XML::Document.new
+      @request_doc << request_data
+
+      @response_data = OpenStruct.new
+    end
+
+    def validate_request_xml?
+      begin
+        validate_request_xml!
+        return true
+      rescue MalformedRequestXml => e
+        @request_error = e
+        return false
+      end
+    end
+
+    def validate_request_xml!
+      request_errors = []
+
+      @schema.validate(request_doc).each do |error|
+        request_errors << "Line #{error.line}: #{error.message}"
+      end
+
+      raise MalformedRequestXml.new(request_errors) unless request_errors.empty?
+    end
+
+    def request_data
+      @request_data ||= build_request_data
+    end
+
+    def validate_response?
+      begin
+        validate_response!
+        return true
+      rescue MalformedResponseData => e
+        @response_error = e
+        return false
+      end
+    end
+
+    def validate_response!
+      raise MalformedResponseData.new(["Empty Responses Not Allowed"]) if response_data.to_h.empty?
+
+      @response_xml = nil
+      response_errors = []
+
+      @schema.validate(response_xml).each do |error|
+        response_errors << "Line #{error.line}: #{error.message}"
+      end
+
+      raise MalformedResponseData.new(response_errors) unless response_errors.empty?
+    end
+
+    def response_xml
+      @response_xml ||= build_response_xml
+    end
+
+    def response_soap
+      
+    end
+
+    private
+    def build_response_xml
+      xml = Nokogiri::XML::Document.new
+      symbols_and_names = {}
+      @schema_doc.xpath("//#{@schema_prefix}:element").each do |e_node|
+        symbols_and_names[e_node[:name].underscore.to_sym] = e_node[:name]
+      end
+      
+      xml << ostruct_to_node(@response_data, xml, symbols_and_names)
+      
+      xml
+    end
+
+    def ostruct_to_node(ostruct, xml, symbols_and_names)
+      raise MalformedResponseData.new(["Structure Must Contain a Node Name"]) if ostruct.name.blank?
+      
+      ele = xml.create_element(ostruct.name)
+      ele.add_namespace_definition(nil, @target_namespace.last)
+
+      ostruct.each_pair do |k,v|
+        next if k == :name
+        if v.is_a?(OpenStruct)
+          ele << ostruct_to_node(v, xml, symbols_and_names)
+        else
+          ele << create_element_node(xml, symbols_and_names[k], v)
+        end
+      end
+      ele
+    end
+
+    def create_element_node(xml, node_name, value)
+      t_node = @schema_doc.at_xpath("//#{@schema_prefix}:element[@name='#{node_name}']")
+      formatted_value = value.to_s
+      begin
+        case type_for_element_name(node_name)
+        when 'integer', 'int'
+          formatted_value = '%0d' % value
+        when 'boolean'
+          formatted_value = (value == true ? 'true' : 'false')
+        when 'date', 'time', 'dateTime'
+          formatted_value = value.strftime('%m-%d-%Y')
+        end
+      rescue Exception => e
+        raise MalformedResponseException.new([e.message])
+      end
+
+      to_add = xml.create_element(node_name, formatted_value)
+      to_add.add_namespace_definition(nil, @target_namespace.last)
+      to_add
+    end
+
+    def build_request_data
+      @request_data = node_to_ostruct(@request_doc.first_element_child)
+    end
+
+    def node_to_ostruct(node)
+      ret = OpenStruct.new
+      ret[:name] = node.node_name
+      node.element_children.each do |ele|
+        if ele.element_children.count > 0
+          ret[ele.node_name.underscore.to_sym] = node_to_ostruct(ele)
+        else
+          ret[ele.node_name.underscore.to_sym] = xml_to_type(ele)
+        end
+      end
+
+      ret
+    end
+
+    def xml_to_type(node)
+      return nil if node.text.blank?
+      case type_for_element_name(node.node_name)
+      when 'decimal', 'float', 'double'
+        node.text.to_f
+      when 'integer', 'int'
+        node.text.to_i
+      when 'boolean'
+        node.text == 'true'
+      when 'date', 'time', 'dateTime'
+        Date.parse(node.text)
+      else
+        node.text
+      end
+    end
+    
+    def type_for_element_name(node_name)
+      t_node = @schema_doc.at_xpath("//#{@schema_prefix}:element[@name='#{node_name}']")
+      raise "No type defined for #{node_name}" unless t_node
+      t_node[:type].gsub(/#{@schema_prefix}:/, '')
+    end
+  end
+end

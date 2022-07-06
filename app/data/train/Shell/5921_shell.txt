@@ -1,0 +1,239 @@
+#******************************************
+function _[FN]_help()
+{
+cat <<EOF
+[FN] [options] "command"
+EOF
+}
+#******************************************
+
+unset [FN]_CMDS
+[FN]_CMDS=( \
+    "push" \
+    "modules" \
+    "comment" \
+)
+complete -F __[FN] [FN]
+function __[FN]()
+{
+    local cur prev
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+
+    #$COMP_CWORD是系统自动变量，表示当前命令单词索引。 0表示第一个单词，也就是bsu。
+    case $COMP_CWORD in
+    0)  #仍在完成根命令，这里不需要处理
+        ;;
+    1)  #根命令已经完成，这里开始补充一级主命令
+        #${COMP_WORDS[0]}是根命令，在这个例子中就是[FN]
+        #eval 是调用变量展开后的函数
+        #eval __cmd_${COMP_WORDS[0]}
+        #通过赋值COMPREPLY实现补全提示
+        COMPREPLY=( $(compgen -W "${[FN]_CMDS[*]}" -- ${cur}) )
+        ;;
+    2|*)#一级主命令已经完成，这里开始补充一级主命令的选项
+        #${COMP_WORDS[1]}是一级主命令，在这个例子中就是push或者其他
+        #eval __cmd_${COMP_WORDS[1]}
+        ;;
+    esac
+}
+
+function [FN]()
+{
+    case $1 in
+        -h|--help)
+            _[FN]_help
+            ;;
+        modules)
+            _[FN]_modules
+            ;;
+        push)
+            _[FN]_push
+            ;;
+        comment)
+            shift
+            _[FN]_comment $1 "$2"
+            ;;
+        *)
+            ;;
+    esac
+}
+
+function _[FN]_modules()
+{
+    local path
+    path=$(gettop)/.repo/manifest.xml
+    if [ -f ${path} ]; then
+        cat ${path} | sed -n '/<project/p' | sed 's/^  <project name="//' | sed 's/".*$/.git/'
+    else
+        echo "Can't find ${path}."
+    fi
+}
+
+function _[FN]_push()
+{
+    local command
+    local usr
+    local uri
+    local git
+    local branch
+
+    local path
+    local cur
+    local isok
+    local action
+    local update_str
+    local msg
+
+    isok=`git status 2>&1 | grep "fatal:"`
+    if [ -n "$isok" ]; then
+        echo -e "${RED}${isok}${CE}"
+        return
+    fi
+
+    usr="$USRNAME"
+    if [ -z $usr ]; then
+        usr="[user name?]"
+    fi
+
+    uri="172.24.61.94:29418"
+    if [ -z $uri ]; then
+        uri="[uri?]"
+    fi
+
+    branch=`git branch -a | grep "\->" | sed 's/^.*\///'`
+    if [ -z $branch ]; then
+        branch="[branch?]"
+    fi
+
+    cur=`pwd`
+    while [ $cur != "/" ]; do
+        pushd $path 1>/dev/null 2>/dev/null
+        cur=`pwd`
+        git=`cat .git/config 2>/dev/null | grep git | sed 's/^.*:\///'`
+        popd 1>/dev/null 2>/dev/null
+
+        if [ -n "$git" ]; then
+            break
+        fi
+        path="$path../"
+    done
+    if [ -z $git ]; then
+        git="[git?]"
+    fi
+
+    action="0"
+    while [ "0" = "0" ]; do
+        separate
+        if [ -n "$msg" ]; then
+            echo -e "$msg"
+            msg=
+        fi
+        echo
+        echo -e "git push ssh://${BLUE}${usr}${CE}@${BLUE}${uri}${CE}/${git} HEAD:refs/for/${RED}${branch}${CE}"
+        echo
+        echo "1) change user name"
+        echo "2) change server URI"
+        echo "3) change git name"
+        echo "4) change branch name"
+        echo
+        echo "you can choose an action, are you sure to push[yes]?"
+        read action
+
+        if [ -z "$action" -o "$action" = "yes" ]; then
+            action="p"
+        fi
+
+        case ${action} in
+            1)
+                echo "please input user name"
+                read update_str
+                if [ -z "$update_str" ]; then
+                    msg="${RED}invalid user name.${CE}"
+                else
+                    usr="$update_str"
+                    msg="${GREEN}change success.${CE}"
+                fi
+                ;;
+            2)
+                echo "please input server URI"
+                read update_str
+                update_str=`echo $update_str | grep ":"`
+                if [ -z "$update_str" ]; then
+                	msg="${RED}invalid server URI.${CE}"
+                else
+                    uri="$update_str"
+                    msg="${GREEN}change success.${CE}"
+                fi
+                ;;
+            3)
+                echo "please input git name"
+                read update_str
+                update_str=`echo $update_str | grep ".git"`
+                if [ -z "$update_str" ]; then
+                    msg="${RED}invalid git name.${CE}"
+                else
+                    git="$update_str"
+                    msg="${GREEN}change success.${CE}"
+                fi
+                ;;
+            4)
+                echo "please input branch name"
+                read update_str
+                if [ -z "$update_str" ]; then
+                    msg="${RED}invalid branch name.${CE}"
+                else
+                    branch="$update_str"
+                    msg="${GREEN}change success.${CE}"
+                fi
+                ;;
+
+            p)
+                echo "pushing..."
+                break;
+                ;;
+            *)
+                echo "canceled!"
+                return
+                ;;
+        esac
+    done
+
+    command="git push ssh://${usr}@${uri}/${git} HEAD:refs/for/${branch}"
+    $command
+}
+
+function _[FN]_comment()
+{
+    separate
+    updatedate
+    numbers=$1
+    description="PR${numbers} '''$2''' ${USRNAME} ${CD}"
+    echo ${description}
+
+    echo "instruction: The '''description.''' area appears only once(first comment place) per file."
+    echo -e "${REVERSE}== java ==${CE}"
+    echo "multi-line:"
+    echo -e "${GREEN}/* { ${description} */${CE}"
+    echo -e "${GREEN}/* { PR${numbers} ${USRNAME} ${CD} */${CE}"
+    echo -e "${GREEN}/* } PR${numbers} ${USRNAME} ${CD} */${CE}"
+    echo "single-next-line:"
+    echo -e "${GREEN}/// ${description}${CE}"
+    echo "single-line:"
+    echo -e "${GREEN}// PR${numbers} ${USRNAME} ${CD}${CE}"
+    echo
+    echo -e "${REVERSE}== xml ==${CE}"
+    echo "multi-line:"
+    echo -e "${GREEN}<!-- { ${description} -->${CE}"
+    echo -e "${GREEN}<!-- } PR${numbers} ${USRNAME} ${CD} -->${CE}"
+    echo "single-next-line:"
+    echo -e "${GREEN}<!--- ${description} -->${CE}"
+    echo
+    echo -e "${REVERSE}== sh ==${CE}"
+    echo "multi-line:"
+    echo -e "${GREEN}# { ${description}${CE}"
+    echo -e "${GREEN}# } PR${numbers} ${USRNAME} ${CD}${CE}"
+    echo "single-next-line:"
+    echo -e "${GREEN}### ${description}${CE}"
+}

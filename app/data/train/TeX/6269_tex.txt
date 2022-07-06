@@ -1,0 +1,684 @@
+\documentclass[twoside,9pt]{article}
+\usepackage{rsloan,palatino,epsfig,latexsym,natbib,amsmath,amssymb,listings}
+
+\lstset{
+  basicstyle=\footnotesize,
+  breakatwhitespace=true,
+  breaklines=true,
+  extendedchars=true,
+  frame=single,
+  keepspaces=true,
+  language=ML,
+}
+
+\begin{document}
+
+\ecjHeader{ }{ }{ }{ }{ }{Robert Sloan}
+\title{\bf Stoq: Stream-Based Probabilistic Programming in Coq}
+
+\author{\name{\bf Robert Sloan} \hfill \addr{rsloan@mit.edu}\\ 
+        \addr{MIT CSAIL/PLV}}
+
+\maketitle
+
+\begin{abstract}
+
+I introduce a new open-source proof-of-concept formalization of probability
+in the Coq Proof Assistant, called Stoq, which represents fundamental atoms of
+stochastic reasoning on streams of samples with an eye toward easy integration
+with program logics and intuitive, tactical verification techniques.
+
+I use Stoq to prove several fundamental examples of computations on
+Randomized Algorithms, including the Chernoff Bound, and the expected collision rate
+of a hash function.
+
+\end{abstract}
+
+\section{The Role of Formal Verification}
+
+By formal verification, we simply mean proof; and when we talk about the formal
+verification of programs, we mean to logically deconstruct an algorithm's behavior
+to show that it obeys some property. We could, for example, prove that an
+algorithm can never return a negative number by backtracking and proving our
+hypothesis symbolically for each code path our program could have taken.
+
+Clearly, the relevant logical problem is generally very complex and almost never
+doable by humans: proof assistants such as Coq automate the task by
+programmatically deriving proofs about embedded languages which are then
+extracted into normal code. Proofs are automated by specialized programs called
+tactics.
+
+These verification techniques, while less flashy than many applications, have
+long been essential to systems programming, hardware synthesis, and
+cryptography, because these domains produce immense logical complexity, their
+implementation is very easy to do wrong, and their performance is essential to
+today's computing systems.
+
+\subsection{Formal Verification to Mediate Complexity}
+
+While invisible to the external world, the majority of digital logic designers
+now formally verify their designs in industry, specifying the behavior of
+individual modules in some temporal logic \cite{intel}. This essentially
+replaces testing: the hardware design will \textit{necessarily} behave in the
+expected way.
+
+This practice developed because the hardware designs simply got too complex for
+a human to acually think about, even with thorough tests. As software algorithms
+increase in complexity and sophistication, correctness proofs are becoming more
+and more relevant:
+
+\textit{In our opinion, many proofs in cryptography have become
+        essentially unverifiable. Our field may be approaching
+        a crisis of rigor - M. Bellare and P. Rogaway.}
+
+\subsection{Formal Verification as Security}
+
+In a software context, the most obvious relevance of programs with provable
+properties is a matter of security: for example, if we have an implementation
+of a cryptosystem which provably behaves in the expected way, and we prove that
+that expected behavior provably implements some security property, then our
+system has that security property \cite{barthe09}.
+
+This is the idea behind CertiCrypt, CryptoVerif, EasyCrypt, and FCF, which
+are quickly gaining traction in the security world for the verification of
+cryptographic protocols, with broad support from the cryptographic community 
+\cite{fcf}. 
+
+There has been a lot of recent progress in many other domains, from verified
+compilers to verified operating system kernels, the significance of which cannot
+be understated: it means that compilers like CompCert are \textit{completely
+trustworthy} up to the C specifications! \cite{compcert}
+
+\subsection{Formal Verification as Synthesis}
+
+During the derivation of our correctness proof, we generally also fill in some
+of the blanks \textemdash for example, if we prove that $\exists x$, we usually
+have found some $x$. In this way, when we extract our program, we can fill in
+all of the things that the automated proof constructed, and we've partially
+synthesized our correct program \cite{cpdt}.
+
+This sort of synthesis has been used, for example, to construct the hardware
+design for the Advanced Microcontroller Bus Architecture \cite{amba}. Using
+proof assistants like Coq makes these designs \textit{correct by construction},
+and this kind of synthesis has many applications, particularly in hardware and
+concurrent data structures.
+
+\section{The Relevance of Probabilistic Programming}
+
+Reasoning about probabilistic events is a fundamental problem: real-world systems
+generally operate in an environment of high uncertainty, and randomization is the
+go-to way for algorithms deal with that.
+
+This is the focus of research into probabilistic programming languages, which
+usually utilize Monte-Carlo simulation, factor graphs, or abstract
+interpretation to analyze the behavior of isolated programs \cite{probprog}.
+
+Fundamentally, what I'd like to do is make a small inroad to joining the work of
+symbolic probabilistic programming with the formal verification world: if, in the
+dream of formal verification, we do want to formalize our algorithmic reasoning,
+we need to deal with probability.
+
+\subsection{Randomized Algorithms}
+
+Randomized algorithms will be the focus of my attention for the time being,
+given that there are simple results to verify, and an extremely large space of
+problems and implications too broad to go into detail about:
+
+\begin{itemize}
+\item Randomized Queues underlying modern networks
+\item Randomized Distributed Algorithms \cite{pogo12}
+\item Industrial and medical control systems \cite{static}
+\end{itemize}
+
+\subsection{Cryptography}
+
+As mentioned before, Cryptography is kind of a golden application for
+verification, and cryptographic analysis also requires randomized reasoning:
+ key generation, plaintext modeling, etc. are all sampling operations, and most
+ results in cryptography can be thought of as either reductions or proability
+ bounds \cite{certicrypt} \cite{fcf}.
+
+\subsection{Statistics}
+
+It is worth mentioning that statistics, and much of science as a result,
+directly relies on the statistical computations performed by data analysis
+tools. Usually, because science is a fundamentally exploratory pursuit,
+verification is far from the first priority.
+
+At some point, though, statistics and formal verification will come into
+contact, possibly in the context of something in finance or aerospace where
+correctness is important. At that point, having a good probabilistic formalism
+in Coq will be essential.
+
+\section{Coq and the Tools Underlying Stoq}
+
+Being called a proof assistant is actually a poor choice in nomenclature: Coq is
+actually primarily a functional programming language (similar to Standard ML)
+called Gallina which supports specialized types that represent logical
+propositions, called \texttt{Prop}s, a logic over those propositions.
+
+The Ltac language is Coq's automation language: it automates the application of
+theorems, lemmas, etc. in the derivation of a proof, through programs called
+\textit{tactics}.
+
+In additional to the normal functional constructs, Coq has specialized support
+for some more unique features \cite{cpdt}:
+
+\begin{itemize}
+\item Dependent types, which pair a value with a proof about that value
+      (which is easy when proofs are an intrinsic inductive type). This
+      represents a \textit{subset} of the type of the value.
+\item Coinductive proofs, which operate opposite inductive proofs, from larger
+      sets to smaller sets. We will use these extensively to prove things about
+      infinite data structures, such as streams.
+\end{itemize}
+
+\section{The Philosophy of Stoq}
+
+In making Stoq, I am primarily interested in making a library, something that
+can support future research: it will be useful in proportion to its reusability,
+particularly the degree to which it can be easily integrated with other tools.
+For this reason, it only uses intrinsic Gallina data types (in other words, uses
+a shallow embedding).
+
+In the interest of understandability, the representation of programs should also
+be as small as possible, and a user should be insulated from the limit-formalization
+of probability that underlies the reasoning going on. Likewise, notation and
+naming should be very carefully engineered to be intuitive to anyone familiar
+with probability theory.
+
+Fundamentally, Stoq needs to be, in the spirit of Coq, correct. Stoq has no
+axioms, and the only assumption, really, is its limit definition. For this
+reason, writing Stoq is in practice a mathematical task: that formalization is
+devilishly complicated, but, with good interfaces, can be hidden from the user.
+
+\subsection{Design Goals}
+
+Put into more concrete terms, this philosophy can be materialized into design goals:
+
+\begin{itemize}
+\item Extraction: A program using Stoq should be easily extractable to use
+      the random primitives of another language
+\item Realism: a program using Stoq should look like it would otherwise
+\item Minimal: use only a small set of data structures
+\item Intuition: The predicates Stoq uses need to make intuitive sense to
+      anyone versed in probability theory.
+\end{itemize}
+
+\subsection{Target Application}
+
+In the interest of physicalizing these ideas, take a look at how these goals are
+implemented in the real language (putting off the actual design for a bit):
+
+\begin{itemize}
+\item[] The expectation of a binomial random variable: \texttt{<| (Binomial p) |> == p}
+\item[] The linearity of expectation: \texttt{<| a |+| b |> == <| a |> + <| b |>}
+\item[] Markov's Inequality: \texttt{<| (moreThan c) |?| a |> <= <| a |> / c}
+\end{itemize}
+
+These are some of the simplest problems in probability theory, certainly,
+but their representation is illustrative of the above philosophy: every
+operation (except \texttt{|?|}, which is the most understandable symbol for an
+indicator random variable I came up with) is immediately
+recognizable. It uses only rational numbers and streams (wrapped in a Random
+record described below), and, if we replace the streams with lists, can be
+readily extracted to any functional language.
+
+\subsection{Datatype Design Decisions}
+
+\subsubsection{Rational Streams}
+
+Now we come to our first nuance: all random variables $a$ and $b$ are
+\textit{streams of samples}, with the idea that, in contrast with other
+distribution representations, streams are easy to deal with in functional
+programs; sampling is trivial; properties are easily derivable in coinductive
+proofs; normalization is implicit (!); and the expectation is very easy to
+represent:
+
+\[ \mathbb{E}[a] = lim_{n \rightarrow \infty} \frac{1}{n} \sum_i^n a_i \]
+
+These streams are streams of rational numbers, so that we can reason about the
+limits. For this reason, Stoq supports a \texttt{Indexable} record type, which
+represents types which can be converted to and from rational numbers, so that we
+can perform expectations over anything \texttt{Indexable}. This is not ideal, but
+nonetheless the best achievable generalization for this feature set.
+
+\textit{
+AN: Stoq has undergone many evolutions and revisions: a previous version used
+the real numbers, which was changed in the interest of not having to deal with
+the complexities of the real line. The isomorphism to distributions does work
+in that case, and a proof is included as an appendix.}
+
+\subsubsection{Expectation Limit Definition}
+
+Of course, because this is a \textit{limit}, for some streams the expectation
+will not exist. \texttt{Random}, then, is the subset of streams of rational
+numbers for which this limit exists:
+
+\begin{lstlisting}
+Definition expectLimit (s: QStream) (x: Q): Prop :=
+  forall (delta: Q), exists (bound: nat), forall (n: nat),
+    (n > bound)%nat -> delta > 0 ->
+    Qabs (nExpect n s - x) < delta.
+
+Definition hasExpectation (s: QStream): Prop :=
+  exists (x: Q), expectLimit s x.
+\end{lstlisting}
+
+The reason I chose this particular definition is that it also embodies
+convergence constraints: we can set $n$ arbitrarily high and we must get
+progressively closer to $x$, which is not the case in the normal definition
+that relies on convergent sequences.
+
+Then, Random is just the set of rational streams that have an expectation, or
+\texttt{\{x: Stream Q | hasExpectation x\}}. We can deal with arbitrary
+Randoms using the Hilbert Epsilon formalism .
+
+\subsection{Essential Operators}
+
+\begin{itemize}
+\item \texttt{RandomEq} pointwise-compares the streams. Note that this
+      theoretically requires an infinite amount of computation, which is why we
+      need the coinductive logics in Coq.
+
+\item \texttt{RandomPlus}, \texttt{RandomMinus}, \texttt{RandomNeg}, and
+      \texttt{RandomMult} are the core algebraic operations on random variables,
+      which are wrapped in the above notations (such as \texttt{|+|}). Note that
+      RandomMult multiplies by a constant because we cannot prove in general
+      that the product of two converging sequences also converges, and so we
+      can't show it \texttt{hasExpectation}. This took a long time to discover.
+
+\item The \texttt{Indicator} operator (the \texttt{|?|} above) selects 1 if the
+      condition is satisfied, and 0 otherwise. In this way, taking the expectation of
+      an indicator is the same as determining the probability that that condition is
+      satisfied on the current stream of samples.
+
+\item The \texttt{Binomial} stream, the type of which is the subset of \texttt{Random}s
+      whose values are only 0 or 1, and have an expectation of the given probability.
+      The Binomial function produces any element of this subset, taken as the Hilbert
+      Epsilon of the set \cite{coqart}. In the case of program extraction, this operation
+      would be replaced with a system random function. The argument of the Binomial has
+      the specialized type Probability, which represents rationals in the range $[0..1]$.
+
+\item The \texttt{Uniform} stream operates the same way, restricting the values
+      to the range $[0..1]$ (constructing larger ranges with other operators)
+      using a similar techinique. The condition in this case is that the
+      indicator probability of any range in the uniform distribution is the size of that 
+      range. This operation would also be replaced by a system random.
+\end{itemize}
+
+The notations look like this:
+
+\begin{tabular}{ l l }
+\texttt{a |=| b}  & \texttt{RandomEq}: pointwise-compare $a$ and $b$ \\
+\texttt{a |+| b}  & \texttt{RandomPlus}: pointwise-add $a$ and $b$ \\
+\texttt{a |-| b}  & \texttt{RandomMinus}: pointwise-subtract $a$ and $b$ \\
+\texttt{c |\#*| b}& \texttt{RandomMult}: Multiply $b$ by the scalar $c$ \\
+\texttt{<| a |>}  & \texttt{Expect}: the expectation of $a$ \\
+\texttt{c |?| a}  & \texttt{Indicator}: 1 if $c$ is true on the entry of $a$, 0 otherwise \\
+\texttt{|\#| c}   & \texttt{RandomConst}: the constant value $c$ \\
+\texttt{|p| c}    & \texttt{Binomial}: binomially distributed with probability $c$ \\
+\texttt{|U|}      & \texttt{Uniform}: uniformly distributed between $0$ and $1$ \\
+\end{tabular}
+
+\subsection{What can we represent with just these?}
+
+This can directly represent all linear operations taken on streams of samples;
+\texttt{Indicator}s enable measurement of probability; and it supports two of the
+most fundamental distributions, the ones most often used in the context of
+randomized algorithms.
+
+As a bit of an extension, we can also think about the probability density:
+
+\begin{lstlisting}
+pdf a x := <| (moreThan (x-delta) /\
+               lessThan (x+delta)) |?| a |> / (2 * delta)
+\end{lstlisting}
+
+and the distribution of values on a histogram:
+
+\begin{lstlisting}
+distAs a f := forall x, Qabs ((f x) - pdf a x) < epsilon
+\end{lstlisting}
+
+for arbitrary variables $\delta$ and $\epsilon$. Dealing with \texttt{pdf} and 
+\texttt{distAs} is very nice if the only primitives are \texttt{Binomial}
+and \texttt{Uniform}.
+
+\subsection{Supporting More Operators: A bounded formalism}
+
+The problem in supporting more complex operators, especially pointwise
+multiplication, and conditioning is that it is in general impossible to show
+convergence to some expectation (the resulting sequence could easily diverge
+or oscillate).
+
+However, if we bound the samples below and above, this difficulty disappears,
+and I conjecture that we can prove convergence for the expectation of
+\textit{any} bounded rational sequence, but have as yet not succeeded in doing
+so.
+
+This model is partially implemented in Stoq, and would support a Ring Theory
+over Randoms, complex conditioning operations, and so on as future work.
+
+\section{Stoq's Programming Model}
+
+\subsection{Monadic Programming Model}
+
+A key benefit to using a stream model is that pulling off values is
+logically rather simple, where sampling from a distribution is practically
+very complex: this is how I would expect Stoq to be used in practical terms,
+much like a list Monad:
+
+\begin{lstlisting}
+Definition RandomPlus'(a b: Random): Random.
+exact (x <- a ;;
+       y <- b ;;
+       Return x + y).
+\end{lstlisting}
+
+Stoq includes a basic monadic formalism for \texttt{Random}s, with an eye toward
+the possiblity of a more expansive programming framework (like Haskell's).
+
+\textit{Technical note: the binding is a \texttt{(concat (take 1 (map f x)))},
+so the operation above is pointwise on the stream of samples}
+
+\subsection{Tactical Interface}
+
+As a tactical interface, in addition to some automatically applied tactics and
+coercions, Stoq currently provides only the \texttt{randomsimpl} tactic to
+automatically apply the linearity of expectation, pull out constants from
+expectations, evaluate expectations of Uniform or Binomial, etc. This is
+kept separate from Coq's hints because I expect that it will have more
+complex functionality in the future (such as automatically turning monadic
+operations on streams as above into operations we have theorems about, such as
+\texttt{RandomPlus}).
+
+The important basic theorems to know about are:
+
+\begin{lstlisting}
+qlimit: (forall (delta: Q), delta > 0 -> Qabs (a - b) < delta) -> a == b.
+
+expect_uniqueness: forall x y a, expectLimit a x -> expectLimit a y -> x == y
+
+expect_linearity: forall a b, <| a |+| b |> == <| a |> + <| b |>
+
+expect_mul: forall a c, <| a |*#| c |> == <| a |> * c
+
+expect_binomial: forall c, <| |p| c |> == c
+
+markov: forall a c, c > 0 -> <| (moreThan c) |?| a |> <= <| a |> / c
+\end{lstlisting}
+
+\subsection{Comonadic Stencil Computations}
+
+A nuanced investigation that this framework would enable is the behavior of
+comonadic probabilistic programs, essentially those whose operation depends on
+previous samples (like feedback systems), \textit{without} sampling multiple
+times.
+
+\begin{lstlisting}
+Definition movingAverage (n: nat) (s: Stream Q): Stream Q :=
+  iterate (=>> (fun x => average (take n x))) s
+\end{lstlisting}
+
+A comonadic formalism could directly model differentiation, filtering,
+convolution, and many other operations that would be unthinkably complicated in
+a more standard formulation. I leave that as future work: Stoq includes
+nothing but the basic form and notation of the Random comonad.
+
+\section{The Application to Randomized Algorithms}
+
+The basic problems of randomized algorithms problems rely almost exclusively on
+the Chernoff and Markov bounds: more complex multiplication-based bounds
+could be implemented (I've proved them before with a less rigorous formalism), but
+rely on pointwise stream multiplication, for example:
+
+\begin{lstlisting}
+chebyshev: forall a sigma k,
+  <| a |> == 0 -> <| a |*| a |> == sigma ->
+    <| (moreThan (k * sigma)) |?| a |> <= 1 / (k*k)},
+\end{lstlisting}
+
+Again, I believe that doable, but the proofs are difficult.
+
+\subsection{Chernoff Bound}
+
+My proof of the Chernoff bound is essentially a property of BinomialSum
+distributions, notated \texttt{n |\#?| p} for the sum of $n$ i.i.d random
+variables distributed as Binomials with probability $p$.
+
+I use a slight variant of the Chernoff Bound which is easy for bounding
+algorithms problems:
+
+\begin{lstlisting}
+chernoff: forall n p mu r,
+  <| n |#?| p |> == mu ->
+    <| (moreThan (r)) |?| (n |#?| p |-| |#| mu) |> <= 2 ^ (4*r*r / ((Zpos n)#1))},
+\end{lstlisting}
+
+This essentially denotes the probability of seeing at most $n - (r + \mu)$
+zeros in the result sequence for the random variables.
+
+The proof of this is inductive on $n$:
+
+\[ \mathbb{P}(Bin(n, p) > \mu + r) \]
+\[ = p * \mathbb{P}(Bin(n - 1, p) > \mu + r - 1) +
+  (1 - p) * \mathbb{P}(Bin(n - 1, p) > \mu + r)\]
+
+If we then simply prove the $n = 1$ case and induct (with a $<=$ operator), we
+have to show
+
+\[ 2^{-4*r*r / n}
+ \leq p * 2^{-4*r*r / n} +
+  (1 - p) * 2 ^{-4*(r - 1)*(r - 1) / (n - 1)} \]
+
+which is relatively simple in either case.
+
+\subsection{Rabin-Karp String Pattern Matching Algorithm Failure Probability}
+
+The Rabin-Karp hash is, essentially, the simplest hash function I could find:
+the hash of some string $s$ is the sum of its characters modulo some constant
+$n$. The probability that it encounters a collision is the probability that $k$
+integers identically distributed in some range sum to the same value.
+
+I model this first in the single-bit case, for values being the multiples of
+$n$, then I generate second bits for the characters of the string, multiply them
+by 2 and add them in, and so on. In the end, this problem separates cleanly by
+dynamic-programming the bit index (from bit 0 up) so that we can deal with
+carrying; and the resulting probability of any given result is
+$\lfloor 2^N/n \rfloor$ (actually within $1/2$ of that because of the
+histogramming formalization Stoq uses).
+
+A further interesting question about this problem is its dependence on previous
+inputs, i.e. what is the probability of failure given \textit{non-independent}
+inputs. This is left as future work.
+
+\subsection{Randomized Quicksort}
+
+After many attempts, I finally gave up on showing the expected runtime of
+Randomized Quicksort, largely because, in the absence of a domain-specific
+language, keeping track of how many times we recurse and \textit{why} we do so
+is difficult.
+
+More study is needed on this point, and the solution probably lies with a better
+trace monad, as mentioned below.
+
+\section{Further Applications}
+
+\begin{itemize}
+\item Making an \texttt{entropy} predicate to support information-theoretic
+      analysis in Coq: this would probably look something like the dependent
+      types used for expectation, but with a substantially more complex
+      predicate.
+
+\item Integration into some domain-specific language that can specify the
+      properties we have to deal with more exactly (Gallina is very general,
+      it turns out), the way FCF does \cite{fcf}.
+
+\item Make \texttt{randomsimpl} translate monadic operations into the operators that
+      Stoq's theorems understand.
+
+\item Create some usable model for program traces -- that, I think, is the best,
+      most general way to prove things like the Randomized Quicksort runtime.
+
+\item Integration with a Coq toolchain for dealing with distributed program
+      traces
+
+\item Implementing oblivious data structures using the probabilistic primitives
+      in Stoq (A major field of research ripe for formalization)
+
+\item Formalize Path-ORAM for probabilistic analysis
+
+\item Formalize a Differentially Private key-value store for probabilistic
+      analysis
+
+\end{itemize}
+
+\section{Appendix: Lessons Learned}
+
+\begin{itemize}
+
+\item Never, ever make axioms, and be very, very careful with definitions.
+
+\item Many things you try to prove are actually impossible and do not respond to
+      increased effort
+
+\item Existence is easy, uniqueness is hard.
+
+\item The ordering of existential quantifiers is absurdly important.
+
+\item If something doesn't exist in a popular, stable software project, and it
+      seems like it should, there's probably a reason
+
+\item Difficulty in formalization is exponential in the number of conditions on
+      the system
+
+\item If you have the option, do not wrap it in an inductive type.
+
+\item Absolute values are difficult. Use them sparingly.
+
+\end{itemize}
+
+\section{Appendix: Correctness Proofs}
+
+\subsection{Application to the Kolmogorov Axioms of Probability}
+
+\begin{enumerate}
+
+\item
+The probability of an event is a nonnegative real number.
+
+\[ P_s(E) \equiv \lim _{N \to \infty} \frac{1}{N} \sum _{i=0}^N \delta
+          \left(s_i\in E\right)\in \mathbb{R}\geq 0 \]
+
+because $\delta$ is strictly nonnegative (0 or 1).
+
+\item
+The probability that the event representing the entire sample space will happen is 1.
+
+\(P(\Omega) \equiv \lim _{N\to \infty }\frac{1}{N}\sum _{i=0}^N
+            \delta \left(s_i\in \Omega \right)=\lim_{N\to \infty
+            }\frac{1}{N}\sum _{i=0}^N (1=1)\)
+
+\item
+Any countable sequence of disjoint events \(E_1,E_2,\cdots\) satisfies the property
+\(P\left(E_1\cup E_2\cup \cdots \right)=\sum _{i=1}^{\infty} E_i\).
+
+\(P\left(E_1\cup E_2\cup \cdots \right) \equiv
+  \lim_{N\to \infty}\frac{1}{N}\sum _{i=0}^N
+  \delta \left(s_i\in \left(E_1\cup E_2\cup \cdots \right)\right)\)
+
+\(=\lim _{N\to \infty }\frac{1}{N}\sum _{i=0}^N \left(\delta
+    \left(s_i\in E_1\right)+\delta \left(s_i\in E_2\right)+\cdots
+    \right)\)
+
+Because the $E_i$ are disjoint, their indicators are independent.
+
+\(=\lim _{N\to \infty }\frac{1}{N}\sum _{i=0}^N \delta \left(s_i\in E_1\right)
+  +\lim _{N\to \infty }\frac{1}{N}\sum _{i=0}^N \delta \left(s_i\in E_2\right)+\cdots
+  =\sum _{i=1}^{\infty } E_i\)
+
+\end{enumerate}
+
+\subsection{Isomorphism to the Computable Subset of Normalized Distributions over the Real Numbers}
+
+\subsubsection{Sampling Oracle Derivation}
+
+Assume an oracle for sampling exists, and construct i.i.d \(s_i\) distributed
+as some distribution \(p\). Then, immediately, the expectation over the oracle
+will give us the result we want (this is the intuitive case):
+
+\(E_s\left[P\left(x_j\right)\right] =E_s\left[
+  \lim _{N\to \infty }\frac{1}{N}\sum _{i=0}^N \delta \left(s_i=x_j\right)\right]
+  =\lim _{N\to \infty}\frac{1}{N}\sum _{i=0}^N E_s\left[\delta
+  \left(s_i=x_j\right)\right]=\lim _{N\to \infty}\frac{1}{N}\sum _{i=0}^N p_j=p_j\)
+
+The Weak Law of Large Numbers indicates that this should be with probability 1
+for $N\to \infty$.
+
+\subsubsection{Computational Derivation}
+
+In any computational environment, the actual number of floating-point numbers is
+finite ($N_{\text{fp}}\equiv 2^{64}$ in most modern computers), so we can
+expand the distribution into a list of samples directly:
+
+Represent the distribution function as a length-$N_{\text{fp}}$ list of values
+$v_i\in \mathbb{R}$, representing the normalized PDF of the discrete distribution
+over the floating-point numbers.
+
+Zip the list with the \(N_{\text{fp}}\) coordinates to produce
+$\left[\left(x_1,p_1\right),\left(x_2,p_2\right),\ldots \right]$
+
+Construct a new list by replicating each entry $N_{\text{fp}}*p_i$ times to produce
+
+\[\left[\left(x_1,p_1\right),\left(x_1,p_1\right),\left(x_2,p_2\right),\ldots \right]\]
+
+Take just the \(x_i\) and permute arbitrarily: this becomes exactly a sample list
+with the appropriate probabilities, of size $N_{\text{fp}}{}^2$.
+
+\[P\left(x_j\right) \equiv \lim _{N\to \infty }\frac{1}{N}\sum _{i=0}^N \delta
+   \left(s_i=x_j\right)=\frac{1}{N_{\text{fp}}}\left(N_{\text{fp}}p_j\right)=p_j\]
+
+\subsubsection{Analytic Function Derivation}
+
+We can construct a sample list \(\left[s_i\right]\) from an analytic distribution
+$f$ via the following procedure:
+Any analytic function can be represented as a length-$\aleph_0$ power series of real
+numbers $\sum _{i=0}^{\infty } a_i\left(x-x_0\right){}^i$.
+For each $j\in \mathbb{N}$, pick the first $x_j$ (in some abitrary sequence) such
+that
+
+\[\sum _{i=0}^{j-1} a_i\left(x-x_0\right){}^i\neq \sum
+  _{i=0}^j a_i\left(x-x_0\right){}^i\]
+  
+Note that now \textit{ exactly one} analytic distribution will have the correct
+probability at all $x_j$ -- the easiest argument to make is via matrices:
+
+The observed $\left[\left(x_i,p_i\right)\right]$ pairs represent an
+$\aleph_0$-dimensional linear constraint on an $\aleph_0$-dimensional vector space
+of $a_i$, because evaluation of the power series looks like the inner-product of
+the $a_i$ with a vector of the $\left(x-x_0\right){}^i$.
+
+Therefore, there exists a one-to-one and onto interpolation operator $\mathfrak{O}$
+that materializes an $a_i$-vector from the $\left[\left(x_i,p_i\right)\right]$.
+This operator can be composed with a function operator $\mathfrak{F}$ that constructs
+a power series function from the $a_i$, so that
+$\mathfrak{F}\mathfrak{O}$ is the isomorphism from $\left[x_j,p_j\right]$ to
+analytic functions $\mathbb{R}\to [0,1]$
+
+Define $\Lambda_n$ as the list constructed by replicating each $x_j$ $n*p_j$ times,
+then permuting arbitrarily (to construct a sample list). If we take
+$\lim_{n\to \infty }\Lambda _n$, this is exactly the sample list we want, unique
+for an analytic distribution because it will have the correct value at all \(x_j\):
+
+\[P\left(x_j\right) \equiv \lim _{N\to \infty }\frac{1}{N}\sum _{i=0}^N \delta
+   \left(\lambda _i=x_j\right)=\lim _{n\to \infty }\frac{1}{n}\left(n p_j\right)=p_j\]
+
+The caveat here is that any sampling procedure will produce $x_i$ in exactly this
+proportion, in an infinite stream of values.
+
+\newpage
+
+\bibliographystyle{ieeetr}
+\bibliography{stoq}
+\end{document}

@@ -1,0 +1,113 @@
+﻿<#
+.SYNOPSIS
+This PowerShell script module file provides a step to be used in a series of
+executable PowerShell steps that is intended to be included in all main
+PowerShell scripts that reside within the automation framework.
+
+.DESCRIPTION
+Note: This script module is NOT intended to be executed independent of another
+PowerShell script referencing and using it.
+#>
+
+function Set-Context {
+	<#
+    .SYNOPSIS
+	Sets all context properties into the context file.
+
+    .DESCRIPTION
+    N/A
+
+    .EXAMPLE
+    There are no parameters for this function.
+ 
+    Set-Context
+    #>
+
+    # perform initial setup of developer directory location and context, if not already setup
+    if (-Not (Test-FileExists -filePath (Get-OsContextProperty -name "ContextPointerFilePath"))) {
+
+        # prompt for developer directory location or use default location
+        $developerDirPath = Read-Host "Enter required developer directory location or hit enter to use default location ($($Global:Os.Id))"
+
+        # validate developer directory location
+        # if not set, use default location
+        if ([string]::IsNullOrWhiteSpace($developerDirPath)) {
+            $developerDirPath = (Get-OsContextProperty -name "DefaultDeveloperDirPath")
+        }
+
+        # prompt for current username
+        $currentUser = Read-Host "Enter required username for the current user"
+
+        # validate username for current user
+        # if not set, throw exception
+        if ([string]::IsNullOrWhiteSpace($currentUser)) {
+            Write-Exception -Message "Username for current user is required!!!" -ErrorAction Stop
+        }
+
+        # create developer directory
+        New-Directory -dirPath $developerDirPath -showOutMessage $true
+
+        # set absolute path to context directory location
+        $contextDirPath = (Join-Path $developerDirPath (Get-OsContextProperty -name "ContextDir"))
+
+        # create context directory
+        New-Directory -dirPath $contextDirPath -showOutMessage $true
+
+        # set absolute path to context file
+        $contextFilePath = (Join-Path $contextDirPath (Get-OsContextProperty -name "ContextFile"))
+
+        # write context file absolute path to context pointer file
+        Set-Content -Path (Get-OsContextProperty -name "ContextPointerFilePath") -Value $contextFilePath
+
+        # write current username to current username pointer file
+        Set-Content -Path (Get-OsContextProperty -name "CurrentUserPointerFilePath") -Value $currentUser
+    }
+    else {
+
+        # get absolute path to context file
+        $contextFilePath = (Get-Content (Get-OsContextProperty -name "ContextPointerFilePath"))
+
+        # set absolute path to context directory location
+        $contextDirPath = (Split-Path $contextFilePath -Parent)
+
+        # create context directory
+        New-Directory -dirPath $contextDirPath
+    }
+
+    # create default OS-specific context file, if it does not exist
+    if (-Not (Test-FileExists -filePath $contextFilePath)) {
+
+        # set absolute path to default OS-specific context file
+        $defaultContextFilePath = (Get-OsContextProperty -name "DefaultContextFilePath")
+
+        # copy default OS-specific context file as context file location
+        Copy-Item $defaultContextFilePath $contextFilePath -Force
+    }
+
+    # write user-entered context properties to context file
+    if (![string]::IsNullOrWhiteSpace($developerDirPath)) {
+        Write-ContextProperty -name "developerHome" -value $developerDirPath
+    }
+
+    if (![string]::IsNullOrWhiteSpace($currentUser)) {
+        Write-ContextProperty -name "currentUser" -value $currentUser
+    }
+
+    # read context file into hashtable, if it exists
+    $context = Read-Context
+
+    # read default context file into hashtable, if it exists
+    $defaultContext = Read-DefaultContext
+
+    # add context properties that do not exist
+    # create default property in context, if it does not exist
+    if ($defaultContext) {
+        $defaultContext.GetEnumerator() | Sort-Object Key | % {
+            
+            if ($context -eq $null -or $context.Get_Item($_.Key) -eq $null) {    
+
+                Write-ContextProperty -name $_.Key -value $_.Value
+            }
+        }
+    }
+}

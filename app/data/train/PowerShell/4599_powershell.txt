@@ -1,0 +1,101 @@
+function Copy-BPACondition {
+    <#
+        .SYNOPSIS
+            Copies an AutoMate BPA condition.
+
+        .DESCRIPTION
+            Copy-BPACondition can copy a condition object within, or between servers.
+
+        .PARAMETER InputObject
+            The object to copy.
+
+        .PARAMETER Name
+            The new name to set on the object.
+
+        .PARAMETER Folder
+            The folder to place the object in.
+
+        .PARAMETER BPAServer
+            The server to copy the object to.
+
+        .INPUTS
+            The following BPA object types can be modified by this function:
+            Condition
+
+        .EXAMPLE
+            # Copy condition "Daily at 12:00PM" from server1 to server2
+            Get-BPACondition "Daily at 12:00PM" -BPAServer server1 | Copy-BPACondition -Folder (Get-BPAFolder CONDITIONS -BPAServer server2) -BPAServer server2
+
+        .NOTES
+            Author(s):     : David Seibel
+            Contributor(s) :
+            Date Created   : 10/03/2017
+            Date Modified  : 02/08/2018
+
+        .LINK
+            https://github.com/davidseibel/PoshBPA
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, ValueFromPipeline = $true)]
+        $InputObject,        
+
+        [ValidateNotNullOrEmpty()]
+        [string]$Name,
+
+        [ValidateScript({$_.TypeName -eq "Folder"})]
+        $Folder,
+
+        [string]$BPAServer
+    )
+
+    BEGIN {
+        $currentDate = Get-Date
+        $nullDate = Get-Date "12/31/1899 7:00:00 PM"
+        if ($BPAServer) {
+            $user = Get-BPAUser -BPAServer $BPAServer | Where-Object {$_.Name -ieq ($BPAConnectionInfo | Where-Object {$_.Server -eq $BPAServer}).Credential.UserName}
+        }
+    }
+
+    PROCESS {
+        foreach ($obj in $InputObject) {
+            if ($obj.TypeName -eq "Condition") {
+                $guid = "{$((New-Guid).Guid)}"
+                if ($BPAServer) {
+                    # Copy from one BPA server to another
+                    if ($obj.BPAServer -ne $BPAServer) {
+                        if ($Folder) {
+                            if ($Folder.BPAServer -ne $BPAServer) {
+                                throw "Folder specified exists on $($Folder.BPAServer), the folder must exist on $BPAServer!"
+                            }
+                        } else {
+                            $Folder = Get-BPAFolder -ID $user.ConditionFolderID -BPAServer $BPAServer
+                        }
+                    }
+                    $server = $BPAServer
+                } else {
+                    $user = Get-BPAUser -BPAServer $obj.BPAServer | Where-Object {$_.Name -ieq ($BPAConnectionInfo | Where-Object {$_.Server -eq $obj.BPAServer}).Credential.UserName}
+                    $server = $obj.BPAServer
+                }
+
+                $copy = Get-BPACondition -ID $obj.ID -BPAServer $obj.BPAServer
+                $copy.ID          = $guid
+                $copy.CreatedBy   = $user.ID
+                $copy.CreatedOn   = $currentDate
+                $copy.EndedOn     = $nullDate
+                $copy.ResultCode  = 0
+                $copy.ResultText  = ""
+                $copy.ModifiedOn  = $currentDate
+                $copy.StartedOn   = $nullDate
+                $copy.Version     = 1
+                $copy.VersionDate = $currentDate
+                if ($Name)   { $copy.Name = $Name }
+                if ($Folder) { $copy.ParentID = $Folder.ID }
+                $copy | New-BPAObject -BPAServer $server
+                Get-BPACondition -ID $guid -BPAServer $server
+            } else {
+                Write-Error -Message "Unsupported input type '$($obj.TypeName)' encountered!" -TargetObject $obj
+            }
+        }
+    }
+}

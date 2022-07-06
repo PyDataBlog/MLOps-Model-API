@@ -1,0 +1,1 @@
+﻿get-aduser –filter * -properties samaccountname, UserPrincipalName, emailaddress, enabled | export-csv -path "c:\scripts\SAMAccountNames.csv" –notypeinformation

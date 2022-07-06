@@ -1,0 +1,365 @@
+--
+	-- PreInstalls
+	--
+
+	IF OBJECT_ID('dbo.vw_GetInCompleteItems') IS NOT NULL
+    BEGIN
+        DROP VIEW dbo.vw_GetInCompleteItems
+    END
+
+GO
+
+	GO
+	IF OBJECT_ID('dbo.ItemProgressLog') IS NOT NULL
+    BEGIN
+        DROP TABLE dbo.ItemProgressLog
+    END
+
+GO
+
+IF OBJECT_ID('dbo.ItemName') IS NOT NULL
+    BEGIN
+        DROP TABLE dbo.ItemName
+    END
+
+GO
+
+IF OBJECT_ID('dbo.ItemNamespace') IS NOT NULL
+    BEGIN
+        DROP TABLE dbo.ItemNamespace
+    END
+
+GO
+
+IF OBJECT_ID('dbo.MessageLog') IS NOT NULL
+    BEGIN
+        DROP TABLE dbo.MessageLog
+    END
+
+GO
+
+
+	GO
+	IF OBJECT_ID('dbo.pr_Insert_ItemProgress') IS NOT NULL
+    BEGIN
+        DROP PROCEDURE dbo.pr_Insert_ItemProgress
+    END
+		
+GO
+
+IF OBJECT_ID('dbo.pr_Upsert_Item') IS NOT NULL
+    BEGIN
+        DROP PROCEDURE dbo.pr_Upsert_Item
+    END
+		
+GO
+
+IF OBJECT_ID('dbo.pr_Insert_MessageLog') IS NOT NULL
+    BEGIN
+        DROP PROCEDURE dbo.pr_Insert_MessageLog
+    END
+		
+GO
+
+IF OBJECT_ID('dbo.pr_GetInCompleteItems') IS NOT NULL
+    BEGIN
+        DROP PROCEDURE dbo.pr_GetInCompleteItems
+    END
+		
+GO
+
+IF OBJECT_ID('dbo.pr_GetInCompleteItemsForDisplay') IS NOT NULL
+    BEGIN
+        DROP PROCEDURE dbo.pr_GetInCompleteItemsForDisplay
+    END
+		
+GO
+
+	GO
+    
+	--
+	-- Tables
+	--
+
+	CREATE TABLE [dbo].[ItemNamespace]
+(
+	[Id] INT NOT NULL PRIMARY KEY IDENTITY, 
+    [Desc] VARCHAR(255) NOT NULL, 
+    [TimeNow] DATETIME NOT NULL DEFAULT getutcdate(), 
+    [ServerMetaData] VARCHAR(256) NULL
+)
+
+	GO
+	CREATE TABLE [dbo].[MessageLog]
+(
+	[Id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY DEFAULT newid(),
+    [TimeNow] DATETIME NOT NULL DEFAULT getutcdate(), 
+    [MessageType] VARCHAR(25) NOT NULL, 
+    [MessageBody] VARCHAR(MAX) NOT NULL, 
+    [ServerMetaData] VARCHAR(256) NULL
+)
+
+	GO
+	CREATE TABLE [dbo].[ItemName]
+(
+	[Id] INT NOT NULL PRIMARY KEY IDENTITY, 
+	[ItemNamespaceId] INT NOT NULL,
+    [Desc] VARCHAR(128) NOT NULL, 
+    [TimeNow] DATETIME NOT NULL DEFAULT getutcdate(), 
+    CONSTRAINT [FK_ItemName_ToItemNamespace] FOREIGN KEY ([ItemNamespaceId]) REFERENCES [ItemNamespace]([Id]),
+	[MetaData] VARCHAR(MAX) NULL, 
+    [ServerMetaData] VARCHAR(256) NULL
+)
+
+	GO
+	CREATE TABLE [dbo].[ItemProgressLog]
+(
+	[Id] UNIQUEIDENTIFIER NOT NULL PRIMARY KEY DEFAULT newid(), 
+    [ItemNameId] INT NOT NULL, 
+    [ProgressNow] BIGINT NOT NULL, 
+    [ProgressTotal] BIGINT NOT NULL, 
+    [TimeNow] DATETIME NOT NULL DEFAULT getutcdate(), 
+    [ProgressMeta] VARCHAR(128) NULL, 
+    [ServerMetaData] VARCHAR(256) NULL, 
+    CONSTRAINT [FK_ItemProgressLog_ToItemName] FOREIGN KEY ([ItemNameId]) REFERENCES [ItemName]([Id])
+)
+
+	GO
+    
+	--
+	-- Views
+	--
+
+	CREATE VIEW [dbo].[vw_GetInCompleteItems]
+AS
+    WITH    MaxTimeNow
+              AS ( SELECT   [dbo].[ItemNamespace].[Desc] AS ItemNamespace ,
+                            [dbo].[ItemNamespace].[Id] AS ItemNamespaceId ,
+                            [dbo].[ItemName].[Desc] AS ItemName ,
+							[dbo].[ItemName].[Id] AS ItemNameId ,
+                            [dbo].[ItemProgressLog].[ProgressNow] ,
+                            [dbo].[ItemProgressLog].[ProgressTotal] ,
+                            [dbo].[ItemProgressLog].[ProgressMeta] ,
+							[dbo].[ItemProgressLog].[TimeNow] ,
+                            ROW_NUMBER() OVER ( PARTITION BY [dbo].[ItemProgressLog].[ItemNameId] ORDER BY [dbo].[ItemProgressLog].[TimeNow] DESC ) AS ROW
+                   FROM     [dbo].[ItemProgressLog] WITH ( NOLOCK )
+                            INNER JOIN [dbo].[ItemName] ON [dbo].[ItemName].[Id] = [dbo].[ItemProgressLog].[ItemNameId]
+                            INNER JOIN [dbo].[ItemNamespace] ON [dbo].[ItemNamespace].[Id] = [dbo].[ItemName].[ItemNamespaceId]
+                 )
+    SELECT  *
+    FROM    MaxTimeNow mtn
+    WHERE   mtn.ROW = 1
+            AND mtn.ProgressNow <> mtn.progressTotal
+
+	GO
+    
+	--
+	-- Procedures
+	--
+
+	CREATE PROCEDURE [dbo].[pr_Insert_MessageLog]
+    @MessageType VARCHAR(25) ,
+    @MessageBody VARCHAR(MAX) ,
+    @ServerMetaData VARCHAR(256)
+    AS
+
+    INSERT  INTO dbo.MessageLog
+            ( MessageType ,
+              MessageBody ,
+			  ServerMetaData
+            )
+    VALUES  ( @MessageType ,
+              @MessageBody,
+			  @ServerMetaData
+            )
+    RETURN 0
+
+	GO
+	CREATE PROCEDURE [dbo].[pr_GetInCompleteItemsForDisplay]
+AS
+    SELECT  [ItemNamespace] ,
+            [ItemName] ,
+            [ProgressNow] ,
+            [ProgressTotal] ,
+            [ProgressMeta] ,
+            dbo.vw_GetInCompleteItems.[TimeNow] ,
+            dbo.ItemName.MetaData
+    FROM    dbo.vw_GetInCompleteItems
+            INNER JOIN dbo.ItemName ON dbo.ItemName.Id = dbo.vw_GetInCompleteItems.ItemNameId
+
+	GO
+	CREATE PROCEDURE [dbo].[pr_GetInCompleteItems]
+AS
+    SELECT  [ItemNamespace] ,
+            [ItemName] ,
+            [ProgressNow] ,
+            [ProgressTotal] ,
+            [ProgressMeta] ,
+            dbo.vw_GetInCompleteItems.[TimeNow] ,
+            dbo.ItemName.MetaData
+    FROM    dbo.vw_GetInCompleteItems
+            INNER JOIN dbo.ItemName ON dbo.ItemName.Id = dbo.vw_GetInCompleteItems.ItemNameId
+    ORDER BY dbo.vw_GetInCompleteItems.[TimeNow] ASC
+
+	GO
+	CREATE PROCEDURE [dbo].[pr_Upsert_Item]
+    @ItemNamespace VARCHAR(255) ,
+    @ItemName VARCHAR(255) ,
+    @MetaData VARCHAR(MAX) ,
+    @ProgressNow BIGINT ,
+    @ProgressTotal BIGINT ,
+    @ProgressMeta VARCHAR(128) ,
+    @ServerMetaData VARCHAR(256)
+AS
+    DECLARE @ItemNamespaceId INT = NULL
+    SELECT  @ItemNamespaceId = Id
+    FROM    dbo.ItemNamespace (NOLOCK)
+    WHERE   [Desc] = @ItemNamespace
+    IF ( @ItemNamespaceId IS NULL )
+        BEGIN
+            INSERT  INTO dbo.ItemNamespace
+                    ( [Desc], [ServerMetaData] )
+            VALUES  ( @ItemNamespace, @ServerMetaData )
+            SET @ItemNamespaceId = @@IDENTITY
+        END
+	
+    DECLARE @LastMetaData VARCHAR(MAX) = NULL
+	DECLARE @ItemNameId INT = NULL
+    SELECT  @ItemNameId = Id, @LastMetaData = MetaData
+    FROM    dbo.ItemName (NOLOCK)
+    WHERE   [Desc] = @ItemName
+            AND [ItemNamespaceId] = @ItemNamespaceId
+    IF ( @ItemNameId IS NULL )
+        BEGIN
+            BEGIN TRAN
+            UPDATE  dbo.ItemName
+            SET     MetaData = @MetaData ,
+                    ServerMetaData = @ServerMetaData
+            WHERE   [Desc] = @ItemName
+                    AND [ItemNamespaceId] = @ItemNamespaceId
+
+            IF ( @@ROWCOUNT = 0 )
+                BEGIN
+                    INSERT  INTO dbo.ItemName
+                            ( [Desc] ,
+                              [ItemNamespaceId] ,
+                              [MetaData] ,
+                              [ServerMetaData]
+                            )
+                    VALUES  ( @ItemName ,
+                              @ItemNamespaceId ,
+                              @MetaData ,
+                              @ServerMetaData
+                            )
+                    SET @ItemNameId = @@IDENTITY
+                END
+            COMMIT
+        END
+    ELSE
+        BEGIN
+            UPDATE  dbo.ItemName
+            SET     [MetaData] = ISNULL(@MetaData, @LastMetaData) ,
+                    [ServerMetaData] = @ServerMetaData
+            WHERE   [Desc] = @ItemName
+                    AND [ItemNamespaceId] = @ItemNamespaceId
+        END
+
+    EXEC [dbo].[pr_Insert_ItemProgress] @ItemNamespace, @ItemName,
+        @ProgressNow, @ProgressTotal, @ProgressMeta, @ServerMetaData
+    RETURN 0
+
+	GO
+	CREATE PROCEDURE [dbo].[pr_Insert_ItemProgress]
+    @ItemNamespace VARCHAR(255) ,
+    @ItemName VARCHAR(255) ,
+    @ProgressNow BIGINT ,
+    @ProgressTotal BIGINT ,
+    @ProgressMeta VARCHAR(32) ,
+    @ServerMetaData VARCHAR(256)
+AS
+    DECLARE @ProgressNowLocal BIGINT = @ProgressNow
+    DECLARE @ProgressTotalLocal BIGINT = @ProgressTotal
+
+    DECLARE @ItemNamespaceId INT = NULL
+    SELECT  @ItemNamespaceId = Id
+    FROM    dbo.ItemNamespace (NOLOCK)
+    WHERE   [Desc] = @ItemNamespace
+    IF ( @ItemNamespaceId IS NULL )
+        BEGIN
+            INSERT  INTO dbo.ItemNamespace
+                    ( [Desc], [ServerMetaData] )
+            VALUES  ( @ItemNamespace, @ServerMetaData )
+            SET @ItemNamespaceId = @@IDENTITY
+        END
+	
+    DECLARE @ItemNameId INT = NULL
+    SELECT  @ItemNameId = Id
+    FROM    dbo.ItemName
+    WHERE   [Desc] = @ItemName
+            AND [ItemNamespaceId] = @ItemNamespaceId
+    IF ( @ItemNameId IS NULL )
+        BEGIN
+            BEGIN TRAN
+            UPDATE  dbo.ItemName
+            SET     ServerMetaData = @ServerMetaData
+            WHERE   [Desc] = @ItemName
+                    AND [ItemNamespaceId] = @ItemNamespaceId
+
+            IF ( @@ROWCOUNT = 0 )
+                BEGIN
+                    INSERT  INTO dbo.ItemName
+                            ( [Desc] ,
+                              [ItemNamespaceId] ,
+                              [ServerMetaData]
+                            )
+                    VALUES  ( @ItemName ,
+                              @ItemNamespaceId ,
+                              @ServerMetaData
+                            )
+                    SET @ItemNameId = @@IDENTITY
+                END
+            COMMIT
+        END
+	
+    IF ( @ProgressNowLocal = -1
+         AND @ProgressTotalLocal = -1
+       )
+        BEGIN
+            SELECT TOP 1
+                    @ProgressNowLocal = ProgressNow ,
+                    @ProgressTotalLocal = ProgressTotal
+            FROM    dbo.ItemProgressLog
+            WHERE   ItemNameId = @ItemNameId
+            ORDER BY TimeNow DESC
+
+            IF ( @ProgressNowLocal = -1
+                 AND @ProgressTotalLocal = -1
+               )
+                BEGIN
+                    SET @ProgressNowLocal = 0
+                    SET @ProgressTotalLocal = 1
+                END
+        END
+
+    INSERT  INTO dbo.ItemProgressLog
+            ( ItemNameId ,
+              ProgressNow ,
+              ProgressTotal ,
+              ProgressMeta ,
+              ServerMetaData
+            )
+    VALUES  ( @ItemNameId ,
+              @ProgressNowLocal ,
+              @ProgressTotalLocal ,
+              @ProgressMeta ,
+              @ServerMetaData
+            )
+    SELECT  @ProgressNowLocal AS ProgressNow ,
+            @ProgressTotalLocal AS ProgressTotal
+GO
+
+
+
+	GO
+    
+	

@@ -1,0 +1,143 @@
+/*
+  @meta {
+    "processorId": "org.helgoboss.scala_bundle:1.0.0",
+    "projectId": "org.helgoboss:obr-facade:1.0-SNAPSHOT",
+    "dependencies": [
+      "com.weiglewilczek.scala-lang-osgi:scala-library:2.9.1",
+      "org.apache.felix:org.osgi.service.obr:1.0.2",
+      "org.helgoboss:maven-osgi:1.0-SNAPSHOT"
+    ],
+    "transformers": [
+      "org.helgoboss.my_oss:1.0.0"
+    ]
+  }
+*/
+package org.helgoboss.obr_facade
+
+import java.net.URL
+import org.osgi.service.obr.Repository
+
+/**
+ * Interface for a service treating OSGi bundle repository resources and bundles as one thing. It simplifies the lifecycle
+ * of bundles by only differentiating between the two states off and on (uninstalled || installed || resolved = off, starting || stopping || active = on). installed, resolved, starting and stopping are intermediate states.
+ * Switching off means turning the bundle into state uninstalled. Switching on means turning the bundle into state active.
+ * Note, however, that you still have access on the bundles itself. So you are not limited in flexibility.
+ */
+trait ObrFacade {
+  def installedRepositories: Seq[Repository]
+
+  def installedRemoteRepositories: Seq[Repository]
+
+  def installedLocalRepositories: Seq[Repository]
+
+  def findInstalledRepository(repositoryUrl: URL): Option[Repository]
+
+  def repositoryIsInstalled(repositoryUrl: URL) = {
+    findInstalledRepository(repositoryUrl).isDefined
+  }
+
+  def developmentRepositoryUrl: Option[URL]
+
+  def installRepository(repositoryUrl: URL)
+
+  def uninstallRepository(repositoryUrl: URL)
+
+  def uninstallRepository(repository: Repository) {
+    installRepository(repository.getURL)
+  }
+
+  def installOrRefreshRepository(repositoryUrl: URL)
+
+  def refreshRepository(repository: Repository) {
+    installOrRefreshRepository(repository.getURL)
+  }
+
+  def findResources(filterExpression: String): Seq[Resource]
+
+  def findResource(resourceId: ResourceId): Option[Resource]
+
+  def resourceExists(resourceId: ResourceId) = {
+    findResource(resourceId).isDefined
+  }
+
+  /**
+   * Returns whether the given resource is switched on.
+   */
+  def resourceIsSwitchedOn(resource: ResourceId): Boolean
+
+  /**
+   * Switches on the given resource. If the resource is already switched on, the behavior is undefined.
+   */
+  def switchOnResource(resourceId: ResourceId)
+
+  /**
+   * Switches off the given resource. If the resource is already switched off, the behavior is undefined.
+   */
+  def switchOffResource(resourceId: ResourceId)
+
+  /**
+   * Switches the given resource off (if it was switched on) and on.
+   */
+  def switchOnOrRefreshResource(resourceId: ResourceId)
+
+  /**
+   * Switches the given resources on. This differs from executing switchOnResource several times by having a transactional character.
+   * If only one of them cannot be resolved, no resource will be switched on. If one of the resources is already switched on,
+   * the behavior is undefined.
+   */
+  def switchOnResources(resourceIds: Iterable[ResourceId])
+}
+
+import org.osgi.service.obr.{ Resource => ObrResource }
+import org.osgi.framework.{ Bundle, Version }
+
+trait Resource {
+  def id: ResourceId
+  def obrResource: Option[ObrResource]
+  def bundle: Option[Bundle]
+  def symbolicName: String
+  def version: Version
+  def presentationName: String
+  def categories: Seq[String]
+  def state: ResourceState
+}
+
+object ResourceId {
+  def apply(symbolicName: String, version: String) = new ResourceId(symbolicName, osgify(version))
+
+  private def osgify(version: String) = {
+    org.helgoboss.maven_osgi.LightDefaultMaven2OsgiConverter.cleanupVersion(version)
+  }
+}
+
+class ResourceId private (val symbolicName: String, val version: String) extends Equals {
+  override def toString = symbolicName + ":" + version
+
+  override def equals(o: Any) = o match {
+    case that: ResourceId =>
+      (that canEqual this) && that.symbolicName == this.symbolicName && that.version == this.version
+
+    case _ =>
+      false
+  }
+
+  override def hashCode = {
+    41 * (
+      41 + symbolicName.hashCode
+    ) + version.hashCode
+  }
+
+  def canEqual(o: Any) = o.isInstanceOf[ResourceId]
+}
+
+sealed abstract class ResourceState(val displayName: String)
+
+object ResourceState {
+  object NotInstalled extends ResourceState("Not installed")
+  object Uninstalled extends ResourceState("Uninstalled")
+  object Installed extends ResourceState("Installed")
+  object Resolved extends ResourceState("Resolved")
+  object Starting extends ResourceState("Starting")
+  object Stopping extends ResourceState("Stopping")
+  object Active extends ResourceState("Active")
+}

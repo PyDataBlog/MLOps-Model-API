@@ -1,0 +1,876 @@
+# -*- coding: utf-8 -*-
+
+
+import threading
+import logging
+import unittest
+import gc
+
+from stockviderApp.utils import retryLogger
+
+from stockviderApp.sourceDA.symbols.referenceSymbolsDA import ReferenceSymbolsDA
+from stockviderApp.localDA.symbols.dbReferenceSymbolsDA import DbReferenceSymbolsDA
+
+from stockviderApp.sourceDA.symbols.googleSymbolsDA import GoogleSymbolsDA
+from stockviderApp.sourceDA.symbols.yahooSymbolsDA import YahooSymbolsDA
+from stockviderApp.sourceDA.symbols.wikiSymbolsDA import WikiSymbolsDA
+from stockviderApp.localDA.symbols.dbGoogleSymbolsDA import DbGoogleSymbolsDA
+from stockviderApp.localDA.symbols.dbYahooSymbolsDA import DbYahooSymbolsDA
+from stockviderApp.localDA.symbols.dbWikiSymbolsDA import DbWikiSymbolsDA
+
+from stockviderApp.localDA.rawData.dbGoogleRawDataDA import DbGoogleRawDataDA
+from stockviderApp.localDA.rawData.dbYahooRawDataDA import DbYahooRawDataDA
+from stockviderApp.localDA.rawData.dbWikiRawDataDA import DbWikiRawDataDA
+from stockviderApp.sourceDA.rawData.googleRawDataDA import GoogleRawDataDA
+from stockviderApp.sourceDA.rawData.yahooRawDataDA import YahooRawDataDA
+from stockviderApp.sourceDA.rawData.wikiRawDataDA import WikiRawDataDA
+
+from stockviderApp.sourceDA.rawData.referenceRawDataDA import ReferenceRawDataDA
+from stockviderApp.localDA.rawData.dbReferenceRawDataDA import DbReferenceRawDataDA
+
+
+
+
+class ThreadUpdateRawData(threading.Thread):
+    '''
+    Threading class handling data retrieval from Quand sources.
+    
+    '''
+    
+    threadLimiter = threading.BoundedSemaphore(3) 
+    # De toute façon il y en a que 3 max
+    
+    def __init__(self, _updateFunc, _symbolList, _exchange):
+        threading.Thread.__init__(self)
+        self.updateFunc = _updateFunc
+        self.symbolList = _symbolList
+        self.exchange = _exchange
+        
+        # Récupère le logger
+        self.logger = logging.getLogger(__name__)
+        return
+    
+    def run(self):
+        
+        # Demande l'acquisition d'un thread
+        ThreadUpdateRawData.threadLimiter.acquire()
+        
+        # Découpe la liste de symbols en plusieurs listes (pb de mémoire)
+        listOfSymbsList = ThreadUpdateRawData._chunks(self.symbolList, 100)
+        for (curIndex, currentSymbolsList) in enumerate(listOfSymbsList):
+            
+            self.logger.info("Traitement de la liste " + str(curIndex + 1) + 
+                             "/" + str(len(listOfSymbsList)))
+            
+            # Execute la fonction d'update
+            self.updateFunc(currentSymbolsList, self.exchange)
+            
+            # Relache proprement la mémoire
+            gc.collect()
+        
+        # Release le thread
+        ThreadUpdateRawData.threadLimiter.release()
+            
+        return
+    
+    @classmethod
+    def _chunks(cls, l, n):
+        '''
+        Chuncks and returns the list in multiple list of size n.
+        
+        :param l: list to chunck
+        :type l: list
+        :param n: chunck size
+        :type n: int
+        
+        :returns: list of chunked lists
+        :rtype: list
+        '''
+        
+        listOfLists = []
+        
+        for i in range(0, len(l), n):
+            listOfLists.append(l[i:i+n])
+
+        return listOfLists
+
+        
+
+
+class DbManager(object):
+    '''
+    Class wrapping all procedures to update the local database from 
+    outside sources.
+    
+    '''
+    
+    # A virer en prod - utile en debug pour limiter la récupération de données
+    limitNbr = None # A none il n'est pas pris en compte
+    exchangeTuple = ('NYSE', 'NASDAQ')
+    instrumentType = 'EQUITIES'
+    
+    def __init__(self):
+        
+        # Récupère le logger
+        self.logger = logging.getLogger(__name__)
+        
+        return
+    
+    def runTest(self):
+        '''
+        Runs tests.
+        '''
+        
+        self.logger.info("Début des tests unitaires")
+        self._runUnitTest()
+        self.logger.info("Fin des tests unitaires")
+        
+        return
+    
+    def runSymbols(self):
+        '''
+        Handles the symbol tables update in the database.
+        '''
+        
+        self.logger.info("Début de l'update des symbols Quandl")
+        # Update les symbols des tables Quandl
+        self._updateQuandlSymbols(self.exchangeTuple)
+        self.logger.info("Fin de l'update des symbols Quandl")
+          
+        self.logger.info("Début de l'update des symbols de référence")
+        # Upate les symbols de référence
+        for exchange in self.exchangeTuple:
+            self.logger.info("Référence - ajout des symbols de " + str(exchange))
+            self._updateReferenceSymbols(exchange, self.instrumentType)
+              
+        self.logger.info("Fin de l'update des symbols de référence")
+          
+        self.logger.info("Début du nettoyage des symbols de référence")
+        # Nettoie les doublons dans les symbols de ref entre Nyse et Nasdaq
+        self._cleanDuplicatedReferenceSymbols()
+        self.logger.info("Fin du nettoyage des symbols de référence")
+          
+        self.logger.info("Début du mapping des symbols de référence")
+        # Mappe les symbols de référence
+        for exchange in self.exchangeTuple:
+            self.logger.info("Référence - mapping des symbols de " + str(exchange))
+            self._mapReferenceSymbols(exchange)
+        self.logger.info("Fin du mapping des symbols de référence")
+        
+        return
+    
+    def runQuandlRawData(self, exchange):
+        '''
+        Handle the Quandl data update in the database.
+        '''
+        
+        self.logger.info("Début de traitement des raw data Quandl de " + str(exchange))
+        self._updateQuandlRawData(exchange)
+        
+        return
+    
+    def runReferenceRawData(self, exchange):
+        '''
+        Handle the aggregated data update in the database.
+        '''
+        
+        self.logger.info("Début de traitement des raw data Reference de " + str(exchange))
+        self._updateReferenceRawData(exchange)
+        
+        return
+        
+    # -------------------------------------------------------------
+    
+    
+    def _runUnitTest(self):
+        '''
+        Runs unit tests.
+        '''
+        
+        # Lance les tests
+        testsuite = unittest.TestLoader().discover('./test/')
+        testResults = unittest.TextTestRunner(verbosity=1).run(testsuite)
+        
+        # Log les erreurs et les echec
+        self.logger.warning("Erreur de test : ")
+        for errorString in testResults.errors:
+            self.logger.error(errorString)
+        for failureString in testResults.failures:
+            self.logger.error(failureString)
+        return
+    
+    
+    # ------------------ Méthodes d'update des symbols -------------------
+
+    @retryLogger(maxRetryNbr=3, sleepTimeIncr=30)
+    def _updateReferenceSymbols(self, exchange, instrumentType):
+        '''
+        Updates the reference symbol table in the database.
+        
+        :param exchange: name of the exchange
+        :type exchange: str
+        :param instrumentType: type of instrument (EQUITIES, BOND, ...)
+        :type instrumentType: str
+        
+        .. warning::
+           This procedure must be called after the local update of the Quandl
+           symbols.
+        '''
+        
+        # Met en place le DAO des symbols de référence
+        referenceSymbolsDAO = ReferenceSymbolsDA(exchange)
+        dbReferenceSymbolDAO = DbReferenceSymbolsDA()
+        
+        # Récupère les symbols de référence
+        referenceSymbolsList = referenceSymbolsDAO.returnSymbolsList(instrumentType)[0:DbManager.limitNbr]
+        
+        # Les ajoute en DB
+        dbReferenceSymbolDAO.updateOrAddSymbolsList(referenceSymbolsList, exchange)
+        
+        self.logger.info("Référence - symbols ajoutés dans la table")
+        
+        return
+    
+    
+    def _cleanDuplicatedReferenceSymbols(self):
+        '''
+        Cleans the reference symbol table from duplicated entries.
+        
+        .. note::
+           It may happen that the same symbol is listed on both NYSE and
+           NASDAQ. This procedure ensures that these symbols are only recorded
+           once in the database.
+        '''
+        
+        # Met en place le DAO local des symbols de référence
+        dbReferenceSymbolDAO = DbReferenceSymbolsDA()
+        dbReferenceSymbolDAO.cleanDuplicatedSymbols('NYSE', 'NASDAQ')
+        
+        self.logger.info("Référence - NYSE/NASDAQ nettoyés")
+        
+        return
+    
+    
+    def _mapReferenceSymbols(self, exchange):
+        '''
+        Maps the 1-1 relation of reference symbols object with each Quandl
+        symbols.
+        
+        :param exchange: name of the exchange
+        :type exchange: str
+        '''
+        
+        # Met en place le DAO des symbols de référence
+        dbReferenceSymbolDAO = DbReferenceSymbolsDA()
+        
+        # Récupère tous les symbols de l'exchange
+        referenceSymbolsList = dbReferenceSymbolDAO.getAllSymbolsList(exchange)
+        refSymbolNamesList = [refSymbol.symbol for refSymbol in referenceSymbolsList]
+        
+        # Mappe les symbols de référence avec les symbols de chaque source
+        dbReferenceSymbolDAO.mapOneToOneRelationsSymbols(refSymbolNamesList, exchange)
+        
+        self.logger.info("Référence - symbols mappés")
+        
+        return
+    
+    
+    
+    def _updateQuandlSymbols(self, exchangeNamesTuple):
+        '''
+        Updates the Quandl symbol tables in the database.
+        
+        :param exchangeNamesTuple: tuple of exchange names
+        :type exchangeNamesTuple: tuple
+        '''
+        
+        self.logger.info("Début de l'update des symbols Google")
+        self._updateGoogleSymbols(exchangeNamesTuple)
+        self.logger.info("Fin de l'update des symbols Google")
+        
+        self.logger.info("Début de l'update des symbols Yahoo")
+        self._updateYahooSymbols(exchangeNamesTuple)
+        self.logger.info("Fin de l'update des symbols Yahoo")
+        
+        self.logger.info("Début de l'update des symbols Wiki")
+        self._updateWikiSymbols(exchangeNamesTuple)
+        self.logger.info("Fin de l'update des symbols Wiki")
+
+        return
+    
+    @retryLogger(maxRetryNbr=3, sleepTimeIncr=30)
+    def _updateGoogleSymbols(self, exchangeNamesTuple):
+        '''
+        Updates the Google symbol table in the database.
+        
+        :param exchangeNamesTuple: tuple of exchange names
+        :type exchangeNamesTuple: tuple
+        '''
+        
+        # Met en place les DAO des symbols
+        googleSymbolsDAO = GoogleSymbolsDA()
+        dbGoogleSymbolsDAO = DbGoogleSymbolsDA()
+        
+        # Récupère tous les symbols de la source
+        symbolsListGoogle = googleSymbolsDAO.returnSymbolsDict()
+        
+        # Crée la liste d'exchange effectifs de cette source
+        googleExchangeNamesList = []
+        for exchange in exchangeNamesTuple:
+            googleExchangeNamesList.append(self._returnEffectiveExchange(exchange)['Google'])
+        googleExchangeNamesList = list(set(googleExchangeNamesList))
+        
+        # Ajoute les symbols à la DB pour chaque exchange du tuple
+        for exchange in googleExchangeNamesList:
+            
+            self.logger.info("Google - traitement des symbols de " + str(exchange))
+            
+            # Récupère la liste de symbols de cet exchange
+            currentSymbolsList = symbolsListGoogle[exchange][0:DbManager.limitNbr]
+            
+            # Les ajoute en DB
+            dbGoogleSymbolsDAO.updateOrAddSymbolsList(currentSymbolsList, exchange)
+
+        return
+    
+    @retryLogger(maxRetryNbr=3, sleepTimeIncr=30)
+    def _updateYahooSymbols(self, exchangeNamesTuple):
+        '''
+        Updates the Yahoo symbol table in the database.
+        
+        :param exchangeNamesTuple: tuple of exchange names
+        :type exchangeNamesTuple: tuple
+        '''
+        
+        # Met en place les DAO des symbols
+        yahooSymbolsDAO = YahooSymbolsDA()
+        dbYahooSymbolsDAO = DbYahooSymbolsDA()
+        
+        # Récupère tous les symbols de la source
+        symbolsListYahoo = yahooSymbolsDAO.returnSymbolsDict()
+        
+        # Crée la liste d'exchange effectifs de cette source
+        yahooExchangeNamesList = []
+        for exchange in exchangeNamesTuple:
+            yahooExchangeNamesList.append(self._returnEffectiveExchange(exchange)['Yahoo'])
+        yahooExchangeNamesList = list(set(yahooExchangeNamesList))
+        
+        # Ajoute les symbols à la DB pour chaque exchange du tuple
+        for exchange in yahooExchangeNamesList:
+            
+            self.logger.info("Yahoo - traitement des symbols de " + str(exchange))
+            
+            # Récupère la liste de symbols de cet exchange
+            currentSymbolsList = symbolsListYahoo[exchange][0:DbManager.limitNbr]
+            
+            # Les ajoute en DB
+            dbYahooSymbolsDAO.updateOrAddSymbolsList(currentSymbolsList, exchange)
+
+        return
+    
+    @retryLogger(maxRetryNbr=3, sleepTimeIncr=30)
+    def _updateWikiSymbols(self, exchangeNamesTuple):
+        '''
+        Updates the Wiki symbol table in the database.
+        
+        :param exchangeNamesTuple: tuple of exchange names
+        :type exchangeNamesTuple: tuple
+        '''
+        
+        # Met en place les DAO des symbols
+        wikiSymbolsDAO = WikiSymbolsDA()
+        dbWikiSymbolsDAO = DbWikiSymbolsDA()
+        
+        # Récupère tous les symbols de la source
+        symbolsListWiki = wikiSymbolsDAO.returnSymbolsDict()
+        
+        # Crée la liste d'exchange effectifs de cette source
+        wikiExchangeNamesList = []
+        for exchange in exchangeNamesTuple:
+            wikiExchangeNamesList.append(self._returnEffectiveExchange(exchange)['Wiki'])
+        wikiExchangeNamesList = list(set(wikiExchangeNamesList))
+        
+        # Ajoute les symbols à la DB pour chaque exchange du tuple
+        for exchange in wikiExchangeNamesList:
+            
+            self.logger.info("Wiki - traitement des symbols de " + str(exchange))
+            
+            # Récupère la liste de symbols de cet exchange
+            currentSymbolsList = symbolsListWiki[exchange][0:DbManager.limitNbr]
+            
+            # Les ajoute en DB
+            dbWikiSymbolsDAO.updateOrAddSymbolsList(currentSymbolsList, exchange)
+
+        return
+    
+    
+    
+    
+    
+    
+    
+    # -------------- Méthodes d'update des raw data ---------------------
+    
+    def _updateQuandlRawData(self, exchange):
+        '''
+        Updates the Quandl data tables in the database.
+        
+        :param exchange: name of the exchange
+        :type exchange: str
+        '''
+        
+        # Ces liste stockent les objets Db des symbols
+        googleSymbolsList = []
+        yahooSymbolsList = []
+        wikiSymbolsList = []
+        
+        # Récupère les DAO
+        dbReferenceSymbolDAO = DbReferenceSymbolsDA()
+        
+        # Parcourt la liste des symbols de référence
+        for refSymbol in dbReferenceSymbolDAO.getAllSymbolsList(exchange):
+            
+            # Récupère pour chaque symbol de référence le symbol de chaque source
+            # et l'append à sa liste s'il existe
+            if refSymbol.googleSymbol is not None:
+                googleSymbolsList.append(refSymbol.googleSymbol)
+            if refSymbol.yahooSymbol is not None:
+                yahooSymbolsList.append(refSymbol.yahooSymbol)
+            if refSymbol.wikiSymbol is not None:
+                wikiSymbolsList.append(refSymbol.wikiSymbol)
+        
+        
+        self.logger.info("Liste de symbols (Google, Yahoo, Wiki) assemblées")
+        self.logger.info("Début de la maj des raw data (Google, Yahoo Wiki) (threading)")
+            
+        # Crée un thread par source et execute la fonction de maj
+        googleThread = ThreadUpdateRawData(self._updateGoogleRawData, googleSymbolsList, exchange)
+        yahooThread = ThreadUpdateRawData(self._updateYahooRawData, yahooSymbolsList, exchange)
+        wikiThread = ThreadUpdateRawData(self._updateWikiRawData, wikiSymbolsList, exchange)
+        googleThread.start()
+        yahooThread.start()
+        wikiThread.start()
+           
+        # Il faut les join avant de quitter cette fonction pour s'assurer que tout le monde est là
+        googleThread.join()
+        yahooThread.join()
+        wikiThread.join()
+        self.logger.info("Google - fin de la maj des raw data")
+        self.logger.info("Yahoo - fin de la maj des raw data")
+        self.logger.info("Wiki - fin de la maj des raw data")
+        
+        self.logger.info("Fin de la maj des raw data (Google, Yahoo Wiki) (threading)")
+
+        return
+    
+    
+    def _updateReferenceRawData(self, exchange):
+        '''
+        Updates the reference (aggregated) data table in the database.
+        
+        :param exchange: name of the exchange
+        :type exchange: str
+        '''
+        
+        # Récupère les DAO
+        dbReferenceSymbolDAO = DbReferenceSymbolsDA()
+        
+        # Cette liste stocke les objets Db des symbols
+        refSymbolsList = []
+        
+        self.logger.info("Début de la maj des raw data de reference (threading)")
+        
+        # Construit la liste des symbols de référence à traiter
+        # Elle est construite après la maj des autres symbols car sinon
+        # les symbols de référence récupérés ne seront pas à jour.
+        for refSymbol in dbReferenceSymbolDAO.getAllSymbolsList(exchange):
+            
+            if refSymbol.googleSymbol is not None or refSymbol.yahooSymbol is not None \
+            or refSymbol.wikiSymbol is not None :
+                refSymbolsList.append(refSymbol)
+        
+        
+        # Traite les reference raw data en les mettant dans un thread
+        # Ici le thread ne sert à rien sauf pour profiter de sa fonction de chunk
+        referenceThread = ThreadUpdateRawData(self._updateReferenceRawDataLists, refSymbolsList, exchange)
+        referenceThread.start()
+        referenceThread.join()
+        
+        self.logger.info("Référence - fin de la maj des raw data")
+        
+        return
+        
+    
+    
+    def _updateGoogleRawData(self, dbSymbolsList, exchange):
+        '''
+        Updates the Google data table in the database.
+        
+        :param dbSymbolsList: list of Google symbol objects
+        :param dbSymbolsList: list
+        :param exchange: name of the exchange
+        :type exchange: str
+        '''
+        
+        self.logger.info("Google - début de la maj des raw data")
+        
+        # Liste des objets raw data à update
+        toUpdateRawDataList = []
+        toMapSymbolNamesList = []
+        
+        # Liste de symbols à problème
+        issuesSymbolsList = []
+        
+        # Récupère les DAO
+        googleRawDataDAO = GoogleRawDataDA()
+        dbGoogleRawDataDAO = DbGoogleRawDataDA()
+        dbGoogleSymbolsDAO = DbGoogleSymbolsDA()
+        
+        # Pour chaque symbol
+        for dbSymbol in dbSymbolsList:
+            
+            self.logger.debug("GOOGLE : " + str(exchange) + "-" + dbSymbol.symbol.upper())
+            
+            # Nom du symbol à demander chez Quandl
+            googleSymbolName = "_".join([dbSymbol.exchange.upper(), dbSymbol.symbol.upper()])
+            
+            # Appelle la fonction de récupération des data
+            returnValue = self._returnQuandlRawDataDictAndNew(dbSymbol, 
+                                                              googleSymbolName, 
+                                                              googleRawDataDAO)
+            
+            # Dans ce cas la data n'a pas été récupérée correctement.
+            # Tout a été loggé on peut passer au symbol d'après.
+            if returnValue is None:
+                issuesSymbolsList.append({'Symbol' : dbSymbol.symbol.upper(),
+                                          'Exchange' : dbSymbol.exchange.upper()})
+                continue
+             
+            (isNew, rawDataDict) = returnValue
+            
+            # Met ces données dans la liste de données à maj
+            toUpdateRawDataList.append(rawDataDict)
+            
+            if isNew:
+                # Met le symbol dans la liste des symbols à mapper
+                toMapSymbolNamesList.append(dbSymbol.symbol.upper())
+
+        # Effectue toutes les maj en DB
+        dbGoogleRawDataDAO.updateOrAddRawDataList(toUpdateRawDataList, exchange)
+        
+        # Effectue le mapping
+        dbGoogleSymbolsDAO.mapOneToOneRelations(toMapSymbolNamesList, exchange)
+        
+        self.logger.warning("Google - symbols à problèmes : " + str(issuesSymbolsList))
+        
+        return
+    
+    
+    def _updateYahooRawData(self, dbSymbolsList, exchange):
+        '''
+        Updates the Yahoo data table in the database.
+        
+        :param dbSymbolsList: list of Yahoo symbol objects
+        :param dbSymbolsList: list
+        :param exchange: name of the exchange
+        :type exchange: str
+        '''
+        
+        self.logger.info("Yahoo - début de la maj des raw data")
+        
+        # Liste des objets raw data à update
+        toUpdateRawDataList = []
+        toMapSymbolNamesList = []
+        
+        # Liste de symbols à problème
+        issuesSymbolsList = []
+        
+        # Récupère les DAO
+        yahooRawDataDAO = YahooRawDataDA()
+        dbYahooRawDataDAO = DbYahooRawDataDA()
+        dbYahooSymbolsDAO = DbYahooSymbolsDA()
+        
+        exchange = self._returnEffectiveExchange(exchange)['Yahoo']
+        
+        # Pour chaque symbol
+        for dbSymbol in dbSymbolsList:
+            
+            self.logger.debug("YAHOO : " + str(exchange) + "-" + dbSymbol.symbol.upper())
+            
+            # Nom du symbol à demander chez Quandl
+            yahooSymbolName = dbSymbol.symbol.upper()
+            
+            # Appelle la fonction de récupération des data
+            returnValue = self._returnQuandlRawDataDictAndNew(dbSymbol, 
+                                                                yahooSymbolName, 
+                                                                yahooRawDataDAO)
+            
+            # Dans ce cas la data n'a pas été récupérée correctement.
+            # Tout a été loggé on peut passer au symbol d'après.
+            if returnValue is None:
+                issuesSymbolsList.append({'Symbol' : dbSymbol.symbol.upper(),
+                                          'Exchange' : dbSymbol.exchange.upper()})
+                continue
+             
+            (isNew, rawDataDict) = returnValue
+            
+            # Met ces données dans la liste de données à maj
+            toUpdateRawDataList.append(rawDataDict)
+            
+            if isNew:
+                # Met le symbol dans la liste des symbols à mapper
+                toMapSymbolNamesList.append(dbSymbol.symbol.upper())
+                
+        # Effectue toutes les maj en DB
+        dbYahooRawDataDAO.updateOrAddRawDataList(toUpdateRawDataList, exchange)
+        
+        # Effectue le mapping
+        dbYahooSymbolsDAO.mapOneToOneRelations(toMapSymbolNamesList, exchange)
+        
+        self.logger.warning("Yahoo - symbols à problèmes : " + str(issuesSymbolsList))
+        
+        return
+    
+    
+    def _updateWikiRawData(self, dbSymbolsList, exchange):
+        '''
+        Updates the Wiki data table in the database.
+        
+        :param dbSymbolsList: list of Wiki symbol objects
+        :param dbSymbolsList: list
+        :param exchange: name of the exchange
+        :type exchange: str
+        '''
+        
+        self.logger.info("Wiki - début de la maj des raw data")
+        
+        # Liste des objets raw data à update
+        toUpdateRawDataList = []
+        toMapSymbolNamesList = []
+        
+        # Liste de symbols à problème
+        issuesSymbolsList = []
+        
+        # Récupère les DAO
+        wikiRawDataDAO = WikiRawDataDA()
+        dbWikiRawDataDAO = DbWikiRawDataDA()
+        dbWikiSymbolsDAO = DbWikiSymbolsDA()
+        
+        exchange = self._returnEffectiveExchange(exchange)['Wiki']
+        
+        # Pour chaque symbol
+        for dbSymbol in dbSymbolsList:
+            
+            self.logger.debug("WIKI : " + str(exchange) + "-" + dbSymbol.symbol.upper())
+            
+            # Nom du symbol à demander chez Quandl
+            wikiSymbolName = dbSymbol.symbol.upper()
+            
+            # Appelle la fonction de récupération des data
+            returnValue = self._returnQuandlRawDataDictAndNew(dbSymbol, 
+                                                                wikiSymbolName, 
+                                                                wikiRawDataDAO)
+            
+            # Dans ce cas la data n'a pas été récupérée correctement.
+            # Tout a été loggé on peut passer au symbol d'après.
+            if returnValue is None:
+                issuesSymbolsList.append({'Symbol' : dbSymbol.symbol.upper(),
+                                          'Exchange' : dbSymbol.exchange.upper()})
+                continue
+             
+            (isNew, rawDataDict) = returnValue
+            
+            # Met ces données dans la liste de données à maj
+            toUpdateRawDataList.append(rawDataDict)
+            
+            if isNew:
+                # Met le symbol dans la liste des symbols à mapper
+                toMapSymbolNamesList.append(dbSymbol.symbol.upper())
+                
+        # Effectue toutes les maj en DB
+        dbWikiRawDataDAO.updateOrAddRawDataList(toUpdateRawDataList, exchange)
+        
+        # Effectue le mapping
+        dbWikiSymbolsDAO.mapOneToOneRelations(toMapSymbolNamesList, exchange)
+        
+        self.logger.warning("Wiki - symbols à problèmes : " + str(issuesSymbolsList))
+        
+        return
+    
+    @retryLogger(maxRetryNbr=3, sleepTimeIncr=10)
+    def _returnQuandlRawDataDictAndNew(self, dbSymbol, quandlSymbolName, rawDataDAO):
+        '''
+        Returns the rawData dict of the symbol fetched from Quandl. Indicates
+        also if the rawData is new to the database (1st time fetched).
+        
+        :param dbSymbol: symbol object
+        :type dbSymbol: BaseSymbol
+        :param quandlSymbolName: name of the symbol to fetch from Quandl
+        :type quandlSymbolName: str
+        :param rawDataDAO: data access object to the Quandl database
+        :type rawDataDAO: QuandlRawDataDA
+        
+        :returns: tuple with the raw data dict and a boolean indicating if the
+        data is new to the local database.
+        :rtype: tuple
+        '''
+        
+        # Booléen pour savoir la data est nouvelle ou non
+        isNew = False
+        
+        # Récupère les meta data
+        metaData = rawDataDAO.returnMetaData(quandlSymbolName)
+        
+        # Initialisation du data frame (si on fait 2 updates sans update du côté
+        # de quandl il sera à None car aucune nouvelle date ne sera récupérée).
+        dataFrame = None
+        
+        # Si le raw data du symbol n'existe pas 
+        if dbSymbol.rawData is None:
+            
+            # Récupère l'ensemble des données
+            dataFrame = rawDataDAO.returnDataFrame(quandlSymbolName, 
+                                                   metaData['oldest_available_date'], 
+                                                   metaData['newest_available_date'])
+            # Il s'agit d'une nouvelle data
+            isNew = True
+            
+        else:
+            # Récupère les données
+            if metaData['oldest_available_date'] < dbSymbol.rawData.oldestDateAvailable:
+                # Effectue un maj complète
+                dataFrame = rawDataDAO.returnDataFrame(quandlSymbolName, 
+                                                       metaData['oldest_available_date'], 
+                                                       metaData['newest_available_date'])
+                
+            elif dbSymbol.rawData.newestDateAvailable <  metaData['newest_available_date']:
+                # Ne récupère que le bout qui manque
+                dataFrame = rawDataDAO.returnDataFrame(quandlSymbolName, 
+                                                       dbSymbol.rawData.newestDateAvailable , 
+                                                       metaData['newest_available_date'])
+                
+        # Forme le dict du symbol et des raw data
+        rawDataDict = {'symbol' : dbSymbol.symbol.upper(), 
+                       'metaData': metaData,
+                       'dataFrame' : dataFrame}
+        
+        return (isNew, rawDataDict)
+    
+    
+    def _updateReferenceRawDataLists(self, dbSymbolsList, exchange):
+        '''
+        Updates the reference (aggregated) data table in the database.
+        
+        :param dbSymbolsList: list of reference symbol objects
+        :param dbSymbolsList: list
+        :param exchange: name of the exchange
+        :type exchange: str
+        '''
+        
+        self.logger.info("Référence - début de la maj des raw data")
+        
+        # Liste des objets raw data à update
+        toUpdateRawDataList = []
+        toMapSymbolNamesList = []
+        
+        # Liste de symbols à problème
+        issuesSymbolsList = []
+        
+        # Récupère les DAO des symbols de référence
+        dbReferenceSymbolDAO = DbReferenceSymbolsDA()
+        referenceRawDataDAO = ReferenceRawDataDA()
+        dbReferenceRawDataDAO = DbReferenceRawDataDA()
+        
+        # Parcourt la liste des symbols de référence
+        for refSymbol in dbSymbolsList:
+            
+            self.logger.debug("REFERENCE : " + str(exchange) + "-" + refSymbol.symbol.upper())
+            
+            try:
+                
+                # Récupère les meta data
+                metaData = referenceRawDataDAO.returnMetaData(refSymbol)
+                
+                # Initilise le dataFrame
+                dataFrame = None
+                
+                # Initialise le raw data du symbol s'il n'existe pas
+                if refSymbol.rawData is None:
+                    # Récupère l'ensemble des données
+                    dataFrame = referenceRawDataDAO.returnDataFrame(refSymbol, 
+                                                                 metaData['oldest_available_date'], 
+                                                                 metaData['newest_available_date'])
+                    
+                    # Met le symbol dans la liste des symbols à mapper
+                    toMapSymbolNamesList.append(refSymbol.symbol.upper())
+                    
+                else:
+                    # Récupère les données
+                    if metaData['oldest_available_date'] < refSymbol.rawData.oldestDateAvailable:
+                        # Effectue un maj complète
+                        dataFrame = referenceRawDataDAO.returnDataFrame(refSymbol, 
+                                                                     metaData['oldest_available_date'], 
+                                                                     metaData['newest_available_date'])
+                        
+                    elif refSymbol.rawData.sourceNewestConsolidatedDate <  metaData['newest_available_date']:
+                        # Ne récupère que le bout qui manque
+                        dataFrame = referenceRawDataDAO.returnDataFrame(refSymbol, 
+                                                                     refSymbol.rawData.sourceNewestConsolidatedDate , 
+                                                                     metaData['newest_available_date'])
+                # Met ces données dans la liste de données à maj
+                rawDataDict = {'symbol' : refSymbol.symbol.upper(), 
+                               'metaData': metaData,
+                               'dataFrame' : dataFrame}
+                toUpdateRawDataList.append(rawDataDict)
+                    
+            except Exception as e:
+                # Dans ce cas il y a eu un problème avec ce symbol,
+                # on l'ajoute à la liste des symbols à problème
+                self.logger.error('Erreur', exc_info=True)
+                issuesSymbolsList.append({'Symbol' : refSymbol.symbol.upper(),
+                                          'Exchange' : refSymbol.exchange.upper()})
+                
+        # Effectue la maj de la db
+        dbReferenceRawDataDAO.updateOrAddRawDataList(toUpdateRawDataList, exchange)
+            
+        # Effectuer le mapping
+        dbReferenceSymbolDAO.mapOneToOneRelationsRawData(toMapSymbolNamesList, exchange)
+        
+        self.logger.warning("Référence - symbols à problèmes : " + str(issuesSymbolsList))
+        
+        return
+    
+    
+    
+    # ---------------- Méthodes utilitaires -----------------------
+    
+    def _returnEffectiveExchange(self, exchange):
+        '''
+        Returns a dcit with the effective exchange name for each source.
+        
+        :param exchange: name of the exchange
+        :type exchange: str
+        
+        :returns: dict of effective name ordered by source
+        :rtype: dict
+        
+        .. note::
+           Dict attribute access:
+           
+        >>> exchangeDict['Google']
+        >>> exchangeDict['Yahoo']
+        >>> exchangeDict['Wiki']
+        '''
+        
+        exchangeDict = {}
+        exchangeDict['Google'] = exchange.upper()
+        if exchange.upper() in ('NYSE', 'NASDAQ'):
+            exchangeDict['Yahoo'] = 'OTHER'
+            exchangeDict['Wiki'] = 'OTHER'
+        
+        return exchangeDict
+    
+    
+    
+    
+        

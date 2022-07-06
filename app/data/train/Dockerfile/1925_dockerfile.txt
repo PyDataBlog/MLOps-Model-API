@@ -1,0 +1,131 @@
+FROM ubuntu:14.04.4
+MAINTAINER vitr <vitdotonline@gmail.com>
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    TERM=xterm
+
+# Copy custom scripts
+#COPY install-php.sh /install-php.sh
+#COPY install-nginx.sh /install-nginx.sh
+#COPY install-mysql.sh /install-mysql.sh
+#COPY install-postgres.sh /install-postgres.sh
+#COPY install-ssl.sh /install-ssl.sh
+
+#COPY start.sh /start.sh
+#COPY serve.sh /serve.sh
+COPY *.sh ./
+RUN chmod +x /*.sh
+
+# create new user - vagrant password - vagrant
+RUN sudo useradd vagrant -m -s /bin/bash  && \
+    sudo echo vagrant:vagrant | /usr/sbin/chpasswd
+
+# Force Locale
+RUN echo "LC_ALL=en_US.UTF-8" >> /etc/default/locale  && \
+    locale-gen en_US.UTF-8
+
+
+# Install initial packages
+RUN apt-get update && apt-get install -y --force-yes \
+    software-properties-common \
+    curl \
+    wget
+
+RUN apt-add-repository ppa:nginx/development -y  && \
+    apt-add-repository ppa:chris-lea/redis-server -y  && \
+    apt-add-repository ppa:ondrej/php -y
+
+# gpg: key 5072E1F5: public key "MySQL Release Engineering <mysql-build@oss.oracle.com>" imported
+RUN apt-key adv --keyserver ha.pool.sks-keyservers.net --recv-keys 5072E1F5  && \
+    sh -c 'echo "deb http://repo.mysql.com/apt/ubuntu/ trusty mysql-5.7" >> /etc/apt/sources.list.d/mysql.list'  && \
+    wget --quiet -O - https://www.postgresql.org/media/keys/ACCC4CF8.asc | apt-key add -  && \
+    sh -c 'echo "deb http://apt.postgresql.org/pub/repos/apt/ trusty-pgdg main" >> /etc/apt/sources.list.d/postgresql.list'  && \
+    curl -s https://packagecloud.io/gpg.key | apt-key add -  && \
+    echo "deb http://packages.blackfire.io/debian any main" | tee /etc/apt/sources.list.d/blackfire.list  && \
+    curl --silent --location https://deb.nodesource.com/setup_5.x | bash -
+
+# Install Some Basic Packages
+RUN apt-get update && apt-get install -y --force-yes \
+    build-essential \
+    dos2unix \
+    gcc \
+    git \
+    libmcrypt4 \
+    libpcre3-dev \
+    make \
+    python2.7-dev \
+    python-pip \
+    re2c \
+    supervisor \
+    unattended-upgrades \
+    whois \
+    vim \
+    libnotify-bin \
+    mc
+
+# Set My Timezone
+RUN ln -sf /usr/share/zoneinfo/UTC /etc/localtim
+
+RUN ./install-php.sh
+
+RUN ./install-nginx.sh
+
+RUN ./install-mysql.sh
+
+
+# Install Node
+
+RUN apt-get install -y --force-yes nodejs && \
+    /usr/bin/npm install -g gulp && \
+    /usr/bin/npm install -g bower
+
+# Install SQLite
+
+RUN apt-get install -y --force-yes sqlite3 libsqlite3-dev
+
+
+# Install Blackfire
+
+RUN apt-get install -y --force-yes blackfire-agent blackfire-php
+
+# Install A Few Other Things
+
+# RUN apt-get install -y --force-yes redis-server memcached beanstalkd
+
+# Configure Beanstalkd
+
+#RUN sed -i "s/#START=yes/START=yes/" /etc/default/beanstalkd
+#RUN /etc/init.d/beanstalkd start
+
+RUN ./install-ssl.sh
+
+
+ADD default-app.tar.gz /home/vagrant
+RUN chown -Rf vagrant.vagrant /home/vagrant/default-app
+
+
+COPY homestead /etc/nginx/sites-available/
+#COPY supervisord.conf /etc/supervisor/conf.d/supervisord.conf
+RUN mkdir /home/vagrant/apps
+
+# Volumes
+VOLUME ["/etc/nginx"]
+VOLUME ["/home/vagrant/apps"]
+VOLUME ["/var/cache/nginx"]
+VOLUME ["/var/log/nginx"]
+VOLUME ["/var/lib/mysql"]
+VOLUME ["/var/log/supervisor"]
+
+EXPOSE 80 22 35729 9876
+ENTRYPOINT ["/bin/bash","-c"]
+#CMD ["/usr/bin/supervisord"]
+#CMD ["tail -f /dev/null"]
+#CMD bash -C '/path/to/start.sh';'bash'
+CMD ["/start.sh"]
+
+# Postgresql stuff
+# Add VOLUMEs to allow backup of config, logs and databases
+#VOLUME  ["/etc/postgresql", "/var/log/postgresql", "/var/lib/postgresql"]
+
+# Set the default command to run when starting the container
+#CMD ["/usr/lib/postgresql/9.3/bin/postgres", "-D", "/var/lib/postgresql/9.3/main", "-c", "config_file=/etc/postgresql/9.3/main/postgresql.conf"]

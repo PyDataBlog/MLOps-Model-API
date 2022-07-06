@@ -1,0 +1,365 @@
+<! -- Fix for Bootstrap css with Google Maps https://github.com/twitter/bootstrap/issues/1552 -->
+<style type="text/css">
+    .map_canvas label {
+        width: auto;
+        display: inline;
+    }
+    .map_canvas img {
+        max-width: none;
+    }
+
+    .olImageLoadError {
+        /* when OL encounters a 404, don't display the pink image */
+        display: none !important;
+    }
+
+    #loading{
+        position:absolute;
+        z-index: 10000;
+        width: 100%;
+        height: 100%;
+        margin-top: 0px;
+        margin-left: 0px;
+        background-color: rgba(255,255,255,1);
+    }
+
+    #facts {
+        position: relative;
+        margin-top:200px;
+    }
+
+    .layersDiv label {
+        color: white;
+    }
+</style>
+
+<div id="loading" style="display:none">
+    <div class="row">
+        <div class="span12">
+            <div id="facts" class="alert alert-info">
+                Loading task...
+            </div>
+            <div class="progress progress-striped">
+                <div id="bar" class="bar" style="width: 0%;"></div>
+            </div>
+        </div>
+    </div>
+</div>
+
+
+<div id="maps" class="row">
+    <div id="answer" class="skeleton span10">
+        <div id="question">
+            <h3>Add a mark for every house you see, then click <strong>Submit task</strong>.
+                 Submit without marks if there are no houses, or if there is no satellite image available.</h3>
+            <p><a href="http://www.microsoft.com/maps/product/terms.html" target="_blank">
+                Maps by Bing from Microsoft</a></p>
+        </div>
+        <div id="controls" class="btn-group" data-toggle="buttons-radio" style="padding-bottom:5px;">
+            <button id="navigate" class="btn btn-inverse btn-map-ctrl">
+                <i class="icon icon-white icon-move"></i> Navigate
+            </button>
+            <button id="point"    class="btn btn-inverse btn-map-ctrl ">
+                <i class="icon icon-white icon-flag"></i> Mark
+            </button>
+            <button id="modify"    class="btn btn-inverse btn-map-ctrl ">
+                <i class="icon icon-white icon-edit"></i> Edit
+            </button>
+            <button id="delete"    class="btn btn-inverse btn-map-ctrl ">
+                <i class="icon icon-white icon-trash"></i> Delete
+            </button>
+        </div>
+
+        <button id="answerbtn" class="btn btn-success btn-submit" value="coordinates" style="display:none">
+            <i class="icon-check icon-white"></i> Submit task</button>
+        <p>You are working on task: <span id="task-id" class="label label-warning"></span>
+            <a href="../tutorial" class="btn btn-primary pull-right" style="margin-left:-15px;">Tutorial</a>
+        </p>
+        <hr>
+        <div class="row">
+            <!-- Success and Error Messages for the user -->
+            <div class="span12" style="height:50px">
+                <div id="success" class="alert alert-success" style="display:none;">
+                    <a class="close">×</a>
+                    <strong>Well done!</strong> Your answer has been saved
+                </div>
+                <div id="loading" class="alert alert-info" style="display:none;">
+                    <a class="close">×</a>
+                    Loading next task...
+                </div>
+                <div id="taskcompleted" class="alert alert-info" style="display:none;">
+                    <strong>The task has been completed!</strong> Thanks a lot!
+                </div>
+                <div id="finish" class="alert alert-success" style="display:none;">
+                    <strong>Congratulations!</strong> You have participated in all available tasks!
+                    <br/>
+                    <div class="alert-actions">
+                        <a class="btn small" href="/">Go back</a>
+                        <a class="btn small" href="/app">or, Check other applications</a>
+                    </div>
+                </div>
+                <div id="error" class="alert alert-error" style="display:none;">
+                    <a class="close">×</a>
+                    <strong>Error!</strong> Something went wrong, please contact the site administrators
+                </div>
+            </div> <!-- End Success and Error Messages for the user -->
+        </div> <!-- End of Row -->
+        <hr>
+        <h4>Your progress</h4>
+        <div class="progress progress-striped">
+            <div id="progress" rel="tooltip" title="#" class="bar" style="width: 0%;"></div>
+        </div>
+      </div>
+</div>
+
+
+<script src="http://d3js.org/d3.v2.js"></script>
+<script src="http://www.openlayers.org/api/OpenLayers.js"></script>
+<script src="/static/js/pybossa/pybossa.js" type="text/javascript"></script>
+<!-- PyBossa interface -->
+<script>
+var step = 0;
+var steps = 2;
+
+function updateBar(fact) {
+    if (step < steps) {
+        step = step + 1;
+    }
+    if (fact != null) {
+        $("#facts").html(fact);
+    }
+    pct = Math.floor(( step*100 )/steps);
+    if (pct >= 100) {
+        $("#facts").html("Task loaded!");
+        $("#loading").delay(2000).fadeOut(400);
+    }
+    $("#bar").css("width", pct + "%");
+}
+
+$("#loading").show();
+
+function enableAnswerBtn() {
+    if ($("#answerbtn").hasClass("disabled")) {
+        $("#answerbtn").removeClass('disabled');
+        $("#answerbtn").show();
+    }
+}
+
+
+// Function to enable/disable the drawing controls. Only one can be active at a time
+function toggleControl(task, control) {
+    console.log("Activating control " + control + " for Task " + task.id);
+    for (key in task.drawControls) {
+        var ctrl = task.drawControls[key];
+        if ( (control == key) && (!ctrl.active) ) {
+            ctrl.activate();
+        }
+        else {
+            ctrl.deactivate();
+        }
+    }
+}
+
+// Restrict panning and zooming
+function restrictView(map, bounds) {
+    map.setOptions({
+        maxExtent: bounds,
+        restrictedExtent: bounds
+    });
+    map.zoomToExtent(bounds);
+    var minZoomLevel = map.getZoom();
+    map.events.register("zoomend", this, function(e){
+        if (map.getZoom() < minZoomLevel ){
+            map.zoomToExtent(bounds);
+        }
+        //TODO: next line added for low-res tiles
+        if (map.getZoom() > 18 ){
+            map.zoomToExtent(bounds);
+        }
+        console.log(bounds)
+    });
+}
+
+function loadUserProgress() {
+    pybossa.userProgress('RuralGeolocator').done(function(data){
+        var f = d3.format("2.2s");
+        var pct = Math.round((data.done*100)/data.total);
+        $("#progress").css("width", pct.toString() +"%");
+        $("#progress").attr("title", pct.toString() + "% completed!");
+        $("#progress").tooltip({'placement': 'left'});
+        $("#total").text(data.total);
+        $("#done").text(data.done);
+    });
+}
+
+pybossa.taskLoaded(function(task, deferred){
+    if (!$.isEmptyObject(task)) {
+        var map_div = $("<div/>", {id:"map_task_" + task.id, 'class': 'span4'});
+        var map_canvas = $("<div/>", {id: "map_" + task.id, 'class': 'map_canvas'});
+        map_canvas.css("width", "700px");
+        map_canvas.css("height", "370px");
+        map_div.append(map_canvas);
+        $("#maps").prepend(map_div);
+        updateBar("Loading task data...");
+        task.map = new OpenLayers.Map("map_" + task.id, {
+            controls: [
+                new OpenLayers.Control.Navigation(),
+                //TODO: max zoom level should depend on tile resolution
+                new OpenLayers.Control.PanZoomBar(),
+                new OpenLayers.Control.MousePosition({displayProjection:new OpenLayers.Projection("EPSG:4326")})
+            ],
+            projection: new OpenLayers.Projection("EPSG:900913"),
+            displayProjection: new OpenLayers.Projection("EPSG:4326"),
+            units: "m"
+        });
+
+        // Layers
+        // API key for http://openlayers.org. Please get your own at
+        // http://bingmapsportal.com/ and use that instead.
+        //var apiKey = "AqTGBsziZHIJYYxgivLBf0hVdrAk9mWO5cQcb8Yux8sW5M8c8opEC2lZqKR1ZZXf";
+        //crowdcrafting.org key
+        var apiKey = "As1jW63G51I3Z3jFZmmsNHsJ8CVxNtkyd7VCtzXk-E0Bztzd80fR0axNXApJW3O5";
+        //test key
+        //var apiKey = "AvG7hej7Y1yUJ88z7HI6AGnzzbgqE_e1OffJj3k1ji4OkBf_66Ii_HknyB6tQS-k";
+
+        task.satelliteLayer = new OpenLayers.Layer.Bing({
+            key: apiKey,
+            type: "Aerial"
+        });
+
+        // Google Maps Satellite layer
+        //task.satelliteLayer = new OpenLayers.Layer.Google(
+        //        "Google Satellite",
+        //        {type: google.maps.MapTypeId.SATELLITE, numZoomLevels: 20}
+        //);
+        task.map.addLayer(task.satelliteLayer);
+
+        var styleBlack = new OpenLayers.StyleMap({
+            pointRadius: 3,
+            fillColor: "rgba(256,0,0,0.5)",
+            strokeColor: "rgba(0,0,0,1)",
+            strokeWidth: 2
+        });
+
+        task.areaLayer = new OpenLayers.Layer.Vector("Area Layer", {
+            styleMap: styleBlack
+        });
+        var nb = parseFloat(task.info.northbound);
+        var sb = parseFloat(task.info.southbound);
+        var wb = parseFloat(task.info.westbound);
+        var eb = parseFloat(task.info.eastbound);
+        var bb = new OpenLayers.Bounds.fromArray([wb, sb, eb, nb]);
+        bb = bb.transform(new OpenLayers.Projection("EPSG:4326"), task.map.getProjectionObject());
+        task.areaLayer.events.on({
+            featureselected: function(e) {
+                if (!task.drawControls['modify'].active) {
+                    var remove = confirm("Are you sure you want to REMOVE this element?");
+                    if (remove == true) {
+                        var id = e.feature.id;
+                        var feature = task.areaLayer.getFeatureById(id);
+                        task.areaLayer.removeFeatures(feature);
+                    }
+                }
+            },
+            featureadded: function(e) {
+                var feature = task.areaLayer.getFeatureById(e.feature.id);
+                if (!bb.contains(feature.geometry.x, feature.geometry.y, false)) {
+                    var remove =  alert("Please only mark houses inside the box");
+                    task.areaLayer.removeFeatures(feature);
+                }
+            }
+        });
+
+        var box = new OpenLayers.Feature.Vector(bb.toGeometry(), null,
+                {strokeColor: "#eeaa00", fillOpacity: 0, strokeWidth: 3});
+        var boxes  = new OpenLayers.Layer.Vector( "Boxes" );
+        boxes.addFeatures(box);
+        task.map.addLayer(boxes);
+        task.map.addLayer(task.areaLayer);
+
+        // Drawing controls
+        task.drawControls = {
+            point:      new OpenLayers.Control.DrawFeature(task.areaLayer,
+                    OpenLayers.Handler.Point,
+                    {'featureAdded': enableAnswerBtn}
+            ),
+            modify:     new OpenLayers.Control.ModifyFeature(task.areaLayer),
+            delete:     new OpenLayers.Control.SelectFeature(task.areaLayer)
+        };
+
+        // Add them to the map
+        for (var key in task.drawControls) {
+            task.map.addControl(task.drawControls[key]);
+        }
+        task.areaLayer.removeAllFeatures();
+        var nmb = parseFloat(task.info.northmapbound);
+        var smb = parseFloat(task.info.southmapbound);
+        var wmb = parseFloat(task.info.westmapbound);
+        var emb = parseFloat(task.info.eastmapbound);
+        var mb = new OpenLayers.Bounds.fromArray([wmb, smb, emb, nmb]);
+        mb = mb.transform(new OpenLayers.Projection("EPSG:4326"), task.map.getProjectionObject());
+        restrictView(task.map, mb);
+        map_div.hide();
+        deferred.resolve(task);
+    }
+
+    else {
+        deferred.resolve(task);
+    }
+
+});
+
+pybossa.presentTask(function(task, deferred){
+    if ( !$.isEmptyObject(task) ) {
+        updateBar("Loading task data...");
+        $("#task-id").text(task.id);
+        loadUserProgress();
+
+
+        $(".btn-map-ctrl").off('click').on('click', function(evt){
+            var ctrlClicked = $(evt.target).attr("id");
+            toggleControl(task, ctrlClicked);
+        });
+
+        $(".btn-submit").off('click').on('click', function(evt){
+            var btnClicked = $(evt.target).attr("value");
+            console.log("The answer for task " + task.id + " is " + btnClicked);
+            // Convert the feature location into the GeoJSON format
+            var geojson = new OpenLayers.Format.GeoJSON({
+                'internalProjection': task.map.baseLayer.projection,
+                'externalProjection': new OpenLayers.Projection("EPSG:4326")
+            });
+            // The answer is a list of GeoJSON objects
+            var answer = [];
+            // Cache the number of features added to the areaLayer
+            var numAnswers = task.areaLayer.features.length;
+            // Iterate over them, and save them into the answer list variable
+            for (i=0;i<numAnswers;i++) {
+                answer.push(JSON.parse(geojson.write(task.areaLayer.features[i])));
+            }
+
+            pybossa.saveTask(task.id, {'houses': answer, 'batch': task.info.batch}).done( function(data) {
+                // Show the feedback div
+                console.log(answer);
+                $("#success").fadeIn();
+                // Fade out the pop-up after a 1000 miliseconds
+                setTimeout(function() { $("#success").fadeOut() }, 1000);
+                $("#map_" + task.id).remove();
+                deferred.resolve();
+            });
+        });
+        $("#navigate").addClass("active");
+        $("#point").removeClass("active");
+        $("#modify").removeClass("active");
+        $("#delete").removeClass("active");
+        $("#answerbtn").show();
+        $("#map_task_" + task.id).show();
+    }
+    else {
+        $(".skeleton").hide();
+        $("#finish").fadeIn();
+    }
+});
+
+pybossa.run('RuralGeolocator');
+</script>

@@ -1,0 +1,90 @@
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+module Passman.Engine.Conversions where
+
+import           Control.Error.Safe           (assertErr)
+import           Data.Bits                    (shift)
+import           Data.Foldable                (all)
+import           Data.Semigroup               ((<>))
+import           Data.Vector.Unboxed          (Vector, (!))
+import qualified Data.Vector.Unboxed          as V
+
+import qualified Passman.Engine.ByteString    as B
+import           Passman.Engine.Errors
+import           Passman.Engine.Strength      (Strength(..))
+
+data CharSpace = CharSpace { charSpaceName :: String
+                           , charSpaceSymbols       :: Vector Char
+                           }
+
+charSpaceSize :: CharSpace -> Int
+charSpaceSize CharSpace{..} = V.length charSpaceSymbols
+
+makeCharSpace :: String -> String -> CharSpace
+makeCharSpace name symbols =
+    CharSpace name $ V.fromList symbols
+
+
+type Converter = B.ByteString -> String
+
+data ConverterSpec = ConverterSpec CharSpace Strength
+
+makeConverter :: Maybe Int -> ConverterSpec -> Either EngineError Converter
+makeConverter inLength spec = do
+    validateBase spec
+    validateInputRequirements inLength spec
+    return $ convert spec
+
+validateBase :: ConverterSpec -> Either EngineError ()
+validateBase (ConverterSpec charSpace _)  =
+    assertErr invalidBase checkBase
+  where
+    checkBase = 2 <= base && base <= 256
+    invalidBase = InvalidOutputBase base
+    base = charSpaceSize charSpace
+
+validateInputRequirements :: Maybe Int -> ConverterSpec -> Either EngineError ()
+validateInputRequirements provided spec =
+    assertErr insufficientInput checkInputLength
+  where
+    checkInputLength = all (inLength <=) provided
+    insufficientInput = ExcessiveDerivedBits outLength inLength
+    (inLength, outLength) = inputOutputLength spec
+
+inputOutputLength :: ConverterSpec -> (Int, Int)
+inputOutputLength (ConverterSpec CharSpace{..} Strength{..}) =
+    (inLength, outLength)
+  where
+    base = V.length charSpaceSymbols
+    rawOutputLength = ceiling $
+      fromIntegral strengthBits / logBase (2 :: Double) (fromIntegral base)
+    outLength = rawOutputLength + (rawOutputLength `mod` 2)
+    inLength = ceiling $
+      fromIntegral outLength * logBase (256 :: Double) (fromIntegral base)
+
+inputLength :: ConverterSpec -> Int
+inputLength = fst . inputOutputLength
+
+
+integerOfBytes :: Int -> B.ByteString -> Integer
+integerOfBytes inLength bytes =
+    B.foldr (\a b -> fromIntegral a + shift b 8) 0 $ B.take inLength (bytes <> zeroes)
+  where
+    zeroes = B.replicate inLength 0
+
+materialize :: Int -> Vector Char -> Integer -> String
+materialize outputLength chars src =
+    take outputLength $ materialize' src
+  where
+    base = V.length chars
+    materialize' n =
+        let (q, r) = n `quotRem` fromIntegral base in
+        chars ! fromIntegral r : materialize' q
+
+convert :: ConverterSpec -> B.ByteString -> String
+convert spec@(ConverterSpec charSpace _) bytes =
+    materialize outLength (charSpaceSymbols charSpace) $ integerOfBytes inLength bytes
+  where
+    (inLength, outLength) = inputOutputLength spec
+

@@ -1,0 +1,47 @@
+$here = $MyInvocation.MyCommand.Path | Split-Path -Parent
+. $here\website.fn.ns.ps1
+
+Function Get-ReadyPagePath ($websiteName){
+    Get-PhysicalPathForSite $websiteName "\ready.txt"
+}
+
+Function Remove-FromLoadBalancer($websiteName) {
+    if(Test-SiteExisted $websiteName){
+        Trace-Progress "Remove ready.txt from site $websiteName" {
+            $readyPagePath = Get-ReadyPagePath $websiteName
+            Remove-Item $readyPagePath
+        }
+    }
+}
+
+Function Add-ToLoadBalancer($websiteName) {
+    Trace-Progress "Create ready.txt under site $websiteName" {
+        if(-not(Test-SiteExisted $websiteName)){
+            throw "Site doesn't exist $websiteName"
+        }
+        $readyPagePath = Get-ReadyPagePath $websiteName
+        if(-not (Test-Path $readyPagePath)){
+            New-Item $readyPagePath -type File | Out-Null    
+        }
+    }
+}
+
+Function Test-SuspendedFromLoadBalancer($websiteName){
+    Trace-Progress "Check ready.txt whether it exists in site [$websiteName]" {
+        if(-not(Test-SiteExisted $websiteName)) { return $true; }
+        $readyPageUrl = Get-UrlForSite $websiteName "/ready.txt"
+        -not (Test-UrlExisted $readyPageUrl)
+    }
+}
+
+Function Assert-SuspendedFromLoadBalancer($websiteName) {
+    Redo-UntilCondition -timeout 30 -condition $true -errorMessage "Operation failed, ready.txt is still existing under site [$websiteName]!" -action {
+        return Test-SuspendedFromLoadBalancer $websiteName
+    }
+}
+
+Function Assert-AddedToLoadBalancer($websiteName){
+    Redo-UntilCondition -timeout 30 -condition $false -errorMessage "Operation failed, ready.txt doesn't exist in site [$websiteName]!" -action {
+        return Test-SuspendedFromLoadBalancer $websiteName
+    }
+}

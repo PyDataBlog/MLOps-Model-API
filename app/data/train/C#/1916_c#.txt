@@ -1,0 +1,131 @@
+﻿using Castle.Core.Logging;
+using Bivi.Infrastructure.Constant;
+using Bivi.Infrastructure.Services.Depots;
+using Bivi.Infrastructure.Services.Encryption;
+using Bivi.BackOffice.Web.Controllers.ActionResults;
+using Bivi.BackOffice.Web.Controllers.Filters;
+using Bivi.BackOffice.Web.Controllers.Helpers;
+using Bivi.BackOffice.Web.Controllers.Modularity;
+using Bivi.BackOffice.Web.ViewModels.ModelBuilders.Administration.LienExterne;
+using Bivi.BackOffice.Web.ViewModels.ModelBuilders.Common;
+using Bivi.BackOffice.Web.ViewModels.Pages.Administration.LienExterne.Details.InforsGenerales;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net;
+using System.Text;
+using System.Threading.Tasks;
+using System.Web.Mvc;
+using Bivi.Infrastructure.Extensions;
+using System.Transactions;
+using Bivi.Infrastructure.Attributes.Modularity;
+using Bivi.Domaine;
+using Bivi.BackOffice.Web.ViewModels.Pages.Administration.LienExterne.Details;
+using Bivi.Domaine.Criterias;
+using Bivi.Infrastructure.Services.Caching;
+using Bivi.Infrastructure.Services.Exports;
+using Bivi.BackOffice.Web.ViewModels.Pages.Common;
+
+namespace Bivi.BackOffice.Web.Controllers.Administration
+{
+    public class LienExterneController : ModularController
+    {
+        private readonly ILienExterneModelBuilder _lienExterneModelBuilder;
+
+        public LienExterneController(
+            ILogger logger,
+            ICryptography encryption,
+            IDepotFactory depotFactory,
+            ILienExterneModelBuilder lienExterneModelBuilder,
+            ICommonModelBuilder commonModelBuilder,
+            ICaching cachingService,
+            IExcelExport exportService)
+            : base(logger, encryption, depotFactory, commonModelBuilder, cachingService, exportService)
+        {
+            _lienExterneModelBuilder = lienExterneModelBuilder;
+            Page = PageEnum.LienExterne;
+        }
+
+        public ActionResult Index()
+        {
+            return ProcessPage();
+        }
+
+        [HttpGet]
+        public ActionResult Recherche()
+        {
+            BuildActionContext(VueEnum.LienExterneSearch);
+
+            var vm = _commonModelBuilder.BuildPartialViewModel(Context, null);
+
+            return View(vm);
+        }
+
+        [HttpPost]
+        public ActionResult Recherche(SearchLienExterneCriterias criterias)
+        {
+            var res = _depotFactory.LienExterneDepot.Search(criterias.Description);
+
+            var model = new RechercheResultViewModel
+            {
+                Results = res
+            };
+
+            if (criterias.ExportExcel)
+            {
+                model.ExportUrl = CreateExportFile(res, "ExportRechercheDemande.xls", FileDownloadTypes.ExportRecherche);
+            }
+
+            return new JsonHttpStatusResult((int)HttpStatusCode.OK, model);
+        }
+
+
+        public ActionResult Details(long id, long? vueID)
+        {
+            var vm = _commonModelBuilder.BuildDetailsViewModel(Context, (long)ActionModeAffichageEnum.Consultation, (long)GroupeVueEnum.LienExterneDetails, id, vueID);
+
+            foreach (var item in vm.GroupeVue.Vues)
+            {
+                item.Url = RoutesHelper.GetUrl(item.CodeRoute, new { id = id, utilisateurID = Context.User.ID, vueID = item.ID, type = Constants.GetStringValue(GroupeVueTraductibleEnum.LienExterne) });
+            }
+
+            return View("~/Views/Common/Details.cshtml", vm);
+        }
+
+
+        public ActionResult InformationsGenerales(long id)
+        {
+            BuildActionContext(VueEnum.LienExterneInformationsGenerales);
+
+            var vm = _lienExterneModelBuilder.BuildInfosGeneralesViewModel(Context, id);
+
+            return View(vm);
+        }
+
+        public ActionResult Create()
+        {
+            var vm = _commonModelBuilder.BuildDetailsViewModel(Context, (long)ActionModeAffichageEnum.Creation, (long)GroupeVueEnum.LienExterneDetails, 0, null);
+
+            foreach (var item in vm.GroupeVue.Vues)
+            {
+                item.Url = RoutesHelper.GetUrl(item.CodeRoute, new { id = 0 });
+            }
+
+            return View("~/Views/Common/Details.cshtml", vm);
+
+        }
+
+        [HttpPost]
+        [ValidateModelState]
+        public ActionResult SaveInformationsGenerales(InfosGeneralesViewModel model)
+        {
+            BuildActionContext(VueEnum.LienExterneInformationsGenerales, model.LienExterne.ID, model.LienExterne.ID > 0 ? (long)TypeActionEnum.Save : (long)TypeActionEnum.Add, model.TimeStamp);
+
+            var lienExterne = AutoMapper.Mapper.Map<LienExterneViewModel, LienExterne>(model.LienExterne);
+
+            var lien = Save(() => _depotFactory.LienExterneDepot.SaveLienExterneInfosGenerales(lienExterne));
+
+            return new JsonHttpStatusResult((int)HttpStatusCode.OK, new { id = lien.ID });
+        }
+    }
+}

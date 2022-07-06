@@ -1,0 +1,338 @@
+\documentclass{article}
+
+\usepackage[final]{nips_2017}
+
+\usepackage[utf8]{inputenc} % allow utf-8 input
+\usepackage[T1]{fontenc}    % use 8-bit T1 fonts
+\usepackage{hyperref}       % hyperlinks
+\usepackage{url}            % simple URL typesetting
+\usepackage{booktabs}       % professional-quality tables
+\usepackage{amsfonts}       % blackboard math symbols
+\usepackage{nicefrac}       % compact symbols for 1/2, etc.
+\usepackage{microtype}      % microtypography
+
+\usepackage{caption}
+\usepackage{floatrow}
+\usepackage{float}
+\usepackage{graphicx}
+\usepackage{slashbox}
+\usepackage{subfigure}
+
+\newfloatcommand{capbtabbox}{table}[][\FBwidth]
+
+\setcitestyle{square}
+
+\title{T5-Delphi: Code Completion With PGMs}
+
+\author{Chen Ma, Dylan Ashley, Dylan Hyatt-Denesik, Rameel Sethi \\
+  Department of Computing Science, University of Alberta \\
+  \texttt{\{cma2, dashley, hyattden, rameel\}@ualberta.ca} \\
+}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+    Code completion and prediction are tasks frequently performed by an integrated development environment (IDE) and are crucial to improving developer productivity. We apply probabilistic graphical models (PGMs) techniques from natural language processing (NLP) to code completion. More specifically, we construct two PGMs commonly used in NLP, Log-Bilinear Graphical Models and Conditional Random Fields, as a method to tackle the code completion problem. Also, we create a counting $n$-gram to serve as a baseline. We evaluate our solutions using both raw prediction accuracy and the cross-entropy of the models. While both of our methods learn an approximation of the true distribution, they do not perform better than the baseline on either evaluation criteria.
+\end{abstract}
+
+\section{Introduction}
+
+Most modern IDEs provide code completion capabilities because this is crucial to improving developer productivity. For example, the Eclipse IDE is known for its intuitive code completion tools that come packaged with the program. These features have made the program a popular solution for Java, C++, and JavaScript code authoring.\cite{wikicode}
+
+We follow the existing idea of applying methods from NLP to code completion \cite{Hindle2012}. Specifically we apply PGMs common in NLP tasks to the code completion task.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=1 \linewidth]{io2.png}
+\caption{The flowing graph for performance and learning tasks}
+\label{fig:io}
+\end{figure}
+
+As shown in Figure~\ref{fig:io}, we define our \textbf{performance task} as predicting what the next token will be, given a sequence of previous tokens. We consider these predictions as starting from an arbitrary point in source code. For example when faced with the code snippet \texttt{for (int i = 0; i < n;} we would like our predictor to output the most likely token to appear next which, in most programming languages, would be \texttt{i++}.
+
+We define the \textbf{learning task} as learning the probability distribution of current token, $w_t$, given the sequence of previous tokens $w_{t-k}, w_{t-k+1}, ..., w_{t-1}$, for some arbitrary position $t$ in the data set. We write this distribution using statistical notation as follows:
+
+\[
+    P(w_t | w_{t-k}, w_{t-k+1}, ..., w_{t-1})
+\]
+
+One way to accomplish this task is to learn a probability distribution over a set of program files and then use this distribution to predict the next keyword of the program.
+
+We firstly introduce the literature review in the Section~\ref{sec:background}. We then clarify how exactly we evaluate our models in Section~\ref{sec:evaluation}. Following that we describe the data used for the empirical experiments in Section~\ref{sec:data}. Afterwards we discuss the PGMs we applied to this task and the results of this in Section~\ref{sec:experiments}. Finally we conclude with an analysis of future avenues of study in this area in Section~\ref{sec:conclusion} and Section~\ref{sec:future}.
+
+\section{Background literature review}
+\label{sec:background}
+
+The task of determining language models using graphical models is very well studied. Many authors have used Conditional or Markov Random Fields to create language models. In particular, Jernite et al. \cite{jernite15}  made contributions in global-likelihood optimization of a Markov random field which are independent of corpus size.
+
+The idea of applying NLP methods to software comes from Hindle et al. \cite{Hindle2012} who used $n$-grams to build a language model over a software database and implemented a code suggestion tool. This model is used to improve the existing Eclipse IDE suggestion facility. This work is the primary inspiration for this project, where we apply some NLP methods and compare their performance against $n$-gram models.
+
+A number of authors have expanded on these results, such as Allamanis and Sutton \cite{Allamanis2013} who applied the results of Hindle et al. \cite{Hindle2012} to a massive corpus of Java projects with over one billion tokens. They do this for the purpose of developing a statistical understanding of large software projects. Another interesting result is due to Cambell et al. \cite{Campbell2014} who made use of $n$-gram models to detect syntax errors by training on past project versions. Finally, in their 2014 paper, Raychev et al. \cite{Raychev2014} use statistical language models for code completion. To this end, given a program containing what they call "holes," they attempt to fill these holes with the most likely sequence of method calls. It should be noted that this task is distinct from ours despite its similarities, while they are "plugging holes" in existing code, our goal is to predict token at the end of a sequence of tokens.
+
+\section{Evaluation}
+\label{sec:evaluation}
+
+We consider two evaluation methods for our models. The first is the raw accuracy of our models. To determine this accuracy of a model on a file involves stepping through a file and predicting each subsequent token given all previous tokens in the file. To determine the estimated accuracy of the model we repeat this task over all files in some set of projects and report the percentage of correct predictions made. To provide a more comprehensive evaluation method we permit models to make $k$ predictions and consider the model to have made a correct prediction if the next token appears in the $k$ predictions.
+
+The second evaluation method we consider is the cross-entropy, or log-transformed perplexity, of a model \cite{Hindle2012}. This metric attempts to capture how "surprised" a model is by a given sequence of empirically observed tokens. This metric is computed as is formulated as follows:
+
+\[
+    H_M(s) = -\frac{1}{n} \sum_{t = 1}^{n}log(P(w_t | w_{t-k}, w_{t-k+1}, ..., w_{t-1}))
+\]
+
+For computational reasons we let \(log(0) = log(1e-9)\) or, in other words, if the model would never predict a token for whatever reason, perhaps because it's never been encountered before, we instead the model assigned a probability of $1e-9$ to that token appearing.
+
+\section{Data}
+\label{sec:data}
+
+In this section, we firstly introduce the raw data set by  \cite{github}. Then we introduce the data preprocess and a special procedure of low frequency tokens elimination. Finally, we illustrate the statistics information on our train, validation and test set.
+
+\subsection{Github Java Corpus Collection}
+
+The raw data used for this project is a corpus of Java projects collected by processing the GitHub event stream \cite{github}. This corpus was then subsequently filtered by which projects had been forked at least once so that the corpus would be of an above average quality. In principle, the aim of this heuristic was to ensure that only projects with a sufficiently high "reputation" would be processed, that is, the project was of sufficient quality that it was forked.
+
+After this processing, the corpus contains a total of 10,968 projects, with 264,225,189 lines of code in total. The corpus is approximately 12.32 GB in size.
+
+\subsection{Data preprocessing}
+
+Because of the computational limits of our models it is infeasible to use the whole corpus. For this reason, we randomly selected 233 projects of the corpus for training, 104 projects for validation, and 104 projects for testing. To keep in line with our learning task, we also strip the comments from each file since comments are not subject to the grammar restraints imposed by Java.
+
+To tokenize the data we first separate the data using white space. We then apply some specific modifications. First, we observe that Java has alphanumeric constants which are very often unique to each file. Thus we regard all strings by a string token and all numeric constants by a numeral token. Next, while separating the data, we consider instances where tokens are not separated by white space but are still considered distinct Java tokens. For example, we want to view \texttt{a+b} as three individual tokens. It is important to note that we do nothing special with variable names.
+
+\subsection{Low Frequency Tokens Elimination}
+
+\begin{table}[h]
+\caption{Sparsity of the data set}
+\label{high_sparsity}
+\begin{center}
+\begin{tabular}{lrr}
+Coverage  & Number of Unique Tokens & Frequency Threshold
+\\ \hline \\
+0.80 & 332 & 3, 510 \\
+0.85 & 1, 027 & 860 \\
+0.90 & 4, 253 & 166 \\
+0.95 & 25, 707 & 23 \\
+0.99 & 136, 187 & 3 \\
+1.00 & 252, 226 & 1 \\
+\end{tabular}
+\end{center}
+\end{table}
+
+To reduce the total number of tokens being considered by the model we ignore tokens that rarely appear in the training data. To do this, we define coverage as the percentage of all tokens in the dataset that appear in some set of unique tokens. Under this definition of coverage, the data set has extremely high sparsity. For example, 322 unique tokens are sufficient to achieve a coverage of 80\%. By contrast, 252,226 total unique tokens are needed to cover the whole data set. Table~\ref{high_sparsity} shows the exponential growth in the size of the set of tokens being considered as the coverage increases.
+
+This growth rate is easily explained when one considers that java keywords, such as \texttt{for}, are likely to appear in a very frequently in a large number of files. Whereas long identifiers are more likely to only occur a handful of times in a single file.
+
+To ensure that relations between tokens being considered are not disrupted the tokens that are not considered are simply replaced by a special token to denote a unknown token. While performing the evaluation any prediction with the true value as the unknown token is considered incorrect.
+
+\subsection{Data Statistics}
+
+\begin{table}[h]
+\caption{Data Statistics}
+\label{Data_statistics}
+\begin{center}
+\begin{tabular}{l|rrr}
+& Training Set & Validation Set & Test Set
+\\ \hline \\
+Number of Projects & 233 & 104 & 104 \\
+Number of Files & 30, 222 & 13, 737 &  16, 504 \\
+Number of Tokens & 22, 569, 743 & 8, 803, 294 & 11, 409, 203 \\
+Coverage & 0.8 & 0.77 & 0.77 \\
+\end{tabular}
+\end{center}
+\end{table}
+
+As shown in Table~\ref{Data_statistics}, we split the data set into a train, validation, and test set with the training set being roughly twice the size of the other two sets. This ratio was selected because testing these kinds of models is significantly faster than training them. So combined with our large corpus we can achieve a more reliable result without much computational penalty.
+
+It is important to note that the coverage of the validation and test sets is slightly lower than the training set since tokens in the training set dictionary do not occur in the test or validation sets.
+
+\section{Experiments and Results}
+\label{sec:experiments}
+
+\subsection{Baseline}
+
+As no sufficient baseline existed for the given task, a counting $n$-gram model was created and used to obtain a baseline. In this context, a counting $n$-gram model is a $n$-gram model that, given a $(n - 1)$-gram, predicts what token will follow this $(n - 1)$-gram by the frequency of the corresponding $n$-grams it has observed.
+
+The baseline model was designed to fall back to a simpler model when faced with data sparsity. Specifically, given an $(n - 1)$-gram the model selects $k$ tokens it believes are the most likely candidates for the next token. When appended to the $(n - 1)$-gram these form $n$-grams. If between all $k$ candidates the model has seen less than $t$ of these $n$-grams then the selection is repeated with an $(n - 1)$-gram model. This procedure is done recursively until some set of candidates exceed the threshold $t$, or the $1$-gram model is the current model being considered.
+
+Table~\ref{baseline-results} summarizes the accuracy when applying this model. For each entry, threshold values of $0$, $1$, $10$, $30$, $50$, and $100$ were tried on a validation set. Only the best result is displayed.
+
+\begin{table}[h]
+\caption{$n$-gram Baseline Results}
+\label{baseline-results}
+\begin{center}
+\begin{tabular}{c|cccc}
+\backslashbox{n}{k} & 1 & 3 & 5 & 10
+\\ \hline \\
+2 & 0.3078 & 0.5306 & 0.6034 & 0.6686 \\
+3 & 0.3922 & 0.6005 & 0.6544 & 0.6953 \\
+5 & 0.4583 & 0.6351 & 0.6755 & 0.7073 \\
+\end{tabular}
+\end{center}
+\end{table}
+
+Unfortunately, because of computational reasons, the cross-entropy of the $n$-gram baseline was not able to be computed with the available resources.
+
+\subsection{Log-Bilinear Graphical Model}
+
+As Figure~\ref{lbl_graph} shows, we use a template model that "slides" over the data set predicting the current token $w_n$ given the previous $n-1$ tokens. This figure shows the case where $n=3$ or where the template predicts $w_3$ given the previous two tokens.
+
+\begin{minipage}{\textwidth}
+  \begin{minipage}[b]{0.49\textwidth}
+    \centering
+     \includegraphics[width=0.7\linewidth]{lbl_graph.png}
+    \captionof{figure}{The diagram for the log-bilinear model}
+    \label{lbl_graph}
+  \end{minipage}
+  \hfill
+  \begin{minipage}[b]{0.49\textwidth}
+    \centering
+     \includegraphics[width=0.7\linewidth]{crf.png}
+    \captionof{figure}{The diagram for the CRF model}
+    \label{crf_diagram}
+  \end{minipage}
+\end{minipage}
+
+\medskip
+
+Mnih et al. \cite{Mnih2007} represent each token by a real-valued feature vector of length $N_f$, with $N_w$ the size of the dictionary. Let R be an $N_w \times N_f$ matrix with row i being the feature vector for the $i$th token in the dictionary. Then the feature vector for token $w_i$ is given by $v_i^TR$, where $v_i$ is a binary column vector of length $N_w$ with 1 in the $w$-th position.
+
+To compute the summation over factors in log space, Mnih et al. \cite{Mnih2007} define the following energy function for $w_n$ given $w_{1:n-1}$:
+
+\[
+    E(w_n;w_{1:n-1}) = -\left(\sum_{i = 1}^{n-1} v_i^TRC_i\right)R^Tv_n - b_r^TR^Tv_n - b_n^Tv_n
+\]
+
+Here $C_i$ specifies the interaction between the feature vector of $w_i$ and the feature vector of $w_n$, while $b_r$ and $b_v$ specify the word biases.
+
+Through normalization, the resulting predictive distribution is as follows:
+
+\[
+    P(w_n|w_{1:n-1}) = \frac{1}{Z_c} exp(-E(w_n;w_{1:n-1}) )
+\]
+
+\[
+    Z_c = \sum{w_n}  exp(-E(w_n;w_{1:n-1}) )
+\]
+
+The learning process is to train the parameters using gradient descent to achieve maximum log likelihood loss over the data set, shown in Equation~\ref{loss}.
+
+\begin{equation}
+    \label{loss}
+    \textnormal{log-likelihood loss} = \sum_{Dataset} \log(P(w_n|w_{1:n-1}))
+\end{equation}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=1\linewidth]{lbm_result.png}
+\caption{The result for the log-bilinear model}
+\label{lbm_result}
+\end{figure}
+
+The code used for training was sourced online from Theano\cite{2016arXiv160502688short}. Our goal is to restore parameters to compute probability, so we can compute code completion accuracy and cross entropy over distribution.
+
+The accuracy improvements has diminishing returns for increasing K. For 3-gram model, the bottleneck is that the window size of 3 limits the information the model can acquire, making it hard to predict next token. For the 5-gram model, though it can use more previous tokens' to improve accuracy, it's hard for model itself to capture and learn long dependencies.
+
+From the view of cross-entropy, 5-gram is better at learning the probability distribution of current tokens given the previous ones when compared to the 3-gram model. We recall that cross entropy indicates how well a model can read an arbitrary file, that is, the lower the cross entropy the better.
+
+\subsubsection{Understanding of the model}
+
+The log-bilinear model is a shallow Boltzmann Machine, except the design, conferencing and learning principles are based on basic Markov models. Firstly, we define the energy function, Equation~\ref{2}, to compute summation over factors in log space. Second, we perform inference on target probabilities using normalization. Finally, the parameters are learned by maximizing the log likelihood loss using gradient descent.
+
+Mnih et al. explains this model as follows. "..the model predicts a feature vector for the next word by computing a linear function of the context word feature vectors.Then it assigns probabilities to all words in the vocabulary based on the similarity of their feature vectors to the predicted feature vector as measured by the dot product." \cite{Mnih2007}
+
+\subsection{Conditional Random Field (CRF)}
+
+Alongside the log-bilinear model, we investigated the use of a first-order conditional random field (CRF) for source code token prediction \cite{lafferty2001}. CRFs have proved successful in a variety of NLP tasks such as named entity recognition (NER) \cite{downey2007locating} and chunking in conjunction with part-of-speech (POS) tagging \cite{pvs2007part}. It is important to note, however, that our task differs from these canonical NLP tasks in that we are always interested in prediction of the next token and therefore do not allow prediction tokens to be based on tokens further ahead in the source code file.
+
+\subsubsection{Model Description}
+
+Conditional random fields are a class of undirected probabilistic graphical models consisting of observed states, which, in this case, are our source code tokens in the order they appear in a source code file; and unobserved states, which model the probability of the current token occurring given surrounding context. The transitions between these states are all pairwise factors. Figure~\ref{crf_diagram} shows an example of a linear CRF for token prediction.
+
+The goal of this method is to learn the following probability distribution \cite{gupta2006conditional}:
+
+\[
+    P(y_1,...,y_m|x)=\frac{1}{Z_X}\prod_{C\in{\mathcal{C}},C\neq{\{X}\}}\psi_C(x,y)
+\]
+
+where $Z_X$ is the partition function and $\psi_C(X,Y)$ is a pairwise factor between an observed state $x$ and an unobserved state $y$.
+
+\subsubsection{Inference and Learning}
+
+The CRF model was trained using a limited memory variant of the Broyden–Fletcher–Goldfarb–Shanno (BFGS) algorithm titled L-BFGS \cite{liu1989} with L2 regularization. It is a limited memory quasi-Newtown method for large-scale optimization. A detailed description of the algorithm is beyond the scope of this paper, but it was used since it is the recommended default learning algorithm for use with the CRF implementation used.
+
+\subsubsection{Experimental Setup and Result}
+
+We used an open-source implementation of the CRF model titled CRFsuite \cite{CRFsuite} to allow for fast training of models. It requires a template to be supplied from which features for the model are generated. The features supplied as part of the template are listed in Table \ref{fig:crf_features}. We generate both prior features which are described by the current token and some tokens preceding it, as well as posterior features which consist of the current token conditioned on tokens that have appeared previously.
+
+\begin{table}[!ht]
+\caption{List of features supplied to CRF model}
+\label{fig:crf_features}
+\begin{center}
+\begin{tabular}{lrr}
+ \\ \hline \\
+Prior & Posterior
+\\ \hline \\
+w[0] & w[-1] | w[0]\\
+w[-1] & w[-2] | w[0]\\
+w[-2] & w[-3] | w[0]\\
+w[-3] & w[-4] | w[0]\\
+w[-4] & \\
+\end{tabular}
+\end{center}
+\end{table}
+
+The results of top token prediction accuracy yielded by two linear CRF models, one considering the current and previous four tokens with the other considering only the previous two tokens, is shown in Figure~\ref{fig:crf_result}. Like the baseline $n$-gram model, prediction accuracy increases with the number of previous tokens considered, which in this case results in a boost from 39 to 43 per cent. The CRF model appears to outperform the $n$-gram baseline, which may be due to the fact that $n$-gram features are relatively simple and tend to leave out important context. It also outperforms the log-bilinear model, which may be attributed to the difficulty in tuning the log-bilinear model.
+
+\begin{figure}[!ht]
+\centering
+\includegraphics[width=0.5\linewidth]{crfresults.png}
+\caption{Top token prediction accuracy against number of tokens}
+\label{fig:crf_result}
+\end{figure}
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+In this paper, we applied PGMs to the code completion task. This task is important because code completion remains essential for developer productivity.
+
+For a baseline, we used a counting $n$-gram model. While Log-Bilinear Graphical Models and CRFs are some of the most powerful PGMs available for this task, both failed to outperform the baseline. A summary of the comparison between the log-bilinear model and the $n$-gram baseline is provided in Figure~\ref{fig:upresult}. Because of computation limitations, the CRF model was only trained on a small portion of the training set. Even with this small amount of training data, it performed better than the log-bilinear model on predicting the most likely token to appear next.
+
+Unfortunately, no comparison can be made between the cross-entropy of the models as the cross-entropy of the $n$-gram model and the cross-entropy of the CRF were not computable with the current resources.
+
+Therefore we conclude that, without a significant quantity of computational resources, neither the log-bilinear model nor the CRF model can outperform a simple counting $n$-gram model on this task.
+
+We have learnt several key lessons from this project. The most important of these is that computation of the partition function is quite costly since it is an intractable problem in both the number of unique tokens and the amount of training data. It is therefore prudent to invest time and thought in the proper selection of model and choice of evaluation criterion. It is also in the best interest of any project requiring training on a large amount of data to ensure the availability of ample computational resources. We also gained valuable experience in pre-processing and cleaning of data, as was evidenced by the sheer amount of time spent in selecting a corpus of source code projects fit for use in an academic project, and the time spent in properly tokenizing and converting the source code corpus into a format suitable for training.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.6\linewidth]{cmp4.png}
+\caption{Log-bilinear and Counting n-gram Comparison on Test Set}
+\label{fig:upresult}
+\end{figure}
+
+\section{Future Work}
+\label{sec:future}
+
+This work addresses a considerably complex problem in the realm of machine learning. As such this work is hardly exhaustive and much remains to be done in the future.
+
+The current method of reducing the number of tokens uses the total frequency of tokens in the dataset. While it is conjectured that, due to the nature of the number of tokens our models consider, filtering tokens by the number of files each token appears in is unlikely to improve accuracy significantly. However, this remains a conjecture that there was insufficient time to either prove or disprove.
+
+Now, due to the nature of the defined task, both models only considered the tokens that appear before each token. This task ignores the fact that, when editing source code, tokens are added or removed in the middle of a file. As such it is worth considering the alternative task of predicting a token from surrounding tokens.
+
+In addition to the task only permitting a model to look at preceding tokens, the task also restricts the system to be language independent. So, while the current implementation only predicts java files, the only part of the system that is language dependent is the tokenizer. It seems likely that a language dependent model will be able to take advantage of the context of a token and incorporate more prior knowledge.
+
+The final task that was identified as an important follow-up research area is to determine how sensitive the Log-Bilinear Graphical Model and Conditional Random Fields are to the percentage of tokens being considered. In these experiments, a low proportion of tokens was considered because of computational concerns. With more computational time better performance is likely.
+
+\subsubsection*{Acknowledgments}
+
+This work was compiled as part of the University of Alberta's Winter 2017 CMPUT 499/659 class. As such, material obtained from the professor, the teacher's assistants, and class material, was used in the creation of this work.
+
+The authors would especially like to thank Dr. Abram Hindle of the University of Alberta for their assistance throughout the project.
+
+\small
+\bibliographystyle{acm}
+\bibliography{bibliography}
+
+\end{document}

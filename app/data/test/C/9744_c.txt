@@ -1,0 +1,287 @@
+/*
+  Copyright (C) 2011  Charles Pence <charles@charlespence.net>
+
+  This program is free software: you can redistribute it and/or modify
+  it under the terms of the GNU General Public License as published by
+  the Free Software Foundation, either version 3 of the License, or
+  (at your option) any later version.
+
+  This program is distributed in the hope that it will be useful,
+  but WITHOUT ANY WARRANTY; without even the implied warranty of
+  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+  GNU General Public License for more details.
+
+  You should have received a copy of the GNU General Public License
+  along with this program.  If not, see <http://www.gnu.org/licenses/>.
+*/
+#include <stdlib.h>
+#include <stdio.h>
+#include <aformula.h>
+#include <scew.h>
+
+#include "../util/error.h"
+#include "transform.h"
+
+struct arcus_transform_s
+{
+    char *from;
+    char *to;
+    
+    aformula_t formulas[4];
+    double v0, v1, v2, v3;
+    double a0, a1, a2, a3;
+    double p0, p1, p2, p3;
+};
+
+
+static arcus_transform *transform_create(void)
+{
+    arcus_transform *ret;
+    int i, success;
+    
+    ret = (arcus_transform *)malloc(sizeof(arcus_transform));
+    if (!ret)
+    {
+        fprintf(stderr, "transform_create: out of memory");
+        exit(1);
+    }
+    
+    ret->from = NULL;
+    ret->to = NULL;
+    
+    success = 1;
+    for (i = 0 ; i < 4 ; i++)
+        ret->formulas[i] = NULL;
+    
+    for (i = 0 ; i < 4 ; i++)
+    {
+        ret->formulas[i] = af_create_formula(BACKEND_DEFAULT);
+        if (!ret->formulas[i])
+        {
+            fprintf(stderr, "transform_create: out of memory");
+            exit(1);
+        }
+        
+        if (!af_formula_setvariable(ret->formulas[i], "v0", &ret->v0) ||
+            !af_formula_setvariable(ret->formulas[i], "v1", &ret->v1) ||
+            !af_formula_setvariable(ret->formulas[i], "v2", &ret->v2) ||
+            !af_formula_setvariable(ret->formulas[i], "v3", &ret->v3) ||
+            !af_formula_setvariable(ret->formulas[i], "a0", &ret->a0) ||
+            !af_formula_setvariable(ret->formulas[i], "a1", &ret->a1) ||
+            !af_formula_setvariable(ret->formulas[i], "a2", &ret->a2) ||
+            !af_formula_setvariable(ret->formulas[i], "a3", &ret->a3) ||
+            !af_formula_setvariable(ret->formulas[i], "p0", &ret->p0) ||
+            !af_formula_setvariable(ret->formulas[i], "p1", &ret->p1) ||
+            !af_formula_setvariable(ret->formulas[i], "p2", &ret->p2) ||
+            !af_formula_setvariable(ret->formulas[i], "p3", &ret->p3))
+        {
+            set_error_string("transform_create: could not set variables");
+            success = 0;
+            break;
+        }
+    }
+    
+    if (!success)
+    {
+        transform_destroy(ret);
+        return NULL;
+    }
+    
+    return ret;
+}
+
+
+void transform_destroy(arcus_transform *trans)
+{
+    int i;
+    
+    if (!trans)
+        return;
+    
+    if (trans->from)
+        free(trans->from);
+    if (trans->to)
+        free(trans->to);
+    
+    for (i = 0 ; i < 4 ; i++)
+    {
+        if (trans->formulas[i])
+            af_destroy_formula(trans->formulas[i]);
+    }
+    
+    free(trans);
+}
+
+
+arcus_transform *transform_from_xml(scew_element *element)
+{
+    arcus_transform *trans;
+    scew_attribute *attr;
+    const char *attr_val;
+    char const* contents_ptr;
+    char *contents;
+    char *tok;
+    int i;
+    
+    if (!element)
+    {
+        set_error_string("transform_from_xml: NULL element");
+        return NULL;
+    }
+    if (strcmp(scew_element_name(element), "transform") != 0 &&
+        strcmp(scew_element_name(element), "transform_diff") != 0)
+    {
+        set_error_string("transform_from_xml: element name != 'transform' or 'transform_diff'");
+        return NULL;
+    }
+    
+    trans = transform_create();
+    if (!trans)
+        return NULL;
+    
+    // Get system ids
+    attr = scew_element_attribute_by_name(element, "from");
+    if (!attr)
+    {
+        set_error_string("transform_from_xml: transform without from");
+        
+        transform_destroy(trans);
+        return NULL;
+    }
+    
+    attr_val = scew_attribute_value(attr);
+    if (!attr_val)
+    {
+        set_error_string("transform_from_xml: attribute without value (scew bug?)");
+        
+        transform_destroy(trans);
+        return NULL;
+    }
+    
+    trans->from = strdup(attr_val);
+
+    attr = scew_element_attribute_by_name(element, "to");
+    if (!attr)
+    {
+        set_error_string("transform_from_xml: transform without to");
+        
+        transform_destroy(trans);
+        return NULL;
+    }
+    
+    attr_val = scew_attribute_value(attr);
+    if (!attr_val)
+    {
+        set_error_string("transform_from_xml: attribute without value (scew bug?)");
+        
+        transform_destroy(trans);
+        return NULL;
+    }
+    
+    trans->to = strdup(attr_val);
+    
+    if (strcmp(trans->from, trans->to) == 0)
+    {
+        set_error_string("transform_from_xml: transform from == to");
+        
+        transform_destroy(trans);
+        return NULL;
+    }
+    
+    contents_ptr = scew_element_contents(element);
+    if (!contents_ptr)
+    {
+        set_error_string("transform_from_xml: element has no contents");
+        return NULL;
+    }
+
+    contents = strdup(contents_ptr);
+    tok = strtok(contents, ";");
+    i = 0;
+    
+    while (tok != NULL)
+    {
+        if (i >= 4)
+        {
+            set_error_string("transform_from_xml: more than 4 formulas");
+            
+            free(contents);
+            transform_destroy(trans);
+            return NULL;
+        }
+        
+        if (!af_formula_setexpr(trans->formulas[i], tok))
+        {
+            set_error_string("transform_from_xml: could not set expression");
+            
+            free(contents);
+            transform_destroy(trans);
+            return NULL;
+        }
+        
+        tok = strtok(NULL, ";");
+        i++;
+    }
+    
+    if (i < 4)
+    {
+        set_error_string("transform_from_xml: less than 4 formulas");
+
+        free(contents);
+        transform_destroy(trans);
+        return NULL;
+    }
+    
+    free(contents);
+    return trans;
+}
+
+
+const char *transform_from(arcus_transform *trans)
+{ return trans->from; }
+const char *transform_to(arcus_transform *trans)
+{ return trans->to; }
+
+
+int transform_evaluate(arcus_transform *trans, double *v0, double *v1, 
+    double *v2, double *v3, double a0, double a1, double a2, double a3,
+    double p0, double p1, double p2, double p3)
+{
+    if (!trans)
+    {
+        set_error_string("transform_evaluate: invalid transform");
+        return 0;
+    }
+    
+    if (!v0 || !v1 || !v2 || !v3)
+    {
+        set_error_string("transform_evaluate: invalid output variables");
+        return 0;
+    }
+    
+    // Set input variables and clear output variables
+    trans->v0 = trans->v1 = trans->v2 = trans->v3 = 0.0;
+    trans->a0 = a0;
+    trans->a1 = a1;
+    trans->a2 = a2;
+    trans->a3 = a3;
+    trans->p0 = p0;
+    trans->p1 = p1;
+    trans->p2 = p2;
+    trans->p3 = p3;
+    
+    // Evaluate all four formulas
+    af_formula_evaluate(trans->formulas[0]);
+    af_formula_evaluate(trans->formulas[1]);
+    af_formula_evaluate(trans->formulas[2]);
+    af_formula_evaluate(trans->formulas[3]);
+    
+    // Copy output variables
+    *v0 = trans->v0;
+    *v1 = trans->v1;
+    *v2 = trans->v2;
+    *v3 = trans->v3;
+    
+    return 1;
+}
+

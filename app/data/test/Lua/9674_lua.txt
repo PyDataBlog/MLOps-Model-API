@@ -1,0 +1,208 @@
+
+
+local ScanTime = 1 -- Time is takes to scan the target.
+local ResultTime = 3 -- Time to leave the result on screen
+local ShareResult = true 
+
+local HostileColor = Color( 255,0,0 )
+local NonHostileColor = Color( 0,255,0 )
+	
+if SERVER then
+
+	util.AddNetworkString( "StartPropScanner" )
+	
+	local tableScanTargets = {
+		prop_physics = true,
+		prop_physics_multiplayer = true,
+		ph_prop = true,
+		ph_dummy = true
+	}
+	
+	net.Receive( "StartPropScanner", function( len, ply )
+		
+		if !ply.PropScanner then ply.PropScanner = {} end
+		ply.PropScanner.isKeyDown = true
+		
+	end )
+	
+	
+	local function PlayerThink( ply )
+	
+		if IsValid(ply) && ply:Team() == TEAM_HUNTERS && ply:Alive() && !ply:IsFrozen() then
+		
+			if !ply.PropScanner then ply.PropScanner = {} end
+			if ply.PropScanner.isKeyDown then
+			
+				ply.PropScanner.isKeyDown = false
+				
+				local tr = util.TraceLine({ 
+					start = ply:EyePos(), 
+					endpos = ply:EyePos() + ply:EyeAngles():Forward() * 100, 
+					filter = function(ent) 
+						if IsValid(ent) && tableScanTargets[ent:GetClass()] then 
+							return true
+						end
+						return false
+				end })
+				
+				if IsValid(tr.Entity) && tableScanTargets[tr.Entity:GetClass()] then
+					local validPlayers = {}
+					for _,pl in pairs(player.GetAll()) do
+						if IsValid(pl) && ply:IsPlayer() && (ply:Team()==TEAM_HUNTERS||ply:Team()==TEAM_SPECTATOR) then
+							table.insert( validPlayers, pl )
+						end
+					end
+					
+					net.Start( "StartPropScanner" )
+					net.WriteBool( tr.Entity:GetClass() == "ph_prop" || tr.Entity:GetClass() == "ph_dummy" )
+					net.WriteEntity( tr.Entity )
+					net.WriteEntity( ply )
+					net.Send( validPlayers )
+					
+					ply:Freeze( true )
+					ply.FreezeTime = CurTime() + ScanTime
+				end
+					
+			end
+			
+		end
+		
+		-- Unfreeze the player
+		if IsValid(ply) && ply:Team() == TEAM_HUNTERS && ply:IsFrozen() && ply.FreezeTime && CurTime() > ply.FreezeTime then
+			ply:Freeze( false )
+			ply.FreezeTime = nil
+		end
+	
+	end
+	_G.PlayerThink.hookAdd( "Hunters.PropScanner", PlayerThink )
+	
+	
+	hook.Add( "PreRoundStart", "ClearScannedTargets", function()
+		for _, ply in pairs(player.GetAll()) do
+			ply:SendLua( "PropScanner = {}" )
+		end
+	end )
+	
+else --Client
+
+	PropScanner = {}
+
+	net.Receive( "StartPropScanner", function()
+		
+		local targetHostile = net.ReadBool()
+		local scannedTarget = net.ReadEntity()
+		local color = NonHostileColor
+		if targetHostile then color = HostileColor end
+		
+		if !IsValid(scannedTarget) then return end
+		
+		scannedTarget.scannedModel = scannedTarget:GetModel()
+		scannedTarget.isHostile = targetHostile
+		scannedTarget.oldColor = scannedTarget:GetColor()
+		scannedTarget.newColor = color
+		
+		local plyScan = net.ReadEntity()
+		
+		if !PropScanner.scannedTargets then PropScanner.scannedTargets = {} end
+		timer.Simple( ScanTime, function()
+			if IsValid(scannedTarget) && PropScanner && PropScanner.scannedTargets then
+				table.insert( PropScanner.scannedTargets, scannedTarget )
+				scannedTarget:SetColor( color )
+				scannedTarget:SetRenderMode( RENDERMODE_TRANSALPHA )
+			end
+		end )
+		
+		if LocalPlayer() == plyScan then
+			PropScanner.ScanTime = CurTime()+ScanTime
+			PropScanner.IsHostile = targetHostile
+			
+			timer.Remove( "Hunters.PropScanner.ResultTimer" ) 
+			timer.Create( "Hunters.PropScanner.ResultTimer", ScanTime+ResultTime, 1, function()
+				PropScanner.IsHostile = nil
+			end )
+		end
+		
+	end )
+	
+	
+	local function HUDPaint()
+	
+		if !PropScanner then PropScanner = {} end
+		if !PropScanner.ScanTime then PropScanner.ScanTime = 0 end
+		
+		if LocalPlayer():Alive() && LocalPlayer():Team() == TEAM_HUNTERS then
+			local text = "..."
+			local color = Color(255,255,60)
+			local x = ScrW() - 280
+			local y = ScrH() - 140
+			local width = 245
+			local height = 55
+			
+			draw.RoundedBox( 0, x, y, width, height, Color( 50,50,50,200 ) )
+			
+			if CurTime() <= PropScanner.ScanTime && LocalPlayer():IsFrozen() then
+			
+				local iProgress = math.Round((PropScanner.ScanTime-CurTime())*50)
+				text = tostring( iProgress )
+				surface.SetDrawColor( Color( 255,255,0 ) )
+				surface.DrawRect( x, y+height, width*(iProgress*0.02), 3 )
+				
+			elseif CurTime() > PropScanner.ScanTime && PropScanner.IsHostile != nil then
+			
+				if PropScanner.IsHostile then
+					text = "Hostile"
+					color = Color( 255,100,100 )
+				else
+					text = "Clear"
+					color = Color( 100,255,100 )
+				end
+				
+			end
+			
+			draw.SimpleText( "PROP", "Hud.Name", x+10, y+5, Color(255,255,60) )
+			draw.SimpleText( "SCANNER", "Hud.Name", x+10, y+20, Color(255,255,60) )
+			draw.SimpleText( "Hold Q on Target", "Hud.NameSmall", x+10, y+35, Color(255,255,60) )
+			
+			draw.SimpleText( text, "Hud.Number", x+240, y, color, TEXT_ALIGN_RIGHT )
+		end
+		
+	end
+	hook.Add( "HUDPaint", "Hunters.PropScanner", HUDPaint )
+	
+	local function Think()
+	
+		if input.IsKeyDown( KEY_Q ) && CurTime() > (keyCoolDown or 0) then
+			timeKeyDown = timeKeyDown or CurTime()+0.1 -- How long the key needs to be held down
+			
+			if CurTime() > timeKeyDown then
+				timeKeyDown = nil
+				keyCoolDown = CurTime() + ScanTime + 1
+				net.Start( "StartPropScanner" )
+				net.SendToServer()
+			end
+		elseif timeKeyDown then
+			timeKeyDown = nil
+			keyCoolDown = nil
+		end
+		
+		-- Remove scanned entities if they have a different model
+		if PropScanner && PropScanner.scannedTargets then
+			for i, ent in pairs( PropScanner.scannedTargets ) do
+				if IsValid(ent) && ent:GetModel() != ent.scannedModel then
+					local target = PropScanner.scannedTargets[i]
+					target:SetRenderMode( RENDERMODE_NORMAL )
+					target:SetColor( target.oldColor )
+					table.remove( PropScanner.scannedTargets, i )
+				elseif IsValid(ent) && ent:GetColor() != ent.newColor then
+					ent:SetColor( ent.newColor )
+					ent:SetRenderMode( RENDERMODE_TRANSALPHA )
+				elseif !IsValid(ent) then
+					table.remove( PropScanner.scannedTargets, i )
+				end
+			end
+		end
+	
+	end
+	hook.Add( "Think", "Hunters.PropScanner.Think", Think )
+
+end

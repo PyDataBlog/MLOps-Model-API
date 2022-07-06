@@ -1,0 +1,120 @@
+package session
+
+import (
+	"errors"
+
+	impact "github.com/impactasaurus/server"
+	"github.com/impactasaurus/server/auth"
+	"github.com/impactasaurus/server/data"
+	uuid "github.com/satori/go.uuid"
+	"gopkg.in/mgo.v2/bson"
+)
+
+func (s *S) GetCategory(outcomeSetID, categoryID string, u auth.User) (impact.Category, error) {
+	os, err := s.GetOutcomeSet(outcomeSetID, u)
+	if err != nil {
+		return impact.Category{}, err
+	}
+
+	for _, c := range os.Categories {
+		if c.ID == categoryID {
+			return c, nil
+		}
+	}
+	return impact.Category{}, data.NewNotFoundError("Category")
+}
+
+func (s *S) NewCategory(outcomeSetID, name, description string, aggregation impact.Aggregation, u auth.User) (impact.Category, error) {
+	userOrg, err := u.Organisation()
+	if err != nil {
+		return impact.Category{}, err
+	}
+
+	id := uuid.NewV4()
+
+	newCategory := &impact.Category{
+		ID:          id.String(),
+		Name:        name,
+		Description: description,
+		Aggregation: aggregation,
+	}
+
+	if err := s.collection(questionnaires).Update(bson.M{
+		"_id":            outcomeSetID,
+		"organisationID": userOrg,
+	}, bson.M{
+		"$push": bson.M{
+			"categories": newCategory,
+		},
+	}); err != nil {
+		return impact.Category{}, err
+	}
+
+	return s.GetCategory(outcomeSetID, id.String(), u)
+}
+
+func (s *S) isCategoryActivelyUsed(os impact.OutcomeSet, categoryID string) error {
+	unarchivedQuestions := os.GetCategoryQuestions(categoryID)
+	if len(unarchivedQuestions) > 0 {
+		return errors.New("Cannot delete a category which is being used")
+	}
+	return nil
+}
+
+func (s *S) removeCategoryFromArchivedCategoryQuestions(os impact.OutcomeSet, categoryID string, u auth.User) {
+	archivedQuestions := os.GetArchivedCategoryQuestions(categoryID)
+	for _, q := range archivedQuestions {
+		s.RemoveCategory(os.ID, q.ID, u)
+	}
+}
+
+func (s *S) DeleteCategory(outcomeSetID, categoryID string, u auth.User) error {
+	userOrg, err := u.Organisation()
+	if err != nil {
+		return err
+	}
+
+	os, err := s.GetOutcomeSet(outcomeSetID, u)
+	if err != nil {
+		return err
+	}
+
+	if err := s.isCategoryActivelyUsed(os, categoryID); err != nil {
+		return err
+	}
+
+	s.removeCategoryFromArchivedCategoryQuestions(os, categoryID, u)
+
+	return s.collection(questionnaires).Update(bson.M{
+		"_id":            outcomeSetID,
+		"organisationID": userOrg,
+	}, bson.M{
+		"$pull": bson.M{
+			"categories": bson.M{
+				"id": categoryID,
+			},
+		},
+	})
+}
+
+func (s *S) EditCategory(outcomeSetID, categoryID string, name, description string, aggregation impact.Aggregation, u auth.User) (impact.Category, error) {
+	userOrg, err := u.Organisation()
+	if err != nil {
+		return impact.Category{}, err
+	}
+
+	if err := s.collection(questionnaires).Update(bson.M{
+		"_id":            outcomeSetID,
+		"organisationID": userOrg,
+		"categories.id":  categoryID,
+	}, bson.M{
+		"$set": bson.M{
+			"categories.$.name":        name,
+			"categories.$.description": description,
+			"categories.$.aggregation": aggregation,
+		},
+	}); err != nil {
+		return impact.Category{}, err
+	}
+	return s.GetCategory(outcomeSetID, categoryID, u)
+}

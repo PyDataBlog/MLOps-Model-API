@@ -1,0 +1,120 @@
+#!/usr/bin/python2.3
+
+# This is the short name of the plugin, used as the menu item
+# for the plugin.
+# If not specified, the name of the file will be used.
+shortname = "Moment Curve layout (Cohen et al. 1995)"
+# This is the long name of the plugin, used as the menu note
+# for the plugin.
+# If not specified, the short name will be used.
+name = "Moment Curve layout, O(n^3)"
+
+DEBUG = False
+
+
+def run(context, UI):
+    """
+    Run this plugin.
+    """
+
+    if len(context.graph.vertices) < 1:
+        generate = True
+    else:
+        res = UI.prYesNo("Use current graph?",
+                         "Would you like to apply the layout to the current graph? If not, a complete graph will be generated and the current graph cleared.")
+        if res:
+            generate = False
+            # Go through and eliminate any existing bend points
+            from graph import DummyVertex
+
+            for v in [x for x in context.graph.vertices if isinstance(x, DummyVertex)]:
+                context.graph.removeVertex(v)
+        else:
+            generate = True
+
+    if generate:
+        N = UI.prType("Number of Vertices", "Input number of vertices to generate complete graph:", int, 4)
+        if N == None:
+            return True
+        while N < 0:
+            N = UI.prType("Number of Vertices",
+                          "Please input positive value.\n\nInput number of vertices to generate complete graph:", int,
+                          N)
+            if N == None:
+                return True
+
+        context.graph.clear()
+
+        # Generate a complete graph
+        k_n(context, N)
+
+    res = UI.prYesNo("Use mod-p layout?",
+                     "Would you like to use the mod-p compact layout (O(n^3) volume)? If not, the O(n^6) uncompacted layout will be used.")
+
+    # Lay it out according to the 1bend layout
+    moment(context, compact=res)
+
+    context.camera.lookAtGraph(context.graph, context.graph.centerOfMass(), offset=context.graph.viewpoint())
+
+    return True
+
+
+def k_n(C, n):
+    """
+    k_n (C, n) -> void
+    Create a complete graph on n vertices in context C.
+    """
+    from graph import Vertex, DummyVertex
+
+    G = C.graph
+    G.clear()
+    # Add n vertices
+    for i in range(n):
+        G.addVertex(Vertex(id='%d' % i, name='v%d' % i))
+
+    # For every pair of vertices (u, v):
+    for u in G.vertices:
+        for v in G.vertices:
+            # ignoring duplicates and u==v
+            if (u, v) not in G.edges and (v, u) not in G.edges and u != v:
+                # add an edge between u and v
+                G.addEdge((u, v))
+
+
+def moment(C, compact=False):
+    """
+    Run moment curve layout (Cohen, Eades, Lin, Ruskey 1995).
+    """
+    G = C.graph
+    from math import sqrt, ceil, floor
+    from graph import DummyVertex, GraphError
+    import colorsys
+
+
+    vertices = [x for x in G.vertices if not isinstance(x, DummyVertex)]
+    n = len(vertices)
+
+    # Choose a prime p with n < p <= 2n
+    for p in range(n + 1, 2 * n + 1):
+        for div in range(2, p / 2):
+            if p % div == 0:
+                # print "%d is not a prime (div by %d)" % (p, div)
+                break
+        else:
+            # We did not find a divisor
+            # print "%d is a prime!" % p
+            break
+    else:
+        # Can't happen!
+        raise Exception, "Can't find a prime between %d and %d!" % (n + 1, 2 * n)
+
+    # Position each vertex
+
+    if compact:
+        for i in range(n):
+            G.modVertex(vertices[i]).pos = (i * 10, ((i * i) % p) * 10, ((i * i * i) % p) * 10)
+    else:
+        for i in range(n):
+            G.modVertex(vertices[i]).pos = (i, (i * i), (i * i * i))
+
+    return

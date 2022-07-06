@@ -1,0 +1,41 @@
+Function Reset-AppPool($appPoolName, $username, $password, $loadUserProfile){
+    $isWebSiteExists = $false
+    try {
+	New-WebAppPool $appPoolName -ErrorAction Stop
+    }
+    catch{}
+
+    $appPoolPath = "IIS:\AppPools\$appPoolName"
+    if (-not $username) {
+        Set-ItemProperty $appPoolPath ProcessModel.IdentityType 4
+    } else{
+        if((-not (Test-IsDomain)) -and (-not (Test-User $username))){
+            Write-Host "Creating new local user [$username]"
+            New-LocalUser $username $password | Out-Null
+            Set-LocalGroup $username "IIS_IUSRS" -add
+        }
+
+        Write-Host "User [$username] is ready."
+        Set-ItemProperty $appPoolPath ProcessModel.Username $username
+        Set-ItemProperty $appPoolPath ProcessModel.Password $password
+        Set-ItemProperty $appPoolPath ProcessModel.IdentityType 3
+
+        if($loadUserProfile) {
+            Set-ItemProperty $appPoolPath ProcessModel.loadUserProfile $loadUserProfile
+        }
+    }
+    Set-ItemProperty $appPoolPath managedRuntimeVersion v4.0
+    Set-ItemProperty $appPoolPath -Name recycling.periodicrestart.time -Value 00:00:00
+    $thirtyDays = [TimeSpan]::FromMinutes(43200)
+    Set-ItemProperty $appPoolPath -Name processModel.idleTimeout -Value $thirtyDays
+
+    $retry = 0
+    While(((Get-WebAppPoolState $appPoolName).Value -ne "Started") -and ($retry++ -lt 10)) {
+        Write-Host "try to restart Application pool [$appPoolName]"
+        Restart-WebAppPool $appPoolName
+    }
+    if ((Get-WebAppPoolState $appPoolName).Value -ne "Started") {
+        throw "Application pool [$appPoolName] could not be started."
+    }
+    Write-Host "Application pool [$appPoolName] is ready."
+}

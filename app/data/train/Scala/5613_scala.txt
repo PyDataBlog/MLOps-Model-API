@@ -1,0 +1,28 @@
+package opentrack.jp.planner
+
+import java.time.LocalDate
+
+import opentrack.jp.journey.Journey
+import opentrack.jp.planner.filter.SlowJourneyFilter
+import opentrack.jp.station.Location
+import opentrack.jp.station.repository.StationRepository
+import opentrack.jp.transferpattern.repository.TransferPatternRepository
+
+import scala.concurrent.ExecutionContext.Implicits.global
+import scala.concurrent.Future
+
+
+case class GroupStationPlanner(patternRepository: TransferPatternRepository, stationRepository: StationRepository) {
+
+  def getJourneys(origin: Location, destination: Location, dateTime: LocalDate): Future[Vector[Journey]] = {
+    val futureJourneys = Future.sequence(stationRepository.getRelevantStations(origin).flatMap(o =>
+      stationRepository.getRelevantStations(destination).map(d =>
+        patternRepository.getTransferPatterns(o, d, dateTime).map(tp => {
+          tp.flatMap(_.getJourneys)
+        })
+      )
+    )).map(_.flatten)
+
+    futureJourneys.map { journeys: List[Journey] => SlowJourneyFilter(journeys.toVector).sortBy(_.departureTime) }
+  }
+}

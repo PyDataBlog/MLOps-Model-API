@@ -1,0 +1,186 @@
+#!/usr/bin/perl -w
+#
+# EJ to JE dictionary converter for gene.dic [1/25/1999]
+#
+# Copyright (C) 1998-1999 Satoru Takabayashi  All rights reserved.
+#     This is free software with ABSOLUTELY NO WARRANTY.
+#
+# You can redistribute it and/or modify it under the terms of 
+# the GNU General Public License version 2.
+#
+# gene.dic ¤ò¸µ¤ËÏÂ±Ñ¼­½ñ¤òºîÀ®¤·¤Þ¤¹¡£
+# gene.dic ¤Î½ñ¼°¤Ë¹ç¤ï¤»¤Æ¤½¤ì¤Ê¤ê¤Î½èÍý¤ò¹Ô¤¤¤Þ¤¹¡£
+# ¤«¤Ê¤ê½ñ¼°¤ËÍÉ¤ì¤¬¤¢¤ë¤Î¤ÇÄ´À°¤¹¤ë¤Î¤Ï¤Ê¤«¤Ê¤«Æñ²ò¤Ç¤·¤¿¡£
+# Perl 5.003 °Ê¹ß¤¬É¬Í×¤Ç¤¹¡£ JPerl ¤ÇÆ°¤¯¤«¤ÏÊ¬¤«¤ê¤Þ¤»¤ó¡£
+# ¤³¤Î¥Õ¥¡¥¤¥ë¤ÏÆüËÜ¸ì EUC ¤Ç¤Ê¤±¤ì¤Ð¤Ê¤ê¤Þ¤»¤ó¡£
+#
+# »È¤¤Êý: jgene.pl [--compat] < gene.dic > jgene.dic
+#         --compat: ¸ß´¹¥â¡¼¥É
+#   
+#   Pentium 133MHz, 64MB ¤Î¥Þ¥·¥ó¤ÇÌó 2Ê¬¤«¤«¤ê¤Þ¤¹¡£
+#
+# ´ûÃÎ¤ÎÌäÂêÅÀ
+#     * ¡¦¡¦¤«¤éÀÑ¤ß²Ù¤ò¤ª¤í¤¹	unload
+#     *  ¡¼¤È¤Î¸ò´¹¤Ç	in barter with ~
+#     *  ¡Á(¤¤¤ä¤Ê¤³¤È)¤ò·Ð¸³¤µ¤»¤ë	put someone through ~
+#   ¤Î¤è¤¦¤ËÀèÆ¬¤¬µ­¹æ¤Ç»Ï¤Þ¤ë¤â¤Î¤ò¤½¤Î¤Þ¤Þ¤Ë¤·¤Æ¤¤¤ë¡£
+#
+
+
+require 5.004;
+use strict;
+use IO::File;
+
+my $CHOON     = "(?:[\xa1][\xbc])";  # ¡¼
+my $CHOON2    = "(?:[\xa1][\xc1])";  # ¡Á
+my $NAKAGURO  = "(?:[\xa1][\xa6])";  # ¡¦
+my $HIRAGANA  = "(?:[\xa4][\xa1-\xf3])";
+my $KANJI     = "(?:[\xb0-\xfe][\xa1-\xfe]|\xa1\xb9)";
+my $CHAR      = "(?:[\xa1-\xfe][\xa1-\xfe]|[^\xa1-\xfe])";
+
+my $KAKASI = "kakasi";
+my %je;
+
+my $Compatible = 0;
+$Compatible = 1, shift @ARGV if defined($ARGV[0]) && $ARGV[0] eq "--compat";
+
+$| = 1;
+print STDERR "reading input...\n";
+eval { binmode(STDOUT); };
+while(<>) {
+    /(.*)\t(.*)/;
+    my $term = $1;
+    my $definition = $2;
+
+    # ³ç¸ÌÆâ¤Ê¤É¤Î¥«¥ó¥Þ¤ò¥¨¥¹¥±¥¤¥×¤·¤Æ¤ª¤¯
+    $definition =~ s/(\/.*)   /escape_commas($1)/e;
+    $definition =~ s/(\(.*?\))/escape_commas($1)/ge;
+    $definition =~ s/(\".*?\")/escape_commas($1)/ge;
+    $definition =~ s/(\<.*?\>)/escape_commas($1)/ge;
+
+    # ¡ú¥Þ¡¼¥¯¤ÎÃí¼á¤òÁ°¤Î°ÕÌ£¤Ë·Ò¤²¤ë
+    #   cable lock	¥ï¥¤¥ä¾û,¡úÆîµþ¾û¤Ïpadlock
+    $definition =~ s/, *(¡ú)/$1/g;
+
+    my @meanings = split(/, */, $definition);
+    for my $meaning (@meanings) {
+	# ¤¤¤¤²Ã¸º¤ÊÊÑ´¹¤ò2½Å¤Ë¹Ô¤¦
+	$meaning = transform($meaning);
+	$meaning = transform($meaning);
+
+	# = ¥Þ¡¼¥¯¤Ê¤é¤Ð¤½¤Î¸µ¤ÎÃ±¸ì¤Ë¤¯¤Ã¤Ä¤±¤ë
+	# (Æó¤ÄÌÜ°Ê¹ß¤Î¹àÌÜ¤Ë¤³¤ì¤¬¤¯¤ë¤ÈÎÉ¤¯¤Ê¤¤¤ó¤À¤±¤É)
+	#   business trend	=economic trend,·Êµ¤Æ°¸þ
+	if ($meaning =~ /^=/) {
+	    $meaning =~ s/\x0/,/g;
+	    $term .= " $meaning";
+	    next;
+	}
+
+	# ¥¨¥¹¥±¥¤¥×¤·¤Æ¤ª¤¤¤¿¥«¥ó¥Þ¤òÉü³è
+	$meaning =~ s/\x0/,/g;
+
+	# ÀèÆ¬¤¬ÆüËÜ¸ì¤Ê¤é¤ÐÅÐÏ¿¤¹¤ë
+	$je{$meaning} .= $term . ", " if $meaning =~ /^[\xa1-\xfe]/;
+    }
+}
+
+# ¤Ò¤é¤¬¤Ê¤ÎÆÉ¤ß¤ò KAKASI ¤Ëºî¤Ã¤Æ¤â¤é¤¦ and ½ÐÎÏ
+# IPC::Open2 ¤Ï¤¤¤Þ¤¤¤Á¤Ê¤Î¤Ç°ìÃ¶¥Õ¥¡¥¤¥ë¤Ë½ñ¤­½Ð¤¹
+if ($Compatible) {
+    for my $tmp (sort keys (%je)) {
+	$je{$tmp} =~ s/, *$//;
+	print $tmp, "\t", $je{$tmp}, "\n";
+    }
+} else {
+    print STDERR "working KAKASI...\n";
+    my $fname = "tmp.$$";
+    {
+	my $fh = new IO::File;
+	$fh->open("|$KAKASI -JH -KH > $fname") or die $!;
+	for my $tmp (sort keys(%je)) {
+	    if ($tmp =~ /^$CHAR*$KANJI/o) {
+		print $fh $tmp, "\n";
+	    } else {
+		print $fh "\n";
+	    }
+	}
+    }
+
+    my @results = ();
+    {
+	my $fh = new IO::File;
+	$fh->open("$fname") or die $!;
+	@results = <$fh>;
+    }
+
+    print STDERR "outputting results to stdout...\n";
+    my $i = 0;
+    for my $tmp (sort keys (%je)) {
+	$je{$tmp} =~ s/, *$//;
+	$je{$tmp} =~ s/&/&amp;/g;
+	$je{$tmp} =~ s/</&lt;/g;
+	$je{$tmp} =~ s/>/&gt;/g;
+
+	$results[$i++] =~ /^((?:$HIRAGANA|$CHOON|$CHOON2|$NAKAGURO)+)/o;
+	my $yomi = $1;
+	if ($yomi && $tmp =~ /^$CHAR*$KANJI/o) {
+	    print "<K>$tmp</K>", "<K>$yomi</K>", $je{$tmp}, "\n";
+	} else {
+	    print "<K>$tmp</K>", $je{$tmp}, "\n";
+	}
+    }
+    unlink $fname;
+} 
+
+# ¤ª¤·¤Þ¤¤
+
+sub escape_commas ($) {
+    my ($str) = @_;
+    $str =~ s/,/\x0/g;
+    $str;
+}
+
+sub transform($) {
+    my ($meaning) = @_;
+
+    # ÀèÆ¬¤Î¶õÇò¤ò¼Î¤Æ¤ë
+    $meaning =~ s/^ +//;
+    
+    # ¸«½Ð¤·¤Î¿ô»úÉôÊ¬¤òºï½ü
+    # bottle  1.¥Ó¥ó,ÉÓ,2.¥Ó¥ó¤ËÆþ¤ì¤ë,¥Ó¥ó¤ËÆþ¤ì¤ÆÌ©Éõ¤¹¤ë,ÍÞ¤¨¤ë
+    $meaning =~ s/^(\d+\. *)|(\(\d+\) *)//;
+
+    # (the ¡Á) ¤òºï½ü
+    # brink of bankruptcy (the ¡Á)ÇË»º¤ÎÀ¥¸ÍºÝ
+    $meaning =~ s/\(the .*?\)//;
+	
+    # ÀèÆ¬¤Î (a ¡Á) ¤òºï½ü
+    # bottle of ~ (a ¡Á)°ì¥Ó¥ó¤Î
+    $meaning =~ s/^\(a .*?\)//;
+	
+    # ÀèÆ¬¤Î ? ¤ò¸å¤í¤Ø»ý¤Ã¤Æ¤¤¤¯
+    # BIL  ? ´ð½à¾×·âÀä±ï¶¯ÅÙ
+    $meaning =~ s/^\? (.*)/$1 ?/;
+    
+    # ÀèÆ¬¤Î ¡Ú...¡Û ¤ò¸å¤í¤Ø»ý¤Ã¤Æ¤¤¤¯
+    #   British Columbia  ¡ÚÃÏÌ¾¡Û¥Ö¥ê¥Æ¥£¥Ã¥·¥å¥³¥í¥ó¥Ó¥¢;Î¬:BC
+    # ÀèÆ¬¤Î ¡Ô...¡Õ ¤ò¸å¤í¤Ø»ý¤Ã¤Æ¤¤¤¯
+    #   beanery  1.¡ÔÊÆ²ñÏÃ¡Õ°Â¥ì¥¹¥È¥é¥ó,Âç½°¿©Æ²,2.¡ÔÊÆ°Å¹õ³¹¡ÕÎ±ÃÖ¾ì
+    # ÀèÆ¬¤Î <...> ¤ò¸å¤í¤Ø»ý¤Ã¤Æ¤¤¤¯
+    #   benign  1.<¿Í¡¦À­³Ê¤Ê¤É¤¬>¿ÆÀÚ¤Ê,Í¥¤·¤¤,
+    #           2.<µ¤¸õ¡¦É÷ÅÚ¤¬>·ò¹¯¤ËÎÉ¤¤,²¹ÏÂ¤Ê
+    # ÀèÆ¬¤Î (...) ¤ò¸å¤í¤Ø»ý¤Ã¤Æ¤¤¤¯
+    #   captivate  (¡Á¤Î¿´¤ò)Êá¤¨¤ë,Ì¥ÏÇ¤¹¤ë,¿Í¤ò¤¦¤Ã¤È¤ê¤µ¤»¤ë,¿´¤òÃ¥¤¦
+    # ÀèÆ¬¤Î [...] ¤ò¸å¤í¤Ø»ý¤Ã¤Æ¤¤¤¯
+    #   ciao	¡Ô°Ë¡Õ[´¶]<ÏÃ>¥Á¥ã¥ª,¤³¤ó¤Ë¤Á¤Ï,¤µ¤è¤¦¤Ê¤é
+
+    $meaning =~ s/^((?:(?:¡Ú$CHAR*?¡Û)|(?:¡Ô$CHAR*?¡Õ)|(?:<.*?>)|(?:\(.*?\))|(?:\[.*?\]) *)+)(.*)/$2 $1/;
+
+
+    # ÀèÆ¬¤Î "..." ¤«¤é "" ¤ò¼è¤ë
+    #   European Free Trade Association  "¥¨¥Õ¥¿",²¤½£¼«Í³ËÇ°×Ï¢¹ç;Î¬:EFTA
+    $meaning =~ s/"(.*?)"/$1/;
+    
+    $meaning;
+}

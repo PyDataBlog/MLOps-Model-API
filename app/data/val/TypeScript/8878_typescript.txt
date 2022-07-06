@@ -1,0 +1,566 @@
+import {CabeiriLang}        from "../../cabeiri.lang";
+import {CType}              from "../../../src/ctype";
+import {CDeclaration}       from "../../../src/fundamentals/cdeclaration";
+import {CID}                from "../../../src/cid/cid";
+import {CEvent, CEventType} from "../../../src/context/cevent";
+import {CModule}            from "../../../src/fundamentals/type/cmodule";
+import {CLiteral}           from "../../../src/fundamentals/type/cliteral";
+import {CFunction}          from "../../../src/fundamentals/function/cfunction";
+import {CPPFunction}        from "../../../src/fundamentals/function/cppfunction";
+import {TaskFunction}       from "../../../src/fundamentals/function/taskfunction";
+import {CTask}              from "../../../src/context/ctask";
+import {CScope}             from "../../../src/fundamentals/cscope";
+import {CGraph}             from "../../../src/context/cgraph";
+import {RootCGraph}         from "../../../src/context/root.cgraph";
+import {CReference}         from "../../../src/context/creference";
+
+
+export class AVRReflector
+{   
+    protected clang : CabeiriLang;
+    /**
+     * Constructs a new CReflector.
+     * @param clang the CabeiriLang instance
+     */
+    constructor (clang : CabeiriLang) 
+    {
+        this.clang = clang;
+    }
+    /**
+     * Add the given number of tabulation to each line in the code given,
+     * @param code the code string to be indented.
+     * @param nbTabs the number of tab to add.
+     */
+    private IndentCode(code : string, nbTabs : number) : string
+    {
+        //TODO
+        return code;
+    }
+    
+    /**
+     * Return the c++ includes for the given paths.
+     */
+    public reflectIncludes(includes : Array<string>) : string
+    {
+        var result : string = "";
+        for (var include of includes )
+        {
+            if (!include)
+            {
+                continue;
+            }
+            var newInclude : string = "#include \"" + include +"\"\n";
+            if (result.indexOf(newInclude) == -1)
+            {
+                result += newInclude;             
+            }
+        }
+        result += "\n";
+        return result;
+    }
+    
+    //-----------------------------------------------------------
+    //                          Functions
+    //
+    
+    public reflectionCFunctionDefinition(cfunction : CFunction, cmodule : CModule = null) : string 
+    {
+        var result = "";
+        if (cfunction.usingTemplate())
+        {
+            return result;
+        }
+        result += (cmodule? "" : "static ") + this.reflectCTypeIdentifier(cfunction.returnType) + " " + (cmodule? this.reflectCTypeIdentifier(cmodule) + "::" : "") + this.reflectCTypeIdentifier(cfunction) + "(" + this.reflectCFunctionParameters(cfunction.getParameters())+ ")" + "\n";
+        result += this.reflectCFunctionBody(cfunction);
+        
+        return result;
+    }
+    
+    public reflectCFunctionBody(cfunction : CFunction) : string
+    {
+        var result = "";
+        result += "{\n"
+        
+        if (cfunction instanceof CPPFunction)
+        {
+            result += this.reflectCPPFunctionBody(cfunction);
+        }
+        else if (cfunction instanceof TaskFunction)
+        {
+            result += this.reflectTaskFunctionBody(cfunction);
+        }
+        else
+        {
+            throw new Error("unsupported cfunction type.")
+        }
+        result += "}\n\n"
+
+        return result;
+    }
+    
+    /**
+     * Returns a c++ function body.
+     */
+    public reflectCPPFunctionBody(cfunction : CPPFunction) : string
+    {
+        return cfunction.body;
+    }
+    
+    /**
+     * Returns a task function c++ body.
+     */
+    public reflectTaskFunctionBody(cfunction : TaskFunction) : string
+    {
+        var result : string = "";
+        
+        //locals (context variables) are declared in the body of the function, so they are reset every time the function runs.
+        result += this.ReflectCScopeLocalDeclarations(cfunction.graph.cscope);
+        result += this.ReflectCGraphEventBody(CEvent.getBasicEvent(CEventType.PulseEvent), cfunction.graph);
+        return result;
+    }
+    
+    /**
+     * Returns the native code declaring the function. only valid for global functions (not in modules)
+     */
+    public reflectCFunctionHeader(cfunction : CFunction, bStatic : boolean = false)
+    {
+        var result : string = this.reflectCTypeIdentifier(cfunction.returnType) + " " + this.reflectCTypeIdentifier(cfunction) + "(" + this.reflectCFunctionParameters(cfunction.getParameters()) + ")";
+        
+        if (bStatic)
+        {
+            result = "static " + result;
+        }
+        //in case of a template function, reflect the whole function in the header.
+        if (cfunction.usingTemplate())
+        {
+            var templateDecl : string = "template <";
+            for (var parameter of cfunction.getParameters())
+            {
+                if (parameter.isTemplate())
+                {
+                    templateDecl += " typename " + this.reflectDeclarationType(parameter) + ",";
+                }
+            }
+            //remove last ","
+            templateDecl = templateDecl.substr(0, templateDecl.length - 1);
+            templateDecl += ">\n";
+            
+            result = templateDecl + result;
+            result += this.reflectCFunctionBody(cfunction);
+        }
+        else
+        {
+            result += ";";
+        }
+        return result;
+    }
+    
+    /**
+     * generate the c++ string for declaring the function parameters.
+     * @returns c++ string of the function parameters
+     */
+    public reflectCFunctionParameters(parameters : Array<CDeclaration>) :string
+    {
+        var result : string = "";
+        for (var parameter of parameters)
+        {
+            //TODO shouldn't take basic types per reference.
+            result = result + ", " + this.reflectReferenceDeclaration(parameter);
+        }
+        //remove first ", "
+        return result.substr(2, result.length);
+    }
+        
+    /**
+     * Regular expression to find flow control tags in native code.
+     * tags looks like the following
+     * //[CABEIRI_OUT:"output"]
+     * //[CABEIRI_OUT:"step_0"]
+     * Tags for out flow appear in c++ comments, so they won't conflict with any c++ syntax. 
+     */
+    private static _flowRegexStart = /\/\/\s*\[CABEIRI_OUT\s*:\s*\"/;
+    private static _flowRegexEnd = /\w*\"\s*\]/;
+    /**
+     * Returns the native code to perform the function(for inlining).
+     *  It will inline the function code, meaning this returns the function body.
+     * @param cfunction the function to call
+     * @param cscope the scope in which the function is executed 
+     * @param flowControl it is for code structure like "if" or "for" statement, allowing to execute subsequent task from within the task's function
+     * @param cscope scope in which the function is executed.
+     * @param parametersAssignment variable to use for each parameter of the function.
+     */
+    public reflectCFunctionBodyInline(cfunction : CFunction, flowControl : Map<string, Array<CTask>>, parametersAssignment : Map<string, CReference>, cscope : CScope) : string
+    {
+        //Add a scope so we can declare some extra variable without conflicts...
+        var result : string = "{\n";
+        
+        //We are inlining, so any parameter must become a correctly named variable in our scope.
+        for (var param of cfunction.getParameters())
+        {
+            if (param.isArray())
+            {
+                //hmm not the most efficient way here... doing a full copy... just for having the right name? also, not working on the reference here...
+                result += this.reflectReferenceDeclaration(param) + " = &" + this.reflectCReference(parametersAssignment.get(param.name), cscope) + ";\n";                                        
+            }
+            else
+            {
+                result += this.reflectReferenceDeclaration(param) + " = " + this.reflectCReference(parametersAssignment.get(param.name), cscope) + ";\n";                        
+            }
+        }
+        
+        //inline the function body.
+        result += this.reflectCFunctionBody(cfunction);    
+          
+        //Replace in the function body, the out flow tags by the actual code of the corresponding tasks.
+        flowControl.forEach((tasks : CTask[], flowTag: string) => 
+        {
+            var outFlowBody : string = "";
+            for (var ctask of tasks)
+            {
+                outFlowBody += this.reflectCTaskBody(ctask, cscope);
+            }
+            result = result.replace(new RegExp(AVRReflector._flowRegexStart.source + flowTag + AVRReflector._flowRegexEnd.source), outFlowBody);
+        });
+        
+        //close the scope.
+        result += "}\n";
+        
+        return result;
+    }
+    
+    /**
+     * Returns the native code to perform a call to the function this task is executing.
+     * @param target object on which to call the function (can be null)
+     * @param cfunction the function to call
+     * @param parametersAssignment references to the variables used for the parameters of the function
+     * @param returnValueAssignment reference to the variable which will receive the return value.
+     * @param cscope scope in which the function is executed.
+     */
+    public reflectCFunctionCall(cfunction : CFunction, parametersAssignment : Map<string, CReference>, cscope : CScope, target : CReference, returnValueAssignment : CReference) : string
+    {
+        var result : string = "";
+        if (target)
+        {            
+            result += this.reflectCReference(target, cscope) + "."
+        }
+        result += this.reflectCTypeIdentifier(cfunction) + "(";
+        for (var param of cfunction.getParameters())
+        {
+            result += this.reflectCReference(parametersAssignment.get(param.name), cscope) + ", ";
+        }
+        // remove last ", "
+        result = result.substr(0, result.length - 2);
+        result += ");\n";
+        
+        if (returnValueAssignment)
+        {
+            result = this.reflectCReference(returnValueAssignment, cscope) + " = " + result;
+        }
+        
+        return result;
+    }
+    
+    //-----------------------------------------------------------
+    //                          References
+    //
+    
+    /**
+     * Reflect a reference to a variable. 
+     * @param creference the reference to be reflected.
+     * @param scope the scope in which the referenced variable is found. 
+     * @returns the reflected code string.
+     */
+    public reflectCReference(creference : CReference, cscope : CScope) : string
+    {
+        var result : string = "";
+        
+        for (let declaration of creference.getPathToReference())
+        {
+            result += declaration.name + "."; 
+        }
+        
+        // remove last "."
+        result = result.substr(0, result.length - 1);
+        
+        var msgs :Array<string> = new Array<string>();
+        if (!creference.validate(cscope, msgs))
+        {
+            throw new Error("reflected invalid reference : " + result);       
+        }
+        
+        return result;
+    }
+    
+    //-----------------------------------------------------------
+    //                          CType
+    //
+    
+    /**
+     * Returns the c++ identifier of the given type.
+     * @param ctype the object for which we want thte c++ identifier.
+     */
+    public reflectCTypeIdentifier(ctype :CType) : string
+    {
+        return ctype.name;
+    }
+
+    //-----------------------------------------------------------
+    //                          Graphes
+    //
+
+    public reflectRootCGraphEventFunctionCall(inCEventID : CID) : string
+    {
+        var result : string = "";
+        for (var rootgraph of this.clang.getAllRootCGraphes())
+        {
+            rootgraph.cgraph.forEachEvents((ctasks : CTask[], ceventID : CID) =>
+            {
+                if (inCEventID == ceventID)
+                {
+                    result += "Core::get()."+rootgraph.name  + "Instance" + "." + this.clang.getCEvent(ceventID).name + "();\n";
+                }
+            });
+        }
+        
+        return result;
+    }
+    
+    public reflectRootCGraphDecl() : string
+    {
+        var result : string = "";
+        for (var rootgraph of this.clang.getAllRootCGraphes())
+        {
+            result += rootgraph.name + " " + rootgraph.name + "Instance;\n";
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Provide the native code body to run for an event. 
+     * this code should be put in a function where the locals are available. 
+     * @param ceventID the event for which to produce to code body.
+     * @param cgraph the graph for which to produce the event code body.
+     * @returns the graph event body c++ code.
+     */
+    public ReflectCGraphEventBody(ceventID : CID, cgraph : CGraph) : string
+    {
+        var tasks : Array<CTask> = cgraph.getTasks(ceventID);
+        var result : string = "";
+        for (var task of tasks)
+        {
+            result += this.reflectCTaskBody(task, cgraph.cscope);
+        }
+        
+        return result;
+    }
+    
+    /**
+     * Recursive function that reflect the full body of this task in native code (includes subsequent tasks)
+     *  The body is made of all the function calls native code (of the task tree).
+     *  Recurse on the subsequent tasks.  
+     * @param cscope scope in which the task is executed.
+     */
+    public reflectCTaskBody(ctask : CTask, cscope : CScope) : string
+    {
+        //We throw a couple of critical errors in this function.
+        //It is indeed expected that those would be prevented by a validation before the reflection phase.
+        var cfunction : CFunction = ctask.getCFunction();
+        var result : string = "";
+        var errors : Array<string> = new Array<string>()
+        if (!ctask.validate(errors))
+        {
+            throw new Error("ctask is invalid, cannot reflect body." + errors);
+        }
+        else if (ctask.inline)
+        {
+            result += this.reflectCFunctionBodyInline(cfunction, ctask.flowControl, ctask.parametersAssignment, cscope);
+        }
+        else
+        {    
+            result += this.reflectCFunctionCall(cfunction, ctask.parametersAssignment, cscope, ctask.target, ctask.returnValueAssignment);
+        }
+        
+        for (var nextTask of ctask.next)
+        {
+            result += this.reflectCTaskBody(nextTask, cscope);
+        }
+
+        return result;
+    }
+    
+    /**
+    * Return all function definitions for the graph
+    * @returns 
+    */
+    public reflectRootCGraphBody (rootCGraph : RootCGraph) : string
+    {
+        var result : string = "";
+        result += "\n\t//FUNCTION DEFINITIONS\n\n";
+
+        rootCGraph.cgraph.forEachEvents ((tasks : CTask[], eventCID : CID) =>
+        {
+            var cevent : CEvent = this.clang.getCEvent(eventCID);
+            if (cevent == null)
+            {
+                throw new Error("Could not find event corresponding to event CID in root context.");
+            }
+            else
+            {            
+                //Implement a native function for each event.
+                result += this.reflectCTypeIdentifier(CLiteral.cvoid) + " " 
+                    + this.reflectCTypeIdentifier(rootCGraph) + "::" 
+                    + cevent.name + "(" + this.reflectCFunctionParameters(cevent.GetParameters())+ ")" + "\n";
+                    
+                result += "{\n"
+                //Add all the task code to the function body.
+                for (var ctask of tasks)
+                {                    
+                    result += this.reflectCTaskBody(ctask, rootCGraph.cgraph.cscope);
+                }
+                
+                result += "}\n\n";                
+            }
+
+        });
+        return result;
+    }
+    
+    /**
+     * Returns header definition.
+     * @return {string}
+     */
+    public reflectRootCGraphHeader (rootCGraph : RootCGraph) : string
+    {
+        var result : string;
+        result = "class " + this.reflectCTypeIdentifier(rootCGraph) + "\n{\npublic:\n";
+        result += "\t//CONTEXT LOCAL VARIABLE DECLARATIONS\n\n";
+
+        result += this.ReflectCScopeLocalDeclarations(rootCGraph.cgraph.cscope);
+        result += "\n\t//CONTEXT EVENT FUNCTION DECLARATIONS\n\n";
+
+        rootCGraph.cgraph.forEachEvents ((tasks : CTask[], eventCID : CID) =>
+        {
+            var cevent : CEvent = this.clang.getCEvent(eventCID);
+            if (cevent == null)
+            {
+                throw new Error("Could not find event corresponding to event CID in root context.");
+            }
+            else
+            {            
+                //Create a native function for each event.
+                result += this.reflectCTypeIdentifier(CLiteral.cvoid) + " " + cevent.name + "(" + this.reflectCFunctionParameters(cevent.GetParameters()) + ");\n"
+            }
+        });
+
+        result += "};\n\n"
+        return result;
+    }
+     
+    //-----------------------------------------------------------
+    //                          CScope
+    //
+       
+    /**
+     * Generates the c++ code for declaring all variables of the scope.
+     * These variables should be declared so they live as long as the scope lives. 
+     *  - within a global struct instance for a root context.
+     *  - within a function body for a function context.
+     */
+    public ReflectCScopeLocalDeclarations(cscope : CScope) : string
+    {
+        var result : string = "";
+        for (var local of cscope.getLocals())
+        {
+            result += this.reflectDeclaration(local) +";\n";
+        }
+        return result;
+    }
+    
+    //-----------------------------------------------------------
+    //                          CReferences
+    //
+    
+    /**
+     * Returns the native code declaration. Declared as a reference.
+     */
+    public reflectReferenceDeclaration(cdeclaration : CDeclaration) : string
+    {
+        return (this.reflectDeclarationType(cdeclaration)) 
+            + (cdeclaration.isArray()? (cdeclaration.arrayLength == CDeclaration.ARRAY_UNDEFINED_LENGTH? "*" : " (&") : "& ") 
+            + cdeclaration.name 
+            + (cdeclaration.isArray() && cdeclaration.arrayLength != CDeclaration.ARRAY_UNDEFINED_LENGTH? ") " : "") 
+            + this.reflectDelcrationArrayLenght(cdeclaration);
+    }
+    
+    /**
+     * Returns the native code declaration.
+     */
+    public reflectDeclaration(cdeclaration : CDeclaration) : string
+    {
+        return this.reflectDeclarationType(cdeclaration) 
+            + (cdeclaration.isArray() && cdeclaration.arrayLength == CDeclaration.ARRAY_UNDEFINED_LENGTH? "*" : "")
+            + " " +  cdeclaration.name 
+            + this.reflectDelcrationArrayLenght(cdeclaration);
+    }
+    
+    /**
+     * Reflect the "[n]" part of the array declaration.
+     */
+    private reflectDelcrationArrayLenght(cdeclaration : CDeclaration) : string
+    {
+         return cdeclaration.isArray()  && cdeclaration.arrayLength != CDeclaration.ARRAY_UNDEFINED_LENGTH? "[" + cdeclaration.arrayLength +  "]" : "";
+    }
+    
+    /**
+     * Returns the type identifier.
+     */
+    public reflectDeclarationType(cdeclaration : CDeclaration) : string
+    {
+        return cdeclaration.isTemplate()? cdeclaration.templateTypeName : this.reflectCTypeIdentifier(cdeclaration.ctype);
+    }
+    
+    //-------------------------------------------------------
+    /// Reflect implementation
+    ///
+
+    /**
+     * Returns header definition.
+     * @return {string}
+     */
+    reflectCModuleHeader (cmodule : CModule) : string
+    {
+        var result : string;
+        result = "class " + this.reflectCTypeIdentifier(cmodule) + "\n{\npublic:\n";
+        result += "\t//VARIABLE DECLARATIONS\n\n";
+
+        result += this.ReflectCScopeLocalDeclarations(cmodule.variables);
+        result += "\n\t//FUNCTION DECLARATIONS\n\n";
+
+        cmodule.foreachCFunction ((fct: CFunction, cid : CID) =>
+        {
+            result += "\t" + this.reflectCFunctionHeader(fct) +";\n";
+        });
+
+        result += "};\n\n"
+        return result;
+    }
+
+    /**
+    * Return all function definitions.
+    * @return {string} [description]
+    */
+    public reflectCModuleBody (cmodule : CModule) : string
+    {
+        var result : string = "";
+        result += "\n//FUNCTION DEFINITIONS\n\n";
+
+        cmodule.foreachCFunction ((fct: CFunction, cid : CID) =>
+        {
+            result += this.reflectionCFunctionDefinition(fct, cmodule);
+        });
+        
+        return result;
+    }
+}    
+    

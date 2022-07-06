@@ -1,0 +1,283 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+#
+# PROJETO LAVAGEM A SECO
+#
+# MAIN
+#
+# Felipe Bandeira da Silva
+# 26 jul 15
+#
+
+import logging
+import tornado.escape
+import tornado.ioloop
+import tornado.web
+import tornado.options
+import tornado.websocket
+import tornado.httpserver
+import os.path
+
+from tornado.concurrent import Future
+from tornado import gen
+from tornado.options import define, options, parse_command_line
+
+import socket
+import fcntl
+import struct
+
+import random
+
+define("port", default=8888, help="run on the given port", type=int)
+define("debug", default=False, help="run in debug mode")
+
+import multiprocessing
+
+import controle
+
+import time
+
+import os
+import signal
+import subprocess
+import sys
+
+from platform import uname
+
+
+#NAVEGADOR = 'epiphany'
+NAVEGADOR = 'midori -e Fullscreen -a'
+
+
+
+# A pagina HTML contém informações interessantes e que devem ser
+# apresentadas ao usuário. Quanto menor o tempo maior o processamento
+# por parte do cliente ou dependendo do caso pelo servidor.
+TEMPO_MS_ATUALIZACAO_HTML = 500
+
+# Via websocket é possível mais um cliente conectado e todos devem
+# receber as mensagens do servidor, bem como enviar.
+# clientes do websocket
+clients = []
+
+# tarefa para atualizacao do pagina html
+queue_joyx = multiprocessing.Queue()
+queue_joyy = multiprocessing.Queue()
+queue_joyz = multiprocessing.Queue()
+
+# anemometro
+queue_velocidade = multiprocessing.Queue()
+queue_direcao = multiprocessing.Queue()
+queue_distancia = multiprocessing.Queue()
+
+# usado para o controle da página pelo joystick
+queue_joy_botoes = multiprocessing.Queue()
+
+#class NavegadorWEB(multiprocessing.Process):
+#    def __init__(self):
+#        multiprocessing.Process.__init__(self)
+#
+#        self.navegador = subprocess.Popen(['epiphany-browser 192.168.42.1:8888'], stdout=subprocess.PIPE, \
+#                                           shell=True, preexec_fn=os.setsid)
+#
+#    def run(self):
+#        while True:
+#            time.sleep(0.01)
+
+def inicia_navegador():
+    navegador = subprocess.Popen([NAVEGADOR+' 192.168.42.1:8888'], \
+                                      stdout=subprocess.PIPE, \
+                                      shell=True, preexec_fn=os.setsid)
+
+
+def fecha_navegador():
+    processos = subprocess.Popen(['pgrep', NAVEGADOR], stdout=subprocess.PIPE)
+
+    print 'PID dos processos', processos.stdout
+    for pid in processos.stdout:
+        os.kill(int(pid), signal.SIGTERM)
+        try:
+            time.sleep(3)
+            os.kill(int(pid), 0)
+            print u'erro: o processo %d ainda existe' % pid
+        except OSError as ex:
+            continue
+
+def get_ip_address():
+    # Informa o endereço IP da primeira conexão funcionando
+    # visto em:
+    # http://code.activestate.com/recipes/439094-get-the-ip-address-associated-with-a-network-inter/
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        ifname = 'eth0'
+        return socket.inet_ntoa(fcntl.ioctl( \
+            s.fileno(), \
+            0x8915,  # SIOCGIFADDR \
+            struct.pack('256s', ifname[:15]) \
+        )[20:24])
+    except:
+        try:
+            ifname = 'wlan0'
+            return socket.inet_ntoa(fcntl.ioctl( \
+                s.fileno(), \
+                0x8915,  # SIOCGIFADDR \
+                struct.pack('256s', ifname[:15]) \
+            )[20:24])
+        except:
+            return "127.0.0.1"
+
+def get_ip_address_interface(ifname):
+    # Informa o endereço de IP de uma rede <ifname>
+    # visto em:
+    # http://code.activestate.com/recipes/439094-get-the-ip-address-associated-with-a-network-inter/
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        return socket.inet_ntoa(fcntl.ioctl( \
+            s.fileno(), \
+            0x8915,  # SIOCGIFADDR \
+            struct.pack('256s', ifname[:15]) \
+        )[20:24])
+    except:
+        return "0.0.0.0"
+
+class MainHandler(tornado.web.RequestHandler):
+
+    # Atende ao GET e POST do cliente
+    def get(self):
+
+        # é possível via argumento renderizar a página html com
+        # informações interessantes, os comentários devem ter o mesmo
+        # nome da variável da página
+        self.render("index.html", title="LAVAGEM A SECO", \
+                    ip_host=get_ip_address()+":"+str(options.port), \
+                    msg_status="LIGADO")
+
+class WebSocketHandler(tornado.websocket.WebSocketHandler):
+
+    # Todo cliente se encarrega de conectar-se ao servidor websocket.
+    # Quando existe uma nova conexão é salvo qual cliente foi.
+    def open(self):
+        print 'tornado: websocket: aviso: nova conexão de um cliente'
+        clients.append(self)
+        self.write_message("connected")
+
+    # Quando um cliente envia uma mensagem, esta é a função responsável
+    # por ler e aqui deve ficar a chamada dos get das filas(queue)
+    def on_message(self, message):
+        print 'tornado: websocket: aviso: nova mensagem: %s' % message
+        q = self.application.settings.get('queue')
+        q.put(message)
+
+    # Para evitar envios de informações a clientes que não existem mais
+    # é necessário retirá-los da lista
+    def on_close(self):
+        print 'tornado: websocket: aviso: conexão finalizada/perdida'
+        clients.remove(self)
+        fecha_navegador()
+        inicia_navegador()
+
+
+def envia_cmd_websocket(cmd, arg):
+    # Facilita o trabalho repetitivo de envia mensagem para todo os clientes
+    # Envia um comando e seu argumento para todos os clientes
+    for c in clients:
+        c.write_message(cmd+";"+arg)
+
+def tarefa_atualizacao_html():
+    # Esta função tem uma chamada periódica, responsável por atualizar os
+    # elementos atualizáveis na página html
+
+    envia_cmd_websocket("lan", get_ip_address())
+    envia_cmd_websocket("random", str(random.randint(0,1000)))
+
+    # para envia algo é necessário que fila tenha algo
+    if not queue_joyx.empty():
+        resultado = queue_joyx.get()
+        envia_cmd_websocket("joyx", str(resultado)[:6])
+
+    if not queue_joyy.empty():
+        resultado = queue_joyy.get()
+        envia_cmd_websocket("joyy", str(resultado)[:6])
+
+    if not queue_joyz.empty():
+        resultado = queue_joyz.get()
+        envia_cmd_websocket("joyz", str(resultado)[:6])
+
+    if not queue_joy_botoes.empty():
+        resultado = queue_joy_botoes.get()
+        envia_cmd_websocket("b", str(resultado))
+
+    if not queue_velocidade.empty():
+        resultado = queue_velocidade.get()
+        envia_cmd_websocket("v", str(resultado))
+
+    if not queue_direcao.empty():
+        resultado = queue_direcao.get()
+        envia_cmd_websocket("d", str(resultado))
+
+
+    if not queue_distancia.empty():
+        resultado = queue_distancia.get()
+        envia_cmd_websocket("x", str(resultado)[:6])
+
+def main():
+    print u"Iniciando o servidor Tornado"
+
+    fecha_navegador()
+
+    tarefa_controle = multiprocessing.Queue()
+
+    # esse loop ler os dados do joystick e envia para o lavos
+    # sem ele, nenhuma resposta do Joystick é atendida.
+    controle_loop = controle.ControleLavagem(tarefa_controle, \
+                                             queue_joyx, \
+                                             queue_joyy, \
+                                             queue_joyz, \
+                                             queue_joy_botoes, \
+                                             queue_velocidade, \
+                                             queue_direcao, \
+                                             queue_distancia)
+    controle_loop.daemon = True
+    controle_loop.start()
+
+    # espera um pouco para que a tarefa esteja realmente pronta
+    # sincronismo é mais interessante?
+    time.sleep(1)
+    tarefa_controle.put("Testando Tarefa :)")
+
+    parse_command_line()
+    app = tornado.web.Application(
+        [
+            (r"/", MainHandler),
+            (r"/ws", WebSocketHandler)
+        ],
+        cookie_secret="__TODO:_GENERATE_YOUR_OWN_RANDOM_VALUE_HERE__",
+        template_path=os.path.join(os.path.dirname(__file__), "templates"),
+        static_path=os.path.join(os.path.dirname(__file__), "static"),
+        xsrf_cookies=True,
+        debug=options.debug,
+        autoreload=True,
+        queue=tarefa_controle,
+    )
+
+    # porta que o servidor irá usar
+    app.listen(options.port)
+
+    # carrega o servidor mas não inicia
+    main_loop = tornado.ioloop.IOLoop.instance()
+
+    # Aqui será a principal tarefa do lavagem, leitura e acionamento
+    tarefa_atualizacao_html_loop = tornado.ioloop.PeriodicCallback(tarefa_atualizacao_html,\
+                                                   TEMPO_MS_ATUALIZACAO_HTML, \
+                                                   io_loop = main_loop)
+
+    print u"aviso: tornado: start"
+    tarefa_atualizacao_html_loop.start()
+
+    inicia_navegador()
+
+    # o loop do servidor deve ser o último, já que não um daemon
+    main_loop.start()
+
+if __name__ == "__main__":
+    main()

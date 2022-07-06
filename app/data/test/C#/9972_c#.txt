@@ -1,0 +1,858 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Xml;
+using System.ServiceModel.Syndication;
+using Business;
+using System.Drawing;
+using BBCommon;
+
+namespace BBBot
+{
+   public class BBBotBusiness
+   {
+      #region Constantes
+
+      private const string Help = "HELP";
+
+      private const string RandomVDM = "VDM";
+      private const string LastVDM = "LAST VDM";
+      private const string AllVDM = "ALL VDM";
+
+      private const string RandomBash = "BASH";
+      private const string LastBash = "LAST BASH";
+      private const string AllBash = "ALL BASH";
+
+      private const string StartPendu = "PENDU GAME START";
+
+      #endregion
+
+      #region Properties
+
+      private DateTimeOffset LastDateTimeVDM;
+      private DateTimeOffset LastDateTimeBash;
+      private ChatApplication ChatApplicationBusiness;
+      private string ActualWord;
+      private int NbErrors;
+      private List<char> _allLetters;
+      private List<char> AllLetters
+      {
+         get
+         {
+            if (this._allLetters == null)
+               this._allLetters = new List<char>();
+
+            return this._allLetters;
+         }
+      }
+      private bool EnfOfGame;
+      private List<char> AllLettersAuthorized = new List<char>() { 'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z' };
+
+      #region Properties Color & Nick
+
+      private Color Pendu_Color = Color.MediumVioletRed;
+      private string Pendu_Nick = "PenduBot";
+
+      private string Helper_Nick = "Helper";
+      private Color Helper_Color = Color.Magenta;
+
+      #endregion
+
+      #endregion
+
+      #region Constructor
+
+      /// <summary>
+      /// Constructeur de la classe
+      /// </summary>
+      /// <param name="chatApplication"></param>
+      public BBBotBusiness(ChatApplication chatApplication)
+      {
+         this.ChatApplicationBusiness = chatApplication;
+      }
+
+      #endregion
+
+      #region Methods Help
+
+      private void LoadHelpMessage(BBMessage message)
+      {
+         this.ChatApplicationBusiness.ChangePlayerName(this.Helper_Nick);
+         this.ChatApplicationBusiness.ChangePlayerColor(this.Helper_Color);
+
+         //Description des commandes :
+         StringBuilder text = new StringBuilder();
+
+         text.AppendLine(string.Format("Commande : {0} => Affiche l'aide en ligne", BBBotBusiness.Help));
+         text.AppendLine(string.Format("Commande : {0} => Affiche les dernières VDM depuis la dernière exécution", BBBotBusiness.AllVDM));
+         text.AppendLine(string.Format("Commande : {0} => Affiche la dernière VDM", BBBotBusiness.LastVDM));
+         text.AppendLine(string.Format("Commande : {0} => Affiche une VDM au hasard", BBBotBusiness.RandomVDM));
+         text.AppendLine(string.Format("Commande : {0} => Affiche les derniers Bash", BBBotBusiness.AllBash));
+         text.AppendLine(string.Format("Commande : {0} => Affiche le dernier Bash", BBBotBusiness.LastBash));
+         text.AppendLine(string.Format("Commande : {0} => Affiche un Bash au hasard", BBBotBusiness.RandomBash));
+         text.AppendLine(string.Format("Commande : {0} => Démarre le jeu du pendu", BBBotBusiness.StartPendu)); 
+
+         this.ChatApplicationBusiness.EnteredHelper(text.ToString(), message);
+      }
+
+      #endregion
+
+      #region Methods VDM
+
+      /// <summary>
+      /// Démarrer le lancement de VDM
+      /// </summary>
+      /// <returns></returns>
+      public bool StartVDM()
+      {
+         if (DateTimeOffset.Now.DayOfWeek == DayOfWeek.Monday)
+         {
+            //Comme c est un démarrage, on regarde la date d hier soir en fait 
+            this.LastDateTimeVDM = DateTimeOffset.Now.Subtract(new TimeSpan(2, 15, 0, 0));
+         }
+         else if (DateTimeOffset.Now.DayOfWeek == DayOfWeek.Sunday)
+         {
+            //Comme c est un démarrage, on regarde la date d hier soir en fait 
+            this.LastDateTimeVDM = DateTimeOffset.Now.Subtract(new TimeSpan(1, 15, 0, 0));
+         }
+         else
+         {
+            //Comme c est un démarrage, on regarde la date d hier soir en fait 
+            this.LastDateTimeVDM = DateTimeOffset.Now.Subtract(new TimeSpan(15, 0, 0));
+         }
+
+         return this.LastDateTimeVDM != null;
+      }
+
+      /// <summary>
+      /// Charger une nouvelle VDM
+      /// </summary>
+      public void LoadVDM(BBMessage message)
+      {
+         string str = this.GetVDM();
+
+         if (!string.IsNullOrEmpty(str))
+         {
+            this.ChatApplicationBusiness.EnteredVDM(message, str, true);
+
+            this.LastDateTimeVDM = DateTime.Now;
+         }
+      }
+
+      public void CatchLetterVDMLast(BBMessage message)
+      {
+         string str = this.GetLastVDM();
+
+         if (!string.IsNullOrEmpty(str))
+         {
+            this.ChatApplicationBusiness.EnteredVDM(message, str, false);
+         }
+      }
+
+      public void CatchLetterVDMRandom(BBMessage message)
+      {
+         string str = this.GetSpecialVDM();
+
+         if (!string.IsNullOrEmpty(str))
+         {
+            this.ChatApplicationBusiness.EnteredVDM(message, str, false);
+         }
+      }
+
+      /// <summary>
+      /// Obtient uniquement une seule VDM prise aléatoirement
+      /// </summary>
+      /// <returns></returns>
+      private string GetSpecialVDM()
+      {
+         try
+         {
+            string href = "http://feeds.feedburner.com/viedemerde";
+
+            /* Load the RSS */
+            XmlReader reader = XmlReader.Create(href);
+            SyndicationFeed feed = SyndicationFeed.Load(reader);
+
+            Random rand = new Random();
+            int nb = rand.Next(0, feed.Items.Count() - 1);
+
+            SyndicationItem item = feed.Items.ElementAt(nb);
+            string str = ((TextSyndicationContent)(item.Content)).Text;
+
+            string[] strArray = str.Split('<');
+
+            return strArray[0];
+         }
+         catch
+         {
+            return string.Empty;
+         }
+      }
+
+      /// <summary>
+      /// Obtient la derniere VDM
+      /// </summary>
+      /// <returns></returns>
+      private string GetLastVDM()
+      {
+         try
+         {
+            string href = "http://feeds.feedburner.com/viedemerde";
+
+            /* Load the RSS */
+            XmlReader reader = XmlReader.Create(href);
+            SyndicationFeed feed = SyndicationFeed.Load(reader);
+
+            SyndicationItem item = feed.Items.ElementAt(0);
+            string str = ((TextSyndicationContent)(item.Content)).Text;
+
+            string[] strArray = str.Split('<');
+
+            return strArray[0];
+         }
+         catch
+         {
+            return string.Empty;
+         }
+      }
+
+      private string GetSpecialBash()
+      {
+         return string.Empty;
+      }
+
+      /// <summary>
+      /// Obtient les données de VDM
+      /// </summary>
+      /// <returns></returns>
+      private string GetVDM()
+      {
+         string href = "http://feeds.feedburner.com/viedemerde";
+
+         /* Load the RSS */
+         XmlReader reader = XmlReader.Create(href);
+         SyndicationFeed feed = SyndicationFeed.Load(reader);
+
+         StringBuilder text = new StringBuilder();
+         foreach (SyndicationItem item in feed.Items)
+         {
+            if (item.PublishDate > this.LastDateTimeVDM)
+            {
+               string str = ((TextSyndicationContent)(item.Content)).Text;
+
+               string[] strArray = str.Split('<');
+
+               text.Append(strArray[0]);
+
+               text.AppendLine();
+            }
+         }
+
+         return text.ToString();
+      }
+
+      #endregion
+
+      #region Methods Bash
+
+      /// <summary>
+      /// Démarrage des récupérations de bash fr
+      /// </summary>
+      public bool StartBash()
+      {
+         if (DateTimeOffset.Now.DayOfWeek == DayOfWeek.Monday)
+         {
+            //Comme c est un démarrage, on regarde la date d hier soir en fait 
+            this.LastDateTimeBash = DateTimeOffset.Now.Subtract(new TimeSpan(2, 15, 0, 0));
+         }
+         else if (DateTimeOffset.Now.DayOfWeek == DayOfWeek.Sunday)
+         {
+            //Comme c est un démarrage, on regarde la date d hier soir en fait 
+            this.LastDateTimeBash = DateTimeOffset.Now.Subtract(new TimeSpan(1, 15, 0, 0));
+         }
+         else
+         {
+            //Comme c est un démarrage, on regarde la date d hier soir en fait 
+            this.LastDateTimeBash = DateTimeOffset.Now.Subtract(new TimeSpan(15, 0, 0));
+         }
+
+         return this.LastDateTimeBash != null;
+      }
+
+      /// <summary>
+      /// Charge les données pour Bash FR
+      /// </summary>
+      public void LoadBash(BBMessage message)
+      {
+         string str = this.GetBash();
+
+         if (!string.IsNullOrEmpty(str))
+         {
+            this.ChatApplicationBusiness.EnteredBASH(str, true, message);
+
+            this.LastDateTimeVDM = DateTime.Now;
+         }
+      }
+
+      private void LoadRandomBash(BBMessage message)
+      {
+         string str = this.GetRandomBash();
+
+         if (!string.IsNullOrEmpty(str))
+         {
+            this.ChatApplicationBusiness.EnteredBASH(str, false, message);
+         }
+      }
+
+      private void LoadLastBash(BBMessage message)
+      {
+         string str = this.GetLastBash();
+
+         if (!string.IsNullOrEmpty(str))
+         {
+            this.ChatApplicationBusiness.EnteredBASH(str, false, message);
+         }
+      }
+
+      private string GetLastBash()
+      {
+         try
+         {
+            string href = "http://feeds.feedburner.com/bashfr";
+
+            /* Load the RSS */
+            XmlReader reader = XmlReader.Create(href);
+            SyndicationFeed feed = SyndicationFeed.Load(reader);
+
+            Random rand = new Random();
+            int nb = 0;
+
+            SyndicationItem item = feed.Items.ElementAt(nb);
+            StringBuilder text = new StringBuilder();
+
+            /* Filter on items which titles begins with "Quote" */
+            if (String.Compare(item.Title.Text, 0, "Quote", 0, 5, true) == 0)
+            {
+               /* split into a lines array, using <br /> as a separator */
+               String[] sep = new string[1];
+               sep[0] = "<br />";
+               String[] lines = item.Summary.Text.Split(sep, StringSplitOptions.RemoveEmptyEntries);
+
+               /* Delete the last line containing the quote url */
+               Array.Resize(ref lines, lines.Length - 1);
+
+               foreach (String line in lines)
+               {
+                  /* Add the line */
+                  text.Append(line);
+               }
+
+               text.AppendLine();
+            }
+
+            return text.ToString();
+         }
+         catch
+         {
+            return string.Empty;
+         }
+      }
+
+      private string GetRandomBash()
+      {
+         try
+         {
+            string href = "http://feeds.feedburner.com/bashfr";
+
+            /* Load the RSS */
+            XmlReader reader = XmlReader.Create(href);
+            SyndicationFeed feed = SyndicationFeed.Load(reader);
+
+            Random rand = new Random();
+            int nb = rand.Next(0, feed.Items.Count());
+
+            StringBuilder text = new StringBuilder();
+            SyndicationItem item = feed.Items.ElementAt(nb);
+
+            /* Filter on items which titles begins with "Quote" */
+            if (String.Compare(item.Title.Text, 0, "Quote", 0, 5, true) == 0)
+            {
+               /* split into a lines array, using <br /> as a separator */
+               String[] sep = new string[1];
+               sep[0] = "<br />";
+               String[] lines = item.Summary.Text.Split(sep, StringSplitOptions.RemoveEmptyEntries);
+
+               /* Delete the last line containing the quote url */
+               Array.Resize(ref lines, lines.Length - 1);
+
+               foreach (String line in lines)
+               {
+                  /* Add the line */
+                  text.Append(line);
+               }
+
+               text.AppendLine();
+            }
+
+            return text.ToString();
+         }
+         catch
+         {
+            return string.Empty;
+         }
+      }
+
+      /// <summary>
+      /// Obtient les données sur BASH FR
+      /// </summary>
+      /// <param name="sender"></param>
+      /// <param name="e"></param>
+      private string GetBash()
+      {
+         string href = "http://feeds.feedburner.com/bashfr";
+
+         /* Load the RSS */
+         XmlReader reader = XmlReader.Create(href);
+         SyndicationFeed feed = SyndicationFeed.Load(reader);
+
+         StringBuilder text = new StringBuilder();
+         foreach (SyndicationItem item in feed.Items)
+         {
+            /* Filter on items which titles begins with "Quote" */
+            if (String.Compare(item.Title.Text, 0, "Quote", 0, 5, true) == 0 && item.PublishDate > this.LastDateTimeBash)
+            {
+               /* split into a lines array, using <br /> as a separator */
+               String[] sep = new string[1];
+               sep[0] = "<br />";
+               String[] lines = item.Summary.Text.Split(sep, StringSplitOptions.RemoveEmptyEntries);
+
+               /* Delete the last line containing the quote url */
+               Array.Resize(ref lines, lines.Length - 1);
+
+               foreach (String line in lines)
+               {
+                  /* Add the line */
+                  text.Append(line);
+               }
+
+               text.AppendLine();
+            }
+         }
+
+         return text.ToString();
+      }
+
+      #endregion
+
+      #region Methods Pendu
+
+      /// <summary>
+      /// Récupére un nouveau mot
+      /// </summary>
+      public void GetNewPenduWord(BBMessage message)
+      {
+         if ((this.ActualWord == null) || (this.EnfOfGame))
+         {
+            this.AllLetters.Clear();
+            this.NbErrors = 0;
+            this.ActualWord = null;
+            this.EnfOfGame = false;
+
+            //Game ended so can new game
+            this.ActualWord = this.FindWord();
+            this.DisplayPenduGame(true, null, true, message);
+         }
+         else
+         {
+            this.DisplayPenduGame(false, "Last game isn't finish yet.", true, message);
+         }
+      }
+
+      /// <summary>
+      /// Affiche le pendu
+      /// </summary>
+      /// <param name="alert"></param>
+      /// <param name="specialMessage"></param>
+      public void DisplayPenduGame(bool alert, string specialMessage, bool toDisplayAll, BBMessage message)
+      {
+         this.ChatApplicationBusiness.ChangePlayerName(this.Pendu_Nick);
+         this.ChatApplicationBusiness.ChangePlayerColor(this.Pendu_Color);
+
+         if (!string.IsNullOrEmpty(this.ActualWord))
+         {
+            if (!string.IsNullOrEmpty(specialMessage))
+            {
+               //Couleur spéciale temporaraire
+               this.ChatApplicationBusiness.ChangePlayerColor(Color.Gold);
+               this.ChatApplicationBusiness.EnteredPendu(specialMessage, false, message);
+               this.ChatApplicationBusiness.ChangePlayerColor(this.Pendu_Color);
+            }
+
+            if (toDisplayAll)
+            {
+
+               StringBuilder toDisplay = new StringBuilder();
+               //Affiche les mots
+               foreach (char ch in this.ActualWord.ToCharArray())
+               {
+                  if (this.AllLetters.Contains(ch))
+                  {
+                     toDisplay.Append(ch.ToString());
+                  }
+                  else
+                  {
+                     toDisplay.Append("_");
+                  }
+
+                  toDisplay.Append(" ");
+               }
+
+               //Affiche les lettres utilisées
+               toDisplay.Append(" -- Used letters : ");
+
+               foreach (char ch in this.AllLetters)
+               {
+                  if (!this.ActualWord.Contains(ch))
+                     toDisplay.Append(string.Concat(ch.ToString(), " "));
+               }
+
+               //Affiche le nombre d'erreurs
+               toDisplay.AppendFormat("{0} / 7 errors !", this.NbErrors.ToString());
+
+               this.ChatApplicationBusiness.EnteredPendu(toDisplay.ToString(), alert, message);
+            }
+         }
+      }
+
+      /// <summary>
+      /// Recherche si le mot tapé est une lettre ou pas...
+      /// </summary>
+      private void CatchLetterPendu(string str, BBMessage message)
+      {
+         if ((str.Length == 1) && (!string.IsNullOrEmpty(this.ActualWord)))
+         {
+            char[] allChar = str.ToCharArray();
+            char ch = allChar[0];
+
+            //Vérifie que c est une lettre authorisé
+            if (this.AllLettersAuthorized.Contains(ch))
+            {
+               if (this.EnfOfGame)
+               {
+                  if (ch != 'Y')
+                     this.DisplayPenduGame(false, "Pendu game is ending, do you want to play an other time ? Press Y", false, message);
+                  else
+                     this.GetNewPenduWord(message);
+               }
+               else
+               {
+                  //Vérifie que la lettre n'a pas déjà été joué
+                  if (this.AllLetters.Contains(ch))
+                  {
+                     this.DisplayPenduGame(false, "Letter already player", true, message);
+                  }
+                  else
+                  {
+                     if (!this.ActualWord.Contains(ch))
+                        //C'est une erreur
+                        this.NbErrors++;
+
+                     this.AllLetters.Add(ch);
+
+                     this.DisplayPenduGame(false, null, true, message);
+
+                     if (this.NbErrors >= 7)
+                     {
+                        //fin du jeu avec erreurs
+                        this.DisplayPenduGame(false, "You lose ! Sorry, but you can play again ? Press Y", false, message);
+                        this.EnfOfGame = true;
+                     }
+                     else
+                     {
+                        int nbOk = 0;
+
+                        //Vérifie que la partie est gagné ou pas
+                        foreach (char ch1 in this.AllLetters)
+                        {
+                           foreach (char ch2 in this.ActualWord.ToCharArray())
+                              if (ch1 == ch2)
+                                 nbOk++;
+                        }
+
+                        if (nbOk == this.ActualWord.Length)
+                        {
+                           //fin du jeu sans erreurs
+                           this.DisplayPenduGame(false, "Winner ! Do you want to win an other time ? Press Y", false, message);
+                           this.EnfOfGame = true;
+                        }
+                     }
+                  }
+               }
+            }
+         }
+      }
+
+      /// <summary>
+      /// Recherche un mot
+      /// </summary>
+      /// <returns></returns>
+      private string FindWord()
+      {
+         Random rd = new Random();
+         int nb = rd.Next(0, this.AllWord.Count);
+
+         return AllWord[nb];
+      }
+
+      /// <summary>
+      /// Obtient la liste de tous les mots
+      /// </summary>
+      private List<String> AllWord
+      {
+         get
+         {
+            List<String> ls = new List<string>();
+
+            ls.Add("TELEVISION");
+            ls.Add("PENDU");
+            ls.Add("VOITURE");
+            ls.Add("CASCADE");
+            ls.Add("TORRENT");
+            ls.Add("JOSPEHINE");
+            ls.Add("POUPEE");
+            ls.Add("RIVIERE");
+            ls.Add("VENT");
+            ls.Add("ORAGE");
+            ls.Add("PLUIE");
+            ls.Add("WAGON");
+            ls.Add("VENDANGE");
+            ls.Add("VOITURE");
+            ls.Add("MOISSON");
+            ls.Add("XYLOPHONE");
+            ls.Add("BICYCLETTE");
+            ls.Add("TROTINNETTE");
+            ls.Add("CARELAGE");
+            ls.Add("ORANGE");
+            ls.Add("VERT");
+            ls.Add("VOITURETTE");
+            ls.Add("GOLF");
+            ls.Add("BASKETBALL");
+            ls.Add("HOCKEY");
+            ls.Add("GLACE");
+            ls.Add("PATIN");
+            ls.Add("ECRAN");
+            ls.Add("MAISON");
+            ls.Add("APPARTEMENT");
+            ls.Add("LYON");
+            ls.Add("NICE");
+            ls.Add("PARIS");
+            ls.Add("MONTPELLIER");
+            ls.Add("DEFENSE");
+            ls.Add("ATTAQUE");
+            ls.Add("ECHEC");
+            ls.Add("POISON");
+            ls.Add("SECRET");
+            ls.Add("SERPENT");
+            ls.Add("WAGONETTE");
+            ls.Add("BLESSURE");
+            ls.Add("BRAS");
+            ls.Add("MONTAGE");
+            ls.Add("CINEMATOGRAPHIE");
+            ls.Add("AMBULANCE");
+            ls.Add("NUMERO");
+            ls.Add("ENTRETIEN");
+            ls.Add("UNIQUE");
+            ls.Add("MOUSQUETAIRE");
+            ls.Add("ZORRO");
+            ls.Add("POURSUITE");
+            ls.Add("POLICE");
+            ls.Add("POMPIER");
+            ls.Add("SAMU");
+            ls.Add("CHAISE");
+            ls.Add("TABLE");
+            ls.Add("VOLANT");
+            ls.Add("TIREUR");
+            ls.Add("ARME");
+            ls.Add("EPEE");
+            ls.Add("PATINEUR");
+            ls.Add("FOOTBALLEUR");
+            ls.Add("CONSOLE");
+            ls.Add("HACHE");
+            ls.Add("HUGO");
+            ls.Add("TENNISMAN");
+            ls.Add("VOLLEYEUR");
+            ls.Add("VOYEUR");
+            ls.Add("PRISON");
+            ls.Add("CASSEUR");
+            ls.Add("GREVE");
+            ls.Add("FACULTE");
+            ls.Add("GREVISTE");
+            ls.Add("NUAGEUX");
+            ls.Add("SCRABBLE");
+            ls.Add("TINTIN");
+            ls.Add("MILOU");
+            ls.Add("OBELIX");
+            ls.Add("ASTERIX");
+            ls.Add("INTERROGATOIRE");
+            ls.Add("INTERROGER");
+            ls.Add("QUESTION");
+            ls.Add("QUESTIONNER");
+            ls.Add("AVANCER");
+            ls.Add("SPRINTER");
+            ls.Add("COURRIR");
+            ls.Add("TRAVAILLER");
+            ls.Add("POURQUOI");
+            ls.Add("FAIRE");
+            ls.Add("EFFECTUER");
+            ls.Add("TROUVER");
+            ls.Add("EXECUTION");
+            ls.Add("EXECUTER");
+            ls.Add("MALADROIT");
+            ls.Add("MALADRESSE");
+            ls.Add("DETROIT");
+            ls.Add("PAQUEBOT");
+            ls.Add("IVOIRE");
+            ls.Add("TOUR");
+            ls.Add("OCEAN");
+            ls.Add("RORQUAL");
+            ls.Add("BALEINE");
+            ls.Add("ORGUE");
+            ls.Add("ORQUE");
+            ls.Add("FLEUVE");
+            ls.Add("RIVIERE");
+            ls.Add("MICROSOFT");
+            ls.Add("RADIO");
+            ls.Add("BALASKO");
+            ls.Add("BLANC");
+            ls.Add("RETROUVER");
+            ls.Add("CONSOLER");
+            ls.Add("DEFILER");
+            ls.Add("PRENDRE");
+            ls.Add("DESUNIR");
+            ls.Add("ENRHUMER");
+            ls.Add("ENUMERER");
+            ls.Add("TAXE");
+            ls.Add("TOXICOMANIE");
+            ls.Add("TAXIDERMISTE");
+            ls.Add("TAXIDERMIE");
+            ls.Add("AJOUTER");
+            ls.Add("ENLEVER");
+            ls.Add("STOPPER");
+            ls.Add("ASSASSIN");
+            ls.Add("MALADE");
+            ls.Add("SAUVER");
+            ls.Add("ASSOMER");
+            ls.Add("NATIONALE");
+            ls.Add("FRANCE");
+            ls.Add("IRAQ");
+            ls.Add("JERUSALEM");
+            ls.Add("ISRAEL");
+            ls.Add("PAYS");
+            ls.Add("CONTINENT");
+            ls.Add("INCONTINENT");
+            ls.Add("EUROPE");
+            ls.Add("POLICIER");
+            ls.Add("ECLATER");
+            ls.Add("ANGLAIS");
+            ls.Add("ALLEMAND");
+            ls.Add("TURC");
+            ls.Add("TRUC");
+            ls.Add("CHOSE");
+            ls.Add("MALADROIT");
+            ls.Add("EXECRABLE");
+            ls.Add("ZOO");
+            ls.Add("ZEBRE");
+            ls.Add("ZEBRES");
+            ls.Add("YEN");
+            ls.Add("WU");
+            ls.Add("AA");
+            ls.Add("WAGON");
+            ls.Add("WASABI");
+            ls.Add("WALIBI");
+            ls.Add("TUER");
+            ls.Add("FILS");
+            ls.Add("ACHETER");
+            ls.Add("MANGER");
+            ls.Add("DINER");
+            ls.Add("AMIES");
+            ls.Add("DINATOIRE");
+            ls.Add("MEURTRE");
+            ls.Add("DANGER");
+            ls.Add("CHAISE");
+            ls.Add("DOMINIQUE");
+            ls.Add("DIMANCHE");
+            ls.Add("LUNDI");
+            ls.Add("MARDI");
+            ls.Add("JEUDI");
+            ls.Add("VENDREDI");
+            ls.Add("SAMEDI");
+            ls.Add("LOI");
+            ls.Add("JUSTICE");
+            ls.Add("GIRONDRE");
+            ls.Add("ACCELER");
+            ls.Add("AXES");
+            ls.Add("DESAXER");
+            ls.Add("RELACHER");
+            ls.Add("RELAXATION");
+            ls.Add("VILLE");
+            ls.Add("AIRBUS");
+            ls.Add("BOEING");
+            ls.Add("LAMPADAIRE");
+            ls.Add("AUTOCAR");
+            ls.Add("VEHICULE");
+            ls.Add("VACHE");
+            ls.Add("LOUCHE");
+            ls.Add("LOUP");
+            ls.Add("SEPRENT");
+            ls.Add("COBRA");
+            ls.Add("BIBLIOTHEQUE");
+            ls.Add("ANNEES");
+            ls.Add("VECTOR");
+            ls.Add("VECTORIELLE");
+            ls.Add("SPORT");
+            ls.Add("REQUIN");
+            ls.Add("CROSSE");
+            ls.Add("PISTOLET");
+            ls.Add("ARME");
+            ls.Add("EPEE");
+            ls.Add("TRICHER");
+
+            return ls;
+         }
+      }
+
+      #endregion
+
+      #region Catch Letter
+
+      /// <summary>
+      /// Récupére une lettre et calcule
+      /// </summary>
+      /// <param name="message"></param>
+      /// <param name="str"></param>
+      public void CatchLetter(BBMessage message, string str)
+      {
+         if (str.Length == 1)
+            this.CatchLetterPendu(str, message);
+         else if ((str.Length == BBBotBusiness.RandomVDM.Length) && (str == BBBotBusiness.RandomVDM))
+            this.CatchLetterVDMRandom(message);
+         else if ((str.Length == BBBotBusiness.LastVDM.Length) && (str == BBBotBusiness.LastVDM))
+            this.CatchLetterVDMLast(message);
+         else if ((str.Length == BBBotBusiness.AllVDM.Length) && (str == BBBotBusiness.AllVDM))
+            this.LoadVDM(message);
+         else if ((str.Length == BBBotBusiness.StartPendu.Length) && (str == BBBotBusiness.StartPendu))
+            this.GetNewPenduWord(message);
+         else if ((str.Length == BBBotBusiness.LastBash.Length) && (str == BBBotBusiness.LastBash))
+            this.LoadLastBash(message);
+         else if ((str.Length == BBBotBusiness.AllBash.Length) && (str == BBBotBusiness.AllBash))
+            this.LoadBash(message);
+         else if ((str.Length == BBBotBusiness.RandomBash.Length) && (str == BBBotBusiness.RandomBash))
+            this.LoadRandomBash(message);
+         else if ((str.Length == BBBotBusiness.Help.Length) && (str == BBBotBusiness.Help))
+            this.LoadHelpMessage(message);
+      }
+
+      #endregion
+   }
+}

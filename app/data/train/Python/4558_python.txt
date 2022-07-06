@@ -1,0 +1,45 @@
+import tensorflow as tf
+import tensorflow.contrib.slim as slim
+
+
+class BaseReader(object):
+    def read(self):
+        raise NotImplementedError()
+
+
+class ImageReader(BaseReader):
+    def __init__(self):
+        self.width = None
+        self.height = None
+
+    def get_image_size(self):
+        return self.width, self.height
+
+    def set_image_size(self, width, height):
+        self.width = width
+        self.height = height
+
+    def read(self, filename, num_classes, batch_size=256, feature_map=None):
+        assert(self.width is not None and self.height is not None)
+        assert(self.width > 0 and self.height > 0)
+        reader = tf.TFRecordReader()
+        tf.add_to_collection(filename, batch_size)  # is this really needed?
+        key, value = reader.read_up_to(filename, batch_size)
+        if feature_map is None:
+            feature_map = {
+                'label': tf.FixedLenFeature([], tf.int64),
+                'image_raw': tf.FixedLenFeature([self.width * self.height], tf.int64),
+            }
+
+        features = tf.parse_example(value, features=feature_map)
+
+        images = tf.cast(features["image_raw"], tf.float32) * (1. / 255)
+
+        if feature_map.get('label') is not None:
+            labels = tf.cast(features['label'], tf.int32)
+            one_hot = tf.map_fn(lambda x: tf.cast(slim.one_hot_encoding(x, num_classes), tf.int32), labels)
+            one_hot = tf.reshape(one_hot, [-1, num_classes])
+            return one_hot, images
+
+        empty_labels = tf.reduce_sum(tf.zeros_like(images), axis=1)
+        return empty_labels, images

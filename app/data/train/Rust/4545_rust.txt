@@ -1,0 +1,177 @@
+use std::io;
+use protocol::raknet::{NetworkSerializable, NetworkDeserializable, NetworkSize};
+use protocol::raknet::types;
+use byteorder::{ReadBytesExt, WriteBytesExt};
+
+pub trait Packet: NetworkSerializable + NetworkDeserializable + NetworkSize {
+
+    fn packet_id(&self) -> u8;
+}
+
+define_network_struct!(Unidentified => {
+    id: u8,
+    data: Vec<u8>
+});
+
+impl Packet for Unidentified {
+
+    fn packet_id(&self) -> u8 {
+        self.id
+    }
+}
+
+impl Into<PacketTypes> for Unidentified {
+
+    fn into(self) -> PacketTypes {
+        PacketTypes::Unidentified(self)
+    }
+}
+
+macro_rules! define_packets {
+    ($(($id:expr, $name:ident) => {$($field_name:ident: $field_type:ty),*}),+) => (
+        #[derive(Debug)]
+        pub enum PacketTypes {
+            $($name($name)),+,
+            Unidentified(Unidentified)
+        }
+
+        impl PacketTypes {
+
+            pub fn packet_id(&self) -> u8 {
+                match self {
+                    $(&PacketTypes::$name(ref packet) => packet.packet_id()),+,
+                    &PacketTypes::Unidentified(ref packet) => packet.id
+                }
+            }
+        }
+
+        impl NetworkSerializable for PacketTypes {
+
+            fn write_serialize(&self, stream: &mut io::Write) -> io::Result<()> {
+                Ok(match self {
+                    $(&PacketTypes::$name(ref packet) => {
+                        stream.write_u8(packet.packet_id())?;
+                        packet.write_serialize(stream)?;
+                    },)+
+                    &PacketTypes::Unidentified(ref packet) => {
+                        packet.write_serialize(stream)?;
+                    }
+                })
+            }
+        }
+
+        impl NetworkDeserializable for PacketTypes {
+
+            fn read_deserialize(stream: &mut io::Read) -> io::Result<Self> {
+                Ok(match stream.read_u8()? {
+                    $($id => PacketTypes::$name($name::read_deserialize(stream)?),)+
+                    x => PacketTypes::Unidentified(Unidentified {
+                        id: x,
+                        data: Vec::read_deserialize(stream)?
+                    })
+                })
+            }
+        }
+
+        $(
+            define_network_struct!($name => {$($field_name: $field_type),*});
+
+            impl Packet for $name {
+
+                fn packet_id(&self) -> u8 {
+                    $id as u8
+                }
+            }
+
+            impl Into<PacketTypes> for $name {
+
+                fn into(self) -> PacketTypes {
+                    PacketTypes::$name(self)
+                }
+            }
+        )+
+    )
+}
+
+define_packets!(
+    (0x00, ConnectedPing) => {
+        time: i64
+    },
+    (0x01, UnconnectedPing1) => {
+        time: i64,
+        magic: types::Magic
+    },
+    (0x02, UnconnectedPing2) => {
+        time: i64,
+        magic: types::Magic
+    },
+    (0x03, ConnectedPong) => {
+        ping_time: i64,
+        pong_time: i64
+    },
+    (0x05, OfflineConnectionRequest1) => {
+        magic: types::Magic,
+        protocol_version: u8,
+        mtu: Vec<u8>
+    },
+    (0x06, OfflineConnectionResponse1) => {
+        magic: types::Magic,
+        server_guid: i64,
+        use_security: bool,
+        mtu: i16
+    },
+    (0x07, OfflineConnectionRequest2) => {
+        magic: types::Magic,
+        server_addr: types::Address,
+        mtu: i16,
+        client_guid: i64
+    },
+    (0x08, OfflineConnectionResponse2) => {
+        magic: types::Magic,
+        server_guid: i64,
+        client_addr: types::Address,
+        mtu: i16,
+        encryption_enabled: bool
+    },
+    (0x09, OnlineConnectionRequest) => {
+        guid: i64,
+        time: i64,
+        use_security: bool
+    },
+    (0x10, ServerHandshake) => {
+        client_addr: types::Address,
+        system_idx: i16,
+        internal_id: [types::Address; 10],
+        request_time: i64,
+        time: i64
+    },
+    (0x13, ClientHandshake) => {
+        client_addr: types::Address,
+        internal_id: [types::Address; 10],
+        request_time: i64,
+        time: i64
+    },
+    (0x19, IncompatibleProtocol) => {
+        protocol: u8,
+        magic: types::Magic,
+        server_guid: i64
+    },
+    (0x1C, UnconnectedPong) => {
+        time: i64,
+        server_guid: i64,
+        magic: types::Magic,
+        server_info: types::NetworkString
+    },
+    (0x80, EncapsulatedPacket0) => {
+        frame_set: types::FrameSet
+    },
+    (0x84, EncapsulatedPacket4) => {
+        frame_set: types::FrameSet
+    },
+    (0xA0, NAck) => {
+        nack: types::LengthPrefixedVec<u16, types::AckRecord>
+    },
+    (0xC0, Ack) => {
+        ack: types::LengthPrefixedVec<u16, types::AckRecord>
+    }
+);

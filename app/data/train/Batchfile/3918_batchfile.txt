@@ -1,0 +1,1 @@
+cmd_drivers/usb/misc/appledisplay.ko := ../tools/arm-bcm2708/arm-bcm2708hardfp-linux-gnueabi/bin/arm-bcm2708hardfp-linux-gnueabi-ld -EL -r  -T ./scripts/module-common.lds --build-id  -o drivers/usb/misc/appledisplay.ko drivers/usb/misc/appledisplay.o drivers/usb/misc/appledisplay.mod.o

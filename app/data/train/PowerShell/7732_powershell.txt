@@ -1,0 +1,80 @@
+<#
+
+  Title:	VM Discovery Tool
+  Version:	1.0
+  Author:	Will Longo (wlongo-nospam@longoconsulting.us)
+  Purpose:	Gather information based on clusters provided by SIR
+
+  Usage: Requires selection of vcenter server and assigned cluster. Script will return
+		 memory and cpu utilization report for each host within cluster allowing you to
+		 ghetto load balance your servers when using my mass deploy script.
+
+  Versioning:
+    1.0 - Initial creation
+#>
+#requires -version 3.0
+if ( (Get-PSSnapin | Where-Object { $_.Name -eq "VMware.VimAutomation.Core"}) -eq $null ){
+	Add-PSSnapIn VMware.VimAutomation.Core}
+###################Program
+function Program{
+	$credSuper = $Host.ui.PromptForCredential("VCenter Credentials","Enter your vcenter super account and password","","")
+	if(!$credSuper){write-host "Cancelled by User!" -ForegroundColor Yellow -BackgroundColor Red;return}
+	$cred = new-vicredentialstoreitem -host $vcserver -user $credSuper.UserName -Password $credSuper.GetNetworkCredential().password
+	Connect-VIServer -server $cred.Host -user $cred.User -Password $cred.Password -wa 0
+	$host.ui.RawUI.WindowTitle = "VM Discovery Tool"	
+	#gather info - host/mem/cpu
+	if(!$vmcluster){
+	get-cluster | select Name | ft -autosize | out-default
+	$vmcluster = read-host "What Cluster from the above list were you assigned?"}
+	#get the info
+	$result1 = get-vmhost -location $vmcluster | select name, @{N="CpuUsageMhz"; E={[Math]::Round($_.CpuUsageMhz, 3)}}, @{N="CpuTotalMhz"; E={[Math]::Round($_.CpuTotalMhz, 3)}}, @{N="MemoryUsageGB"; E={[Math]::Round($_.MemoryUsageGB, 3)}}, @{N="MemoryTotalGB"; E={[Math]::Round($_.MemoryTotalGB, 3)}},@{N="MemoryUsage%"; E={"{0:P0}" -f [Math]::Round($_.MemoryUsageGB/$_.MemoryTotalGB, 3)}},@{N="VM Count"; E={$_.ExtensionData.vm.count}},@{N="Uptime"; E={(new-timespan $_.ExtensionData.Summary.Runtime.BootTime $end).days}},@{N="Overall Status"; E={$_.ExtensionData.OverallStatus}},@{N="Configuration Status"; E={$_.ExtensionData.ConfigStatus}} | sort name
+	#gather info - datastore
+	$result2 = get-vmhost -location $vmcluster | get-datastore
+	#gather info - OS Customization Spec
+	$result3 = Get-OSCustomizationSpec | select Name, Description, OSType
+	#gather info - Templates
+	$result4 = get-template
+	#gather info - portgroup
+	$result5 = get-vmhost -location $vmcluster | get-virtualportgroup -wa 0 | select Name, NumPorts
+	#present the info
+	$result1 | format-table -autosize | out-default
+	write-host "Press enter for the Datastore info"
+	pause
+	$result2 | format-table -autosize | out-default
+	write-host "Press enter for the OS Customization Specs"
+	pause
+	$result3 | format-table -autosize | out-default
+	write-host "Press enter for the available VM Templates"
+	pause
+	$result4 | format-table -autosize | out-default
+	write-host "Press enter for the available Portgroups in your cluster"
+	pause
+	$result5 | format-table -autosize | out-default
+	pause
+	#Disconnect and cleanup
+	Disconnect-VIServer $cred.Host -Confirm:$False
+	Remove-VICredentialStoreItem -user $cred.User -confirm:$False
+	Remove-variable vmcluster, result1, result2, result3, result4, result5, cred, credSuper
+	write-host "Completed..."
+}
+###################End functions
+###################Initial Stuff
+Write-host "Will Longo's VM Discovery tool"
+write-host ""
+write-host "1 for nadcwpappvct04.hca.corpad.net"
+write-host "2 for ordcwpappvct03.hca.corpad.net"
+write-host "3 for sadcwpappvct01.hca.corpad.net"
+write-host "4 for fwdcwpappvct03.hca.corpad.net"
+write-host "5 for drdcwpappvct09.hca.corpad.net"
+write-host "6 for mtdvwpappvct01.hca.corpad.net"
+write-host "7 for nadcwlappvct02.hca.corpad.net"
+$x = read-host "Select your vcenter by the number above"
+if ($x -eq 1){$vcserver = "nadcwpappvct04.hca.corpad.net"}
+elseif($x -eq 2){$vcserver = "ordcwpappvct03.hca.corpad.net"}
+elseif($x -eq 3){$vcserver = "sadcwpappvct01.hca.corpad.net"}
+elseif($x -eq 4){$vcserver = "fwdcwpappvct03.hca.corpad.net"}
+elseif($x -eq 5){$vcserver = "drdcwpappvct09.hca.corpad.net"}
+elseif($x -eq 6){$vcserver = "mtdvwpappvct01.hca.corpad.net"}
+elseif($x -eq 7){$vcserver = "nadcwlappvct02.hca.corpad.net"}
+else{Write-Host "Invalid Selection or server not added to script"}
+Program

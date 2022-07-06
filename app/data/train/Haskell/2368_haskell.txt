@@ -1,0 +1,357 @@
+{-# LANGUAGE OverloadedStrings, ScopedTypeVariables #-}
+
+module Main where
+import           Action
+import           Control.Applicative
+import           Control.Concurrent
+import           Control.Lens
+import           Control.Monad
+import           Control.Monad.IO.Class
+import           Control.Monad.State
+import           Data.ByteString.Char8 (pack, unpack, ByteString)
+import qualified Data.Map as M
+import           Data.Maybe (fromJust, isNothing)
+import           Debug.Trace
+import           MainHelper
+import           Mana
+import qualified Snap
+import           Snap hiding (writeBS, state)
+import           Snap.Util.FileServe (serveDirectory)
+import           State
+import           System.Log.Logger
+
+import Cards
+
+-- debugging purposes
+--writeBS str = trace (take 50 $ show str) (Snap.writeBS str)
+writeBS :: ByteString -> Snap ()
+writeBS = Snap.writeBS
+
+type GSHandler = MVar GameState -> MVar (Maybe String, IORequest) -> MVar GameAction -> Snap ()
+
+setupGame :: GameState -> IO GameState
+setupGame = execStateT defaultGame'
+  where defaultGame' = do
+          forM_ [1..7] $ \_ -> drawCard 1
+          forM_ [1..6] $ \_ -> drawCard 0
+          processGameState
+
+nickDeck :: String
+nickDeck = "20 x Swamp\n40 x Tenacious Dead"
+--nickDeck = "3 x Battle Sliver\n11 x Mountain\n12 x Forest\n2 x Blur Sliver\n2 x Groundshaker Sliver\n3 x Manaweft Sliver\n2 x Megantic Sliver\n3 x Predatory Sliver\n4 x Striking Sliver\n3 x Thorncaster Sliver\n3 x Giant Growth\n3 x Fog\n2 x Naturalize\n3 x Shock\n4 x Enlarge"
+
+--mitchellDeck = "30 x Mountain\n6 x Regathan Firecat\n8 x Lava Axe\n6 x Battle Sliver\n4 x Blur Sliver\n4 x Shock\n4 x Thunder Strike"
+mitchellDeck :: String
+mitchellDeck = "13 x Mountain\n1 x Canyon Minotaur\n1 x Dragon Hatchling\n2 x Goblin Shortcutter\n2 x Pitchburn Devils\n2 x Regathan Firecat\n3 x Chandra's Outrage\n2 x Lava Axe\n1 x Seismic Stomp\n1 x Shock\n2 x Thunder Strike"
+
+main :: IO ()
+main = do
+  updateGlobalLogger "Game" (setLevel DEBUG)
+  updateGlobalLogger "MVar" (setLevel DEBUG)
+  stateMVar <- newEmptyMVar
+  input <- newMVar (Nothing, IOReqPriority 0)
+  output <- newEmptyMVar :: IO (MVar GameAction)
+  gameState <- setupGame =<<
+               buildGame stateMVar input output
+                         "Nicholas" nickDeck "Mitchell" mitchellDeck
+  debugM "MVar" "main putting initial game state"
+  putMVar stateMVar gameState
+  threadID <- spawnLogicThread stateMVar output input
+  tID <- newMVar threadID
+  quickHttpServe $ site stateMVar input output tID
+
+site :: MVar GameState ->
+        MVar (Maybe String, IORequest) ->
+        MVar GameAction ->
+        MVar ThreadId ->
+        Snap ()
+site stateMVar input output tID = ifTop (writeBS "Magic: the Gathering, yo!") <|>
+             route [("gameBoard", gameBoardHandler stateMVar input output)
+                   ,("clickCard", clickCardHandler stateMVar input output)
+                   ,("useAbility", useAbilityHandler stateMVar input output)
+                   ,("pass", passPriority stateMVar input output)
+                   ,("targetPlayer",
+                     targetPlayerHandler stateMVar input output)
+                   ,("chooseColor", chooseColorHandler stateMVar input output)
+                   ,("decideYes", youMayHandler DecideYes stateMVar input output)
+                   ,("decideNo",  youMayHandler DecideNo  stateMVar input output)
+                   ,("debug", printState stateMVar)
+                   ,("/static", serveDirectory "./M14/")
+                   ,("/client", serveDirectory "../magic-spieler/web-client/")
+                   ,("/newGame", newGame tID stateMVar input output)
+--                   ,("/setupPlayer", runHandler setupPlayer state)
+                    ]
+
+printState :: MVar GameState -> Snap ()
+printState stateMVar = liftIO $ print =<< readMVar stateMVar
+
+clickCardHandler :: GSHandler
+clickCardHandler state input output = do
+  noInput <- liftIO $ isEmptyMVar input
+  if noInput
+    then writeBS "Waiting on server..."
+    else do
+      params <- getParams
+      let lookups = do
+            pID <- "playerID" `M.lookup` params
+            cID <- "cardID" `M.lookup` params
+            return (head pID, head cID)
+      case lookups of
+        Nothing -> writeBS "Error! Please pass in playerID, cardID"
+        Just (playerID :: ByteString, cardID :: ByteString) ->
+          clickCard state input output
+                    (read $ unpack playerID)
+                    (read $ unpack cardID)
+
+clickCard :: MVar GameState -> MVar (Maybe String, IORequest) -> MVar GameAction
+             -> Int -> Int -> Snap ()
+clickCard stateMVar input output playerID cardID = do
+  s <- liftIO $ readMVar stateMVar
+  inputVal@(_, ioreq) <- liftIO $ takeMVar input
+  case ioreq of
+    IOReqChooseBlocker ->
+      if playerID == (s^.currentPlayerID)
+      then do writeBS "You can't block yourself!"
+              liftIO $ putMVar input inputVal
+      else doAction input output (DeclareIsBlocker playerID cardID)
+    IOReqChooseBlockee blockerID
+      | playerID == (s^.currentPlayerID) ->
+        do writeBS "You can't block yourself!"
+           liftIO $ putMVar input inputVal
+      | cardID `notElem` (s^.attackers) ->
+          do writeBS "That isn't attacking. Choose who to block."
+             liftIO $ putMVar input inputVal
+      | otherwise ->
+            doAction input output (DeclareBlocker playerID (blockerID, cardID))
+    IOReqPriority _ ->
+      doAction input output $ actionForClick playerID (s^.card cardID) s
+    IOReqTargeting pID pred cID ->
+      let valid = evalState (pred cID (CardTarget cardID)) s
+      in if valid
+         then doAction input output (TargetCard playerID cardID)
+         else do writeBS "Invalid target choice. Pick another target."
+                 liftIO $ putMVar input inputVal
+    _ -> error $ "Unknown IORequest " ++ show ioreq
+
+
+doAction :: MVar (Maybe String, IORequest) ->
+            MVar GameAction ->
+            GameAction ->
+            Snap ()
+doAction input output action = do
+  -- Sanity checks
+  inputEmpty <- liftIO (isEmptyMVar input)
+  outputEmpty <- liftIO (isEmptyMVar output)
+  unless inputEmpty $
+    error ("doAction " ++ show action ++ " - input not empty")
+  unless outputEmpty $
+    error ("doAction " ++ show action ++ " - output not empty")
+  liftIO $ debugM "MVar" "doAction putting output MVar"
+  liftIO $ putMVar output action
+  liftIO $ debugM "MVar" "doAction reading input MVar"
+  (maybeError, ioreq) <- liftIO $ readMVar input
+  case maybeError of
+    Just err -> writeBS (pack err)
+    Nothing ->
+      let message =
+            case ioreq of
+              IOReqPriority _ -> "OK"
+              IOReqTargeting _ _ _ -> "Select a target"
+              IOReqBlocking _ _ -> "IOReqBlocking - shouldn't be used..."
+              IOReqChooseBlocker -> "Choose a blocker"
+              IOReqChooseBlockee _ -> "Choose who to block"
+              IOReqChooseCard _ _ -> "Choose a card"
+              IOReqChooseColor _ -> "Choose a color"
+              IOReqYouMay _ _ -> "Choose an option"
+      in writeBS message
+
+useAbilityHandler :: MVar GameState ->
+                     MVar (Maybe String, IORequest) ->
+                     MVar GameAction ->
+                     Snap ()
+useAbilityHandler stateMvar input output = do
+  params <- getParams
+  liftIO $ debugM "MVar"
+    "useAbilityHandler reading state MVar, taking input MVar"
+  state <- liftIO $ readMVar stateMvar
+  ioreq <- liftIO $ tryTakeMVar input
+  let lookups = do
+        pID <- "playerID" `M.lookup` params
+        cID <- "cardID" `M.lookup` params
+        aID <- "abilityID" `M.lookup` params
+        return ((read . unpack . head) pID,
+                (read . unpack . head) cID,
+                (read . unpack . head) aID)
+  case ioreq of
+    Nothing -> writeBS "Ability use canceled, waiting on server..."
+    Just ioreq'@(_, IOReqPriority _) ->
+      case lookups of
+        Nothing -> do
+          writeBS "Invalid call to useAbility"
+          liftIO $ putMVar input ioreq'
+        Just (pID, cID, aID) -> do
+          let cardAbilities = state^.card cID.abilities
+              maybeAbility = cardAbilities^?ix aID
+          case maybeAbility of
+            Nothing -> do
+              writeBS "Invalid ability index - programmer error"
+              liftIO $ putMVar input ioreq'
+            Just ability -> -- liftIO $
+                            --   putMVar output (DoAbility pID cID ability)
+              doAction input output (DoAbility pID cID ability)
+    _ -> error "Unknown IORequest in useAbilityHandler"
+
+chooseColorHandler :: GSHandler
+chooseColorHandler _ input output = do
+  params <- getParams
+  liftIO $ debugM "MVar"
+    "chooseColorHandler reading state MVar, taking input MVar"
+  ioreq <- liftIO $ tryTakeMVar input
+  let lookups = do
+        pID <- "playerID" `M.lookup` params
+        color <- "color" `M.lookup` params
+        return ((read . unpack . head) pID,
+                (unpack . head) color)
+  case ioreq of
+    Just ioreq'@(_, IOReqChooseColor reqID) ->
+      case lookups of
+        Nothing -> writeBS "Invalid call to chooseColor"
+        Just (pID, colorString) ->
+          let color = parseManaCost colorString
+            in if (pID /= reqID) || length color /= 1
+               then do
+                 writeBS "Please choose exactly 1 color."
+                 liftIO $ putMVar input ioreq'
+               else doAction input output (ChooseColor $ head color)
+    Just ioreq' -> do
+      writeBS "Not looking for a color right now."
+      liftIO $ putMVar input ioreq'
+    Nothing -> writeBS "Not looking for a color right now."
+
+youMayHandler :: GameAction -> GSHandler
+youMayHandler action _ input output = do
+  params <- getParams
+  liftIO $ debugM "MVar"
+    "youMayHandler reading state MVar, taking input MVar"
+  ioreq <- liftIO $ tryTakeMVar input
+  let maybePID = do
+        pID <- "playerID" `M.lookup` params
+        return $ (read . unpack . head) pID
+  case ioreq of
+    Just ioreq'@(_, IOReqYouMay reqID _) ->
+      case maybePID of
+        Nothing -> writeBS "Invalid call to decide{Yes,No}"
+        Just pID ->
+          if (pID /= reqID)
+          then do
+            writeBS "It is not your decision."
+            liftIO $ putMVar input ioreq'
+          else doAction input output action
+    Just ioreq' -> do
+      writeBS "Not looking for a decision right now."
+      liftIO $ putMVar input ioreq'
+    Nothing -> writeBS "Not looking for a decision right now."
+
+targetPlayerHandler :: GSHandler
+targetPlayerHandler stateMVar input output = do
+  params <- getParams
+  liftIO $ debugM "MVar"
+    "targetPlayerHandler reading state MVar, taking input MVar"
+  state <- liftIO $ readMVar stateMVar
+  ioreq <- liftIO $ tryTakeMVar input
+  let lookups = do
+        pID <- "sourceID" `M.lookup` params
+        tID <- "targetID" `M.lookup` params
+        return ((read . unpack . head) pID,
+                (read . unpack . head) tID)
+  case ioreq of
+    Just ioreq'@(_, IOReqTargeting _ pred cID) ->
+      case lookups of
+        Nothing -> writeBS "Invalid call to targetPlayer"
+        Just (pID, tID) ->
+          let valid = evalState (pred cID (PlayerTarget tID)) state
+            in if not valid
+               then do
+                 writeBS "Invalid Choice"
+                 liftIO $ putMVar input ioreq'
+               else doAction input output (TargetPlayer pID tID)
+    Just ioreq' -> do
+      writeBS "Not looking for a target right now."
+      liftIO $ putMVar input ioreq'
+    Nothing -> writeBS "Not looking for a target right now."
+
+attacker :: Integer
+attacker = 0 -- TODO - how to do this?
+
+errorAction :: GameAction
+errorAction = PayCost 0 0 (ManaCost $ replicate 9001 B)
+
+actionForClick :: Int -> Card -> GameState -> GameAction
+actionForClick pID c s
+  | c^.cardID `elem` s^.playerWithID pID.hand = PlayCard pID (c^.cardID)
+  | Land `elem` (c^.cardType) = DoAbility pID (c^.cardID) (head $ c^.abilities)
+  | Creature `elem` (c^.cardType) = if s^.currentPlayerID == pID
+                                    then DeclareAttacker pID (c^.cardID)
+                                    else errorAction --DeclareBlocker pID (c^.cardID, attacker)
+  | otherwise = errorAction
+
+gameBoardHandler :: GSHandler
+gameBoardHandler stateMVar _ _ = do
+  state <- liftIO (readMVar stateMVar)
+  xml <- liftIO $ toXML state
+  writeBS . pack $ xml
+
+passPriority :: GSHandler
+passPriority stateMVar input output = do
+  params <- getParams
+  liftIO $ debugM "MVar"
+    "passPriority reading state MVar, taking input MVar"
+  s <- liftIO $ readMVar stateMVar
+  (_, ioreq) <- liftIO $ readMVar input
+  let callingPIDList = "playerID" `M.lookup` params
+  if isNothing callingPIDList
+     then writeBS "Error - No pID sent with \"pass\" command"
+    else do
+    let callingPID = read . unpack . head . fromJust $ callingPIDList
+    case ioreq of
+      IOReqPriority pID ->
+        if callingPID == pID
+        then do _ <- liftIO $ takeMVar input
+                doAction input output (PassAction callingPID)
+        else writeBS "Please wait for your opponent."
+      IOReqChooseBlocker ->
+        if s^.currentPlayerID /= callingPID
+        then do _ <- liftIO $ takeMVar input
+                doAction input output (PassAction callingPID)
+        else writeBS "Please wait for your opponent."
+      _ -> writeBS $ pack $ "You can't pass - waiting on " ++ show ioreq
+
+newGame :: MVar ThreadId -> GSHandler
+newGame tID state input output = do
+  params <- getParams
+  let lookups = do
+        p1Name <- "p1Name" `M.lookup` params
+        p1Deck <- "p1Deck" `M.lookup` params
+        p2Name <- "p2Name" `M.lookup` params
+        p2Deck <- "p2Deck" `M.lookup` params
+        return (p1Name, p1Deck, p2Name, p2Deck)
+  case lookups of
+    Nothing -> writeBS "Incorrect call to newGame"
+    Just (p1Name, p1Deck, p2Name, p2Deck) -> liftIO $ do
+      threadID <- takeMVar tID
+      killThread threadID
+
+      _ <- tryTakeMVar input
+      _ <- tryTakeMVar output
+      _ <- tryTakeMVar state
+      putMVar input (Nothing, IOReqPriority 0)
+      gameState <- setupGame =<<
+                   buildGame state input output
+                             (unpack $ head p1Name)
+                             (unpack $ head p1Deck)
+                             (unpack $ head p2Name)
+                             (unpack $ head p2Deck)
+      putMVar state gameState
+
+      threadID' <- spawnLogicThread state output input
+      putMVar tID threadID'

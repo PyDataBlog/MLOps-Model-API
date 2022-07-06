@@ -1,0 +1,605 @@
+-- User defined variables ------------------------
+-- Common
+local ENABLE_CHUNKLOADER = true
+local CLEAR_PASSAGES = false
+local REBUILD_FLOORS = false
+  local floorMaterials = {
+    "minecraft:cobblestone"
+  }
+-- Tunneling
+--local AUTO_SHUTDOWN = false
+--local PLACE_TORCHES = false
+--  local distanceBetweenTorches = 10
+-- Autominer
+local mineableOre = {
+  "minecraft:iron_ore",
+  "minecraft:gold_ore",
+  "minecraft:redstone_ore",
+  "minecraft:diamond_ore",    --
+  "minecraft:coal_ore",
+  "minecraft:lapis_ore",
+  "IC2:blockOreTin",
+  "IC2:blockOreCopper",
+  "IC2:blockOreLead",
+  "IC2:blockOreUran"
+}
+
+local valuableItems = {
+  "minecraft:iron_ore",
+  "minecraft:gold_ore",
+  "IC2:blockOreTin",
+  "IC2:blockOreCopper",
+  "IC2:blockOreLead",
+  "IC2:blockOreUran"
+}
+
+-- System variables ------------------------------
+local component = require("component")
+local robot = require("robot")
+local computer = require("computer")
+local math = require("math")
+local shell = require("shell")
+local term = require("term")
+local sides = require("sides")
+local event = require("event")
+local keyboard = require("keyboard")
+local ic = component.inventory_controller
+local geo = component.navigation
+local cl = component.chunkloader
+local geolyzer = component.geolyzer
+
+local logFile = io.open("mine.log", "w")
+local INVENTORY_SIZE
+local isInitiated = false
+
+-- Task manager
+local tasks = {mine = 0, move = 1, idle = 2, reset = 3}
+local stackOfTasks = {}
+
+-- Navigation
+local baseCoords = {}
+local vertices = {}
+
+-- Deprecated
+local currentShaftLenght = 0 --убрать
+local targetShaftLenght = 400
+
+-- Program code ----------------------------------
+-- System
+function init()
+--spec:
+--depends: none.
+
+  INVENTORY_SIZE = robot.inventorySize()
+
+  -- Greeting
+  term.clear()
+  print("Hello. " .. robot.name() .. " is at your service.")
+  computer.beep(880, 0.1)
+  computer.beep(987, 0.1)
+
+  -- Chunkloader
+  if ENABLE_CHUNKLOADER and not cl.isActive() then
+    cl.setActive(true)
+    print("msg: Chunkloader is activated.")
+  elseif not ENABLE_CHUNKLOADER and cl.isActive() then
+    cl.setActive(false)
+    print("msg: Chunkloader is deactivated.")
+  end
+
+--  baseCoords = {x=0, y=0, z=0} -- сделать как надо
+
+  isInitiated = true
+end
+
+function log(str)
+  logFile:seek("end")
+  logFile:write(str .. "\n")
+  logFile:flush()
+end
+
+function addVertex(currentCoords, fromCoords)
+  table.insert(vertices)
+  vertices[#vertices].x = coords.x
+  vertices[#vertices].y = coords.y
+  vertices[#vertices].z = coords.z
+  vertices[#vertices].edges = {}
+  
+  return (#vertices)  -- returns index of the new vertex.
+end
+
+function addEdge(edge)
+  -- цикл по vertices и edges с добавлением в обе стороны
+end
+
+function searchVertexByCoords(coords)
+
+end
+
+function finishCurrentTask()
+  table.remove(stackOfTasks, #stackOfTasks)
+end
+
+function onTimer()
+  --функция для проверки работы ивентов. переделать для таймера автовыключения.
+  computer.shutdown(true)
+end
+
+function rtbRoutine()
+  -- 3. Return to the current point later.
+  table.insert(stackOfTasks, #stackOfTasks+1, {task = tasks.move, coords = getCurrentCoords()})
+  -- 2. Recharge.
+  table.insert(stackOfTasks, #stackOfTasks+1, {task = tasks.idle})
+  -- 1. Head back to the base.
+  table.insert(stackOfTasks, #stackOfTasks+1, {task = tasks.move, coords = baseCoords})
+end
+
+-- Utility
+function dumpTrash()
+  --двойной цикл на отсутствие в списке ценностей
+end
+
+function storeGoodies(side)
+  for counter = 1, INVENTORY_SIZE do
+    robot.select(counter)
+    ic.dropIntoSlot(side, counter)
+  end
+end
+
+function howMany(objectName)
+  local result = 0
+
+  for counter = 1, INVENTORY_SIZE do
+    inventoryObject = ic.getStackInInternalSlot(counter)
+    if inventoryObject and inventoryObject.name == objectName then
+      result = result + inventoryObject.size
+    end
+  end
+
+  return result
+end
+
+function findItemSlot(objectName)
+-- spec: searches for the specified item in inventory and returns its slot number.
+-- in:   objectName - string that contains identificator of the object.
+-- out:  result - number of the slot in inventory if item is found or 0 if it's not.
+
+  local result = 0
+
+  for counter = 1, INVENTORY_SIZE do
+    inventoryObject = ic.getStackInInternalSlot(counter)
+    if inventoryObject and inventoryObject.name == objectName then
+      result = counter
+      break
+    end
+  end
+
+  return result
+end
+
+-- Navigation
+function getCurrentCoords()
+  local currentX, currentY, currentZ = geo.getPosition()
+  currentX = math.floor(currentX)
+  currentY = math.floor(currentY)
+  currentZ = math.floor(currentZ)
+  coords = {x = currentX, y = currentY, z = currentZ}
+  return coords
+end
+
+function moveTo(targetCoords, targetFacing)
+  local currentCoords = getCurrentCoords()
+
+  local dx = targetCoords.x - currentCoords.x
+  local dy = targetCoords.y - currentCoords.y
+  local dz = targetCoords.z - currentCoords.z
+
+  -- Towards west.
+  if dx < 0 then 
+    while geo.getFacing() ~= 4 do
+      robot.turnLeft()
+    end
+  -- Towards east.
+  elseif dx > 0 then 
+    while geo.getFacing() ~= 5 do
+      robot.turnRight()
+    end
+  end
+
+  -- Towards south.
+  if dz > 0 then 
+    while geo.getFacing() ~= 3 do
+      robot.turnRight()
+    end
+  -- Towards north.
+  elseif dz < 0 then 
+   while geo.getFacing() ~= 2 do
+     robot.turnLeft()
+   end
+  end
+
+  -- Up.
+  if dy > 0 then
+    for counter = 1, math.abs(dy) do
+      while robot.detectUp() do
+        robot.swingUp()
+      end
+
+      robot.up()
+    end
+  -- Down.
+  elseif dy < 0 then
+    for counter = 1, math.abs(dy) do
+      while robot.detectDown() do
+        robot.swingDown()
+      end
+
+      robot.down()
+    end
+  end
+  
+  if dx ~= 0 then
+    for counter = 1, math.abs(dx) do
+      while robot.detect() do
+        robot.swing()
+      end
+
+      robot.forward()
+    end
+  end
+  
+  if dz ~= 0 then
+    for counter = 1, math.abs(dz) do
+      while robot.detect() do
+        robot.swing()
+      end
+
+      robot.forward()
+    end
+  end
+
+  while geo.getFacing() ~= targetFacing do
+    robot.turnRight()
+  end
+
+  return true
+--сделать красивые повороты
+--расчищать путь
+end
+
+function calculateRouteTo(targetCoords)
+
+end
+
+function align(direction)
+
+end
+
+-- Mining
+function scanSides(scanningSides)
+-- spec: 
+-- out: returns a table containing sides list which can be used with Sides API.
+
+  resultTable = {}
+  
+  for sidesCounter, sidesValue in ipairs(scanningSides) do
+    scannedBlock = geolyzer.analyze(sidesValue)
+
+    for mineableOreCounter, mineableOreValue in ipairs(mineableOre) do
+      if mineableOreValue == scannedBlock.name then
+        table.insert(resultTable, sidesValue)
+      end
+    end
+  end
+
+  return resultTable
+end
+
+function checkDurability()
+-- spec: checks durability of the instrument and if it is broken adds an rtb task.
+-- in:
+-- out:
+-- depends:
+
+-- заменить на стандартную
+
+  -- Gather information about equipped instrument.
+  ic.equip(1)
+    equippedItem = ic.getStackInInternalSlot(1)
+    -- Return to base if current charge is below 1%. 
+    if equippedItem.charge <= 0.01*equippedItem.maxCharge then
+      print("err: The drill is broken, RTB.")
+      rtbRoutine()
+    end
+  ic.equip(1)
+end
+
+function drill(miningSides)
+-- spec:
+-- in:
+-- out:
+-- depends: checkDurability()
+  
+  if checkDurability() == false then
+    return false
+  end
+
+  -- Mine only selected sides: front, top or bottom.
+  for miningSidesCounter, miningSidesValue in ipairs(miningSides) do
+    if miningSidesValue == sides.top then
+      while robot.detectUp() do
+        robot.swingUp()
+        if CLEAR_PASSAGES then
+          os.sleep(0.4)
+        end
+      end
+    
+    elseif miningSidesValue == sides.front then
+      while robot.detect() do
+        robot.swing()
+        if CLEAR_PASSAGES then
+          os.sleep(0.4)
+        end
+      end
+    
+    elseif miningSidesValue == sides.bottom then
+      robot.swingDown()
+    end  
+  end
+
+  return true
+end
+
+function makePassage(passageProfile)
+-- spec:
+-- in: passageProfile - table containing sides which have to be removed.
+-- out:
+-- depends: drill(), findItemSlot()
+
+  if not drill(passageProfile) then
+    return false
+  end
+  
+  if REBUILD_FLOORS and not robot.detectDown() then
+    -- искать по списку предметов в инвентаре
+    local slot = findItemSlot("minecraft:cobblestone")
+    if slot > 0  and slot <= INVENTORY_SIZE then
+      robot.select(slot)
+      ic.equip()
+      robot.useDown()
+      ic.equip()
+    else
+      print("err: No more cobblestone.")
+    end
+  end
+  
+  -- реализовать для tunneling
+  --if PLACE_TORCHES and not placeTorch() then
+  --  return false
+  --end
+  
+  if not robot.forward() then
+    return false
+  end
+
+  return true
+end
+
+function recurtion()
+  currPos = getCurrentCoords()
+  currFacing = geo.getFacing()
+  
+  positiveSides = scanSides({sides.front, sides.back, sides.left, sides.right, sides.top, sides.bottom})
+  positiveCoords = {}
+
+  if #positiveSides < 1 then
+    return
+  else
+    for positiveSidesCounter, positiveSidesValue in ipairs(positiveSides) do
+      positiveCoords[positiveSidesCounter] = getCurrentCoords()
+
+      -- north
+      if positiveSidesValue == sides.front and currFacing == 2 then
+        positiveCoords[positiveSidesCounter].z = positiveCoords[positiveSidesCounter].z - 1
+      elseif positiveSidesValue == sides.right and currFacing == 2 then
+        positiveCoords[positiveSidesCounter].x = positiveCoords[positiveSidesCounter].x + 1
+      elseif positiveSidesValue == sides.left and currFacing == 2 then
+        positiveCoords[positiveSidesCounter].x = positiveCoords[positiveSidesCounter].x - 1
+      elseif positiveSidesValue == sides.back and currFacing == 2 then
+        positiveCoords[positiveSidesCounter].z = positiveCoords[positiveSidesCounter].z + 1
+
+      -- south
+      elseif positiveSidesValue == sides.front and currFacing == 3 then
+        positiveCoords[positiveSidesCounter].z = positiveCoords[positiveSidesCounter].z + 1
+      elseif positiveSidesValue == sides.right and currFacing == 3 then
+        positiveCoords[positiveSidesCounter].x = positiveCoords[positiveSidesCounter].x - 1
+      elseif positiveSidesValue == sides.left and currFacing == 3 then
+        positiveCoords[positiveSidesCounter].x = positiveCoords[positiveSidesCounter].x + 1
+      elseif positiveSidesValue == sides.back and currFacing == 3 then
+        positiveCoords[positiveSidesCounter].z = positiveCoords[positiveSidesCounter].z - 1
+        
+      -- east
+      elseif positiveSidesValue == sides.front and currFacing == 5 then
+        positiveCoords[positiveSidesCounter].x = positiveCoords[positiveSidesCounter].x + 1
+      elseif positiveSidesValue == sides.right and currFacing == 5 then
+        positiveCoords[positiveSidesCounter].z = positiveCoords[positiveSidesCounter].z + 1
+      elseif positiveSidesValue == sides.left and currFacing == 5 then
+        positiveCoords[positiveSidesCounter].z = positiveCoords[positiveSidesCounter].z - 1
+      elseif positiveSidesValue == sides.back and currFacing == 5 then
+        positiveCoords[positiveSidesCounter].x = positiveCoords[positiveSidesCounter].x - 1
+        
+      -- west
+      elseif positiveSidesValue == sides.front and currFacing == 4 then
+        positiveCoords[positiveSidesCounter].x = positiveCoords[positiveSidesCounter].x - 1
+      elseif positiveSidesValue == sides.right and currFacing == 4 then
+        positiveCoords[positiveSidesCounter].z = positiveCoords[positiveSidesCounter].z - 1
+      elseif positiveSidesValue == sides.left and currFacing == 4 then
+        positiveCoords[positiveSidesCounter].z = positiveCoords[positiveSidesCounter].z + 1
+      elseif positiveSidesValue == sides.back and currFacing == 4 then
+        positiveCoords[positiveSidesCounter].x = positiveCoords[positiveSidesCounter].x + 1
+      
+      -- up and down
+      elseif positiveSidesValue == sides.up then
+        positiveCoords[positiveSidesCounter].y = positiveCoords[positiveSidesCounter].y + 1
+      elseif positiveSidesValue == sides.down then
+        positiveCoords[positiveSidesCounter].y = positiveCoords[positiveSidesCounter].y - 1
+      end
+    end
+
+    for positiveCoordsCounter, positiveCoordsValue in ipairs(positiveCoords) do
+      local currentOrientation = geo.getFacing()
+      local currentPosition = getCurrentCoords()
+
+      if #positiveSides > 0 then
+      
+        if positiveSides[positiveCoordsCounter] == sides.right then
+          robot.turnRight()
+        elseif positiveSides[positiveCoordsCounter] == sides.left then
+          robot.turnLeft()
+        elseif positiveSides[positiveCoordsCounter] == sides.back then
+          robot.turnAround()
+        end
+  
+        if positiveSides[positiveCoordsCounter] == sides.top then
+          drill({sides.top})
+        elseif positiveSides[positiveCoordsCounter] == sides.bottom then
+          drill({sides.bottom})
+        else
+          drill({sides.front})
+        end
+        
+        moveTo(positiveCoordsValue, 2)
+      end      
+
+      recurtion()
+
+      moveTo(currentPosition, currentOrientation)
+    end
+  end
+end
+
+-- Deprecated tunneling functions.
+function placeTorch()
+  if currentShaftLenght % distanceBetweenTorches == 0 and currentShaftLenght > 0 then
+
+    local slot = findItemSlot("minecraft:torch")
+    if slot > 0  and slot <= INVENTORY_SIZE then
+      robot.select(slot)
+    else
+      print("err: No more torches, RTB.")
+      addTask(tasks.rtb)
+      return false
+    end
+
+    robot.turnAround()
+    robot.place()
+    robot.turnAround()
+  end
+
+  return true
+end
+
+function rtb()
+  robot.turnAround()
+
+  if robot.detectUp() and robot.durability() then
+    robot.swingUp()
+  end
+
+  robot.up()
+
+  for counter = 1, currentShaftLenght do
+    while robot.detect() do
+      robot.swing()
+    end
+    robot.forward()
+  end
+
+  robot.down()
+  robot.turnAround()
+
+  currentShaftLenght = 0
+  return true
+end
+
+--реализовать ввод параметров
+--local args = shell.parse(...)
+--if #args < 1 then
+--  targetShaftLenght = -1
+--else
+--  targetShaftLenght = tonumber(args[1])
+--end
+
+-- Main loop -------------------------------------
+-- spec: implements simple state machine and handles stack of tasks.
+local abortProgram = false
+while not abortProgram do
+  if not isInitiated then
+    init()
+    baseCoords = getCurrentCoords()
+
+    table.insert(stackOfTasks, {task = tasks.move, coords = baseCoords, facing = 2})
+    table.insert(stackOfTasks, {task = tasks.mine, coords = {}})
+    --table.insert(stackOfTasks, {task = tasks.move, coords = {x=41, y=0, z=43}, facing = 3})
+    
+  end
+  
+  --event.pull()
+
+  --if keyboard.isAltDown() then
+  --  abortProgram = true
+  --end
+
+  if #stackOfTasks > 0 then
+    currentTask = stackOfTasks[#stackOfTasks]
+
+    if currentTask.task == tasks.move then
+      if moveTo(currentTask.coords, currentTask.facing) then
+        finishCurrentTask()
+        goto continue
+      end
+    
+    elseif currentTask.task == tasks.mine then
+    
+      local miningSides = {sides.front}
+      if not makePassage(miningSides) then
+        goto continue
+      end
+    
+      recurtion()
+    
+      -- убрать
+      currentShaftLenght = currentShaftLenght + 1
+      if targetShaftLenght > 0 and currentShaftLenght >= targetShaftLenght then
+        finishCurrentTask()
+        print(currentShaftLenght .. " пытаюсь завершить задание")
+        goto continue
+      end
+    
+    elseif currentTask.task == tasks.move then
+    
+      -- Если текущие коодинаты и направление и целевые не совпадают, то
+      -- проложить маршрут к точке по графу.
+      --  если маршрут сложный, то поместить его в стек, заменив текущий
+      --  если простой, то дойти до конца и удалить текущий.
+    
+    elseif currentTask.task == tasks.idle then
+    
+      --event.timer(30, onTimer, 50)
+    
+      if AUTO_SHUTDOWN then
+        computer.shutdown()
+      end
+      abortProgram = true
+    
+    elseif currentTask.task == tasks.reset then
+      -- удалить файл стека задач, сбросить все переменные в исходное состояние.
+    end
+
+  -- If stack of tasks is empty try to load from a file or make a brand new one.
+  --elseif
+    -- сделать новый стэк задач или загрузить из файла.
+  end
+
+  ::continue::
+end

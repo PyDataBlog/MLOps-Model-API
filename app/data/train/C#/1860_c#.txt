@@ -1,0 +1,111 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Data.Entity;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using Lucca.Upgrading.Abstractions;
+using Lucca.Upgrading.Discovery;
+using Lucca.Upgrading.Strategy;
+using Lucca.Upgrading.Test.EfDb;
+using Lucca.Upgrading.Test.Fakes;
+using Xunit;
+
+namespace Lucca.Upgrading.Test
+{
+    public class EfDatabaseFixture : IDisposable
+    {
+        private const string _database = "TestDb";
+        public string ConnectionString = @"Server=(localdb)\v11.0;Integrated Security=true;Initial Catalog=TestDb;Connection Timeout=30;";
+
+        public void SetSetting(UpdateSettings settings)
+        {
+            string dir = Directory.GetCurrentDirectory();
+            string sqlFodler = Path.Combine(dir, "EfDb");
+            settings.ConnectionString = ConnectionString;
+            settings.ScriptFolder = sqlFodler;
+            settings.KeywordsSubstitutions = new Dictionary<string, string>();
+            settings.KeywordsSubstitutions.Add("[MyCustomStringToReplace]", "{27E31783-954A-4590-B969-456006AC21AB}");
+        }
+
+        public void Dispose()
+        {
+            SqlHelper.DropDatabase(_database);
+        }
+    }
+
+    public class SqlExecutionTests : IClassFixture<EfDatabaseFixture>
+    {
+        private readonly EfDatabaseFixture _fixture;
+
+        public SqlExecutionTests(EfDatabaseFixture fixture)
+        {
+            _fixture = fixture;
+        }
+         
+
+        [Fact]
+        public async Task EfCodeFirstThenSqlSchema()
+        {
+            string guid = Guid.NewGuid().ToString();
+
+            UpdateReport report = await CodeFirstThenSqlTest(f => f.Name == "12 - blogSchemaChange.sql" || f.Name == "13 Update Data.sql", 
+                guid, new Step(54, () => Task.FromResult(StepState.Success)));
+
+            Assert.NotNull(report);
+            Assert.Equal(true, report.Success);
+            Assert.Equal(3, report.Reports.Count);
+
+            using (var context = new BloggingContext(_fixture.ConnectionString))
+            {
+                Post post = await context.Posts.Where(i => i.Content == guid).FirstOrDefaultAsync();
+                Assert.NotNull(post);
+                Assert.Equal("42", post.Title);
+            }
+        }
+
+        [Fact]
+        public async Task EfCodeFirstThenSqlSWithParameters()
+        {
+            string guid = Guid.NewGuid().ToString();
+
+            UpdateReport report = await CodeFirstThenSqlTest(f => f.Name == "14 With Sql params.sql", 
+                guid, new Step(42, () => Task.FromResult(StepState.Success)));
+
+            Assert.NotNull(report);
+            Assert.Equal(true, report.Success);
+            Assert.Equal(2, report.Reports.Count);
+
+            using (var context = new BloggingContext(_fixture.ConnectionString))
+            {
+                Blog post = await context.Blogs.Where(i => i.Name == "{27E31783-954A-4590-B969-456006AC21AB}").FirstOrDefaultAsync();
+                Assert.NotNull(post);
+            }
+        }
+
+        private async Task<UpdateReport> CodeFirstThenSqlTest(Func<FileInfo, bool> fileFilter, string guid, IUpdateStep additionalStep)
+        {
+            using (var context = new BloggingContext(_fixture.ConnectionString))
+            {
+                context.Blogs.Add(new Blog
+                {
+                    Name = "the blog",
+                    Posts = new List<Post>
+                        {
+                            new Post {Title = "Hi", Content = guid}
+                        }
+                });
+                await context.SaveChangesAsync();
+            }
+
+            var sqlService = new SqlUpdateStepDiscoveryService(fileFilter);
+
+            var services = new List<IUpdateStepDiscoveryService> { new DiscoveryFakeService(additionalStep), sqlService };
+
+            var updater = new Updater(services, new EfRepository(_fixture.ConnectionString), new NotRunMigrationStrategy());
+            _fixture.SetSetting(updater.Settings);
+            Batch batch = updater.Prepare();
+            return await updater.RunUpdater(batch);
+        }
+    }
+}

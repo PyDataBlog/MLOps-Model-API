@@ -1,0 +1,109 @@
+using Vallado, Base.Test
+
+
+# Vallado (2001), Example 11-6, p.829-30.
+line1 = "1 16609U 86017A   93352.53502934  .00007889  00000 0  10529-3      34"
+line2 = "2 16609  51.6190  13.3340 0005770 102.5680 257.5950 15.59114070 44786"
+
+satnum1, class, intldesg, epoch, ṅ, n̈, b★, TLEnum, i, Ω, e, ω, M, n, revnum = parseTLE(line1, line2)
+
+JD₀ = julianDate(1997, 4, 1, 21, 36, 0)
+@test JD₀ == 2450540.4
+
+n *= 2π/86400
+ṅ *= 2π/86400^2*2
+n̈ *= 2π/86400^3*6
+
+μ  = μ⨁
+ 
+p  = ∛(μ/n^2)*(1-e^2)
+E  = kepEqtnE(M, e)
+ν  = anomaly2ν(E, e)
+
+r⃗₀, v⃗₀ = RANDV(p, e, i, Ω, ω, ν)
+
+@test isapprox(r⃗₀[1], 6585.038266 , rtol=1e-6)
+@test isapprox(r⃗₀[2], 1568.184321 , rtol=1e-6)
+@test isapprox(r⃗₀[3],    9.116355 , rtol=1e-6)
+@test isapprox(v⃗₀[1],   -1.1157766, rtol=1e-6)
+@test isapprox(v⃗₀[2],    4.6316816, rtol=1e-6)
+@test isapprox(v⃗₀[3],    6.0149576, rtol=1e-6)
+
+JD = julianDate(1997, 4, 2, 1, 8, 0)
+@test JD ≈ 2450540.5472
+
+r⃗, v⃗ = pKepler(r⃗₀, v⃗₀, 86400*(JD-JD₀), ṅ, n̈)
+
+@test isapprox(r⃗[1], -2811.3586, rtol=1e-4)
+@test isapprox(r⃗[2],  3486.2272, rtol=1e-4)
+@test isapprox(r⃗[3],  5069.5546, rtol=1e-4)
+@test isapprox(v⃗[1],    -6.8596, rtol=1e-4)
+@test isapprox(v⃗[2],    -2.9648, rtol=1e-4)
+@test isapprox(v⃗[3],    -1.7648, rtol=1e-4)
+
+ϕ_gd   = deg2rad( 42.38)
+λ      = deg2rad(-71.13)
+h_ellp = 24/1e3
+
+vis, q = visibilityAngles(r⃗, JD, λ, ϕ_gd, h_ellp)
+@test vis == "Visible"
+
+θ_GMST, θ_LST = LSTime(JD, λ=λ)
+@test isapprox(θ_LST, deg2rad(136.2944), rtol=1e-6)
+
+r⃗_site = site_ijk(θ_LST, ϕ_gd, h_ellp)
+@test isapprox(r⃗_site[1], -3411.1225, rtol=1e-6)
+@test isapprox(r⃗_site[2],  3260.3788, rtol=1e-6)
+@test isapprox(r⃗_site[3],  4276.8924, rtol=1e-6)
+
+ρ⃗ = r⃗' - r⃗_site'
+ijk_C_sez = rot3mat(-θ_LST)*rot2mat(ϕ_gd-0.5*π)
+
+ρ⃗ = ijk_C_sez'*ρ⃗ # [sez]
+@test isapprox(ρ⃗[1], -773.6886, rtol=1e-2)
+@test isapprox(ρ⃗[2], -577.6745, rtol=1e-2)
+@test isapprox(ρ⃗[3],  326.7046, rtol=1e-2)
+
+r⃗☉ = sun(JD) # [AU]
+@test isapprox(r⃗☉[1], 0.9765, rtol=1e-3)
+@test isapprox(r⃗☉[2], 0.1960, rtol=1e-3)
+@test isapprox(r⃗☉[3], 0.0850, rtol=1e-3)
+
+r⃗☉ *= AU # [km]
+
+ζ = asin(norm(r⃗☉ × vec(r⃗))/(norm(r⃗☉)*norm(r⃗)))
+@test isapprox(ζ, deg2rad(76.0393), rtol=1e-4)
+
+Dist = norm(r⃗)*cos(ζ - 0.5*π)
+@test isapprox(Dist, 1.0292*R⨁, rtol=1e-4)
+
+
+JDs_test = [(2,  1,  8)
+            (1, 22,  0)
+            (1, 23, 30)
+            (1, 23, 32)
+            (1, 23, 34)
+            (1, 23, 36)
+            (2,  1,  6)
+            (2,  1,  8)
+            (2,  1, 10)
+            (2,  1, 12)
+            (2,  1, 14)]
+
+Vis_test   = ["Visible", "Radar Sun", "Visible", "Visible", "Visible", "Visible", "Visible", "Visible", "Radar Night", "Radar Night", "Radar Night"]
+ρ⃗          = [-773.6886 -577.6745 326.7046]
+range_test = [norm(ρ⃗), 1926.8709, 1738.6880, 1208.9464, 1151.0123, 1617.3545, 1787.4217, 1019.3320, 574.8788, 1040.3959, 1811.9563]
+az_test    = [48.9477, 313.9064, 341.3249, 26.7924, 58.3564, 310.1824, 323.2531, 29.2134, 92.3719, 104.9278]
+el_test    = [3.4758, 5.6486, 14.0546, 15.3278, 7.2074, 5.0535, 18.6937, 41.6979, 18.1174, 4.7792]
+
+for i = 1:length(JDs_test)
+    (day, hr, min)   = JDs_test[i]
+    JD_start         = julianDate(1997, 4, day, hr, min, 0)
+    JDs, Vis, Angles = predict(r⃗₀, v⃗₀, 1.0, JD₀, JD_start, JD_start, λ, ϕ_gd, h_ellp, ṅ=ṅ, n̈=n̈)
+    
+    @test Vis[1] == Vis_test[i]
+    @test isapprox(Angles[3], range_test[i], rtol=1e-4)
+    
+    (i ≠ 1) && (@test isapprox(Angles[1], deg2rad(az_test[i-1]), rtol=1e-2))
+    (i ≠ 1) && (@test isapprox(Angles[2], deg2rad(el_test[i-1]), rtol=1e-1))    
+end

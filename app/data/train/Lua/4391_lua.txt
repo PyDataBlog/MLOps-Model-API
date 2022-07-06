@@ -1,0 +1,86 @@
+local ickey_passwd="C=299792.458"  --我方密钥
+
+local ip=ngx.var.remote_addr  --客户端IP
+
+local real_ip = ngx.req.get_headers()["x_forwarded_for"]
+
+
+if real_ip ~= nil then
+    for astr in string.gfind(real_ip, "%d+%.%d+%.%d+%.%d+") do
+        if string.find(astr,"10%.")==nil then  --10
+            if string.find(astr,"172%.16")==nil then  --172.16
+                if string.find(astr,"192%.168")==nil then  --192.168
+                    real_ip = astr
+                    break                
+                end
+            end
+        end
+    end
+end
+
+if real_ip == nil then
+    real_ip = ngx.req.get_headers()["http_cdn_src_ip"]
+end
+
+if real_ip == nil then
+    real_ip = ngx.req.get_headers()["http_client_ip"]
+end
+
+if real_ip ~= nil then
+    ip = real_ip
+end
+
+local searnd = ngx.var.cookie_searnd  --COOKIE值：客户端随机数
+local seacheck_time = ngx.var.cookie_seach  --COOKIE值：客户端校验出错次数
+
+if(seacheck_time == nil) then
+    seacheck_time = 0
+else 
+    seacheck_time=tonumber(seacheck_time) or 0
+end
+
+--TODO:当某一IP的实时计算值校验出错达到上限时，要考虑此IP是否进入灰名单观察
+--local CHECK_LIMIT=10000
+--if(CHECK_LIMIT <= tonumber(seacheck_time)) then
+--    return ngx.redirect("http://www.ickey.cn/")
+--end
+
+if(searnd == nil) then
+    searnd = os.time() .. "_".. os.clock()  --客户端随机数=当前时间int值_2位小数的秒值
+end
+
+local user_mark = ip .. "|" .. searnd .. "|" .. ickey_passwd  --客户端唯一标识明文
+local token = ngx.md5(user_mark) --客户端唯一标识实时计算值
+local seaut= ngx.var.cookie_seaut --COOKIE值：客户端唯一标识MD5加密值
+
+local need_redirect=0
+
+if(seaut == nil) then
+    --没有客户端唯一标识MD5加密值
+    need_redirect=1
+else
+    if (seaut~= token) then
+        --客户端唯一标识MD5加密值 与 实时计算值 不一样
+        seacheck_time = seacheck_time+1
+        need_redirect=1
+    end
+end
+
+local req_args=""
+if(ngx.var.args ~= nil) then
+    req_args=ngx.var.args
+end
+
+local final_url=ngx.var.scheme .. "://" .. ngx.var.host .. ngx.var.uri .. "?" .. req_args .. "&__tm=" .. searnd
+if(need_redirect == 1) then
+    --hqb_pv=0; domain=.okhqb.com; path=/; expires=31 Dec 2011 23:55:55 GMT
+    ngx.header["Set-Cookie"] = {"seaut=" .. token .. ";domain=.ickey.cn;path=/;expires=31 Dec 2099 23:55:55 GMT;", "searnd=" .. searnd .. ";domain=.ickey.cn;path=/;expires=31 Dec 2099 23:55:55 GMT;", "seach=" .. seacheck_time .. ";domain=.ickey.cn;path=/;expires=31 Dec 2099 23:55:55 GMT;"}
+    return ngx.redirect(final_url)
+end
+
+--ngx.say("searnd=" .. searnd .. " ip=" .. ip .. " seaut=" .. seaut .. " token=" .. token .. " ngx.var.uri=" ..ngx.var.uri)
+
+ngx.req.set_uri_args(req_args .. "&ip=" .. ip .. "&user_mark=" .. user_mark)
+
+
+

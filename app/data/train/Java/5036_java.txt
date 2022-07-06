@@ -1,0 +1,554 @@
+package com.game.clean;
+
+import org.apache.log4j.Logger;
+
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.util.Arrays;
+import java.util.LinkedList;
+import java.util.concurrent.*;
+
+/**
+ * Created by wanggq on 2016/11/9.
+ */
+public class MainUI {
+    Logger logger = Logger.getLogger(this.getClass());
+    JFrame frame;
+    JBallPanel[] panels;
+    static final int ROWS = 13, COLUMNS = 13;
+    static int[] step_length = {-COLUMNS, 1, COLUMNS, -1};
+    // 背景色
+    static final Color LIGHT = new Color(42, 59, 77), DEEP = new Color(35, 49, 64);
+    static final String[] ball_color = {"", "红", "黄", "蓝", "绿", "青", "紫", "灰"};
+    // 球的颜色
+    static Color[] Ball_color = {null, new Color(200, 20, 3)
+            , new Color(190, 68, 22)
+            , new Color(211, 154, 27)
+            , new Color(0, 169, 29)
+            , new Color(0, 224, 224)
+            , new Color(32, 67, 251)
+            , new Color(169, 33, 168)
+            , new Color(76, 76, 76)};
+    // 球的图片
+    static Image[] Ball_image = {
+            null, new ImageIcon("./src/com/game/clean/icon/1.jpg").getImage()
+            , new ImageIcon("./src/com/game/clean/icon/2.jpg").getImage()
+            , new ImageIcon("./src/com/game/clean/icon/3.jpg").getImage()
+            , new ImageIcon("./src/com/game/clean/icon/4.jpg").getImage()
+            , new ImageIcon("./src/com/game/clean/icon/5.jpg").getImage()
+            , new ImageIcon("./src/com/game/clean/icon/6.jpg").getImage()
+            , new ImageIcon("./src/com/game/clean/icon/7.jpg").getImage()
+            , new ImageIcon("./src/com/game/clean/icon/8.jpg").getImage()
+    };
+    int[] map = {
+            8, 8, 3, 0, 0, 7, 0, 0, 8, 0, 8, 0, 6,
+            6, 7, 0, 6, 1, 0, 6, 0, 0, 0, 2, 0, 0,
+            0, 0, 2, 0, 6, 5, 1, 3, 0, 3, 0, 6, 0,
+            0, 2, 0, 6, 5, 7, 7, 0, 1, 6, 1, 1, 1,
+            3, 2, 0, 8, 0, 0, 0, 5, 7, 0, 7, 2, 0,
+            7, 8, 2, 3, 0, 0, 0, 8, 0, 0, 0, 5, 0,
+            0, 5, 8, 4, 5, 7, 0, 7, 4, 6, 2, 0, 3,
+            2, 1, 1, 1, 0, 0, 5, 2, 3, 2, 0, 0, 3,
+            5, 0, 4, 5, 0, 4, 0, 0, 6, 0, 4, 0, 3,
+            0, 0, 8, 0, 3, 8, 0, 0, 4, 1, 0, 7, 7,
+            0, 0, 8, 3, 6, 4, 4, 2, 0, 0, 5, 4, 0,
+            1, 0, 0, 0, 8, 1, 0, 5, 0, 0, 4, 4, 2,
+            0, 0, 5, 0, 0, 0, 7, 4, 0, 6, 3, 0, 0
+    };
+    // 评分: 一次消2个得2分, 一次消3个得4分, 一次消4个得10分
+    int[] score_map = {0, 0, 2, 4, 10}, total_ball;
+    static String[] btn_name = {"开始", "暂停"};
+    int start_time = 0;   // 开始时间统计
+    int click_total = 0;  // 点击次数统计
+    int score = 0;        // 分数统计
+    JLabel stepLabel, timeLabel, scoreLabel;
+    JButton startButton;
+    Timer timer, animationTimer;
+    LinkedList<int[]> stack;
+
+    public MainUI() {
+        frame = new JFrame("消弹珠");
+        frame.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        frame.setSize(60 * COLUMNS, 60 * ROWS + 40);
+
+        // 头部Bar
+        JPanel topPanel = new JPanel();
+        topPanel.setLayout(new GridLayout(1, 3));
+        topPanel.setBackground(Color.LIGHT_GRAY);
+
+        JPanel leftPanel = new JPanel(new GridLayout(1, 2, 0, 10));
+        topPanel.add(leftPanel);
+        JPanel clickPanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        leftPanel.add(clickPanel);
+        JLabel click_lab = new JLabel("点击:");
+        clickPanel.add(click_lab);
+        stepLabel = new JLabel("0");
+        stepLabel.setFont(new Font("Courier New", Font.BOLD, 20));
+        clickPanel.add(stepLabel);
+        JPanel scorePanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        leftPanel.add(scorePanel);
+        JLabel score_lab = new JLabel("得分:");
+        scorePanel.add(score_lab);
+        scoreLabel = new JLabel("0");
+        scoreLabel.setFont(new Font("Courier New", Font.BOLD, 20));
+        scorePanel.add(scoreLabel);
+
+        JPanel centerPanel = new JPanel();
+        topPanel.add(centerPanel);
+        startButton = new JButton("开始");
+        startButton.setName("0");
+        startButton.addMouseListener(startMouseAdapter);
+        centerPanel.add(startButton);
+
+        JPanel rightPanel = new JPanel(new GridLayout(1, 2, 0, 10));
+        topPanel.add(rightPanel);
+        JPanel timePanel = new JPanel(new FlowLayout(FlowLayout.LEFT));
+        timeLabel = new JLabel("00:00");
+        timeLabel.setFont(new Font("Courier New", Font.BOLD, 20));
+        timeLabel.setLayout(new FlowLayout(FlowLayout.LEFT));
+        timePanel.add(timeLabel);
+        rightPanel.add(timePanel);
+        JPanel tiPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT));
+        JButton helpButton = new JButton("提示");
+        helpButton.setSize(60, rightPanel.getHeight());
+        helpButton.setLayout(new FlowLayout(FlowLayout.RIGHT));
+        helpButton.addMouseListener(helpMouseAdapter);
+        tiPanel.add(helpButton);
+        rightPanel.add(tiPanel);
+        frame.add(topPanel, BorderLayout.NORTH);
+
+        // 游戏区
+        JPanel bodyPanel = new JPanel();
+        bodyPanel.setLayout(new GridLayout(ROWS, COLUMNS));
+        bodyPanel.setSize(frame.getWidth(), frame.getHeight() - topPanel.getHeight());
+        frame.add(bodyPanel);
+
+        // 画格子
+        panels = new JBallPanel[ROWS * COLUMNS];
+        for (int i = 0, len = panels.length; i < len; i++) {
+            panels[i] = new JBallPanel();
+            panels[i].setBackground((i & 1) == 0 ? DEEP : LIGHT);
+            panels[i].setName(String.valueOf(i));
+            bodyPanel.add(panels[i]);
+//            panels[i].setNo(String.valueOf(i)); // TODO debug
+        }
+        // 初始化弹珠的个数
+        total_ball = new int[9];
+        for (int i = 0; i < map.length; i++) {
+            total_ball[map[i]]++;
+        }
+        // 增加全局键盘事件
+        Toolkit.getDefaultToolkit().addAWTEventListener(e -> {
+            if (e.getID() == KeyEvent.KEY_PRESSED) {
+                KeyEvent ke = (KeyEvent) e;
+                int code = ke.getKeyCode();
+                switch (code) {
+                    // 空格暂停
+                    case KeyEvent.VK_SPACE:
+                        pause();
+                        break;
+                    // backspace, delete, 左键反悔一步
+                    case KeyEvent.VK_DELETE:
+                    case KeyEvent.VK_BACK_SPACE:
+                    case KeyEvent.VK_LEFT:
+                        backward();
+                        break;
+                }
+            }
+        }, AWTEvent.KEY_EVENT_MASK);
+
+        frame.setVisible(true);
+        stack = new LinkedList<>();
+    }
+
+    /**
+     * 画球以及擦除球
+     *
+     * @param display true:显示 false:隐藏
+     */
+    void drawBall(boolean display) {
+        // 画球  按赤橙黄绿青蓝紫灰的顺序分别用1-8表示
+        if (display) {
+            for (int i = 0, len = map.length; i < len; i++) {
+                int n;
+                if ((n = map[i]) != 0) {
+                    // TODO 暂时使用颜色代替
+                    panels[i].setColor(Ball_color[n]);
+                } else {
+                    // 没有画球的空地增加鼠标点击事件
+                    panels[i].addMouseListener(checkMouseAdapter);
+                }
+            }
+            // 初始化计时器
+            if (timer == null) {
+                timer = new Timer(1000, e -> timeLabel.setText(timeFormat(++start_time)));
+            }
+            timer.start();
+            if (animationTimer == null) {
+                animationTimer = new Timer(150, null);
+            }
+        } else {
+            for (int i = 0, len = map.length; i < len; i++) {
+                if (map[i] != 0) {
+                    panels[i].deleteIcon();
+                } else {
+                    // 不显示球的时候同时去除鼠标事件
+                    panels[i].removeMouseListener(checkMouseAdapter);
+                }
+            }
+            timer.stop(); // 暂停计时
+        }
+    }
+
+    /**
+     * 鼠标点击空格子后的处理
+     *
+     * @param index 格子的下标
+     */
+    int[] check(int index) {
+        int row = index / COLUMNS, col = index % ROWS;
+        // 横向查找
+        int xs = index, xn = index, xl = row * COLUMNS, xu = (row + 1) * COLUMNS - 1;
+        while (xs - 1 >= xl && map[--xs] == 0) ;
+        while (xn + 1 <= xu && map[++xn] == 0) ;
+        // 纵向查找
+        int ys = index, yn = index, yl = col, yu = map.length - (COLUMNS - col);
+        while (ys - COLUMNS >= yl && map[ys -= COLUMNS] == 0) ;
+        while (yn + COLUMNS <= yu && map[yn += COLUMNS] == 0) ;
+        logger.info("xs:" + xs + ", xl:" + xn + ", ys:" + ys + ", yl:" + yn);
+        return check0(xs, xn, ys, yn);
+    }
+
+    /**
+     * 扫描4个方向是否有相同颜色的球
+     *
+     * @param n
+     */
+    private int[] check0(int... n) {
+        int[] clone = n.clone();
+        for (int i = 0, len = n.length - 1; i < len; i++) {
+            if (clone[i] == -1) continue;
+            for (int j = i + 1; j < len + 1; j++) {
+                if (clone[j] == -1) continue;
+                if (map[n[j]] != 0 && map[n[i]] == map[n[j]]) {
+                    clone[i] = -1;
+                    clone[j] = -1;
+                }
+            }
+        }
+        int[] log = new int[n.length];
+        int index = 0;
+        for (int i = 0; i < clone.length; i++) {
+            if (clone[i] == -1) {
+                log[index++] = n[i];
+            }
+        }
+        logger.info("消除[" + index + "]个球.");
+        return index > 0 ? Arrays.copyOf(log, index) : null;
+    }
+
+    /**
+     * 消除球体
+     *
+     * @param indexs
+     */
+    void delete(int... indexs) {
+        ActionListener[] actions = animationTimer.getActionListeners();
+        for (ActionListener action : actions) {
+            animationTimer.removeActionListener(action);
+            int info = ((AnimationListener) action).get();
+            whenError(info);
+        }
+        for (int i = 0; i < indexs.length; i++) {
+            int index = indexs[i], cc = map[index];
+            indexs[i] = index * 10 + map[index];
+            map[index] = 0;
+            total_ball[cc]--;
+            panels[index].deleteIcon();
+            // 消除球体之后会留下一个空的格子, 要给空格子加上鼠标点击事件
+            panels[index].addMouseListener(checkMouseAdapter);
+//            int last = index - c, t = last / COLUMNS, s, l;
+//            if (t > 0) {
+//                s = t;
+//                l = COLUMNS;
+//            } else if (t < 0) {
+//                s = -t;
+//                l = -COLUMNS;
+//            } else if (last > 0) {
+//                s = last;
+//                l = 1;
+//            } else {
+//                s = -last;
+//                l = -1;
+//            }
+            animationTimer.addActionListener(new AnimationListener(index, cc));
+        }
+        animationTimer.start();
+        stack.push(indexs);
+        markScore(stack.peek().length);
+    }
+
+    /**
+     * 评分: 一次消2个得2分, 一次消3个得4分, 一次消4个得10分
+     *
+     * @param size >0:消除 <0:反回
+     * @return
+     */
+    void markScore(int size) {
+        int s;
+        if (size > 0) {
+            s = score_map[size];
+        } else {
+            s = -score_map[-size];
+        }
+        scoreLabel.setText(String.valueOf(score += s));
+        Color c;
+        if (score > 150) {
+            c = Color.RED;
+        } else if (score > 100) {
+            c = Color.PINK;
+        } else if (score > 50) {
+            c = Color.BLUE;
+        } else c = Color.BLACK;
+        scoreLabel.setForeground(c);
+    }
+
+    /**
+     * 时间格式化, 将秒格式化为00:00
+     *
+     * @param time 秒
+     * @return
+     */
+    String timeFormat(int time) {
+        int m = time / 60, s = time % 60;
+        char[] cs = {'0', '0', ':', '0', '0'};
+        cs[0] += m / 10;
+        cs[1] += m % 10;
+        cs[3] += s / 10;
+        cs[4] += s % 10;
+        return new String(cs);
+    }
+
+    /**
+     * 暂停
+     */
+    void pause() {
+        // 暂停->开始/开始->暂停
+        int i = Integer.parseInt(startButton.getName());
+        drawBall(i == 0);
+        i = i == 0 ? 1 : 0;
+        startButton.setName(String.valueOf(i));
+        startButton.setText(btn_name[i]);
+    }
+
+    /**
+     * 回退
+     */
+    void backward() {
+        if (stack.isEmpty()) {
+            logger.info("stack is empty.");
+            return;
+        }
+        int[] log = stack.pop();
+        for (int l : log) {
+            int index = l / 10, color = l % 10;
+            map[index] = color;
+            panels[index].setColor(Ball_color[color]);
+        }
+        markScore(-log.length);
+    }
+
+    /**
+     * 提示
+     */
+    void smartHelp() {
+        // TODO 优先找最大可消除位置
+        int n;
+        if ((n = fastFail()) > 0) {
+            JOptionPane.showMessageDialog(frame, "剩余["+ball_color[n]+"色]弹珠无法完全.");
+        }
+        // 1.查找空格子
+
+        // 2.记录可以消除的弹珠数
+        // 3.比较大小然后得到最大的数
+        // 4.查检剩余的弹珠是否能完全消除
+    }
+
+    /**
+     * 快速失败
+     * @return
+     */
+    int fastFail() {
+        // 1.如果该颜色只有1个
+        for (int i = 0; i < total_ball.length; i++) {
+            if (total_ball[i] == 1) return i;
+        }
+        // 2.同一颜色有多个
+        for (int i = 0; i < map.length; i++) {
+            if (i == 0) continue;
+            int row = i / COLUMNS, col = i % ROWS, c = map[i];
+            // 横向查找
+            int xs = i, xn = i, xl = row * COLUMNS, xu = (row + 1) * COLUMNS - 1;
+            while (xs - 1 >= xl && map[--xs] == c) ;
+            while (xn + 1 <= xu && map[++xn] == c) ;
+            // 纵向查找
+            int ys = i, yn = i, yl = col, yu = map.length - (COLUMNS - col);
+            while (ys - COLUMNS >= yl && map[ys -= COLUMNS] == c) ;
+            while (yn + COLUMNS <= yu && map[yn += COLUMNS] == c) ;
+            // 2.1.同颜色相邻
+            if ((xs != xn || ys != yn) && (xn - xs + yn - ys == total_ball[c])) {
+                return c;
+            }
+            // 2.2.同颜色在同一直线且中间隔着其它颜色
+            // 横向查找
+            int n = 0, _n = -1;
+            for (int j = xl; j < xu; j++) {
+                if (map[j] == c) {
+                    if (_n == -1) _n = n;
+                    else if (_n == 9999) _n = 999;
+                    n++;
+                } else {
+                    if (_n != -1) _n = 9999;
+                }
+            }
+            if (n == total_ball[c] && _n == 999) {
+                return c;
+            }
+            n = 0; _n = -1;
+            // 纵向查找
+            for (int j = yl; j < yu; j+=COLUMNS) {
+                if (map[j] == c) {
+                    if (_n == -1) _n = n;
+                    else if (_n == 9999) _n = 999;
+                    n++;
+                } else {
+                    if (_n != -1) _n = 9999;
+                }
+            }
+            if (n == total_ball[c] && _n == 999) {
+                return c;
+            }
+        }
+        return 0;
+    }
+
+    /**
+     * 动画过程中出现错误时将十字路经上的背景使用修改为正确背景
+     *
+     * @param c
+     */
+    void whenError(int c) {
+        panels[c].deleteIcon();
+    }
+
+    void animation(int s, int c, int l) {
+        while (--s > 1) {
+            panels[c].setBackground((c & 1) == 0 ? DEEP : LIGHT);
+            panels[c += l].setBackground(Color.CYAN);
+            try {
+                Thread.sleep(150);
+            } catch (InterruptedException e) {
+                e.printStackTrace();
+            }
+        }
+        panels[c].setBackground((c & 1) == 0 ? DEEP : LIGHT);
+        panels[c + l].deleteIcon();
+        // 消除球体之后会留下一个空的格子, 要给空格子加上鼠标点击事件
+        panels[c + l].addMouseListener(checkMouseAdapter);
+    }
+
+    // 鼠标点击事件--点击空格子
+    MouseAdapter checkMouseAdapter = new MouseAdapter() {
+        @Override
+        public void mouseClicked(MouseEvent e) {
+            super.mouseClicked(e);
+            JBallPanel panel = (JBallPanel) e.getSource();
+            int current = Integer.parseInt(panel.getName());
+            int[] log = check(current);
+            if (log != null) delete(log);
+            stepLabel.setText(String.valueOf(++click_total));
+        }
+    }
+            // 鼠标点击事件--开始/暂停 按钮
+            , startMouseAdapter = new MouseAdapter() {
+        @Override
+        public void mouseClicked(MouseEvent e) {
+            super.mouseClicked(e);
+            pause();
+        }
+    }
+            // 鼠标点击事件--提示
+            , helpMouseAdapter = new MouseAdapter() {
+        @Override
+        public void mouseClicked(MouseEvent e) {
+            super.mouseClicked(e);
+            smartHelp();
+        }
+    };
+
+
+//    /**
+//     * 动画类
+//     */
+//    class AnimationService implements Callable<Integer> {
+//        private int s, c, l;
+//
+//        public AnimationService(int s, int c, int l) {
+//            this.s = s;
+//            this.c = c;
+//            this.l = l;
+//        }
+//
+//        public int[] get() {
+//            return new int[]{s, c, l};
+//        }
+//
+//        @Override
+//        public Integer call() throws Exception {
+//            while (--s > 1) {
+//                SwingUtilities.invokeLater(() -> {
+//                    panels[c].setBackground((c & 1) == 0 ? DEEP : LIGHT);
+//                    panels[c].updateUI();
+//                    panels[c += l].setBackground(Color.CYAN);
+//                    panels[c].updateUI();
+//                });
+//                Thread.sleep(150);
+//            }
+////            SwingUtilities.invokeLater(() -> {
+//            panels[c].setBackground((c & 1) == 0 ? DEEP : LIGHT);
+//            panels[c].updateUI();
+//            panels[c + l].deleteIcon();
+//            panels[c + 1].updateUI();
+//            // 消除球体之后会留下一个空的格子, 要给空格子加上鼠标点击事件
+//            panels[c + l].addMouseListener(checkMouseAdapter);
+////            });
+//            return s - 1;
+//        }
+//    }
+
+    class AnimationListener implements ActionListener {
+        private int c, cc, n = 4;
+
+        public AnimationListener(int c, int cc) {
+            this.c = c;
+            this.cc = cc;
+        }
+
+        public int get() {
+            return c;
+        }
+
+        @Override
+        public void actionPerformed(ActionEvent e) {
+            if (n-- > 0) {
+                Color color = panels[c].getColor(), backColor = (c & 1) == 0 ? DEEP : LIGHT;
+                panels[c].setColor(color == Ball_color[cc] ? backColor : Ball_color[cc]);
+            } else animationTimer.stop();
+        }
+    }
+
+    public static void main(String[] args) {
+        javax.swing.SwingUtilities.invokeLater(() -> new MainUI());
+    }
+}

@@ -1,0 +1,197 @@
+# -*- coding: utf-8 -*-
+
+from django.core.mail import EmailMultiAlternatives
+from django.template import Context, Template
+from django.template.loader import get_template
+
+from helpers import ClientRouter, MailAssetsHelper, strip_accents
+
+
+class UserMail:
+    """
+    This class is responsible for firing emails for Users and Nonprofits
+    """
+    from_email = 'Atados <site@atados.com.br>'
+
+    def __init__(self, user):
+        self.whole_user = user  # This is the Nonprofit or Volunteer object
+        self.user = user.user if not type(user).__name__=='User' else user # This is the User object
+        self.global_context = {
+          "assets": {
+            "check": "https://s3.amazonaws.com/atados-us/images/check.png",
+            "iconFacebook": "https://s3.amazonaws.com/atados-us/images/icon-fb.png",
+            "iconInstagram": "https://s3.amazonaws.com/atados-us/images/icon-insta.png",
+            "logoAtadosSmall": "https://s3.amazonaws.com/atados-us/images/logo.small.png",
+            "logoAtadosSmall2": "https://s3.amazonaws.com/atados-us/images/mandala.png"
+          }
+        }
+
+    def sendEmail(self, template_name, subject, context, user_email=None):
+      text_content = get_template('email/{}.txt'.format(template_name)).render(context)
+      html_content = get_template('email/{}.html'.format(template_name)).render(context)
+
+      msg = EmailMultiAlternatives(subject, text_content, self.from_email, [user_email if user_email else self.user.email])
+      msg.attach_alternative(text_content, "text/plain")
+      msg.attach_alternative(html_content, "text/html")
+      return msg.send() > 0
+
+    def make_context(self, data):
+      context_data = self.global_context.copy()
+      context_data.update(data)
+      return Context(context_data)
+
+    def sendSignupConfirmation(self, site, token):
+      return self.sendEmail('emailVerification', 'Confirme seu email do Atados.', self.make_context({ 'token': token , 'site': site}))
+
+
+class VolunteerMail(UserMail):
+  """
+  This class contains all emails sent to volunteers
+  """
+  def sendSignup(self):
+    """
+    Email A/B from ruler
+    Sent when volunteer completes registration
+    """
+    return self.sendEmail('volunteerSignup', 'Eba! Seu cadastro foi feito com sucesso', self.make_context({}))
+
+  def sendFacebookSignup(self):  # pass by now
+    """
+    Sent when volunteer completes registration from Facebook
+    """
+    return self.sendEmail('volunteerFacebookSignup', 'Seja bem vindo ao Atados! \o/', self.make_context({}))
+
+  def sendAppliesToProject(self, project):
+    """
+    Email for ruler C
+    Sent when volunteer applies to project
+    """
+    return self.sendEmail('volunteerAppliesToProject', u'Você se inscreveu em uma vaga :)', self.make_context({'project': project}))
+
+
+
+  def askActInteractionConfirmation(self, project, volunteer):
+    """
+    Email for ruler D
+    Sent when volunteer applies to project
+    """
+    confirm_url = ClientRouter.mail_routine_monitoring_build_form_url(True, volunteer.user.email, project.nonprofit.name, "")
+    refute_url = ClientRouter.mail_routine_monitoring_build_form_url(False, volunteer.user.email, project.nonprofit.name, "")
+
+    return self.sendEmail('askActInteractionConfirmation', u'Acompanhamento de Rotina:)',
+      self.make_context({
+        'project': project,
+        'confirm_url': confirm_url,
+        'refute_url': refute_url
+      })
+    )
+
+  def sendAskAboutProjectExperience(self, apply):
+    """
+    """
+    subject = u"Como foi sua experiência com a Atados!"
+    feedback_form_url = ClientRouter.mail_ask_about_project_experience_url('volunteer', apply)
+
+    return self.sendEmail('volunteerAskAboutProjectExperience', subject, self.make_context({
+      'project_name': apply.project.name,
+      'feedback_form_url': feedback_form_url,
+      }), apply.volunteer.user.email)
+  #+ def sendAfterApply4Weeks(self):  # new ruler
+  #+   """
+  #+   """
+  #+   context = Context({'user': self.user.name})
+  #+   return self.sendEmail('volunteerAfterApply4Weeks', '~ ~ ~ ~ ~', context)
+
+  #+ def send3DaysBeforePontual(self):  # new ruler
+  #+   """
+  #+   """
+  #+   context = Context({'user': self.user.name})
+  #+   return self.sendEmail('volunteer3DaysBeforePontual', '~ ~ ~ ~ ~', context)
+
+
+class NonprofitMail(UserMail):
+  """
+  This class contains all emails sent to nonprofits
+  """
+  def sendSignup(self):
+    """
+    Email 1 from ruler
+    """
+    return self.sendEmail('nonprofitSignup', 'Recebemos seu cadastro :)', self.make_context({
+      'review_profile_url': ClientRouter.edit_nonprofit_url(self.user.slug)
+    }))
+
+  def sendApproved(self):
+    """
+    Email 2 from ruler
+    """
+    return self.sendEmail('nonprofitApproved', 'Agora você tem um perfil no Atados', self.make_context({
+      'new_act_url': ClientRouter.new_act_url()
+    }))
+
+  def sendProjectPostingSuccessful(self, project):
+    """
+    Email *NEW*
+    """
+    return self.sendEmail('projectPostingSuccessful', 'Vaga criada com sucesso!', self.make_context({
+      'project': project,
+      'edit_project_url': ClientRouter.edit_project_url(project.slug)
+    }))
+
+    edit_nonprofit_act_url(self, act_slug)
+  def sendProjectApproved(self, project):
+    """
+    Email 3 from ruler
+    """
+    return self.sendEmail('projectApproved', 'Publicamos a sua vaga de voluntariado', self.make_context({
+      'project': project,
+      'act_url': ClientRouter.view_act_url(project.slug)
+    }))
+
+  def sendGetsNotifiedAboutApply(self, apply, message):
+    """
+    Email 4 from ruler
+    """
+    try:
+      subject = u'Novo voluntário para o {}'.format(apply.project.name)
+    except UnicodeEncodeError:
+      subject = u'Novo voluntário para o {}'.format(strip_accents(apply.project.name))
+
+    return self.sendEmail('nonprofitGetsNotifiedAboutApply', subject, self.make_context({
+      'apply': apply,
+      'volunteer_message': message,
+      'answer_volunteer_url': ClientRouter.view_volunteer_url(apply.volunteer.user.slug)
+      }), apply.project.email)
+
+  def sendAskAboutProjectExperience(self, project):
+    """
+    """
+    subject = u"Nos conta como foi sua experiência com a Atados!"
+    act_url = ClientRouter.edit_project_url(project.slug)
+    feedback_form_url = ClientRouter.mail_ask_about_project_experience_url('nonprofit', project)
+
+    return self.sendEmail('nonprofitAskAboutProjectExperience', subject, self.make_context({
+      'project_name': project.name,
+      'feedback_form_url': feedback_form_url,
+      'act_url': act_url,
+      }), project.email)
+  #+ def send1MonthInactive(self):
+  #+   """
+  #+   """
+  #+   return self.sendEmail('nonprofit1MonthInactive', '~ ~ ~ ~ ~', self.make_context({
+  #+     'name': self.user.name
+  #+   }))
+
+  #+ def sendPontual(self):
+  #+   """
+  #+   """
+  #+   return self.sendEmail('nonprofitPontual', '~ ~ ~ ~ ~', self.make_context({
+  #+     'name': self.user.name
+  #+   }))
+
+  #+ def sendRecorrente(self):
+  #+   """
+  #+   """
+  #+   return self.sendEmail('nonprofitRecorrente', '~ ~ ~ ~ ~', self.make_context({
+  #+     'name': self.user.name
+  #+   }))

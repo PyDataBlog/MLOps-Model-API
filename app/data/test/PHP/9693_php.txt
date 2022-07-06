@@ -1,0 +1,228 @@
+<?php
+
+set_time_limit(5000);
+require 'vendor/autoload.php';
+include_once 'core.inc.php';
+
+$fb = new Facebook\Facebook([
+    'app_id' => '{enter-app-id}',
+    'app_secret' => '{enter-app-secret}',
+    'default_graph_version' => 'v2.2',
+    'persistent_data_handler' => 'session'
+        ]);
+
+function getLoginUrl() {
+    global $fb;
+    $helper = $fb->getRedirectLoginHelper();
+    $permissions = ['user_photos']; // Optional permissions
+    $loginUrl = $helper->getLoginUrl('http://fbalbummanager.azurewebsites.net/callback.php', $permissions);
+    return $loginUrl;
+}
+
+function setAccessToken() {
+    global $fb;
+    $helper = $fb->getRedirectLoginHelper();
+
+    try {
+        $accessToken = $helper->getAccessToken();
+    } catch (Facebook\Exceptions\FacebookResponseException $e) {
+        // When Graph returns an error
+        echo 'Graph returned an error: ' . $e->getMessage();
+        exit;
+    } catch (Facebook\Exceptions\FacebookSDKException $e) {
+        // When validation fails or other local issues
+        echo 'Facebook SDK returned an error: ' . $e->getMessage();
+        exit;
+    }
+
+    if (!isset($accessToken)) {
+        if ($helper->getError()) {
+            header('HTTP/1.0 401 Unauthorized');
+            echo "Error: " . $helper->getError() . "\n";
+            echo "Error Code: " . $helper->getErrorCode() . "\n";
+            echo "Error Reason: " . $helper->getErrorReason() . "\n";
+            echo "Error Description: " . $helper->getErrorDescription() . "\n";
+        } else {
+            header('HTTP/1.0 400 Bad Request');
+            echo 'Bad request';
+        }
+        exit;
+    }
+    $_SESSION['fb_access_token'] = (string) $accessToken;
+}
+
+function setUserProfileDetails() {
+    global $fb;
+    try {
+        // Returns a `Facebook\FacebookResponse` object
+        $response = $fb->get('/me?fields=id,name', $_SESSION['fb_access_token']);
+    } catch (Facebook\Exceptions\FacebookResponseException $e) {
+        echo 'Graph returned an error: ' . $e->getMessage();
+        exit;
+    } catch (Facebook\Exceptions\FacebookSDKException $e) {
+        echo 'Facebook SDK returned an error: ' . $e->getMessage();
+        exit;
+    }
+
+    $user = $response->getGraphUser();
+    $_SESSION['user_id'] = $user['id'];
+    $_SESSION['name'] = $user['name'];
+    echo $_SESSION['user_id'];
+}
+
+function setUserProfilePic() {
+    global $fb;
+    try {
+        // Returns a `Facebook\FacebookResponse` object
+        $res = $fb->get('/me/picture?type=large&redirect=false', $_SESSION['fb_access_token']);
+    } catch (Facebook\Exceptions\FacebookResponseException $e) {
+        echo 'Graph returned an error: ' . $e->getMessage();
+        exit;
+    } catch (Facebook\Exceptions\FacebookSDKException $e) {
+        echo 'Facebook SDK returned an error: ' . $e->getMessage();
+        exit;
+    }
+    $picture = $res->getGraphObject();
+    $_SESSION['pic'] = $picture['url'];
+}
+
+function getAlbumList() {
+    if (inCache('cache/' . $_SESSION['user_id'] . '_albumList.json')) {
+        return json_decode(getFromCache('cache/' . $_SESSION['user_id'] . '_albumList.json'));
+    } else {
+        global $fb;
+        try {
+            // Returns a `Facebook\FacebookResponse` object
+            $res = $fb->get('/me/albums', $_SESSION['fb_access_token']);
+        } catch (Facebook\Exceptions\FacebookResponseException $e) {
+            echo 'Graph returned an error: ' . $e->getMessage();
+            exit;
+        } catch (Facebook\Exceptions\FacebookSDKException $e) {
+            echo 'Facebook SDK returned an error: ' . $e->getMessage();
+            exit;
+        }
+        $albumListJson = json_decode($res->getBody());
+        $albumList = $albumListJson->data;
+
+//To Check
+        while (isset($albumListJson->paging->next)) {
+            $albumListJson = getPage($albumListJson->paging->next);
+            $albumList = array_merge($albumList, $albumListJson->data);
+        }
+        setCache('cache/' . $_SESSION['user_id'] . '_albumList.json', json_encode($albumList), false);
+        return $albumList;
+    }
+}
+
+function getAlbumCover($id) {
+    $album = getPage('https://graph.facebook.com/' . $id . '?fields=cover_photo,description,count&access_token=' . $_SESSION['fb_access_token']);
+    $albumData = array();
+    $albumData['cover'] = (isset($album->cover_photo->id)) ? $album->cover_photo->id : '';
+    $albumData['description'] = (isset($album->description)) ? $album->description : '';
+    $albumData['count'] = (isset($album->count)) ? $album->count : '';
+    return $albumData;
+}
+
+function getPage($url) {
+    $page = file_get_contents($url);
+    $jsonData = json_decode($page);
+    return $jsonData;
+}
+
+function getImageList($id) {
+    $file = 'cache/list.' . $id . '.json';
+    if (inCache($file)) {
+        return getFromCache($file);
+    } else {
+        $url = 'https://graph.facebook.com/' . $id . '/photos?access_token=' . $_SESSION['fb_access_token'];
+        $albumPics = getPage($url);
+        $albumPicsImageIds = $albumPics->data;
+        while (isset($albumPics->paging->next)) {
+            $albumPics = getPage($albumPics->paging->next);
+            $albumPicsImageIds = array_merge($albumPicsImageIds, $albumPics->data);
+        }
+        setCache($file, $albumPicsImageIds, false);
+        return $albumPicsImageIds;
+    }
+}
+
+function getImageUrlList($id) {
+    $imgList = getImageList($id);
+    $pics = array();
+    foreach ($imgList as $albumPic) {
+        $pics[] = getImage($albumPic->id);
+    }
+    return $pics;
+}
+
+function getImage($id) {
+    $file = 'cache/img.' . $id . '.json';
+    if (inCache($file)) {
+        return getFromCache($file);
+    } else {
+        $url = 'https://graph.facebook.com/' . $id . '?fields=images&access_token=' . $_SESSION['fb_access_token'];
+        $picData = getPage($url);
+        setCache($file, $picData->images[0]->source, false);
+        return $picData->images[0]->source;
+    }
+}
+
+function zipDownloadAlbum($albums, $type) {
+    global $fb;
+    if (!inCache('zip/' . $type . '.zip')) {
+        # create new zip object
+        $zip = new ZipArchive();
+
+        # create a temp file & open it
+        $tmp_file = 'zip/' . $type . '.zip';
+        $zip->open($tmp_file, ZipArchive::CREATE);
+
+        # loop through each file
+        foreach ($albums as $album) {
+            $imgList = getImageList($album);
+            $res = $fb->get('/' . $album . '?fields=name', $_SESSION['fb_access_token']);
+            $details = json_decode($res->getBody());
+            foreach ($imgList as $albumPic) {
+                $img = getImage($albumPic->id);
+                $download_file = file_get_contents($img);
+                $name = strtok(basename($img), "?"); //removing uri queries
+                $zip->addFromString($details->name . '/' . $name, $download_file);
+            }
+        }
+        # close zip
+        $zip->close();
+    }
+}
+
+function inCache($file) {
+    $current_time = time();
+    $expire_time = 5000;
+    if (file_exists($file)) {
+        $file_time = filemtime($file);
+        if ($current_time - $expire_time < $file_time) {// && file_get_contents($file)!=='null'
+            return true;
+        }
+    } else {
+        return false;
+    }
+}
+
+function getFromCache($file) {
+    return json_decode(file_get_contents($file));
+}
+
+function setCache($file, $data, $isJson) {
+    if (!$isJson) {
+        file_put_contents($file, json_encode($data));
+    } else {
+        file_put_contents($file, $data);
+    }
+}
+
+function purgeCache() {
+    $files = glob('cache/*'); // get all file names
+    foreach ($files as $file) { // iterate files
+        if (is_file($file))
+            unlink($file); // delete file
+    }
+}

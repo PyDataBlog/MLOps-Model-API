@@ -1,0 +1,1 @@
+cmd_arch/arm/mvp/pvtcpkm/pvtcpkm.ko := /usr/local/arm/arm-eabi-4.4.3/bin/arm-eabi-ld -EL -r  -T /home/miamo/android/kernel/miamOv/scripts/module-common.lds --build-id  -o arch/arm/mvp/pvtcpkm/pvtcpkm.ko arch/arm/mvp/pvtcpkm/pvtcpkm.o arch/arm/mvp/pvtcpkm/pvtcpkm.mod.o

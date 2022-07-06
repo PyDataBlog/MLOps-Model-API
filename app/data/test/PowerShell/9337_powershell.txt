@@ -1,0 +1,143 @@
+﻿function New-BPAPerformanceCondition {    
+    <#
+        .SYNOPSIS
+            Creates a new AutoMate BPA performance condition.
+
+        .DESCRIPTION
+            New-BPAPerformanceCondition creates a new performance condition.
+
+        .PARAMETER Name
+            The name of the new object.
+
+        .PARAMETER MachineName
+            The computer to check performance counters on.
+
+        .PARAMETER CategoryName
+            The system category in which to monitor (i.e. Processor, Memory, Paging File, etc.). A category catalogues performance counters in a logical unit.
+
+        .PARAMETER CounterName
+            The type of counter related to the category in which to monitor. Performance counters are combined together under categories. They are used to measure various aspects of performance, such as transfer rates for disks or, for processors, the amount of processor time consumed. Specific counters are populated in this section depending on the performance category selected.
+
+        .PARAMETER InstanceName
+            The instance related to the category in which to monitor. A performance counter can be divided into instances, such as processes, threads, or physical units.
+
+        .PARAMETER Operator
+            Above or Below.
+
+        .PARAMETER Amount
+            The threshold to trigger on.
+
+        .PARAMETER TimePeriod
+            The amount of time to wait before triggering.
+
+        .PARAMETER TimePeriodUnit
+            The unit of time for TriggerWhenTimePeriod.
+
+        .PARAMETER Wait
+            Wait for the condition, or evaluate immediately.
+
+        .PARAMETER Timeout
+            If wait is specified, the amount of time before the condition times out.
+
+        .PARAMETER TimeoutUnit
+            The unit for Timeout (Seconds by default).
+
+        .PARAMETER TriggerAfter
+            The number of times the condition should occur before the trigger fires.
+
+        .PARAMETER Notes
+            The new notes to set on the object.
+
+        .PARAMETER Folder
+            The folder to place the object in.
+
+        .PARAMETER BPAServer
+            The server to create the object on.
+
+        .NOTES
+            Author(s):     : David Seibel
+            Contributor(s) :
+            Date Created   : 02/06/2018
+            Date Modified  : 02/12/2018
+
+        .LINK
+            https://github.com/davidseibel/PoshBPA
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true, Position = 0)]
+        [ValidateNotNullOrEmpty()]
+        [string]$Name,
+
+        [string]$MachineName = "",
+        
+        [Parameter(Mandatory = $true)]
+        [string]$CategoryName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$CounterName,
+
+        [Parameter(Mandatory = $true)]
+        [string]$InstanceName,
+        
+        [BPAPerformanceOperator]$Operator = [BPAPerformanceOperator]::Below,
+
+        [int]$Amount = 10,
+
+        [int]$TimePeriod = 3,
+        
+        [BPATimeMeasure]$TimePeriodUnit = [BPATimeMeasure]::Milliseconds,
+
+        [switch]$Wait = $true,
+        [int]$Timeout = 0,
+        [BPATimeMeasure]$TimeoutUnit = [BPATimeMeasure]::Seconds,
+        [int]$TriggerAfter = 1,
+
+        [string]$Notes = "",
+
+        [ValidateScript({$_.TypeName -eq "Folder"})]
+        $Folder,
+
+        [string]$BPAServer
+    )
+
+    $guid = "{$((New-Guid).Guid)}"
+
+    if (-not $BPAServer -and $global:BPAConnectionInfo.Count -gt 1) {
+        throw "Multiple BPA Servers are connected, please specify which server to create a new condition on!"
+    } elseif (-not $BPAServer) {
+        $BPAServer = $BPAConnectionInfo.Server
+    }
+
+    $user = Get-BPAUser -BPAServer $BPAServer | Where-Object {$_.Name -ieq ($BPAConnectionInfo | Where-Object {$_.Server -eq $BPAServer}).Credential.UserName}
+    if (-not $Folder) {
+        # Place the task in the users condition folder
+        $Folder = $user | Get-BPAFolder -Type CONDITIONS
+    }
+
+    # Get the template object from the PoshBPA\ObjectTemplates folder, and configure the object
+    $newObject = Get-BPAObjectTemplate -ConditionType ([BPATriggerType]::Performance) -BPAServer $BPAServer
+    $newObject.ID             = $guid
+    $newObject.Name           = $Name
+    $newObject.ParentID       = $Folder.ID
+    $newObject.Path           = Join-Path -Path $Folder.Path -ChildPath $Folder.Name
+    $newObject.CreatedBy      = $user.ID
+    $newObject.Notes          = $Notes
+    $newObject.Wait           = $Wait.ToBool()
+    if ($newObject.Wait) {
+        $newObject.Timeout      = $Timeout
+        $newObject.TimeoutUnit  = $TimeoutUnit.value__
+        $newObject.TriggerAfter = $TriggerAfter
+    }
+    $newObject.MachineName    = $MachineName
+    $newObject.CounterName    = $CounterName
+    $newObject.CategoryName   = $CategoryName
+    $newObject.InstanceName   = $InstanceName
+    $newObject.Operator       = $Operator.value__
+    $newObject.Amount         = $Amount
+    $newObject.TimePeriod     = $TimePeriod
+    $newObject.TimePeriodUnit = $TimePeriodUnit.value__
+
+    $newObject | New-BPAObject -BPAServer $BPAServer
+    return (Get-BPACondition -ID $guid -BPAServer $BPAServer)
+}

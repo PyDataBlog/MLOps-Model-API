@@ -1,0 +1,88 @@
+import * as io from "socket.io-client";
+
+import {UserSocketRoutes} from "./user-socket.routes";
+import {SocketServer} from "../../../socketio/socket.server";
+import {Server} from "../../../core/server";
+import {UserComponent} from "../component/user.component";
+import {Query, QueryParameter, QueryElement, QueryOperator} from "../../../core/public/query";
+import {UserModel} from "../public/user.model";
+import {config} from "../../../../config";
+import {UserRoutes} from "../public/user.routes";
+import {SocketRequest} from "../../../socketio/socket.request";
+import {DummyUsers} from "../repository/user-mongoose.repository.spec";
+
+class MockUserComponent implements UserComponent {
+    get(request: SocketRequest<Query>): void {
+        request.socket.emit(UserRoutes.get, request.value);
+    }
+
+    add(request: SocketRequest<UserModel>): void {
+        request.socket.emit(UserRoutes.add, request.value);
+    }
+
+    update(request: SocketRequest<UserModel>): void {
+        request.socket.emit(UserRoutes.update, request.value);
+    }
+
+    test(request: SocketRequest<any>): void {
+        request.socket.emit("ping", request.value);
+    }
+}
+
+describe("User routes for SocketIO", () => {
+    let server: Server = new SocketServer();
+    let userRoute: UserSocketRoutes;
+    let clientSocket: SocketIOClient.Socket;
+
+    beforeEach(done => {
+        server.start().then(() => {
+            userRoute = new UserSocketRoutes(server, new MockUserComponent());
+            done();
+        });
+    });
+
+    afterEach(done => {
+        clientSocket.on("disconnect", () => {
+            server.stop()
+                .then(done);
+        });
+
+        clientSocket.close();
+    });
+
+    it("should succesfully route get requests", done => {
+        let query = new Query([new QueryParameter("name", [new QueryElement(QueryOperator.EqualTo, "bob")])]);
+        clientSocket = io.connect(`${config.server.protocol}://${config.server.uri}:${config.server.port}/${UserRoutes.namespace}`);
+
+        clientSocket.emit(UserRoutes.get, {token: "abc", query: query});
+
+        clientSocket.on(UserRoutes.get, (response: Query) => {
+            expect(response.queryParameters[0].queryElements[0].operands).toEqual("bob");
+            done();
+        });
+    });
+
+    it("should succesfully route add requests", done => {
+        let user = DummyUsers.newUserOne;
+        clientSocket = io.connect(`${config.server.protocol}://${config.server.uri}:${config.server.port}/${UserRoutes.namespace}`);
+
+        clientSocket.emit(UserRoutes.add, {token: DummyUsers.membershipUser, user: user});
+
+        clientSocket.on(UserRoutes.add, (response: UserModel) => {
+            expect(response.name).toEqual(user.name);
+            done();
+        });
+    });
+
+    it("should succesfully route update requests", done => {
+        let user = DummyUsers.newUserOne;
+        clientSocket = io.connect(`${config.server.protocol}://${config.server.uri}:${config.server.port}/${UserRoutes.namespace}`);
+
+        clientSocket.emit(UserRoutes.update, {token: DummyUsers.membershipUser, user: user});
+
+        clientSocket.on(UserRoutes.update, (response: UserModel) => {
+            expect(response.email).toEqual(user.email);
+            done();
+        });
+    });
+});

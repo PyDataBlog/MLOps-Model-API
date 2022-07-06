@@ -1,0 +1,165 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+module Main where
+
+import Control.Applicative
+import Control.Arrow
+import qualified Data.Attoparsec.Text.Lazy as A
+import Data.List
+import Data.Maybe
+import Data.Monoid
+import qualified Data.String as S
+import qualified Data.Text.Lazy as T
+
+main :: IO ()
+main = print ("Hi!" :: String)
+
+data Term = Var Char | Lam Char Term | App Term Term
+  deriving Show
+
+instance S.IsString Term where
+  fromString = parse . T.pack
+  
+pretty :: Term -> String
+pretty (Var x) = [x]
+pretty (Lam x s) = "(\\" ++ [x] ++ ". " ++ pretty s ++ ")"
+pretty (App s t) = "(" ++ pretty s ++ " " ++ pretty t ++ ")"
+
+term :: A.Parser Term
+term = (parens app <|> parens lam <|> var)
+  where
+    var = Var <$> A.letter
+    lam = Lam <$> (A.char '\\' *> A.letter) <* A.string ". " <*> term
+    app = App <$> term <* A.char ' ' <*> term
+    parens p = id <$> (A.char '(' *> p) <* A.char ')'
+
+parse :: T.Text -> Term
+parse t = case A.parse (term <* A.endOfInput) t of
+  A.Fail _ _ _ -> error "parsing failed"
+  A.Done _ r   -> r
+
+subst :: (Char, Term) -> Term -> Term
+subst (x, r) s@(Var y) = if x == y then r else s
+subst p@(x, _) s@(Lam y t) = if x == y then s else Lam y (subst p t)
+subst p (App s t) = App (subst p s) (subst p t)
+
+leftmostReduction :: Term -> Maybe Term
+leftmostReduction (Var _) = Nothing
+leftmostReduction (Lam x s) = fmap (Lam x) $ leftmostReduction s
+leftmostReduction (App (Lam x s) t) = Just $ subst (x, t) s
+leftmostReduction (App s t) =
+  case leftmostReduction s of
+    Nothing  -> fmap (App s) (leftmostReduction t)
+    Just s' -> Just $ App s' t
+
+reduce :: Term -> Term
+reduce t = if j < 100 then n else error $ "Stopped after 100 reductions: " ++ pretty n
+  where
+    iterations = zip ([1..] :: [Integer]) $ iterate (>>= leftmostReduction) (Just t)
+    (j, Just n) = last $ takeWhile (\(i,m) -> i <= 100 && isJust m) iterations 
+
+data Signature = SVar String | SFun String [Signature] deriving Eq
+
+instance Show Signature where
+  show (SVar c) = c
+  show (SFun n vs) = "(" ++ n ++ " " ++ (intercalate " " $ map show vs) ++ ")"
+
+unify :: [(Signature, Signature)] -> Either String (Signature -> Signature)
+unify = fmap apply . foldrEither (\(s1, s2) sub  -> unify' sub s1 s2) (Right emptySub)
+  where
+    unify' :: (String -> Signature) -> Signature -> Signature -> Either String (String -> Signature)
+    unify' sub s1@(SVar v) s2 =
+        if s1' == s1
+           then extend sub v s2'
+           else unify' sub s1' s2'
+      where
+        s1' = apply sub s1
+        s2' = apply sub s2
+    unify' sub s@(SFun _ _) v@(SVar _) = unify' sub v s
+    unify' sub t1@(SFun n1 ss1) t2@(SFun n2 ss2) =
+      if n1 /= n2
+        then Left $ "Failed to unify " ++ show t1 ++ " with " ++ show t2 
+        else foldrEither (\(s1, s2) s -> unify' s s1 s2) (Right sub) (zip ss1 ss2)
+
+    foldrEither :: (a -> b -> Either e b) -> Either e b -> [a] -> Either e b
+    foldrEither f = foldr mf
+      where
+        mf _ (Left e) = Left e
+        mf a (Right b) = f a b
+
+    vars :: Signature -> [String]
+    vars (SVar c) = [c]
+    vars (SFun _ ss) = concatMap vars ss
+
+    emptySub :: String -> Signature
+    emptySub = SVar
+
+    extend :: (String -> Signature) -> String -> Signature -> Either String (String -> Signature)
+    extend sub c s =
+      if s == SVar c
+        then Right sub
+        else
+          if c `elem` vars s
+            then Left "cycle"
+            else Right $ (delta c s) `scomp` sub
+
+    delta c s c' = if c == c' then s else SVar c'
+
+    scomp sub1 sub2 c = apply sub1 (sub2 c)
+
+    apply :: (String -> Signature) -> Signature -> Signature
+    apply sub (SVar v) = sub v
+    apply sub (SFun n ss) = SFun n $ map (apply sub) ss
+
+data Type = TVar String | TArrow Type Type
+
+instance Show Type where
+  show (TVar c) = c
+  show (TArrow t1 t2) = "(" ++ show t1 ++ " -> " ++ show t2 ++ ")"
+
+toType :: Signature -> Type
+toType (SVar s) = TVar s
+toType (SFun _ (a:b:[])) = TArrow (toType a) (toType b)
+toType _ = error "unexpected signature"
+
+typeEquations :: String -> Term -> [(Signature, Signature)]
+typeEquations n (Var x) = [(SVar n, SVar $ "T" ++ [x])]
+typeEquations n (App a b) =
+  typeEquations (n ++ "_l") a ++
+  typeEquations (n ++ "_r") b ++
+  [(SVar $ n ++ "_l", SFun "->" [SVar $ n ++ "_r", SVar n])]
+typeEquations n (Lam x b) =
+    map (replaceBoundVar *** replaceBoundVar) (typeEquations (n ++ "_b") b) ++
+    [(SVar n, SFun "->" [SVar $ n ++ "_x", SVar $ n ++ "_b"])]
+  where
+    replaceBoundVar = replaceVar ("T" ++ [x]) (n ++ "_x")
+    
+    replaceVar a a' (SVar v) = if v == a then SVar a' else SVar v
+    replaceVar a a' (SFun name ss) = SFun name $ map (replaceVar a a') ss
+
+typeOf :: Term -> Either String Type
+typeOf t = fmap (\u -> toType $ u (SVar "M")) (unify $ typeEquations "M" t)
+
+eval :: T.Text -> Either String (Type, Term)
+eval s = case typeOf t of
+           Left e -> Left e
+           Right ty -> Right (ty, reduce t)
+  where
+    t = parse s
+
+-- Testing
+
+_I, _K, _S, _Y :: T.Text
+_I = "(\\a. a)"
+_K = "(\\a. (\\b. a))"
+_S = "(\\a. (\\b. (\\c. ((a c) (b c)))))"
+_Y = "(\\f. ((\\w. (f (w w))) (\\w. (f (w w)))))"
+
+(<.>) :: T.Text -> T.Text -> T.Text
+a <.> b = "(" <> a <> " " <> b <> ")"
+infixl 6 <.>
+
+red :: Int -> Term -> IO ()
+red n t = putStr $ unlines $ fmap show $ (fmap . fmap) pretty $ take n $ iterate (>>= leftmostReduction) (Just t)
+
+-- (a, b, c, f) = (SVar "a", SVar "b", SVar "c", \a b -> SFun "f" [a, b])

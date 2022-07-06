@@ -1,0 +1,90 @@
+module Dep.Algorithms.Seq (
+    overLabel,labelHead,reduceFSM,overFSM,concatFSM,headFSM,concatReduceFSM,
+    graySequence
+) where
+
+import Data.BitVector
+import Data.Function (flip)
+import Data.Hashable (Hashable(..))
+import qualified Data.HashMap.Strict as HM
+import Data.List(intersperse,find)
+import Data.Word(Word64)
+
+import Debug.Trace(trace)
+
+import Dep.Algorithms
+import Dep.Structures
+import Dep.Utils(fixpoint,singleGroupBy,grayInc,hashItemLists)
+
+graySequence :: Int -> [BitVector]
+graySequence n =  rs
+    where r0 = 0 :: Word64
+          gi = grayInc n
+          bv = bitVec n
+          rs = bv r0 : cgs (gi r0)
+          cgs ri | ri /= 0 = bv ri : cgs (gi ri)
+                 | otherwise = []
+
+overLabel :: (a -> b) -> FSMState a -> FSMState b
+overLabel f (Label x) = Label (f x)
+overLabel _ DontCare  = DontCare
+
+labelHead :: FSMState [a] -> FSMState a
+labelHead = overLabel head
+
+instance (Eq st,Hashable st,Ord ot) => Reduceable (FSM st it ot) where
+    reduce = headFSM . reduceFSM
+
+concatReduceFSM :: (Eq st,Hashable st,Ord ot) => FSM [st] it ot -> FSM [st] it ot
+concatReduceFSM = concatFSM . reduceFSM
+
+overFSM :: (Hashable su, Eq su) => ([st] -> su) -> FSM [st] it ot -> FSM su it ot
+overFSM g (Moore ss is dt f) = Moore ss' is (\s -> overLabel g . dt (lut s)) $ f . lut
+    where ss' = map g ss
+          lut = lutss ss ss'
+overFSM g (Mealy ss is dt f) = Mealy ss' is (\s -> overLabel g . dt (lut s)) $ \s -> f $ lut s
+    where ss' = map g ss
+          lut = lutss ss ss'
+
+lutss :: (Eq a,Hashable a) => [[b]] -> [a] -> a -> [b]
+lutss ss ss' = flip (HM.lookupDefault []) (HM.fromList $ zip ss' ss)
+
+concatFSM :: (Hashable st,Eq st) => FSM [[st]] it ot -> FSM [st] it ot
+concatFSM = overFSM concat
+
+headFSM :: (Hashable st,Eq st) => FSM [st] it ot -> FSM st it ot
+headFSM = overFSM head
+
+reduceFSM :: (Hashable st,Eq st, Eq ot) => FSM st it ot -> FSM [st] it ot
+reduceFSM (Moore ss is dt f) = Moore rs is (\x y -> pm $ dt (head x) y) $ f.head
+    where rs = calcRedStates is dt (reduce1Moore ss f)
+          pm = Label . flip (HM.lookupDefault []) (hashItemLists rs HM.empty) . stateLabel
+reduceFSM (Mealy ss is dt f) = Mealy rs is (\x y -> pm $ dt (head x) y) (\x y -> f (head x) y)
+    where rs = calcRedStates is dt (reduce1Mealy ss is f)
+          pm = Label . flip (HM.lookupDefault []) (hashItemLists rs HM.empty) . stateLabel
+
+mergeState :: (Eq a) => FSMState a -> FSMState a -> Maybe (FSMState a)
+mergeState DontCare x = Just x
+mergeState x DontCare = Just x
+mergeState (Label a) (Label b) | a == b = Just (Label a)
+                               | otherwise = Nothing
+
+calcRedStates :: (Eq st) => [it] -> (st -> it -> FSMState st) -> [[st]] -> [[st]]
+calcRedStates is dt = fixpoint (reduceInc is dt)
+
+flatStates :: [[FSMState st]] -> [FSMState [st]]
+flatStates = map (Label . map stateLabel)
+
+reduce1Moore :: (Eq ot) => [st] -> (st -> ot) -> [[st]]
+reduce1Moore ss f = singleGroupBy f ss
+
+reduce1Mealy :: (Eq ot) => [st] -> [it] -> (st -> it -> ot) -> [[st]]
+reduce1Mealy ss ins f = singleGroupBy (\x -> map (f x) ins) ss
+
+partitionHeader :: (Eq a) => [[a]] -> FSMState a -> FSMState a
+partitionHeader _  DontCare = DontCare
+partitionHeader ps (Label o) | Just pi <- find (elem o) ps = Label $ head pi
+                             | otherwise = DontCare
+
+reduceInc :: (Eq st) => [it] -> (st -> it -> FSMState st) -> [[st]] -> [[st]]
+reduceInc is dt pt = concat [ singleGroupBy (\s -> map (partitionHeader pt . dt s) is) pi | pi <- pt]

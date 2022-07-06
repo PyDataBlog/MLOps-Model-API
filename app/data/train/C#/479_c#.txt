@@ -1,0 +1,400 @@
+using Android.OS;
+using Android.Text;
+using Android.Util;
+using REKT.Graphics;
+using REKT.Graphics.Unsafe;
+using REKT.DI;
+using SkiaSharp;
+using System;
+using System.Text;
+using D = System.Diagnostics.Debug;
+using NativeActivity = Android.App.Activity;
+using NativeBitmap = Android.Graphics.Bitmap;
+using NativeBitmapFactory = Android.Graphics.BitmapFactory;
+using NativeContext = Android.Content.Context;
+using NativeRect = Android.Graphics.Rect;
+using NativeDialog = Android.Support.V7.App.AlertDialog;
+using NativeProgressDialog = Android.App.ProgressDialog;
+using NativeColour = Android.Graphics.Color;
+using NativeArrayAdapter = Android.Widget.ArrayAdapter;
+using NativeView = Android.Views.View;
+using System.Collections;
+using NativeThread = System.Threading.Thread;
+
+namespace REKT
+{
+    public static class AndroidExtensions
+    {
+        /////////////////////////////////////////////////////////////////////
+        // STRINGS
+        /////////////////////////////////////////////////////////////////////
+
+        public static ISpanned ToSpannedHTML(this string rawHtml)
+        {
+            ISpanned html;
+            if (AndroidPlatform.Version >= BuildVersionCodes.N)
+                html = Html.FromHtml(rawHtml, FromHtmlOptions.ModeLegacy);
+            else
+            {
+#pragma warning disable CS0618 //deprecation
+
+                html = Html.FromHtml(rawHtml);
+
+#pragma warning restore CS0618
+            }
+            return html;
+        }
+
+        /////////////////////////////////////////////////////////////////////
+        // CONTEXTS
+        /////////////////////////////////////////////////////////////////////
+
+        public static SKColor ThemeColour(this NativeContext context, int themeColourID)
+        {
+            if (context == null)
+                throw new ArgumentNullException("context");
+            using (var typedValue = new TypedValue())
+            {
+                var theme = context.Theme;
+                theme.ResolveAttribute(themeColourID, typedValue, true);
+                var data = typedValue.Data;
+                return new SKColor(
+                    (byte)NativeColour.GetRedComponent(data),
+                    (byte)NativeColour.GetGreenComponent(data),
+                    (byte)NativeColour.GetBlueComponent(data),
+                    (byte)NativeColour.GetAlphaComponent(data));
+            }
+        }
+
+        public static NativeBitmap BitmapResource(this NativeContext context, int bitmapResourceID)
+        {
+            using (var opts = new NativeBitmapFactory.Options())
+            {
+                opts.InPreferQualityOverSpeed = true;
+                return NativeBitmapFactory.DecodeResource(context.Resources, bitmapResourceID, opts);
+            }
+        }
+
+        public static SKBitmap BitmapResourceSkia(this NativeContext context, int bitmapResourceID)
+        {
+            using (var nativeBmp = context.BitmapResource(bitmapResourceID))
+                return nativeBmp.ToSkia();
+        }
+
+        private static void RunOnUIThreadIfPossible(this NativeContext context, Action action)
+        {
+            if (context is NativeActivity activity)
+                activity.RunOnUiThread(action);
+            else
+                action();
+        }
+
+        public static void ShowYesNoDialog(this NativeContext context, string title, string text,
+            Action yesAction = null, Action noAction = null)
+        {
+            if (context == null)
+                throw new ArgumentNullException("context");
+            context.RunOnUIThreadIfPossible(() =>
+            {
+                using (var builder = new NativeDialog.Builder(context))
+                {
+                    builder.SetTitle((title ?? "").Trim());
+                    builder.SetMessage((text ?? "").Trim());
+                    builder.SetCancelable(false);
+                    builder.SetPositiveButton("Yes", (s, e) => { yesAction?.Invoke(); });
+                    builder.SetNegativeButton("No", (s, e) => { noAction?.Invoke(); });
+                    using (var dialog = builder.Create())
+                        dialog.Show();
+                }
+            });
+        }
+
+        public static void ShowOKDialog(this NativeContext context, string title, string text, Action okAction = null)
+        {
+            if (context == null)
+                throw new ArgumentNullException("context");
+            context.RunOnUIThreadIfPossible(() =>
+            {
+                using (var builder = new NativeDialog.Builder(context))
+                {
+                    builder.SetTitle((title ?? "").Trim());
+                    builder.SetMessage((text ?? "").Trim());
+                    builder.SetCancelable(false);
+                    builder.SetPositiveButton(Android.Resource.String.Ok, (s, e) => { okAction?.Invoke(); });
+                    using (var dialog = builder.Create())
+                        dialog.Show();
+                }
+            });
+        }
+
+        public static void ShowWaitDialog(this NativeContext context, string title, string text, Action asyncTask)
+        {
+            if (context == null)
+                throw new ArgumentNullException("context");
+            if (asyncTask == null)
+                throw new ArgumentNullException("asyncTask");
+
+            context.RunOnUIThreadIfPossible(() =>
+            {
+                var dialog = NativeProgressDialog.Show(context, (title ?? "").Trim(), (text ?? "").Trim(), true, false);
+                new NativeThread(() =>
+                {
+                    asyncTask?.Invoke();
+                    dialog.Dismiss();
+                    dialog.Dispose();
+                }).Start();
+            });
+        }
+
+        public static void ShowListDialog(this NativeContext context, string title, IList data, Action<int> selectionAction,
+            Action cancelAction = null)
+        {
+            if (context == null)
+                throw new ArgumentNullException("context");
+            if (selectionAction == null)
+                throw new ArgumentNullException("selectionAction");
+            if (data == null)
+                throw new ArgumentNullException("data");
+
+            context.RunOnUIThreadIfPossible(() =>
+            {
+                using (var builder = new NativeDialog.Builder(context))
+                {
+                    var adapter = new NativeArrayAdapter(context, Android.Resource.Layout.SimpleListItem1, data);
+                    builder.SetTitle((title ?? "").Trim())
+                        .SetAdapter(adapter, (s, e) => { selectionAction.Invoke(e.Which); });
+                    if (cancelAction != null)
+                        builder.SetCancelable(true).SetNegativeButton(Android.Resource.String.Cancel, (s, e) => { cancelAction.Invoke(); });
+                    else
+                        builder.SetCancelable(false);
+                    using (var dialog = builder.Create())
+                        dialog.Show();
+                }
+            });
+        }
+
+        public static void ShowCustomDialog(this Activity activity, string title, int viewResID,
+            Action<NativeView> initAction = null,
+            Action<NativeView> okAction = null,
+            Action<NativeView> cancelAction = null)
+        {
+            if (activity == null)
+                throw new ArgumentNullException("context");
+            activity.RunOnUIThreadIfPossible(() =>
+            {
+                using (var builder = new NativeDialog.Builder(activity))
+                {
+                    builder.SetTitle((title ?? "").Trim());
+                    var view = activity.LayoutInflater.Inflate(viewResID, null);
+                    initAction?.Invoke(view);
+                    builder.SetView(view);
+                    builder.SetPositiveButton(Android.Resource.String.Ok,
+                        (s, e) => { okAction?.Invoke(view); });
+                    if (cancelAction != null)
+                        builder.SetCancelable(true).SetNegativeButton(Android.Resource.String.Cancel,
+                            (s, e) => { cancelAction.Invoke(view); });
+                    else
+                        builder.SetCancelable(false);
+                    using (var dialog = builder.Create())
+                        dialog.Show();
+                }
+            });
+        }
+
+        public static void Toast(this NativeContext context, string text)
+        {
+            Android.Widget.Toast.MakeText(context, text, Android.Widget.ToastLength.Long).Show();
+        }
+
+        public static void LaunchWebsite(this NativeContext context, string uri)
+        {
+            using (var _uri = Android.Net.Uri.Parse(uri))
+            using (var intent = new Android.Content.Intent(Android.Content.Intent.ActionView, _uri))
+            {
+                intent.AddFlags(Android.Content.ActivityFlags.NewTask);
+                intent.AddFlags(Android.Content.ActivityFlags.NoHistory);
+                intent.AddFlags(Android.Content.ActivityFlags.ExcludeFromRecents);
+                context.StartActivity(intent);
+            }
+        }
+
+        public static ISpanned GetSpannedHTML(this NativeContext context, int resid)
+        {
+            return context.GetString(resid).ToSpannedHTML();
+        }
+
+        public static void LaunchAppSettings(this NativeContext context)
+        {
+            using (var _uri = Android.Net.Uri.Parse("package:" + context.PackageName))
+            using (var intent = new Android.Content.Intent("android.settings.APPLICATION_DETAILS_SETTINGS", _uri))
+            {
+                intent.AddFlags(Android.Content.ActivityFlags.NewTask);
+                intent.AddFlags(Android.Content.ActivityFlags.NoHistory);
+                intent.AddFlags(Android.Content.ActivityFlags.ExcludeFromRecents);
+                context.StartActivity(intent);
+            }
+        }
+
+        /////////////////////////////////////////////////////////////////////
+        // ACTIVITIES
+        /////////////////////////////////////////////////////////////////////
+
+        public static float CanvasScaleHint(this NativeActivity activity)
+        {
+            using (var displayMetrics = new DisplayMetrics())
+            {
+                activity.WindowManager.DefaultDisplay.GetMetrics(displayMetrics);
+                if (displayMetrics.ScaledDensity.IsZero()) //can this even happen??
+                    return 1.0f;
+                return (displayMetrics.ScaledDensity / 3.0f).Clamp(0.4f, 1.5f);
+            }
+        }
+
+        public static void With<T>(this NativeActivity activity, int id, Action<T> viewAction) where T : Android.Views.View
+        {
+            using (var view = activity.FindViewById<T>(id))
+                viewAction(view);
+        }
+
+        /////////////////////////////////////////////////////////////////////
+        // SKIA
+        /////////////////////////////////////////////////////////////////////
+
+        public static NativeRect ToREKT(this SKRect rect)
+        {
+            return new NativeRect((int)rect.Left, (int)rect.Top,
+                (int)rect.Right, (int)rect.Bottom);
+        }
+
+        public static NativeColour ToNative(this SKColor col)
+        {
+            return new NativeColour(col.Red, col.Green, col.Blue, col.Alpha);
+        }
+
+        public static SKColor ToREKT(this NativeColour col)
+        {
+            return new SKColor(col.R, col.G, col.B, col.A);
+        }
+
+        /////////////////////////////////////////////////////////////////////
+        // BITMAPS
+        /////////////////////////////////////////////////////////////////////
+
+        public static SKBitmap ToSkia(this NativeBitmap source)
+        {
+            if (source == null)
+                throw new ArgumentNullException("source");
+
+            //init destination bitmap
+            var output = new SKBitmap(
+                source.Width,
+                source.Height,
+                SKColorType.Rgba8888,
+                SKAlphaType.Unpremul
+            );
+
+            //get source pixels
+            //"The returned colors are non-premultiplied ARGB values in the sRGB color space.",
+            //per https://developer.android.com/reference/android/graphics/Bitmap.html
+            int[] sourcePixels = new int[source.Width * source.Height];
+            source.GetPixels(sourcePixels, 0, source.Width, 0, 0, source.Width, source.Height);
+
+            //copy into destination
+            try
+            {
+                output.LockPixels();
+                var buffer = output.GetPixels();
+                unsafe
+                {
+                    int* firstPixelAddr = (int*)buffer.ToPointer();
+                    System.Threading.Tasks.Parallel.For(0, output.Height, (y) =>
+                    {
+                        int p = y * output.Width;
+                        int* pixel = firstPixelAddr + p;
+                        for (int x = 0; x < output.Width; x++, p++, pixel++)
+                            *pixel = sourcePixels[p].SwapBytes02();
+                    });
+                }
+                output.UnlockPixels();
+            }
+            catch (Exception e)
+            {
+                e.WriteToLog();
+                output.Dispose();
+                throw;
+            }
+
+            return output;
+        }
+
+        public static Bitmap ToREKT(this NativeBitmap source)
+        {
+            if (source == null)
+                throw new ArgumentNullException("source");
+
+#if DEBUG
+            StringBuilder sb = new StringBuilder("Bitmap: constructing from Android.Graphics.Bitmap:");
+            sb.AppendLine();
+            sb.AppendFormattedLine("Dimensions: {0} x {1}", source.Width, source.Height);
+            sb.AppendFormattedLine("AllocationByteCount: {0}", source.AllocationByteCount);
+            sb.AppendFormattedLine("ByteCount: {0}", source.ByteCount);
+            sb.AppendFormattedLine("RowBytes: {0}", source.RowBytes);
+            sb.AppendFormattedLine("Density: {0}", source.Density);
+            sb.AppendFormattedLine("HasAlpha: {0}", source.HasAlpha);
+            sb.AppendFormattedLine("IsPremultiplied: {0}", source.IsPremultiplied);
+            D.WriteLine(sb);
+#endif
+
+            //init destination bitmap
+            var output = new Bitmap(source.Width, source.Height, SKColorType.Rgba8888);
+
+            //get source pixels
+            //"The returned colors are non-premultiplied ARGB values in the sRGB color space.",
+            //per https://developer.android.com/reference/android/graphics/Bitmap.html
+            int[] sourcePixels = new int[source.Width * source.Height];
+            source.GetPixels(sourcePixels, 0, source.Width, 0, 0, source.Width, source.Height);
+
+            //copy into destination
+            try
+            {
+                output.Lock((buffer) =>
+                {
+                    unsafe
+                    {
+                        byte* firstPixelAddr = (byte*)buffer.ToPointer();
+                        Thread.Distribute((threadIndex, threadCount) =>
+                        {
+                            for (long y = threadIndex; y < output.Height; y += threadCount)
+                            {
+                                long p = y * output.Width;
+                                for (long x = 0; x < output.Width; x++, p++)
+                                    output.SetPixel(firstPixelAddr, x, y, ((uint)sourcePixels[p]));
+                            }
+                        });
+                    }
+                });
+            }
+            catch (Exception e)
+            {
+                e.WriteToLog();
+                output.Dispose();
+                throw;
+            }
+
+            return output;
+        }
+
+        /////////////////////////////////////////////////////////////////////
+        // UUIDs
+        /////////////////////////////////////////////////////////////////////
+
+        public static bool Equals(this Java.Util.UUID uuid, string uuidString)
+        {
+            if (uuid == null)
+                throw new ArgumentNullException("uuid");
+            if (uuidString == null)
+                throw new ArgumentNullException("uuidString");
+            return uuid.ToString().ToUpper() == uuidString.ToUpper();
+        }
+    }
+}

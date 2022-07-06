@@ -1,0 +1,320 @@
+; 
+; 
+; 
+;  ____           _ _   _      _        _    ____ ___ 
+; |  _ \ ___   __| | \ | | ___| |_     / \  |  _ \_ _|
+; | |_) / _ \ / _` |  \| |/ _ \ __|   / _ \ | |_) | | 
+; |  __/ (_) | (_| | |\  |  __/ |_   / ___ \|  __/| | 
+; |_|   \___/ \__,_|_| \_|\___|\__| /_/   \_\_|  |___|
+; 
+;  
+; File:		AsmQwordDumpX64.asm
+; Author: 	Zach Podbielniak
+; Last Update:	12/21/2017
+; 
+; Overview:	This file declares an x64 Assembly Proc to do a Qword Dump
+;               of a specific size at a memory address. This can be a machine
+;               code dump, or a raw memory dump.
+;	
+;		__QwordDumpX64 simply dumps to STDOUT.
+;
+;		__QwordDumpToFileX64 dumps to a file. The file that it is dumped
+;		to is that of the derived file of the HANDLE that is passed in.
+;		Any HANDLE that has overrided the __WriteFile proc, can be 
+; 		passed in, such as a HANDLE created from OpenFile(), 
+;               CreateLog(), CreateSocket(), etc. This HANDLE can also be the 
+;               HANDLE returned from GetStandardOut(), or GetStandardError().
+;
+; 		This file is part of the PodNet API and comes with no warranty,
+; 		use with your own discretion.
+; 
+;
+; Parameters are passed in RDI, RSI, RDX, RCX, R8, R9, Stack : in that order.
+
+
+[DEFAULT REL]
+[BITS 64]
+
+
+global __QwordDumpX64
+global __QwordDumpToFileX64
+
+extern printf
+extern sprintf
+extern WriteFile
+extern WaitForSingleObject
+extern ReleaseSingleObject
+extern CreateSpinLock
+
+
+segment .data
+
+lpszQwordDump:  db      "Qword Dump of size 0x%016X bytes",0x0A,"at address %p",0x0A,0x0A,0x00
+lpszFormat:     db      "0x%016llX",0x09,"0x%016llX",0x0A,0x00
+
+lpszBuffer: 	times 128 db 0
+hSpinLock:	dq	0x0000000000000000
+
+
+
+
+segment .text
+
+; _Success_(return != FALSE, ...)
+; __QwordDumpX64(
+;       _In_            LPVOID          lpAddress       RDI,
+;       _In_            QWORD           qwSize          RSI
+;);
+
+__QwordDumpX64:
+	cmp rdi, 0
+	je __QwordDumpX64Error
+	cmp rsi, 0
+	je __QwordDumpX64Error
+
+	push r15
+	push r14
+	push r13
+	push r12
+	push r11
+	push rbx
+
+	mov r15, rsi
+	mov r13, rsi
+	mov r11, rsi		; Preserve qwSize in r11
+	shr r15, 4		; Divide by 16 for XmmWord loops
+	mov r14, r15
+	shl r14, 4		; Find what is left over	
+	sub r13, r14		; Get remainder
+	shr r13, 3		; Qword is 8 bytes wide, ignore anything after
+	mov r12, rdi		; Save address
+		
+	; qwSize -> r11
+	; lpAddress -> r12
+	; qword loops -> r13
+	; xmmword loops -> r15
+
+	xor rdi, rdi
+	xor rsi, rsi
+	xor rcx, rcx
+	xor rdx, rdx
+
+
+	__QwordDumpX64PrintFirstLine:
+	lea rdi, [lpszQwordDump]
+	mov rsi, r11
+	mov rdx, r12
+	sub rsp, 0x18
+	call printf wrt ..plt
+	add rsp, 0x18
+	xor rdi, rdi
+	xor rsi, rsi
+
+	cmp r15, 0
+	je __QwordDumpX64DoneWithMain
+
+	
+	__QwordDumpX64MainLoop:
+	movups xmm0, [r12]
+	lea rdi, [lpszFormat]
+	movq rsi, xmm0
+	shufps xmm0, xmm0, 0b01001110
+	movq rdx, xmm0
+	xor rcx, rcx
+	sub rsp, 0x18
+	call printf wrt ..plt
+	add rsp, 0x18
+	add r12, 16
+	dec r15
+	cmp r15, 0
+	jne __QwordDumpX64MainLoop
+
+
+	__QwordDumpX64DoneWithMain:
+	cmp r13, 0
+	je __QwordDumpX64Success
+
+	; Remainder
+	__QwordDumpX64LastQword:
+	lea rdi, [lpszFormat]
+	mov rsi, QWORD [r12]
+	xor rdx, rdx
+	sub rsp, 0x18
+	call printf wrt ..plt
+	add rsp, 0x18
+
+
+	__QwordDumpX64Success:
+	pop rbx
+	pop r11
+	pop r12
+	pop r13
+	pop r14
+	pop r15
+	mov rax, 1
+	ret
+
+	__QwordDumpX64Error:
+	pop rbx
+	pop r11
+	pop r12
+	pop r13
+	pop r14
+	pop r15
+	mov rax, 0
+	ret
+
+
+
+
+
+
+; _Success_(return != FALSE, ...)
+; __QwordDumpToFileX64(
+;       _In_            LPVOID          lpAddress       RDI,
+;       _In_            QWORD           qwSize          RSI,
+;	_In_		HANDLE		hFile		RDX
+;);
+
+
+__QwordDumpToFileX64:
+	cmp rdi, 0
+	je __QwordDumpToFileX64Error
+	cmp rsi, 0
+	je __QwordDumpToFileX64Error
+	cmp rdx, 0
+	je __QwordDumpToFileX64Error
+	
+	push r15
+	push r14
+	push r13
+	push r12
+	push r11
+	push rbx
+
+	mov r15, rsi
+	mov r13, rsi
+	mov r11, rsi		; Preserve qwSize in r11
+	shr r15, 4		; Divide by 16 for XmmWord loops
+	mov r14, r15
+	shl r14, 4		; Find what is left over	
+	sub r13, r14		; Get remainder
+	shr r13, 3		; Qword is 8 bytes wide, ignore anything after
+	mov r12, rdi		; Save address
+	mov rbx, rdx		; Handle		
+
+	; hFile -> rbx
+	; qwSize -> r11
+	; lpAddress -> r12
+	; qword loops -> r13
+	; xmmword loops -> r15
+
+	xor rdi, rdi
+	xor rsi, rsi
+	xor rcx, rcx
+	xor rdx, rdx
+
+	mov rdi, QWORD [hSpinLock]
+	cmp rdi, 0
+	jne __QwordDumpToFileX64AcquireLock
+
+	__QwordDumpToFileX64CreateSpinLock:
+	call CreateSpinLock wrt ..plt
+	cmp rax, 0
+	je __QwordDumpToFileX64Error
+	mov rdi, rax	
+	mov QWORD [hSpinLock], rax	
+
+	__QwordDumpToFileX64AcquireLock:	
+	mov rsi, 0xFFFFFFFFFFFFFFFF
+	sub rsp, 0x10
+	call WaitForSingleObject wrt ..plt
+	add rsp, 0x10
+	
+
+	__QwordDumpToFileX64PrintFirstLine:
+	lea rdi, [lpszBuffer]
+	lea rsi, [lpszQwordDump]
+	mov rdx, r11
+	mov rcx, r12
+	xor rax, rax
+	sub rsp, 0x20	
+	call sprintf wrt ..plt
+	add rsp, 0x20
+	mov rdi, rbx
+	lea rsi, [lpszBuffer]
+	xor rdx, rdx
+	sub rsp, 0x20
+	call WriteFile wrt ..plt
+	add rsp, 0x20
+	
+	cmp r15, 0
+	je __QwordDumpToFileX64DoneWithMain
+
+	__QwordDumpToFileX64MainLoop:
+	movups xmm0, [r12]
+	lea rdi, [lpszBuffer]
+	lea rsi, [lpszFormat]
+	movq rdx, xmm0
+	shufps xmm0, xmm0, 0b01001110
+	movq rcx, xmm0
+	xor rax, rax
+	sub rsp, 0x20
+	call sprintf wrt ..plt
+	add rsp, 0x20
+	mov rdi, rbx
+	lea rsi, [lpszBuffer]
+	xor rdx, rdx
+	sub rsp, 0x20
+	call WriteFile wrt ..plt
+	add rsp, 0x20
+	add r12, 16
+	dec r15
+	cmp r15, 0
+	jne __QwordDumpToFileX64MainLoop
+
+
+	__QwordDumpToFileX64DoneWithMain:
+	cmp r13, 0
+	je __QwordDumpToFileX64Success
+
+
+	__QwordDumpToFileX64HandleLastQword:
+	mov rdi, [lpszBuffer]
+	mov rsi, [lpszFormat]
+	mov rdx, QWORD [r12]
+	xor rcx, rcx
+	xor rax, rax
+	sub rsp, 0x20
+	call sprintf wrt ..plt
+	add rsp, 0x20
+	mov rdi, rbx
+	lea rsi, [lpszBuffer]
+	xor rdx, rdx
+	sub rsp, 0x20
+	call WriteFile wrt ..plt
+	add rsp, 0x20	
+	mov rdi, QWORD [hSpinLock]
+	sub rsp, 0x10
+	call ReleaseSingleObject wrt ..plt
+	add rsp, 0x10
+
+	__QwordDumpToFileX64Success:
+	pop rbx
+	pop r11
+	pop r12
+	pop r13
+	pop r14
+	pop r15
+	mov rax, 1
+	ret	
+
+	__QwordDumpToFileX64Error:
+	pop rbx
+	pop r11
+	pop r12
+	pop r13
+	pop r14
+	pop r15
+	mov rax, 0
+	ret

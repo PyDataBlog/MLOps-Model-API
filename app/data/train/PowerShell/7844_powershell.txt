@@ -1,0 +1,101 @@
+﻿# add powershell snapin for solarwinds so I can ask it questions
+Add-PSSnapin SwisSnapin
+
+$SourceServer = "mn601h5a033"
+$DestinationServer = "localhost"
+
+# create the connection to both source and destination SolarWinds servers
+$swissource = Connect-Swis -Hostname $SourceServer -Trusted
+$swisdest = Connect-Swis -Hostname $DestinationServer -trusted
+
+$olddependencyquery = @"
+SELECT d.Name, d.Description, d.IncludeInStatusCalculation, d.ParentEntityType, d.ParentNetObjectID, d.parenturi, case when pn.IP_Address is not null then pn.ip_address when pc.name is not null then pc.name end as [parentidentifier]
+, d.ChildEntityType, d.ChildNetObjectID, d.childuri
+, case when cn.IP_Address is not null then cn.ip_address when cc.name is not null then cc.name end as [childidentifier]
+FROM Orion.Dependencies d
+left join orion.nodes pn on d.ParentNetObjectID=pn.NodeID and d.ParentEntityType = 'Orion.Nodes'
+left join orion.Container pc on d.ParentNetObjectID=pc.ContainerID and d.ParentEntityType = 'Orion.Groups'
+left join orion.nodes cn on d.ChildNetObjectID=cn.NodeID and d.ChildEntityType = 'Orion.Nodes'
+left join orion.container cc on d.ChildNetObjectID=cc.Containerid and d.ChildEntityType = 'Orion.Groups'
+
+where automanaged = 'false'
+and childentitytype != 'Orion.SEUM.Transactions'
+"@
+
+
+$olddeps = Get-SwisData $swissource $olddependencyquery
+
+foreach ($dep in $olddeps) {
+    "Working on $($dep.name): $($dep.parentidentifier) over $($dep.childidentifier) "
+    $existing = Get-SwisData $swisdest "select name from orion.Dependencies where name = '$($dep.name)'"
+
+    if(!$existing){
+        if($dep.parententitytype -like "Orion.Nodes") {
+            $newnode = Get-SwisData $swisdest "select nodeid, uri from orion.nodes where ip_address = '$($dep.parentidentifier)'"
+            if(!$newnode) {
+                $dep.ParentNetObjectID = $null 
+                $dep.parenturi = $null 
+            } else {
+                $dep.ParentNetObjectID = $newnode.nodeid
+                $dep.parenturi = $newnode.uri
+            }
+        }
+
+        if($dep.parententitytype -like "Orion.Groups") {
+            $newgroup = Get-SwisData $swisdest "select containerid, uri from orion.container where name = '$($dep.parentidentifier)'"
+            if(!$newgroup) {
+                $dep.ParentNetObjectID = $null
+                $dep.parenturi = $null 
+            } else {
+                $dep.ParentNetObjectID = $newgroup.containerid
+                $dep.parenturi = $newgroup.uri
+            }
+        }
+
+        if($dep.ParentNetObjectID -notlike $null) {
+
+            if($dep.childentitytype -like "Orion.Nodes") {
+                $newnode = Get-SwisData $swisdest "select nodeid, uri from orion.nodes where ip_address = '$($dep.childidentifier)'"
+                if(!$newnode) {
+                    $dep.ChildNetObjectID = $null
+                    $dep.childuri = $null 
+                } else {
+                    $dep.ChildNetObjectID = $newnode.nodeid
+                    $dep.childuri = $newnode.uri 
+                }
+            }
+
+            if($dep.childentitytype -like "Orion.Groups") {
+                $newgroup = Get-SwisData $swisdest "select containerid, uri from orion.container where name = '$($dep.childidentifier)'"
+                if(!$newgroup) {
+                    $dep.ChildNetObjectID = $null
+                    $dep.childuri = $null 
+                } else {
+                    $dep.ChildNetObjectID = $newgroup.containerid
+                    $dep.childuri = $newgroup.uri
+                }
+            }
+       
+            if($dep.ChildNetObjectID -notlike $null -and $dep.ParentNetObjectID -notlike $null) {
+                       $now = get-date
+            $insertDepSQL = @"
+    INSERT (Name, ParentUri, ChildUri, LastUpdateUtc,ParentNetObjectID,ChildNetObjectID,ParentEntityType,ChildEntityType) 
+    VALUES ("$($dep.Name)","$($dep.ParentUri)","$($dep.ChildUri)", "$now" , "$($dep.ParentNetObjectID)","$($dep.ChildNetObjectID)","$($dep.ParentEntityType)","$($dep.ChildEntityType)")
+"@
+            $insertDepSQL
+            Invoke-SwisVerb $swisdest 'Orion.Reporting' 'ExecuteSQL' $insertDepSQL
+            } else {
+                " No matching child"
+            }
+        
+    
+        } else {
+            " No Matching Parent"
+        }
+
+    } else {
+        " Already Exists"
+    }
+    
+}
+        

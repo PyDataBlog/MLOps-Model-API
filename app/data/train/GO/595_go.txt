@@ -1,0 +1,100 @@
+package mysql
+
+import (
+	"database/sql"
+	"time"
+
+	"crypto/md5"
+
+	"encoding/hex"
+
+	"github.com/cloudbirds/comments/closure-comments/store"
+)
+
+type entityStore struct {
+	db *sql.DB
+}
+
+func byte2string(in [16]byte) []byte {
+	return in[:16]
+}
+
+// New create a new entity
+func (s *entityStore) New(title, url string, discovererID int64) (int64, error) {
+	now := time.Now()
+	md5URL := hex.EncodeToString(byte2string(md5.Sum([]byte(url)))) // ?
+
+	res, err := s.db.Exec(`
+		INSERT INTO entities(title, url, md5_url, discoverer_id, created_at, last_comment_at) VALUES(?, ?, ?, ?, ?, ?)
+	`, title, url, md5URL, discovererID, now, now)
+	if err != nil {
+		return 0, err
+	}
+
+	return res.LastInsertId()
+}
+
+const selectFromEntity = `SELECT id, title, url, md5_url, discoverer_id, created_at, last_comment_at, comment_count FROM entities`
+
+func (s *entityStore) scanEntity(scanner scanner) (*store.Entity, error) {
+	e := new(store.Entity)
+	err := scanner.Scan(&e.ID, &e.Title, &e.URL, &e.MD5URL, &e.DiscovererID, &e.CreatedAt, &e.LastCommentAt, &e.CommentCount)
+	if err == sql.ErrNoRows {
+		return nil, store.ErrNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return e, nil
+}
+
+// Get finds a entity by ID.
+func (s *entityStore) Get(id int64) (*store.Entity, error) {
+	row := s.db.QueryRow(selectFromEntity+` WHERE deleted=false and id=?`, id)
+	return s.scanEntity(row)
+}
+
+// GetLatest returns a limited number of latest entity and a total entity count.
+func (s *entityStore) GetLatest(offset, limit int) ([]*store.Entity, int, error) {
+	var count int
+	err := s.db.QueryRow(`SELECT count(*) FROM entities WHERE deleted=false`).Scan(&count)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	if limit <= 0 || offset > count {
+		return []*store.Entity{}, count, nil
+	}
+
+	rows, err := s.db.Query(selectFromEntity+` WHERE deleted=false ORDER BY last_comment_at DESC, id DESC limit ? offset ?`, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+
+	entities := []*store.Entity{}
+	for rows.Next() {
+		entity, err := s.scanEntity(rows)
+		if err != nil {
+			return nil, 0, err
+		}
+		entities = append(entities, entity)
+	}
+	if err = rows.Err(); err != nil {
+		return nil, 0, err
+	}
+
+	return entities, count, nil
+}
+
+// SetTitle updates entity.Title value.
+func (s *entityStore) SetTitle(id int64, title string) error {
+	_, err := s.db.Exec(`UPDATE entities SET title=? where id=?`, id)
+	return err
+}
+
+// Delete soft-deletes a topic
+func (s *entityStore) Delete(id int64) error {
+	_, err := s.db.Exec(`UPDATE entities SET deleted=true WHERE id=?`, id)
+	return err
+}

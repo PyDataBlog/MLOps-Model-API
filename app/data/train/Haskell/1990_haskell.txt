@@ -1,0 +1,94 @@
+import           Control.Concurrent
+import           Control.Concurrent.STM.TChan
+import           Control.Monad
+import           Control.Monad.STM
+import           Quant.MatchingEngine.BasicTypes
+import           Quant.MatchingEngine.Book
+import           Quant.MatchingEngine.Feed
+import           Quant.MatchingEngine.Protocol
+import           System.Directory
+import           System.Environment
+import           System.Exit
+import           System.FilePath
+import           System.IO
+
+import           Quant.MatchingEngine.Tests
+
+main :: IO ()
+main = getArgs >>= parseArgs
+  where
+    parseArgs :: [String] -> IO ()
+    parseArgs [rootdir, port] = mif (doesDirectoryExist rootdir)
+                                    (startServer rootdir port)
+                                    (putStrLn ("Directory "++ rootdir ++ " not found"))
+    parseArgs [arg] | arg == "test" = runTests
+    parseArgs _               = usage >> exitWith (ExitFailure 2)
+
+mif :: Monad m => m Bool -> m () -> m () -> m ()
+mif test actionTrue actionFalse = test >>= \t -> if t then actionTrue else actionFalse
+
+usage :: IO ()
+usage = putStrLn "exec <root directory> <port>"
+
+type FeedChannel = TChan FeedMessage
+type TradeChannel = TChan TradeMessage
+type TradeResponseChannel = TChan TradeResponseMessage
+
+startServer :: FilePath -> String -> IO ()
+startServer rootDir port = do
+  marketFeed <- newTChanIO
+  tradingInterface <- newTChanIO
+  tradingResponses <- newTChanIO
+  _ <- forkIO $ algo (ClientID 1) marketFeed tradingInterface tradingResponses
+  exchange emptyBook marketFeed tradingInterface tradingResponses
+  print "yada"
+-- read config file to get list of securities to create books for
+-- configuration also specifices number and type of algos to create
+-- and has algo-specific config (root directory for each algo instance)
+-- create control channel and control module (sends market open, auction, close, timer events)
+-- create books
+-- create client trade interface channels
+-- create client feed interface channels
+-- create clients and connect channels
+--
+
+algo :: ClientID -> FeedChannel -> TradeChannel -> TradeResponseChannel -> IO ()
+algo clientID feed tradeChannel tradeResponses = do
+  atomically $ writeTChan tradeChannel (NewOrder clientID Buy (Price 100) (ShareCount 50) (ClientOrderID 1))
+  tradeResponseMessage <- atomically $ readTChan tradeResponses
+  print ("received trade response " ++ show tradeResponseMessage)
+  algo clientID feed tradeChannel tradeResponses
+
+exchange :: Book -> FeedChannel -> TradeChannel -> TradeResponseChannel -> IO ()
+exchange book feedChannel tradeChannel tradeResponseChannel = do
+  tradeMessage <- atomically $ readTChan tradeChannel
+  let tradeResponseMessage = validateAndAckTradeMessage book tradeMessage
+  atomically $ writeTChan tradeResponseChannel tradeResponseMessage
+  let (newBook, feedMessages, tradeResponseMessages) = processTradeMessage book tradeMessage
+  print ("new book:" ++ show newBook)
+  let r1 = map (writeTChan feedChannel) feedMessages
+  let r2 = map (writeTChan tradeResponseChannel) tradeResponseMessages
+  exchange newBook feedChannel tradeChannel tradeResponseChannel
+
+validateAndAckTradeMessage :: Book -> TradeMessage -> TradeResponseMessage
+validateAndAckTradeMessage book (NewOrder clientID _ _ _ clientOrderID) =
+  NewOrderAck clientID clientOrderID orderID
+  where orderID = OrderID 1101
+validateAndAckTradeMessage book (CancelOrder clientID orderID) =
+  if okToCancel then CancelOrderAck clientID orderID else CancelOrderNack clientID orderID
+  where okToCancel = orderExists book clientID orderID
+
+processTradeMessage :: Book -> TradeMessage -> (Book, [FeedMessage], [TradeResponseMessage])
+processTradeMessage book (NewOrder clientID Buy price shareCount clientOrderID) =
+  (newBook, feedMessages, tradeResponseMessages)
+  where (newBook, trades) = processBuy book (OrderBuy price time shareCount clientID orderID)
+        feedMessages =  map (\(Trade tprice tshareCount _ _ _ _) -> FeedMessageTrade tshareCount tprice) trades
+        tradeResponseMessages = map genFill1 trades ++ map genFill2 trades
+        time = Time 0
+        orderID = OrderID 400
+
+genFill1 :: Trade -> TradeResponseMessage
+genFill1 (Trade price shareCount orderID clientID _ _) = OrderFill clientID orderID price shareCount
+genFill2 :: Trade -> TradeResponseMessage
+genFill2 (Trade price shareCount _ _ orderID clientID) = OrderFill clientID orderID price shareCount
+

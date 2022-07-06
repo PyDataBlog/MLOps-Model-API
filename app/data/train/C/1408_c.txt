@@ -1,0 +1,231 @@
+/*
+ * Copyright (C) 2017-present Frederic Meyer. All rights reserved.
+ *
+ * Use of this source code is governed by a BSD-style license that can be
+ * found in the LICENSE file.
+ */
+
+#include "vt100.h"
+#include <stddef.h>
+
+struct vt100_term* vt100_init(struct vt100_term* this, int buffer_width, int buffer_height) {
+    this->state    = VT100_INITIAL;
+    this->color    = 7;
+    this->cursor_x = 0;
+    this->cursor_y = 0;
+    this->buffer_width  = buffer_width;
+    this->buffer_height = buffer_height;
+    this->set_char      = NULL;
+    this->set_cursor    = NULL;
+    this->clear_from_to = NULL;
+
+    return this;
+}
+
+#define UPDATE_CURSOR \
+    if (this->set_cursor != NULL) { \
+        this->set_cursor(this->cursor_x, this->cursor_y); \
+    }
+
+void vt100_write(struct vt100_term* this, char c) {
+    switch (this->state) {
+        // Last character was 0x1B (aka \e or ESC).
+        // This indicates an escape sequence that allows more complex
+        // instructions, e.g. setting terminal foreground & background color.
+        case VT100_ESCAPE:
+            switch (c) {
+                // CSI - Control Sequence Introducer
+                case '[': {
+                    // Clear any left over CSI data
+                    this->csi.num = 0;
+                    for (int i = 0; i < VT100_MAX_PARAMS; i++) {
+                        this->csi.params[i] = 0;
+                    }
+                    this->state = VT100_CONTROL_SEQ;
+                    break;
+                }
+
+                // RIS – Reset to Initial State
+                case 'c':
+                    this->cursor_x = 0;
+                    this->cursor_y = 0;
+                    this->color    = 0x07;
+                    this->state    = VT100_INITIAL;
+                    if (this->set_cursor != NULL) {
+                        this->set_cursor(0, 0);
+                    }
+                    if (this->clear_from_to != NULL) {
+                        this->clear_from_to(0, 0, this->buffer_width - 1, this->buffer_height - 1, this->color);
+                    }
+                    break;
+            }
+            break;
+
+        // Inside of control sequence.
+        // Starts optionally with a sequence of arguments/parameters
+        // then ends with one character indicating the command.
+        // TODO: prevent buffer overlows (csi.params)
+        case VT100_CONTROL_SEQ:
+            switch (c) {
+                // Digit, "append" to current parameter.
+                case '0': case '1': 
+                case '2': case '3': 
+                case '4': case '5':
+                case '6': case '7': 
+                case '8': case '9':
+                    this->csi.params[this->csi.num] *= 10;
+                    this->csi.params[this->csi.num] += c - '0';
+                    break;
+
+                // Ṕarameter delimiter
+                case ';':
+                    this->csi.num++;
+                    break;
+
+                // Set Display Attributes
+                case 'm': {
+                    for (int i = 0; i <= this->csi.num; i++) {
+                        int attribute = this->csi.params[i];
+
+                        switch (attribute) {
+                            // Reset state
+                            case 0:
+                                // TODO: implement more
+                                this->color = 7;
+                                break;
+
+                            // Foreground color
+                            case 30: case 31:
+                            case 32: case 33:
+                            case 34: case 35:
+                            case 36: case 37:
+                                this->color = (this->color & 0xF0) | (attribute - 30);
+                                break;
+                        
+                            // Background color
+                            case 40: case 41:
+                            case 42: case 43:
+                            case 44: case 45:
+                            case 46: case 47:
+                                this->color = (this->color & 0x0F) | ((attribute - 40) << 4);
+                                break;
+                        }
+                    }
+                    this->state = VT100_INITIAL;
+                    break;
+                }
+
+                /*// Erase Line
+                case 'K':
+                    if (this->clear_from_to == NULL) {
+                        break;
+                    }
+                    if (this->csi.num == 0) {
+                        // Cursor to End of line
+                        this->clear_from_to(this->cursor_x, this->cursor_y, this->buffer_width - 1, this->cursor_y, this->color);
+                    } else {
+                        switch (this->csi.params[0]) {
+                            // Start of line to cursor
+                            case 0: 
+                                this->clear_from_to(0, this->cursor_y, this->cursor_x, this->cursor_y, this->color);
+                                break;
+
+                            // Erase entire line
+                            case 1: 
+                                this->clear_from_to(0, this->cursor_y, this->buffer_width - 1, this->buffer_height - 1, this->color);
+                                break;
+                        }
+                    }
+                    break;
+
+                // Erase Block
+                case 'J':
+                    break;
+                */
+
+                default:
+                    // Possibly unknown command, or bad sequence. Ignore.
+                    this->state = VT100_INITIAL;
+                    break;
+            }
+            break;
+
+        // Default state
+        case VT100_INITIAL:
+            switch (c) {
+                // Non-control character. Print it.
+                default:
+                    // TODO: implement line wrap flag
+                    if (this->cursor_x == this->buffer_width) {
+                        this->cursor_x = 0;
+                        this->cursor_y++;
+                    }
+                    if (this->set_char != NULL) {
+                        this->set_char(this->cursor_x, this->cursor_y, c, this->color);
+                    }
+                    this->cursor_x++;
+                    UPDATE_CURSOR;
+                    break;
+
+                // Carriage Return
+                case VT100_CR:
+                    this->cursor_x = 0;
+                    UPDATE_CURSOR;
+                    break;
+
+                // New Line
+                case VT100_LF:
+                    this->cursor_x = 0;
+                    this->cursor_y++;
+                    UPDATE_CURSOR;
+                    break;
+
+                // Back Space
+                case VT100_BS:
+                    // TODO: verify this behaviour
+                    if (this->cursor_x == 0) {
+                        this->cursor_x = this->buffer_width;
+                        this->cursor_y--;
+                    } else {
+                        this->cursor_x--;
+                    }
+                    //if (this->set_char != NULL) {
+                    //    this->set_char(this->cursor_x, this->cursor_y, ' ', this->color);
+                    //}
+                    UPDATE_CURSOR;
+                    break;
+
+                // Horizontal Tab
+                // Converting your precious TAB to spaces. Resistance is furtile.
+                case VT100_HT: {
+                    int spaces;
+
+                    if (this->cursor_x != 0) {
+                        spaces = ((this->cursor_x - 1) & 7) ^ 7;
+                    } else {
+                        // TODO: verify this on other VTs
+                        spaces = 9;
+                    }
+                    while (spaces--) vt100_write(this, ' ');
+
+                    break;
+                }
+
+                // Vertical Tab
+                case VT100_VT:
+                    // TODO: implement
+                    break;
+
+                // Form Feed
+                case VT100_FF:
+                    // TODO: implement
+                    break;
+
+                // Complex escape sequence!
+                case VT100_ESC:
+                    this->state = VT100_ESCAPE;
+                    break;
+            }
+            break;
+    }
+}

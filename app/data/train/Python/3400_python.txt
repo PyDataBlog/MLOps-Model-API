@@ -1,0 +1,634 @@
+# -*- coding: UTF-8 -*-
+
+import sys
+
+WorkList = None
+
+def SH(i):
+    """reformatting .SH"""
+    global WorkList
+    string = WorkList[i]
+    l = len(string) - 2
+    r = 0
+    while string[0] == '=' and string[l] == '=':
+        WorkList[i] = string[1:l]
+        string = WorkList[i]
+        l = len(string) - 1
+        r = r + 1
+    if r == 2:
+        WorkList[i] = '\n.SH "' + string + '"\n.PP\n'
+    else:
+        WorkList[i] = '\n.SS "' + string + '"\n.PP\n'
+#---------------------------------------------------------------------------
+
+def TP(i):
+    """reformatting .TP"""
+    global WorkList
+    string = WorkList[i]
+    l=0
+    string1 = WorkList[i + l]
+    while string1 != '' and string1[0] == ';':
+        j=0
+        finish = 0
+        nexcl = 1
+        s = 0
+        while len(string) > j and finish == 0:
+            if string[j:j+8] == '<nowiki>':
+                nexcl = 0
+                j = j + 7
+            elif string[j:j+9] == '</nowiki>':
+                nexcl = 1
+                j = j + 8
+            elif string[j:j+4] == '<!--':
+                nexcl = 0
+                j = j + 3
+            elif string[j:j+3] == '-->':
+                nexcl = 1
+                j = j + 2
+            if string[j] == ':':
+                s = 1
+            finish = nexcl * s
+            s = 0
+            j = j + 1
+        if len(string) == j:
+            WorkList[i] = '.TP\n.B ' + string[1:]
+        elif string[j-1] == ':':
+            WorkList[i] = '.TP\n.B ' + string[1:j-1] + '\n' + string[j:]
+        l = l + 1
+        string1 = WorkList[i+l]
+    while string1 != '' and string1[0] == ':' and string1[1] <> ':' and string1[1] <> ';':
+        WorkList[i + l] = '.br\n' + string1[1:]
+        l = l + 1
+        string1 = WorkList[i + l]
+#---------------------------------------------------------------------------
+
+def wiki2man(content):
+    global WorkList
+    
+    string = '\n'
+    string = unicode(string, 'utf-8')
+    WorkList = [string]
+    
+    cpt = 0
+    while string != '' and cpt < len(content):
+        string = content[cpt]
+        cpt += 1
+        WorkList.append(string)
+    
+    path = sys.argv[0]
+    
+    n = len(path)
+    n = n - 11
+    path = path[:n]
+    
+    ########## Reformatting from wiki to roff ##########
+    
+    # TH:
+    string = WorkList[1]; 
+    if len(string) > 2 and string[0] != '=' and string[:4] != '<!--' and string[:2] != '{{':
+        i = 0
+        while len(string) > i and string[i] != '(':
+            i = i + 1
+        WorkList.pop(1)
+    WorkList.pop(0)
+    
+    i = 0
+    tabacc = -1
+    tab = 0
+    tab2 = 0
+    col = 0
+    nf = 0
+    nr = 0
+    excl = 0 
+    nowiki = 0
+    RS=0
+    strng = unicode('{{MAN индекс}}', 'utf-8')
+    while len(WorkList) > i:
+        string = WorkList[i]
+        if len(string) > 1:
+            # reformatting "nowiki"
+            if string[:9] == '</nowiki>':
+                WorkList[i] = string[9:]
+                nowiki = 0
+            
+            if nowiki == 0:
+                # reformatting "pre"
+                if string[:6] == '</pre>':
+                    WorkList[i] = '\n.fi\n.RE\n' + string[6:]
+                    nf = 0
+                
+                # reformatting "tt"
+                elif string[:5] == '</tt>':
+                    if string[6:7] == '. ':
+                        WorkList[i] = '\n.fi\n.RE\n' + string[7:]
+                    elif len(string) > 6 and  string[6] == '.':
+                        WorkList[i] = '\n.fi\n.RE\n' + string[6:]
+                    else:
+                        WorkList[i] = '\n.fi\n.RE\n' + string[5:]
+                    nf = 0
+                
+                # reformatting " "
+                if string[0] == ' ':
+                    if nf == 0:
+                        nf = 1
+                        WorkList[i] = '\n.RS\n.nf\n' + string
+                    elif nf == 1:
+                        WorkList[i] = string
+                else:
+                    if nf == 1:
+                        nf = 0
+                        WorkList[i] = '\n.fi\n.RE\n'
+                        WorkList.insert(i+1, string)
+                    
+            string = WorkList[i]
+            if nf != 2 and nowiki == 0:
+                # reformatting excluded text <!-- * -->
+                if excl == 1:
+                    WorkList[i] = '.\" ' + string[0:]
+                    string = WorkList[i]
+                
+                if nf == 0:
+                    # format titles
+                    if string[0] == '=' and string[len(string)-2] == '=':
+                        SH(i)
+                    
+                    # format ";"
+                    elif string[0] == ';':
+                        TP(i)
+                    
+                    # format ":..."
+                    elif string[0] == ':':
+                        l = 1
+                        s = ''
+                        while string[l] == ':':
+                            l = l + 1;
+                        if RS == l:
+                            s = '\n.br\n'
+                        elif RS < l:
+                            while RS < l:
+                                s = s + '.RS\n'
+                                RS = RS + 1
+                        if string[RS] == ';':
+                            WorkList[i] = s + '.TP\n.B ' + string[RS+1:]
+                        else:
+                            WorkList[i] = s + string[RS:]
+                        
+                        string = WorkList[i]
+                        stri = WorkList[i+1]
+                        if RS > 0 and stri[0] <> ':':
+                            while RS > 0:
+                                WorkList[i] = string + '\n.RE\n'
+                                RS = RS - 1
+                                string = WorkList[i]
+                        else:
+                            while RS > 0 and len(stri) > RS-1 and stri[RS-1] <> ':':
+                                RS = RS - 1
+                                WorkList[i] = string + '\n.RE\n'
+                                string = WorkList[i]
+                    
+                    # format "*..."
+                    elif string[0] == '*':
+                        WorkList[i] = '.br\n  * ' + string[1:]
+                    
+                    # format tables 2
+                    elif string[:2] == '{|':
+                        if tab2 > 0:
+                            WorkList[i] = '.RS\n'
+                            tab2 = tab2 + 1
+                            col = 0
+                        else:
+                            WorkList[i] = ''
+                            tab2 = 1
+                    
+                    elif string[:2] == '|-' and tab2 > 0:
+                        WorkList[i] = ''
+                        col = 0
+                    
+                    elif string[:2] == '|}':
+                        if tab2 == 1:
+                            WorkList[i] = ''
+                            col = 0
+                            tab2 = 0
+                        elif tab2 > 1:
+                            WorkList[i] = '\n.RE\n'
+                            col = 0
+                            tab2 = tab2 - 1
+                    
+                    elif string[:8] == '|valign=' and tab2 > 0:
+                        j = 9
+                        while len(string) > j and string[j]!='|':
+                            j = j + 1
+                        if string[j] == '|':
+                            if col == 0:
+                                WorkList[i] = '\n.TP\n' + string[j+1:]
+                                col = 1
+                            elif col > 0:
+                                WorkList[i] = string[j+1:]
+                                col = 2
+                            elif col > 1:
+                                WorkList[i] = '.PP\n' + string[j+1:]
+                                col = col + 1
+                    
+                    elif string[:1] == '|' and tab2 > 0:
+                        if col == 0:
+                            WorkList[i] = '\n.TP\n' + string[1:]
+                            col = 1
+                        elif col == 1:
+                            WorkList[i] = string[1:]
+                            col = col + 1
+                        elif col > 1:
+                            WorkList[i] = '\n' + string[1:]
+                            col = col + 1
+                    
+                    # delete wiki "Category:"
+                    elif string[:11] == '[[Category:':
+                        WorkList[i] = ''
+                    
+                    # delete wiki {{MAN индекс}}
+                    elif string[:14] == strng:
+                        WorkList[i] = ''
+                    
+                    # delete wiki [[en:Man ...]]
+                    elif string[:9] == '[[en:Man ':
+                        WorkList[i] = ''
+                    
+            string = WorkList[i]
+            j = 0
+            B = -1
+            I = -1
+            U = -1
+            K = -1
+            K1 = -1
+            while len(string) > j:
+                # reformatting excluded text <!-- * -->
+                if string[j:j+4] == '<!--':
+                    string = string[:j] + '\n.\"' + string[j+4:]
+                    excl = 1
+                    j = j + 1
+                elif string[j:j+3] == '-->':
+                    string = string[:j] + '\n' + string[j+3:]
+                    excl = 0
+                    j = j - 1
+                
+                if excl == 0:
+                    # Change some symbols: — « » — © "   & < > 
+                    if string[j:j+8] == '&#x2015;':
+                        string = string[:j] + unicode('—', 'utf-8') + string[j+8:]
+                    elif string[j:j+7] == '&laquo;':
+                        string = string[:j] + unicode('«', 'utf-8') + string[j+7:]
+                    elif string[j:j+7] == '&raquo;':
+                        string = string[:j] + unicode('»', 'utf-8') + string[j+7:]
+                    elif string[j:j+7] == '&mdash;':
+                        string = string[:j] + unicode('—', 'utf-8') + string[j+7:]
+                    elif string[j:j+6] == '&copy;':
+                        string = string[:j] + unicode('©', 'utf-8') + string[j+6:]
+                    elif string[j:j+6] == '&quot;':
+                        string = string[:j] + unicode('"', 'utf-8') + string[j+6:]
+                    elif string[j:j+6] == '&nbsp;':
+                        string = string[:j] + unicode(' ', 'utf-8') + string[j+6:]
+                    elif string[j:j+5] == '&amp;':
+                        string = string[:j] + unicode('&', 'utf-8') + string[j+5:]
+                    elif string[j:j+4] == '&lt;':
+                        string = string[:j] + unicode('<', 'utf-8') + string[j+4:]
+                    elif string[j:j+4] == '&gt;':
+                        string = string[:j] + unicode('>', 'utf-8') + string[j+4:]
+                    
+                    # reformatting "-" or "\"
+                    elif string[j:j+1] == '-':
+                        string = string[0:j] + '\\' + string[j:]
+                        j = j + 1
+                    elif string[j:j+1] == '\\':
+                        string = string[0:j] + '\e' + string[j+1:]
+                        j = j + 1
+                    
+                    # reformatting "nowiki"
+                    elif string[j:j+8] == '<nowiki>':
+                        nowiki = 1
+                        if nf != 2:
+                            string = string[:j] + string[j+8:]
+                            j = j
+                    elif string[j:j+9] == '</nowiki>':
+                        nowiki = 0
+                        if nf != 2:
+                            string = string[:j] + string[j+9:]
+                            j = j
+                    
+                    if nowiki == 0:
+                        if string[j:j+5] == "'''''":
+                            if B != -1 and I == -1 :
+                                if tabacc == 1:
+                                    string = string[:B] + '"' + string[B+3:j] + '"' + string[j+3:]
+                                    j = j - 4
+                                    B =- 1
+                                else:
+                                    string = string[:B] + '\\fB' + string[B+3:j] + '\\fR' + string[j+3:]
+                                    j = j + 1
+                                    B =- 1
+                            if I != -1 and B == -1:
+                                string = string[:I] + '\\fI' + string[I+2:j] + '\\fR' + string[j+2:]
+                                j = j + 2
+                                I =- 1
+                        
+                        # reformatting boolean text 1
+                        elif string[j:j+3] == "'''":
+                            if B == -1:
+                                B = j
+                            else:
+                                if tabacc == 1:
+                                    string = string[:B] + '"' + string[B+3:j] + '"' + string[j+3:]
+                                    j = j - 4
+                                    B =- 1
+                                elif j+3-B > 5:
+                                    string = string[:B] + '\\fB' + string[B+3:j] + '\\fR' + string[j+3:]
+                                    j = j + 1
+                                    B =- 1
+                        
+                        # reformatting italic text 1
+                        elif string[j:j+2] == "''" and B == -1:
+                            if I == -1:
+                                I = j
+                            else:
+                                if j+3-I > 2:
+                                    string = string[:I] + '\\fI' + string[I+2:j] + '\\fR' + string[j+2:]
+                                    j = j + 2
+                                    I =- 1
+                        
+                        # reformatting "pre"
+                        elif string[j:j+5] == '<pre>':
+                            string = string[:j] + '\n.RS\n.nf\n' + string[j+5:]
+                            nf = 2
+                            j = j + 3
+                        elif string[j:j+6] == '</pre>':
+                            string = string[:j] + '\n.fi\n.RE\n' + string[j+6:]
+                            nf = 0
+                            j = j + 3
+                        
+                        # reformatting "code"
+                        elif string[j:j+6] == '<code>':
+                            string = string[:j] + '\n.nf\n' + string[j+6:]
+                            nf = 2
+                            j = j + 3
+                        elif string[j:j+7] == '</code>':
+                            string = string[:j] + '\n.fi\n' + string[j+7:]
+                            nf = 0
+                            j = j + 3
+                        
+                        # reformatting "tt"
+                        elif string[j:j+4] == '<tt>':
+                            string = string[:j] + '\n.RS\n.nf\n' + string[j+4:]
+                            nf = 2
+                            j = j + 3
+                        elif string[j:j+5] == '</tt>':
+                            if string[j+5] == '.':
+                                string = string[:j] + '\n.fi\n.RE\n' + string[j+6:]
+                            else:
+                                string = string[:j] + '\n.fi\n.RE\n' + string[j+5:]
+                            nf = 0
+                            j = j + 3
+                        
+                        # reformatting "...}}"
+                        elif string[j:j+2] == '}}':
+                            if nr == 1:
+                                string = string[:j] + '\\fR' + string[j+2:]
+                                nr = 0
+                                j = j + 2
+                            elif nr == 2:
+                                string = string[:j] + '\n.RE\n' + string[j+2:]
+                                nr = 0
+                                j = j + 3
+                        
+                        # reformatting "{{Codeline|...}}"
+                        elif string[j:j+11] == '{{Codeline|':
+                            string = string[:j] + '\\fB' + string[j+11:]
+                            nr = 1
+                            j = j + 2
+                        
+                        # reformatting "{{Warning|...}}"
+                        elif string[j:j+10] == '{{Warning|':
+                            string = string[:j] + '\\fB' + string[j+10:]
+                            nr = 1
+                            j = j + 2
+                        
+                        # reformatting "{{Note|...}}"
+                        elif string[j:j+7] == '{{Note|':
+                            string = string[:j] + '\\fI' + string[j+7:]
+                            nr = 1
+                            j = j + 2
+                        
+                        # reformatting "{{Discussion|...}}"
+                        elif string[j:j+13] == '{{Discussion|':
+                            string = string[:j] + '\\fI' + string[j+13:]
+                            nr = 1
+                            j = j + 2
+                        
+                        # reformatting "{{Filename|...}}"
+                        elif string[j:j+11] == '{{Filename|':
+                            string = string[:j] + '\\fI' + string[j+11:]
+                            nr = 1
+                            j = j + 2
+                        
+                        # reformatting "[mailto:...]"
+                        elif string[j:j+8] == '[mailto:':
+                            a = j + 8
+                            while string[a] <> ' ':
+                                a = a + 1
+                            b = a + 1
+                            while string[b] <> ']':
+                                b = b + 1
+                            string = string[:j] + string[a+1:b] + ' <' + string[j+8:a] + '>'
+                        
+                        # reformatting "{{Box File|...|...}}"
+                        elif string[j:j+11] == '{{Box File|':
+                            a = j + 11
+                            while string[a] <> '|':
+                                a = a + 1
+                            string = string[:j] + '\n.TP\n.B ' + string[j+11:a] + '\n.RS\n' + string[a+1:]
+                            nr = 2
+                        
+                        if nf == 0:
+                            # reformatting boolean text 2
+                            if string[j:j+3] == '<b>':
+                                string = string[:j] + '\\fB' + string[j+3:]
+                                j = j + 2
+                            elif string[j:j+4] == '</b>':
+                                string = string[:j] + '\\fR' + string[j+4:]
+                                j = j + 2
+                            
+                            # reformatting italic text 2
+                            elif string[j:j+3] == '<i>':
+                                string = string[:j] + '\\fI' + string[j+3:]
+                                j = j + 2
+                            elif string[j:j+4] == '</i>':
+                                string = string[:j] + '\\fR' + string[j+4:]
+                                j = j + 2
+                            
+                            # format underlined text
+                            elif string[j:j+3] == '<u>':
+                                U = j
+                            
+                            elif string[j:j+4] == '</u>' and U != -1:
+                                string = string[:U] + '\\fB\\fI' + string[U+3:j] + '\\fB\\fR' + string[j+4:]
+                                j = j + 7
+                                U =- 1
+                            
+                            # brake line 1
+                            elif string[j:j+4] == '<br>':
+                                string = string[0:j] + '\n.br\n' + string[j+4:]
+                                j = j + 2
+                            
+                            # brake line 2
+                            elif string[j:j+6] == '<br />':
+                                string = string[0:j] + '\n.PP\n' + string[j+6:]
+                                j = j + 2
+                            
+                            # format tables 1
+                            elif string[j:j+6] == '<table':
+                                tab = j
+                                while len(string) > j and string[j] != '>':
+                                    j = j + 1
+                                if string[j] == '>':
+                                    string = string[:tab] + string[j+1:]
+                                    j = tab - 1
+                                    tab = 1
+                                else:
+                                    j = tab
+                                    tab = 0
+                            
+                            elif string[j:j+3] == '<tr':
+                                Ktab = j
+                                while len(string) > j and string[j] != '>':
+                                    j = j + 1
+                                if string[j] == '>':
+                                    tabacc = 0
+                                    string = string[:Ktab] + '\n.SS ' + string[j+1:]
+                                    j = Ktab + 4
+                                else:
+                                    j = Ktab
+                            
+                            elif string[j:j+4] == '</tr':
+                                Ktab = j
+                                while len(string) > j and string[j] != '>':
+                                    j = j + 1
+                                if string[j] == '>':
+                                    tabacc =- 1
+                                    string = string[:Ktab] + string[j+1:]
+                                    j = Ktab - 1
+                                else:
+                                    j = Ktab
+                            
+                            elif string[j:j+3] == '<td':
+                                Ktab = j
+                                while len(string) > j and string[j] != '>':
+                                    j = j + 1
+                                if string[j] == '>':
+                                    tabacc = tabacc + 1
+                                    if tabacc == 1:
+                                        string = string[:Ktab] + string[j+1:]
+                                        j = Ktab - 1
+                                    else:
+                                        string = string[:Ktab] + '\n.PP\n' + string[j+1:]
+                                        j = Ktab + 3
+                                else:
+                                    j = Ktab
+                            
+                            elif string[j:j+4] == '</td':
+                                Ktab = j
+                                while len(string) > j and string[j] != '>':
+                                    j = j + 1
+                                if string[j] == '>':
+                                    string = string[:Ktab] + string[j+1:]
+                                    j = Ktab - 1
+                                else:
+                                    j = Ktab
+                            
+                            elif string[j:j+7] == '</table':
+                                tab = j
+                                while len(string) > j and string[j] != '>':
+                                    j = j + 1
+                                if string[j] == '>':
+                                    string = string[:tab] + string[j+1:]
+                                    j = tab - 1
+                                    tab = 0
+                                else:
+                                    j = tab
+                                    tab = 1
+                            
+                            # format table 2 {| |- | || |}
+                            elif string[j:j+2] == '||' and tab2 > 0 and col > 0:
+                                string = string[:j] + '\n' + string[j+2:]
+                                col = col + 1
+                            
+                            # format div????
+                            elif string[j:j+4] == '<div':
+                                div = j
+                                while len(string) > j and string[j] != '>':
+                                    j = j + 1
+                                if string[j] == '>':
+                                    string = string[:div] + string[j+1:]
+                                    j = div - 1
+                                else:
+                                    j = div
+                            
+                            elif string[j:j+5] == '</div':
+                                div = j
+                                while len(string) > j and string[j] != '>':
+                                    j = j + 1
+                                if string[j] == '>':
+                                    string = string[:div] + string[j+1:]
+                                    j = div - 1
+                                else:
+                                    j = div
+                            
+                            # format internal links
+                            elif string[j:j+2] == '[[':
+                                K = j
+                            elif string[j] == '|':
+                                if K != -1:
+                                    K1 = j
+                            elif string[j:j+2] == ']]':
+                                if K != -1 and K1 != -1:
+                                    string = string[:K] + string[K1+1:j] + string[j+2:]
+                                    j = j - K1 + K - 2
+                                    K =- 1
+                                    K1 =- 1
+                                elif K != -1 and K1 == -1:
+                                    string = string[:K] + string[K+2:j] + string[j+2:]
+                                    j = j - 4
+                                    K =- 1
+                j = j + 1
+        WorkList[i] = string
+        i = i + 1
+    
+    # Make title .TH
+    string = '\n'
+    string = string.encode('utf-8')
+    string = unicode(string, 'utf-8')
+    WorkList.insert(0, string)
+    
+    ########## Output roff formatted file ##########
+    
+    # Output encoded symbols:
+    string = ''
+    for i in range(len(WorkList)):
+        string = string + WorkList[i]
+    
+    # Delete empty lines and some think else..., just for making roff code better:
+    i = 0
+    while len(string) > i:
+        if string[i:i+8] == '.RE\n\n.RS':
+            string = string[:i+3] + string[i+4:]
+        if string[i:i+8] == '.RE\n\n.br':
+            string = string[:i+3] + string[i+4:]
+        if string[i:i+6] == '\n.SS\n':
+            string = string[:i+5] + string[i+6:]
+        if string[i:i+5] == '\n\n.RE':
+            string = string[:i+1] + string[i+2:]
+        if string[i:i+5] == '\n\n\n\n\n':
+            string = string[:i] + string[i+3:]
+        if string[i:i+4] == '\n\n\n\n':
+            string = string[:i] + string[i+2:]
+        if string[i:i+3] == '\n\n\n':
+            string = string[:i] + string[i+1:]
+        i = i + 1
+    return string
+#---------------------------------------------------------------------------

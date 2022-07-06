@@ -1,0 +1,239 @@
+; master library - PC/AT - RTC
+;
+; Description:
+;	RTCèÝ(1/4096büú)}l[W
+;
+; Subroutines:
+;	rtc_int_set:NEAR
+;
+; Parameters:
+;	BX = slot number
+;		0: BGM
+;		1: joystick
+;
+;	AX = offset of interrupt function(near)
+;		0ÈOÈçZbg, 0Èçð
+;
+;	interrupt functiondl:
+;	 ·ÅÉCLD, push AX DS, DS=DGROUP É³êÄ¢é
+;	 near call³êé
+;
+; Returns:
+;	WX^ÍAX,BX,CX,DX,ESªjó³êé
+;
+; Binding Target:
+;	assembler
+;
+; Running Target:
+;	PC/AT(RTCèÝªg¦éÂ«)
+;
+; Requiring Resources:
+;	CPU: 186
+;
+; Notes:
+;	Zbgµ½çvOI¹ÜÅÉ·×Äð·é±Æ
+;	ðÌÔÍÇ¤Åà¢¢
+;
+; Assembly Language Note:
+;	
+;
+; Compiler/Assembler:
+;	TASM 3.0
+;	OPTASM 1.6
+;
+; Author:
+;	öËºF
+;
+; Revision History:
+;	94/ 7/ 3 Initial: atrtcmod.asm / master.lib 0.23
+;	95/ 2/23 [M0.22k] RTCèÝ}l[Wrtc_int_setÇÁ, RTC_MODí
+
+
+	.186
+	.MODEL SMALL
+	include func.inc
+	EXTRN	DOS_SETVECT:CALLMODEL
+
+IMR		equ 0a1h	; slave IMR port
+RTC_MASK	equ 1		; RTC's interrupt mask bit
+RTC_VECT	equ 70h		; RTC periodic interrupt vector
+RTC_INDEX	equ 70h		; RTC index port
+RTC_DATA	equ 71h		; RTC data port
+
+MAX_SLOT	equ 2		; RTCèÝÌo^Å«é
+	; #0 BGM
+	; #1 joystick
+
+
+	.DATA
+InSLot		dw	0
+Slot		dw	MAX_SLOT dup (0)
+org_rtc_mask	db	0
+org_rtc_b	db	0
+
+	.CODE
+timerorg	dd	0
+
+	public rtc_int_set
+rtc_int_set	proc near
+	cmp	BX,MAX_SLOT
+	jae	short INT_SET_RET		; foolproof
+	shl	BX,1
+	mov	Slot[BX],AX
+
+	; Xbg2ÂÉßÅ¿µÄé
+	mov	AX,Slot[0]
+	or	AX,Slot[2]
+	add	AX,-1		; cy=1 if nonzero
+	sbb	AX,AX		; AX=cy
+
+	cmp	AX,InSLot
+	je	short INT_SET_RET
+	mov	InSLot,AX
+	ja	short INT_SET
+
+	; free interrupt -----------------------------------
+INT_FREE:
+	CLI
+	mov	AL,0bh		; register B
+	out	RTC_INDEX,AL
+	mov	AL,org_rtc_b
+	out	RTC_DATA,AL	; restore periodic interrupt mask
+
+if 0
+	mov	AL,0ch		; register C
+	out	RTC_INDEX,AL
+	in	AL,RTC_DATA	; clear interrupt request
+endif
+
+	;èÝxN^ð³Éß·
+	push	RTC_VECT
+	push	word ptr CS:timerorg+2
+	push	word ptr CS:timerorg
+	call	DOS_SETVECT
+
+	;}XNWX^ð³Éß·
+	in	AL,IMR
+	or	AL,org_rtc_mask
+	out	IMR,AL
+	STI
+	;jmp	short WAKEUP_DONE
+
+INT_SET_RET:
+	ret			; retÍºÉà éæ
+	EVEN
+
+	; initialize interrupt -----------------------------
+INT_SET:
+	CLI
+
+	;èÝxN^ÌÛ¶&«·¦
+	push	RTC_VECT
+	push	CS
+	push	offset RTC_INT
+	call	DOS_SETVECT
+	mov	word ptr CS:timerorg+2,DX
+	mov	word ptr CS:timerorg,AX
+	;^C}C^vgúÝè
+	mov	AH,0ah		; register A
+	mov	BX,0f004h	; 4096 times per sec
+	call	rtc_mod
+
+	mov	AL,0bh		; register B
+	out	RTC_INDEX,AL
+	in	AL,RTC_DATA
+	mov	org_rtc_b,AL
+	or	AL,40h		; enable periodic interrupt
+	mov	AH,AL
+	mov	AL,0bh		; register B
+	out	RTC_INDEX,AL
+	mov	AL,AH
+	out	RTC_DATA,AL
+
+	;}XNð
+	in	AL,IMR
+	mov	AH,AL
+	and	AL,not RTC_MASK
+	out	IMR,AL
+	xor	AL,AH
+	mov	org_rtc_mask,AL
+	STI
+
+WAKEUP_DONE:
+	CLI
+	mov	AL,0ch		; register C
+	out	RTC_INDEX,AL
+	in	AL,RTC_DATA	; clear interrupt request
+	STI
+	ret			; retÍãÉà éæ
+rtc_int_set	endp
+
+	; RTCWX^ÌÏX
+rtc_mod proc near	; in: AH=index,  BH=and mask, BL=or mask
+	mov	AL,AH
+	out	RTC_INDEX,AL
+	in	AL,RTC_DATA
+	and	AL,BH
+	or	AL,BL
+	xchg	AH,AL
+	out	RTC_INDEX,AL
+	xchg	AH,AL
+	out	RTC_DATA,AL
+	ret
+rtc_mod endp
+
+	; --------------------------------------------------
+	; RTCèÝnh
+RTC_INT proc far
+	push	AX
+	push	DS
+	mov	AX,seg DGROUP
+	mov	DS,AX
+	CLD
+
+	push	offset SlotEnd
+
+	; Xbg2ÂÉßÅ¿µÄé
+
+	;  ÆÉpushµ½[`©çÄÑo³êéæ
+	; bgm slot
+	cmp	Slot[0],0
+	je	short SkipSlot0
+	push	Slot[0]
+SkipSlot0:
+	; joystick slot
+	cmp	Slot[2],0
+	je	short SkipSlot1
+	push	Slot[2]
+SkipSlot1:
+	retn	;	±êÅcall·éÆAÅãÉÍSlotEndÉßÁÄ­é
+	EVEN
+
+SlotEnd:
+	; èÝI¹
+	cmp	org_rtc_mask,0	; ÈOÌèÝª Á½Èç0
+	pop	DS
+	jne	short SELF_EOI
+
+	; ÈOÌèÝÖchain
+	pop	AX
+	jmp	dword ptr CS:timerorg
+	EVEN
+
+SELF_EOI:
+	mov	AL,20h
+	out	0a0h,AL		; EOI to slave PIC
+	out	020h,AL		; EOI to master PIC
+
+	mov	AL,0ch
+	out	RTC_INDEX,AL
+	in	AL,RTC_DATA	; clear interrupt request
+	mov	AL,0ch
+	out	RTC_INDEX,AL
+	in	AL,RTC_DATA	; clear interrupt request
+
+	pop	AX
+	iret
+RTC_INT endp
+
+END

@@ -1,0 +1,7 @@
+set(_CATKIN_CURRENT_PACKAGE "komodo_gazebo")
+set(komodo_gazebo_MAINTAINER "lab-06 <lab-06@todo.todo>")
+set(komodo_gazebo_DEPRECATED "")
+set(komodo_gazebo_VERSION "0.0.0")
+set(komodo_gazebo_BUILD_DEPENDS )
+set(komodo_gazebo_RUN_DEPENDS "ric_description" "gazebo_ros" "controller_manager" "ros_control" "ros_controllers")
+set(komodo_gazebo_BUILDTOOL_DEPENDS "catkin")

@@ -1,0 +1,78 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Jobs\GetInstance;
+use App\Models\Build;
+use App\Models\Commit;
+use App\Models\Repository;
+use App\RepositoryProviders\GitHub;
+use Illuminate\Support\Facades\DB;
+
+class DashboardController extends Controller
+{
+    public function index()
+    {
+        $repositories = Repository::all();
+        $commits      = Commit::select('branch', DB::raw('max(created_at) as created_at'))
+            ->orderBy('created_at', 'desc')
+            ->groupBy('branch')
+            ->get();
+
+        $masterInfo = Commit::getBranchInfo('master');
+
+        $branches = [];
+
+        foreach ($commits as $commit) {
+            $info = Commit::getBranchInfo($commit->branch);
+
+            $branches[] = [
+                'branch'         => $commit->branch,
+                'status'         => $info['status'],
+                'label'          => $info['label'],
+                'last_commit_id' => $info['last_commit_id'],
+            ];
+        }
+
+        return view('dashboard', compact('repositories', 'branches', 'masterInfo'));
+    }
+
+    public function build(Commit $commit, $attempt = null)
+    {
+        $count = Build::where(['commit_id' => $commit->id])->count();
+        $query = Build::where(['commit_id' => $commit->id])
+            ->orderBy('attempt', 'desc');
+
+        if ($attempt) {
+            $query->where(['attempt' => $attempt]);
+        }
+
+        $build = $query->first();
+
+        $logs = json_decode($build->log, true);
+
+        $next = $build->attempt < $count ? "/build/$build->id/" . ($build->attempt + 1) : null;
+
+        return view('build', compact('build', 'commit', 'attempt', 'logs', 'count', 'next'));
+    }
+
+    public function rebuild(Build $build)
+    {
+        $rebuild            = new Build();
+        $rebuild->commit_id = $build->commit_id;
+        $rebuild->attempt   = $build->attempt + 1;
+        $rebuild->status    = 'QUEUED';
+        $rebuild->save();
+
+        $github = new GitHub(
+            $rebuild->commit->repository->name,
+            $rebuild->commit->commit_id,
+            env('PROJECT_URL') . '/build/' . $rebuild->commit_id
+        );
+        $github->notifyPendingBuild();
+
+        dispatch(new GetInstance($rebuild->id));
+
+        return redirect("/build/$rebuild->commit_id");
+    }
+}

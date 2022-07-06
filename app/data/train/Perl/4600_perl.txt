@@ -1,0 +1,235 @@
+#!/usr/bin/perl -w
+#
+#   Copyright (C) 2008 Andreas Baumann <abaumann at yahoo dot com>
+#
+#   This program is free software: you can redistribute it and/or modify
+#   it under the terms of the GNU General Public License as published by
+#   the Free Software Foundation, either version 3 of the License, or
+#   (at your option) any later version.
+#
+#   This program is distributed in the hope that it will be useful,
+#   but WITHOUT ANY WARRANTY; without even the implied warranty of
+#   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+#   GNU General Public License for more details.
+#
+#   You should have received a copy of the GNU General Public License
+#   along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+use strict;
+
+# configuration
+
+my %gettext_lang = (
+	"German"	=> "../po/de.po"
+);
+
+# header declaring the langages
+print <<EOF;
+;// Copyright (C) 2008 Andreas Baumann <abaumann at yahoo dot com>
+
+;// This program is free software: you can redistribute it and/or modify
+;// it under the terms of the GNU General Public License as published by
+;// the Free Software Foundation, either version 3 of the License, or
+;// (at your option) any later version.
+
+;// This program is distributed in the hope that it will be useful,
+;// but WITHOUT ANY WARRANTY; without even the implied warranty of
+;// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+;// GNU General Public License for more details.
+
+;// You should have received a copy of the GNU General Public License
+;// along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+;// messages file for wolf messages
+
+;// language codes for translated messages
+;// (409 ist the windows locale for en-US)
+;// (see http://msdn.microsoft.com/en-us/library/ms776260.aspx)
+LanguageNames = (
+	English		= 0x0409	: MSG00409
+	German		= 0x0407	: MSG00407
+)
+
+;// Category names come first, the 'CategoryCount' registry entry
+;// for the event source must match the number of entries here.
+;// Also the numbering must be strictly starting by one and increase
+;// by one. Careful: categories MUST be defined here, the message
+;// compiler is a little bit flag and context infected. Also make
+;// sure they are not longer than 10 characters, the event viewer
+;// field is quite small.
+
+EOF
+
+# remember already mapped message ids
+my %message_ids = ();
+
+# read all gettext translations
+my $lang;
+my %gettext = ();
+foreach $lang ( keys %gettext_lang ) {
+	my $pofile = $gettext_lang{$lang};
+	open PO, "<$pofile";
+	my $line;
+	my $msgid;
+	my $msgstr;
+	foreach $line ( <PO> ) {
+		if( $line =~ /^msgid\s+"(.*)"/ ) {
+			$msgid = $1;
+		} elsif( $line =~ /^msgstr\s+"(.*)"/ ) {
+			$msgstr = $1;
+			$gettext{"${lang}_${msgid}"} = $msgstr;
+		}
+	}
+	close PO;
+}
+
+
+print <<EOF;
+MessageId = 1
+SymbolicName = WOLF_CATEGORY_LOGGER
+Language = English
+Logger
+.
+Language = German
+Logger
+.
+
+MessageId = 2
+SymbolicName = WOLF_CATEGORY_DAEMON
+Language = English
+Daemon
+.
+Language = German
+Unix-Prozess
+.
+
+MessageId = 3
+SymbolicName = WOLF_CATEGORY_SERVICE
+Language = English
+Service
+.
+Language = German
+Dienst
+.
+EOF
+
+# constants things defined by the event logger (advapi32.dll)
+print <<EOF;
+
+;// event log severity levels (severity bits)
+SeverityNames = ( 
+	Success		= 0x0	: STATUS_SEVERITY_SUCCESS
+	Informational	= 0x1	: STATUS_SEVERITY_INFORMATIONAL
+	Warning		= 0x2	: STATUS_SEVERITY_WARNING
+	Error		= 0x3	: STATUS_SEVERITY_ERROR
+)
+
+;// we get a already defined message? but where is Application defined?
+;// facility names
+FacilityNames = (
+	System		= 0x0FF
+	Application	= 0xFFF
+)
+
+EOF
+
+print <<EOF;
+
+;// event messages from here
+
+MessageIdTypedef = DWORD
+
+EOF
+
+undef $/;
+
+open CONTENT, "find .. -name '*.c' -exec cat {} \\; |";
+my $code = <CONTENT>;
+close CONTENT;
+
+open CONTENT, "find .. -name '*.c' -exec cat {} \\; | cpp -I../../include/wolf |";
+my $expanded_code = <CONTENT>;
+close CONTENT;
+
+for( ;; ) {
+	if( !( $code =~ /wolf_log\s*\(([^\;]*)/s ) ) {
+		last;
+	}
+	my $func = $1;
+	$code = $';
+
+AGAIN:
+	if( !( $expanded_code =~ /wolf_log\s*\(([^\;]*)/s ) ) {
+		exit 1;
+	}
+	my $expanded_func = $1;
+	$expanded_code = $';
+
+	if( $func =~ /\s*(WOLF_LOG_[^\, ]+)\s*\,\s*(WOLF_CATEGORY_[^\, ]+)\s*\,\s*(WOLF_MSG_[^\, ]+)\s*\,\s*_\(\s*"([^"]*)/ ) {
+		my $level = $1;
+		my $category = $2;
+		my $messageid = $3;
+		my $formatstr_c = $4;
+
+		# map C snprintf format to positional format
+		my $formatstr_win = $formatstr_c;
+		my $pos = 1;
+		while( $formatstr_win =~ s/%[sd]/%${pos}/ ) { $pos++ };
+
+		# map the Wolf levels to windows event log severity levels
+		my $severity;
+		if( $level =~ /WOLF_LOG_((EMERG)|(ALERT)|(CRIT)|(ERR))/ ) {
+			$severity = "Error";
+		} elsif( $level eq " WOLF_LOG_WARNING" ) {
+			$severity = "Warning";
+		} else {
+			$severity = "Informational";
+		}
+
+		# fetch expanded message id from the CPP output
+		my $messageid_number = 9999999;
+		if( $expanded_func =~ /\s*(WOLF_LOG_[^\, ]+)\,\s*([\d\s\+]+)\,\s*([^\,]+)/ ) {
+			my $expanded_messageid = $3;
+			$messageid_number = eval $expanded_messageid;
+		} else {
+			goto AGAIN;
+		}
+
+		if( defined( $message_ids{$messageid} ) ) {
+			next;
+		}
+		$message_ids{$messageid} = "";
+
+		print <<EOF;
+MessageId = $messageid_number
+Severity = $severity
+Facility = Application
+SymbolicName = $messageid
+EOF
+
+		# print all translations found in gettext .po files
+		my @langs = ( "English", "German" );
+		my $lang;
+		foreach $lang ( @langs ) {
+			if( $lang eq "English" ) {
+				print <<EOF;
+Language = $lang
+$formatstr_win
+.
+EOF
+			} else {
+				my $msg = $gettext{"${lang}_${formatstr_c}"};
+				
+				# map C snprintf format to positional format
+				my $pos = 1;
+				while( $msg =~ s/%[sd]/%${pos}/ ) { $pos++ };
+
+				print <<EOF;
+Language = $lang
+$msg
+.
+EOF
+			}
+		}
+	}
+}

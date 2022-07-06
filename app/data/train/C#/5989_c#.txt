@@ -1,0 +1,80 @@
+﻿using System.Collections.Generic;
+using System.Linq;
+using Sharepoint.Client.Fluent.Contracts.Entities;
+using Sharepoint.Client.Fluent.Exceptions;
+using Sharepoint.Client.Fluent.Exceptions.Interactors;
+using Sharepoint.Client.Fluent.FluentBase;
+using SP = Microsoft.SharePoint.Client;
+
+namespace Sharepoint.Client.Fluent.Lists.Operations
+{
+    public class SharepointListAddOperations : SharepointFluentBase
+    {
+        private SP.List sharepointList;
+
+        private Dictionary<string, string> titleToInternalName;
+
+        internal SharepointListAddOperations(SP.List sharepointList, ISharepointContext sharepointContext) : base(sharepointContext)
+        {
+            ExceptionFactory.GetInteractor<NullCheckInteractor>()
+                .CheckForConstructorArgumentNull(sharepointList, nameof(sharepointList), typeof(SharepointListAddOperations));
+
+            this.sharepointList = sharepointList;
+            this.titleToInternalName = new Dictionary<string, string>();
+        }
+
+        /// <summary>
+        /// Adding is only performed when the calling code itself calls the execute operation (--> performance reason)
+        /// </summary>
+        /// <param name="item"></param>
+        /// <returns></returns>
+        public SharepointRetrievedListOperations Item(SharepointListItem item)
+        {
+            if (!item.Values.All(s => this.titleToInternalName.ContainsKey(s.ColumnName)))
+            {
+                SP.ClientContext clientContext = this.sharepointContext.GetClientContext();
+                clientContext.Load(this.sharepointList.Fields);
+
+                clientContext.ExecuteQuery();
+
+                foreach (var column in item.Values)
+                {
+                    if (column.ColumnName == "Title" && !this.titleToInternalName.ContainsKey("Title"))
+                    {
+                        this.titleToInternalName.Add("Title", "Title");
+                    }
+                    else
+                    {
+                        this.sharepointList.Fields.Where(
+                            s => !this.titleToInternalName.ContainsKey(column.ColumnName) && s.Title == column.ColumnName)
+                            .ToList()
+                            .ForEach(s => this.titleToInternalName.Add(s.Title, s.InternalName));
+                    }
+                }
+            }
+
+            var itemCreationInfo = new SP.ListItemCreationInformation();
+            var listItem = this.sharepointList.AddItem(itemCreationInfo);
+
+            foreach (var column in item.Values)
+            {
+                listItem[this.titleToInternalName[column.ColumnName]] = column.ColumnValue;
+            }
+            
+            listItem.Update();
+            
+            return new SharepointRetrievedListOperations(this.sharepointList, this.sharepointContext);
+        }
+
+        /// <summary>
+        /// Adding is only performed when the calling code itself calls the execute operation (--> performance reason)
+        /// </summary>
+        /// <param name="items"></param>
+        /// <returns></returns>
+        public SharepointRetrievedListOperations Items(List<SharepointListItem> items)
+        {
+            items.ForEach(s => this.Item(s));
+            return new SharepointRetrievedListOperations(this.sharepointList, this.sharepointContext);
+        }
+    }
+}

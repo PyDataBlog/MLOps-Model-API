@@ -1,0 +1,231 @@
+package jlib.datastream.intraprocess;
+
+import java.io.Closeable;
+import java.io.IOException;
+import java.util.ArrayList;
+
+import jlib.datastream.ezio.LineReaderObject;
+import jlib.events.Command;
+import jlib.utils.e.event.DuplicateCommandException;
+import jlib.utils.e.oop.NonUniqueIdentifierException;
+
+/**
+ * Background Daemon thread that reads user input into the console in a non-blocking daemon thread and takes actions depending on user input.
+ * 
+ * Commands and command identifiers must be unique. Case sensitivity param cannot be changed after construction. Commands have arguments passed as an Object[] of Strings.
+ * Input source cannot be changed and commands cannot be added after the daemon is started
+ * 
+ * @author J-Dierberger
+ */
+public class BackgroundDaemon<T extends LineReaderObject & Closeable> implements Closeable{
+	
+	private ArrayList<Command> commands;
+	private final boolean caseSensitive;
+	private T reader;
+	private Thread daemon;
+	private boolean daemonStarted;
+	private boolean daemonClosed;
+	
+	/**
+	 * Create a BackgroundDaemon with the given case-sensitivity param and the given Commands.
+	 * 
+	 * @param caseSensitive If Command input is case sensitive.
+	 * @param inputSource The source of input the daemon reads from.
+	 * @param commands The list of Commands this daemon can execute.
+	 */
+	public BackgroundDaemon(boolean caseSensitive, T inputSource, Command...commands){
+		this.caseSensitive = caseSensitive;
+		ArrayList<String> commandNames = new ArrayList<String>();
+		
+		// Check for no duplicate names.
+		for(int i = 0; i < commands.length; i++){
+			if(!caseSensitive && commandNames.contains(commands[i].getName())){
+				throw new NonUniqueIdentifierException("Duplicate command "+commands[i].getName());
+			}else if(caseSensitive && commandNames.contains(commands[i].getName().toLowerCase())){
+				throw new NonUniqueIdentifierException("Duplicate command "+commands[i].getName().toLowerCase());
+			}else{
+				String name = commands[i].getName();
+				name = _caseCorrect(name);
+				commandNames.add(name);
+			}
+		}
+		
+		// If we pass the loop without throwing exceptions then we have a valid list of commands.
+		this.commands = new ArrayList<Command>();
+		for(Command c : commands){
+			this.commands.add(c);
+		}
+		daemonStarted = false;
+		daemonClosed = false;
+		reader = inputSource;
+	}
+	
+	/**
+	 * Create a BackgroundDaemon with the given case-sensitivity param.
+	 * 
+	 * @param caseSensitive If Command input is case sensitive.
+	 * @param inputSource The source of input the daemon reads from.
+	 */
+	public BackgroundDaemon(boolean caseSensitive, T inputSource){
+		this(caseSensitive, inputSource, new Command[]{});
+	}
+	
+	/**
+	 * Create a BackgroundDaemon with the given list of executable Commands. Case sensitivity turned off by default. This cannot be changed after construction.
+	 * 
+	 * @param commands The list of Commands this daemon can execute.
+	 * @param inputSource The source of input the daemon reads from.
+	 */
+	public BackgroundDaemon(Command[] commands, T inputSource){
+		this(false, inputSource, new Command[]{});
+	}
+	
+	/**
+	 * Create a BackgroundDaemon with the given input source to read from. Case sensitivity is turned off by default. This cannot be changed after construction.
+	 * 
+	 * @param inputSource The source of input the daemon reads from.
+	 */
+	public BackgroundDaemon(T inputSource){
+		this(false, inputSource, new Command[]{});
+	}
+	
+	/**
+	 * Start the daemon thread.
+	 */
+	public void start(){
+		daemon = new Thread(){
+			@Override
+			public void run(){
+				while(true){
+					try{
+						String in = reader.readLine();
+						String[] fullCommand = in.split(",");
+						String inputComm = fullCommand[0];
+						String[] args = new String[fullCommand.length-1];
+						for(int i = 1; i < fullCommand.length; i++){
+							args[i-1] = fullCommand[i].trim();
+						}
+						inputComm = _caseCorrect(inputComm);
+						for(Command c : commands){
+							String commName = c.getName();
+							commName = _caseCorrect(commName);
+							if(inputComm.equals(commName)){
+								c.execute((Object[])args);
+								break;
+							}
+						}
+					}catch(Throwable e){
+						e.printStackTrace();
+					}
+				}
+			}
+		};
+		daemon.setDaemon(true);
+		daemon.start();
+		daemonStarted = true;
+	}
+	
+	/**
+	 * Set the input source of the daemon.
+	 * 
+	 * @param T The object to read input from. Reads line-by-line.
+	 */
+	public void setLineReaderObject(T inputSource){
+		_checkStarted();
+		reader = inputSource;
+	}
+	
+	/**
+	 * Add a Command to the list of Commands this daemon can execute.
+	 * 
+	 * @param c The Command to add.
+	 */
+	public void addCommand(Command c){
+		_checkStarted();
+		if(commands.contains(c)){
+			throw new DuplicateCommandException("Command already exists in this daemon's list of commands.");
+		}
+		String commName = c.getName();
+		commName = _caseCorrect(commName);
+		for(Command comm : commands){
+			String cName = comm.getName();
+			cName = _caseCorrect(cName);
+			if(commName.equals(cName)){
+				throw new NonUniqueIdentifierException("Duplicate command "+cName);
+			}
+		}
+		commands.add(c);
+	}
+	
+	/**
+	 * Remove the given Command from the list of Commands this daemon can execute.
+	 * 
+	 * @param c The Command to remove.
+	 */
+	public void removeCommand(Command c){
+		_checkStarted();
+		commands.remove(c);
+	}
+	
+	/**
+	 * Stop the daemon thread.
+	 * 
+	 * @throws IOException If closing fails.
+	 */
+	public void close() throws IOException{
+		_checkClosed();
+		reader.close();
+		daemon.interrupt();
+		daemonClosed = true;
+	}
+	
+	/**
+	 * Check if the daemon was started.
+	 * 
+	 * @return If the daemon was started.
+	 */
+	public boolean started(){
+		return daemonStarted;
+	}
+	
+	/**
+	 * Check if the daemon is alive.
+	 * 
+	 * @return If the daemon thread is still alive.
+	 */
+	public boolean isAlive(){
+		return daemon.isAlive();
+	}
+	
+	/**
+	 * Check if the daemon is closed.
+	 * 
+	 * @return If the daemon is closed.
+	 */
+	public boolean isClosed(){
+		return daemonClosed;
+	}
+	
+	private void _checkStarted(){
+		if(daemonStarted){
+			throw new IllegalStateException("Illegal modification attempted; daemon already started.");
+		}
+	}
+	
+	private void _checkClosed(){
+		if(!daemonStarted){
+			throw new IllegalStateException("Daemon not started; cannot close.");
+		}else if(daemonClosed){
+			throw new IllegalStateException("Daemon already closed; cannot close again.");
+		}
+	}
+	
+	private String _caseCorrect(String s){
+		if(!caseSensitive){
+			return s.toLowerCase();
+		}else{
+			return s;
+		}
+	}
+	
+}

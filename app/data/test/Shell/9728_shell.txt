@@ -1,0 +1,1 @@
+juju destroy-environment -y

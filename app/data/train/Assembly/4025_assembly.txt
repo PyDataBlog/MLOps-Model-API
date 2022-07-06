@@ -1,0 +1,419 @@
+[BITS 32]
+
+; Globals
+global	clear_screen
+global	init_tty
+global	tty_print
+global	tty_print_dec_word
+global	tty_print_hex_byte
+global	tty_print_hex_word
+global	tty_print_hex_dword
+global	tty_print_newline
+global	tty_print_char
+global	tty_print_nchars
+global	tty_backspace
+
+; Externs
+
+
+; Defines
+%define	TTY_COLS			80
+%define	TTY_ROWS			24
+
+%define	TTY_FG_BLACK		00h
+%define	TTY_FG_BLUE			01h
+%define	TTY_FG_GREEN		02h
+%define	TTY_FG_CYAN			03h
+%define	TTY_FG_RED			04h
+%define	TTY_FG_PURPLE		05h
+%define	TTY_FG_ORANGE		06h
+%define	TTY_FG_GREY			07h
+%define	TTY_FG_DARK_GRAY		08h
+%define	TTY_FG_BRIGHT_BLUE	09h
+%define	TTY_FG_BRIGHT_GREEN	0ah
+%define	TTY_FG_BRIGHT_CYAN	0bh
+%define	TTY_FG_BRIGHT_RED		0ch
+%define	TTY_FG_BRIGHT_PURPLE	0dh
+%define	TTY_FG_YELLOW		0eh
+%define	TTY_FG_WHITE		0fh
+
+%define	TTY_BG_BLACK		000h
+%define	TTY_BG_BLUE			010h
+%define	TTY_BG_GREEN		020h
+%define	TTY_BG_CYAN			030h
+%define	TTY_BG_RED			040h
+%define	TTY_BG_PURPLE		050h
+%define	TTY_BG_ORANGE		060h
+%define	TTY_BG_GREY			070h
+%define	TTY_BG_DARK_GRAY		080h
+%define	TTY_BG_BRIGHT_BLUE	090h
+%define	TTY_BG_BRIGHT_GREEN	0a0h
+%define	TTY_BG_BRIGHT_CYAN	0b0h
+%define	TTY_BG_BRIGHT_RED		0c0h
+%define	TTY_BG_BRIGHT_PURPLE	0d0h
+%define	TTY_BG_YELLOW		0e0h
+%define	TTY_BG_WHITE		0f0h
+
+;*********************************************************
+; DATA SECTION
+;*********************************************************
+section .data
+	
+tty_default_colour:
+	db	TTY_BG_BLUE|TTY_FG_WHITE
+	
+curs_colour:
+	db	TTY_BG_YELLOW|TTY_FG_BLACK
+	
+curs_x:
+	dw	0
+	
+curs_y:
+	dw	0
+	
+msg_banner:
+	db	'*** ASMKERN v0.0 ***', 10,10, 0
+msg_init_tty:
+	db	'[INFO ] Initialised TTY', 10, 0
+hex_table:
+	db	'0123456789ABCDEF'
+	
+decimal_buffer:
+	times	6 db 0		; Only support up to 6 digits (999,999)
+
+;*********************************************************
+; CODE SECTION
+;*********************************************************
+
+init_tty:
+	call	_hide_vga_cursor		; Hide VGA cursor
+	call	clear_screen
+	mov	eax,msg_banner
+	call	tty_print
+	
+	mov	eax,msg_init_tty
+	call	tty_print
+	
+	
+	ret
+
+;---------------------------------------------------------
+; tty_print_dec_word
+;	Prints the decimal value of a word
+; Input:
+;	ax	Word to output
+;----------------------------------------------------------	
+tty_print_dec_word:
+	pusha
+	mov	ecx,decimal_buffer
+	add	ecx,5
+_div_loop:
+	mov	edx,0
+	mov	bx,10
+	div	bx				; ax/10 -> remainder in dx
+	add	dx,48
+	mov	[ecx],dl
+	dec	ecx
+	cmp	ax,0
+	je	_div_done
+	jmp	_div_loop
+_div_done:
+	call	_cursor_pos			; Point edx to current screen pos
+	mov	eax,decimal_buffer
+	mov	ecx,6
+	call	tty_print_nchars
+	popa
+	ret
+	
+		
+;---------------------------------------------------------
+; tty_print_hex_byte
+;	Prints a string at the current cursor position
+; Input:
+;	al	Byte to output
+;----------------------------------------------------------	
+tty_print_hex_dword:
+	push	eax
+	shr	eax,16			; Use upper word
+	and	eax,01111111111111111b	
+	call	tty_print_hex_word
+	pop	eax
+	and	eax,01111111111111111b	; Clear upper word (use lower word)
+	call	tty_print_hex_word
+	ret
+	
+tty_print_hex_word:
+	push	eax
+	shr	eax,8
+	and	eax,011111111b
+	call	tty_print_hex_byte
+	pop	eax
+	and	eax,011111111b
+	call	tty_print_hex_byte
+	ret
+	
+tty_print_hex_byte:
+	pusha
+	call	_cursor_pos			; Point edx to current screen pos
+	push	eax
+	shr	eax,4				; Use upper nybble
+	and	eax,000001111b
+	mov	ebx,hex_table
+	add	ebx,eax
+	mov	cl,[ebx]
+	mov	[edx],cl
+	pop	eax
+	call	_move_curs_right
+	add	edx,2
+	and	eax,000001111b		; Use lower nybble
+	mov	ebx,hex_table
+	add	ebx,eax
+	mov	cl,[ebx]
+	mov	[edx],cl	
+	call	_move_curs_right
+	popa
+	ret
+
+
+
+;---------------------------------------------------------
+; clear_screen
+;	Clears the screen and places cursor at 0,0
+;----------------------------------------------------------
+clear_screen:
+	mov	edx,0b8000h
+	mov	bh,[tty_default_colour]
+	mov	bl,' '
+	mov	ecx,TTY_COLS*TTY_ROWS*2
+_clear_char:
+	mov	[edx],bx
+	add	edx,2
+	loop	_clear_char
+	mov	word [curs_x],0
+	mov	word [curs_y],0
+	ret
+	
+tty_backspace:
+	pusha
+	call	_curs_hide
+	sub	byte [curs_x],1
+	call	_cursor_pos
+	mov	byte [edx],' '
+	call	_curs_draw
+	popa
+	ret
+
+;---------------------------------------------------------
+; tty_print
+;	Prints a string at the current cursor position
+; Input:
+;	eax	Null terminated string
+;----------------------------------------------------------
+tty_print:
+	pusha
+_get_curr_char:
+	call	_cursor_pos			; Point edx to current screen pos
+	mov	bl,[eax]			; current char in bl
+	cmp	bl,0
+	je	__tty_print_done		; exit on 0
+	cmp	bl,10
+	jne	__skip_newline		; jump over next bit if not a newline
+	call	tty_print_newline
+	jmp	__skip_print
+__skip_newline:
+	mov	[edx],bl			; Print character to screen
+	call	_move_curs_right
+__skip_print:
+	inc	eax				; go to next character
+	jmp	_get_curr_char
+__tty_print_done:
+	popa
+	ret
+
+;---------------------------------------------------------
+; tty_print_char
+;	Print a single character to terminal
+; Input:
+;	al - Char to print
+;----------------------------------------------------------	
+tty_print_char:
+	pusha
+	call	_cursor_pos
+	mov	[edx],al
+	call	_move_curs_right
+	popa
+	ret
+
+;---------------------------------------------------------
+; tty_print_nchars
+;	Print a single character to terminal
+; Input:
+;	 cx - Number of characters to display
+;	eax - Buffer to print
+;----------------------------------------------------------	
+tty_print_nchars:
+	call	_curs_hide
+__print_one_char:
+	call	_cursor_pos
+	mov	bl,[eax]
+	cmp	bl,0
+	je	_skip_nprint			; Dont print 0 byte
+	mov	[edx],bl
+	call	_move_curs_right
+_skip_nprint:
+	inc	eax
+	loop	__print_one_char
+	call	_curs_draw
+	ret
+	
+;---------------------------------------------------------
+; __move_curs_right
+;	Updates cursor position one to the right
+; Input:
+;	None (uses curs and cury values)
+;----------------------------------------------------------	
+_move_curs_right:
+	pusha
+	call	_curs_hide
+	inc	word [curs_x]
+	cmp	byte [curs_x],TTY_COLS-1
+	jge	__wrap_line
+	call	_curs_draw
+	popa
+	ret
+__wrap_line:
+	call	_curs_hide
+	mov	word [curs_x],0
+	inc	word [curs_y]
+	cmp	word [curs_y],TTY_ROWS
+	jl	__no_scroll
+	call	_scroll_window
+	call	_curs_draw
+	popa
+	ret
+__no_scroll:
+	call	_curs_draw
+	popa
+	ret
+	
+
+;---------------------------------------------------------
+; curs_newline
+;	Moves cursor down one line and ot the left
+; Input:
+;	None (uses curs_x and curs_y values)
+;----------------------------------------------------------	
+tty_print_newline:
+	pusha
+	call	_curs_hide
+	mov	word [curs_x],0
+	inc	word [curs_y]
+	cmp	word [curs_y],TTY_ROWS
+	jl	__no_scroll_window
+	call	_scroll_window
+__no_scroll_window:
+	call	_curs_draw
+	popa
+	ret
+	
+_scroll_window:
+	mov	eax,0b8000h+(TTY_COLS*2)
+	mov	ebx,0b8000h
+	mov	ecx,(TTY_COLS*TTY_ROWS*2)-(TTY_COLS*2)
+__copy_window_buff:
+	mov	dl,[eax]
+	mov	[ebx],dl
+	inc	ebx
+	inc	eax
+	loop	__copy_window_buff
+	mov	ecx,TTY_COLS
+	mov	eax,0b8000h+(TTY_COLS*TTY_ROWS*2)-(TTY_COLS*2)
+__clear_last_line:
+	mov	byte	[eax],' '
+	inc	eax
+	mov	bl,[tty_default_colour]
+	mov	byte [eax],bl
+	inc	eax
+	loop	__clear_last_line
+	mov	word [curs_y],TTY_ROWS-1
+	ret
+
+_curs_draw:
+	push	ebx
+	push	edx
+	call	_cursor_pos
+	inc	edx
+	mov	bl,[curs_colour]
+	mov	[edx],bl
+	pop	edx
+	pop	ebx
+	ret
+
+_curs_hide:
+	push	ebx
+	push	edx
+	call	_cursor_pos
+	inc	edx
+	mov	bl,[tty_default_colour]
+	mov	[edx],bl
+	pop	edx
+	pop	ebx
+	ret
+
+;---------------------------------------------------------
+; _cursor_pos
+;	Points EDX to cursor position in screen buffer
+; Input:
+;	None (uses curs_x and curs_y values)
+; Returns:
+;	EDX - Screen position
+;----------------------------------------------------------
+_cursor_pos:
+	push	eax
+	push	ebx
+	push	ecx
+	
+	mov	edx,0b8000h
+	mov	ebx,0
+	mov	eax,0
+	mov	cl,[curs_x]
+	mov	bl,[curs_y]
+	mov	al,TTY_COLS*2
+	mul	bl
+	shl	cx,1
+	add	edx,eax
+	add	edx,ecx
+	
+	pop	ecx
+	pop	ebx
+	pop	eax
+	ret
+
+;---------------------------------------------------------
+; hide_vga_cursor
+;	Hide the blinking cursor by moving it off-screen
+;----------------------------------------------------------
+_hide_vga_cursor:
+	push	eax
+	push	edx
+	
+	mov	ax,14
+	mov	dx,03d4h
+	out	dx,ax
+
+	mov	ax,0ffffh
+	mov	dx,03d5h
+	out	dx,ax
+
+	mov	ax,15
+	mov	dx,03d4h
+	out	dx,ax	
+
+	mov	ax,0ffffh
+	mov	dx,03d5h
+	out	dx,ax
+	
+	pop	edx
+	pop	eax
+	
+	ret

@@ -1,0 +1,101 @@
+# (21 Jul 2017) Pccf Journal version
+#  - 21 Jul 2017: keyword argumants in the cusum() function
+
+
+function cusumStat(x, k)
+    # cusum statistic
+    n = length(x)
+    stat = zeros(n)
+    for i = 2:n
+        stat[i] =  max(0, stat[i-1] + x[i] - k)
+    end
+    stat
+end
+# function cusum(x; update_width=10, expected_change=1.0, threshold=0.5)
+
+function cusum(x; update_width=10, expected_change=1.0, threshold=0.5, tstoutput = false)
+    n = length(x)
+    stat_up = zeros(n)
+    stat_down = zeros(n)
+    wait_flag = 1
+    chps = [1]
+    update_points = []
+    k_up, k_down = 0, 0
+    mu0, mu1, mu2 = 0.0, 0.0, 0.0
+    for i = 1 : n
+        function update_params()
+            train_dat = x[(i - update_width + 1) : i]
+            mu0       = mean(train_dat)
+            mu1       = mu0 + expected_change
+            mu2       = mu0 - expected_change
+            k_up      = (mu0 + mu1)/2
+            k_down    = (mu0 + mu2)/2
+        end
+        if i - chps[end] == update_width && wait_flag == 1
+            push!(update_points, i)
+            update_params()
+            wait_flag = 0
+        end
+        if wait_flag == 0
+            stat_up[i]   = max(0, stat_up[i-1]   + x[i] - k_up)
+            stat_down[i] = min(0, stat_down[i-1] + x[i] - k_down)
+            # Change detection
+            if (stat_up[i] >= threshold) || (abs(stat_down[i]) >= threshold)
+                push!(chps, i)
+                wait_flag = 1
+            end
+        end
+
+    end
+    if tstoutput
+        return(Dict("chps" => chps, "update_points" => update_points, "stat_up" => stat_up, "stat_down" => stat_down))
+    else
+        return chps[2:end]
+    end
+end
+#cusum(randn(100), 10, 1.0, 0.5)
+
+function cusum_pccf(x, update_width, expected_change, threshold_min, threshold_max, mu, sigma, pccf_thr, tstoutput = false)
+    n = length(x)
+    probs = pccf_scale(Pccf.pccf(n, mu, sigma))
+    hs = pccf_dynamic_h(probs, pccf_thr, threshold_min, threshold_max, false)
+    chps = [1]
+
+    stat_up = zeros(n)
+    stat_down = zeros(n)
+    wait_flag = 1
+    update_points = []
+    k_up, k_down = 0, 0
+    mu0, mu1, mu2 = 0.0, 0.0, 0.0
+    for i = 1 : n
+        function update_params()
+            train_dat = x[(i - update_width + 1) : i]
+            mu0       = mean(train_dat)
+            mu1       = mu0 + expected_change
+            mu2       = mu0 - expected_change
+            k_up      = (mu0 + mu1)/2
+            k_down    = (mu0 + mu2)/2
+        end
+        if i - chps[end] == update_width && wait_flag == 1
+            push!(update_points, i)
+            update_params()
+            wait_flag = 0
+        end
+
+        if wait_flag == 0
+            stat_up[i]   = max(0, stat_up[i-1]   + x[i] - k_up)
+            stat_down[i] = min(0, stat_down[i-1] + x[i] - k_down)
+            # Change detection
+            if (stat_up[i] > hs[i]) || (abs(stat_down[i]) > hs[i])
+                push!(chps, i)
+                wait_flag = 1
+            end
+        end
+
+    end
+    if tstoutput
+        return(Dict("chps" => chps, "update_points" => update_points, "stat_up" => stat_up, "stat_down" => stat_down))
+    else
+        return chps[2:end]
+    end
+end

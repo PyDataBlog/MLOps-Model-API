@@ -1,0 +1,143 @@
+﻿Imports MySql.Data.MySqlClient
+Imports Microsoft.Reporting.WinForms
+Imports System.Threading
+
+Public Class PrintRecebimento
+    Inherits ViewRelatorio
+
+    Private ds As New dtsRec
+    Private rec As Recebimento
+
+    Public Sub New(ByVal codRec As String, ByVal saveReport As Boolean)
+        MyBase.New()
+        rec = New Recebimento(codRec)
+        InitializeClass(saveReport)
+    End Sub
+
+    ''' <summary>
+    ''' INICIALIZA COMPONENTES DA CLASSE
+    ''' </summary>
+    ''' <remarks></remarks>
+    Public Overrides Sub InitializeClass(ByVal saveReport As Boolean)
+        Try
+            AddHandler MyBase.Reportviewer.LocalReport.SubreportProcessing, AddressOf Me.SubreportProcessingEventHandler
+            MyBase.Reportviewer.RefreshReport()
+            CarregaRelatorio()
+            If saveReport Then
+                Dim caminho As String = rec.GetDiretorio() & "REC-" & Me.rec.ID.Replace("/", "-") & ".pdf"
+                Dim sr As New ViewSendReport(caminho, "pdf", MyBase.Reportviewer)
+                Dim trd As Thread
+                trd = New Thread(New ThreadStart(AddressOf sr.Send))
+                trd.IsBackground = True
+                trd.Start()
+                While trd.IsAlive
+                    Application.DoEvents()
+                End While
+            End If
+        Catch ex As Exception
+            MessageBox.Show("Ocorreu um erro ao salvar o PDF.", Core.STR_NOME_SISTEMA)
+        End Try
+    End Sub
+
+    '''  <summary> 
+    ''' Mostra tela de envio de email
+    '''  </summary> 
+    Public Overrides Sub newButtonClick(ByVal sender As System.Object, ByVal e As System.EventArgs)
+        Dim caminho = My.Computer.FileSystem.SpecialDirectories.Temp & "\rec_" & Me.rec.ID.Replace("/", "-") & ".pdf"
+        Dim sr As New ViewSendReport(caminho, "pdf", MyBase.Reportviewer)
+        If sr.Send() Then
+            Dim frm As New ViewEnviaEmail(caminho, "Visomes - Recebimento: " & Me.rec.ID, Nothing)
+            If frm.ShowDialog() = Windows.Forms.DialogResult.OK Then
+                MessageBox.Show("Email enviado com sucesso!", Core.STR_NOME_SISTEMA)
+            End If
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA SUBREPORTS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub SubreportProcessingEventHandler(ByVal sender As Object, ByVal e As SubreportProcessingEventArgs)
+        e.DataSources.Add(New ReportDataSource("dtsRec_dttItensRec", ds.Tables(1)))
+    End Sub
+
+    ''' <summary>
+    ''' CARREGA CONFIGURAÇÕES DO RELATÓRIO
+    ''' </summary>
+    ''' <remarks></remarks>
+    Public Overrides Sub CarregaRelatorio()
+        CarregaRelatorioSecundario()
+        Visomes.MySQL.Connection.ConnectionMysql()
+        Dim adapter As New MySqlDataAdapter()
+        Dim ds As New dtsRec
+        adapter.SelectCommand = New MySqlCommand(Me.rec.RelatorioSQL, Visomes.MySQL.Connection.GetMySqlConnection)
+
+        adapter.Fill(ds.Tables(0))
+        Visomes.MySQL.Connection.DisconnectMySQL()
+        MySqlConnection.ClearPool(Visomes.MySQL.Connection.GetMySqlConnection)
+
+        MyBase.Reportviewer.ProcessingMode = ProcessingMode.Local
+        MyBase.Reportviewer.LocalReport.EnableExternalImages = True
+        MyBase.Reportviewer.LocalReport.ReportPath = Application.StartupPath & Recebimento.CaminhoRDLC
+        MyBase.Reportviewer.LocalReport.DataSources.Clear()
+        MyBase.Reportviewer.LocalReport.DataSources.Add(New ReportDataSource("dtsRec_dttRec", ds.Tables(0)))
+        MyBase.Reportviewer.LocalReport.DisplayName = Me.rec.ID.Replace("/", "-")
+        MyBase.Reportviewer.DocumentMapCollapsed = True
+
+        'ADIONA PARAMETRO AO REPORTVIEW
+        Dim prmReport0 As New ReportParameter("Report_Parameter_0", ConfiguraLogo(Me.rec.Empresa.Logo))
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport0})
+
+        Dim prmReport1 As New ReportParameter("Report_Parameter_1", Me.rec.Empresa.Logo)
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport1})
+
+        Dim prmReport2 As New ReportParameter("Report_Parameter_2", Me.rec.Empresa.GetNomeFantasia)
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport2})
+
+        Dim prmReport3 As New ReportParameter("Report_Parameter_3", Me.rec.Empresa.Site)
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport3})
+
+        Dim prmReport4 As New ReportParameter("Report_Parameter_4", Me.rec.Empresa.CNPJ)
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport4})
+
+        Dim prmReport5 As New ReportParameter("Report_Parameter_5", Me.rec.ID)
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport5})
+
+        Dim prmReport6 As New ReportParameter("Report_Parameter_6", Me.rec.Situacao.ToString().Replace("_", " "))
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport6})
+
+        Dim prmReport7 As New ReportParameter("Report_Parameter_7", Me.rec.Empresa.Endereco)
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport7})
+
+        Dim prmReport8 As New ReportParameter("Report_Parameter_8", Me.rec.Cadastro.ToShortDateString())
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport8})
+
+        Dim prmReport9 As New ReportParameter("Report_Parameter_9", "V" & My.Application.Info.Version.ToString())
+        MyBase.Reportviewer.LocalReport.SetParameters(New ReportParameter() {prmReport9})
+
+        MyBase.Reportviewer.ZoomPercent = 100
+        MyBase.Reportviewer.ZoomMode = ZoomMode.Percent
+        MyBase.Reportviewer.SetDisplayMode(DisplayMode.PrintLayout)
+        MyBase.Reportviewer.RefreshReport()
+
+    End Sub
+
+    Private Function ConfiguraLogo(ByVal url As String) As String
+        If Not url.Contains("www.") Then url = "File://" & url
+        Return url
+    End Function
+
+    ''' <summary>
+    ''' CARREGA RELATPORIOS SECUNDÁRIOS
+    ''' </summary>
+    ''' <remarks></remarks>
+    Public Overrides Sub CarregaRelatorioSecundario()
+        Dim adapter As New MySqlDataAdapter()
+        Visomes.MySQL.Connection.ConnectionMysql()
+        adapter.SelectCommand = New MySqlCommand(Me.rec.RelatorioSQLItens, Visomes.MySQL.Connection.GetMySqlConnection)
+        adapter.Fill(ds.Tables(1))
+        Visomes.MySQL.Connection.DisconnectMySQL()
+        MySqlConnection.ClearPool(Visomes.MySQL.Connection.GetMySqlConnection)
+    End Sub
+
+End Class

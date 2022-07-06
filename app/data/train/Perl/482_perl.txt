@@ -1,0 +1,627 @@
+package pTracker::Domain::Project::Test;
+use strict;
+use warnings;
+
+=head1 NAME
+
+pTracker::Domain::Project::Test
+
+=head1 SYNOPSIS
+
+=head1 METHODS
+
+=over
+
+=cut
+
+use pTracker::Domain::Project;
+use pTracker::Domain::Project::Category;
+use pTracker::Domain::Project::EditLock;
+use pTracker::Domain::Project::File;
+use pTracker::Domain::Project::Tag;
+use pTracker::Domain::Util;
+use pTracker::Domain::Watcher;
+
+my $db_conn;
+my $register;
+my $categories;
+my $editlock;
+my $files;
+my $project;
+my $tags;
+my $utils;
+my $watcher;
+
+=item register (args)
+
+Takes a hashref of arguments as input consisting of a config section
+and a register section where the register section is a hash of pointers
+to already registered objects.
+
+Adds blessed instance of itself to the register and also returns the
+blessed instance.
+
+=cut
+
+sub register {
+    my ( $class, $args ) = @_;
+    my $me = _whoami();
+
+    if ( exists $args->{register}{$me} ) {
+        return $args->{register}{$me};
+    }
+
+    my $self = bless {}, $class;
+    # Update register immediately to avoid "Deep recursion on subroutine" error
+    $args->{register}{$me} = $self;
+
+    # Grab a pointer to the database connection broker
+    $db_conn  = $args->{register}{'pTracker::DB'};
+    $register = $args->{register};
+
+    $project    = pTracker::Domain::Project->register($args);
+    $files      = pTracker::Domain::Project::File->register($args);
+    $editlock   = pTracker::Domain::Project::EditLock->register($args);
+    $categories = pTracker::Domain::Project::Category->register($args);
+    $tags       = pTracker::Domain::Project::Tag->register($args);
+    $utils      = pTracker::Domain::Util->register($args);
+    $watcher    = pTracker::Domain::Watcher->register($args);
+
+    return $self;
+}
+
+=item can_view
+
+Determines whether the supplied auth_user can view documents
+
+=cut
+
+sub can_view {
+    my ( $self, $args ) = @_;
+    return $project->can_view($args);
+}
+
+=item can_edit
+
+Determines whether the supplied auth_user can edit tests
+
+=cut
+
+sub can_edit {
+    my ( $self, $args ) = @_;
+
+    my $auth_user  = $utils->get_arg( 'auth_user',  $args );
+    my $project_id = $utils->get_arg( 'project_id', $args );
+    my $test_id    = $utils->get_arg( 'test_id',    $args );
+
+    my $is_project_user = 0;
+    my $can_manage      = 0;
+
+    # Check the edit-lock status:
+    if ($test_id) {
+        my ( $is_locked, $username, $message, $lock_remaining ) =
+            $editlock->edit_lock_status( { item_type => 'test', item_id => $test_id, auth_user => $auth_user } );
+
+        if ( $is_locked and $username ne $auth_user ) {
+            return 0;
+        }
+    }
+
+    my $query = q{
+SELECT priv_code
+    FROM user__privs ( ?::character varying, ?::integer )
+    WHERE has_priv
+};
+
+    my $d = $db_conn->record_set( { query => $query, parms => [ $auth_user, $project_id ] } );
+
+    foreach my $rec ( @{ $d->{data} } ) {
+
+        if ( $rec->{priv_code} eq 'is_active_project_user' ) {
+            $is_project_user = 1;
+        }
+        elsif ( $rec->{priv_code} eq 'manage_test' ) {
+            $can_manage = 1;
+        }
+    }
+    return ( $is_project_user && $can_manage );
+}
+
+=item can_delete
+
+Determines whether the supplied auth_user can delete the specified test
+
+=cut
+
+sub can_delete {
+    my ( $self, $args ) = @_;
+
+    if ( $self->has_requirements($args) ) {
+        return 0;
+    }
+
+    return $self->can_edit($args);
+}
+
+=item list_tests
+
+Return a list of all tests for a project
+
+=cut
+
+sub list_tests {
+    my ( $self, $args ) = @_;
+
+    if ( $self->can_view($args) ) {
+
+        my $query = q{
+SELECT t.id AS test_id,
+        t.project_id,
+        t.test_name,
+        t.type_name,
+        t.created_by,
+        fmt_tmsp ( t.created_dt ) AS created_dt,
+        t.updated_by,
+        fmt_tmsp ( t.updated_dt ) AS updated_dt,
+        t.created_username,
+        t.created_user_full_name,
+        t.updated_username,
+        t.updated_user_full_name
+    FROM v_test t
+    WHERE t.project_id = ?::integer
+};
+
+        my $project_id = $utils->get_arg( 'project_id', $args );
+
+        my @parms = ($project_id);
+
+        if ( $utils->is_integer( $args->{type} ) ) {
+            $query .= "\n        AND t.test_type_id = ?::integer ";
+            push @parms, $args->{type};
+        }
+
+        if ( $args->{tags} ) {
+            foreach ( split /[\s,]+/, $args->{tags} ) {
+                next unless ($_);
+                $query .= q{
+            AND EXISTS ( SELECT 1 FROM pt_test_tag a
+                JOIN pt_tag b
+                    ON ( b.id = a.tag_id )
+                WHERE a.test_id = b.id
+                    AND b.tag_name = ?::character varying ) };
+                push @parms, $_;
+            }
+        }
+
+        if ( $args->{categories} ) {
+            foreach ( split /[\s,]+/, $args->{categories} ) {
+                next unless ($_);
+                $query .= q{
+            AND EXISTS ( SELECT 1 FROM pt_test_category a
+                JOIN pt_category b
+                    ON ( b.id = a.category_id )
+                WHERE a.test_id = b.id
+                    AND b.category_name = ?::character varying ) };
+                push @parms, $_;
+            }
+        }
+
+        $query .= "\n    ORDER BY t.test_name ";
+
+        # Paging...
+        my $limit   = $args->{page_size} || 50;
+        my $page_no = $args->{page_no}   || 1;
+
+        if ( $page_no !~ m/^[0-9]+$/ ) {
+            $page_no = 1;
+        }
+
+        my $offset = ( $page_no - 1 ) * $limit;
+        #        $query .= "\n    OFFSET $offset LIMIT $limit ";
+
+        my $d = $db_conn->record_set( { query => $query, parms => \@parms } );
+
+        my $record_count;
+        my $is_last_page = 0;
+        if ( $d->{data} ) {
+            $record_count      = scalar @{ $d->{data} };
+            $d->{is_last_page} = $record_count < $limit;
+            $d->{page_no}      = $page_no;
+        }
+
+        return $d;
+    }
+    else {
+        return { error => ['FORBIDDEN'] };
+    }
+
+}
+
+=item view_test
+
+View a test
+
+=cut
+
+sub view_test {
+    my ( $self, $args ) = @_;
+
+    if ( $self->can_view($args) ) {
+
+        my $project_id = $utils->get_arg( 'project_id', $args );
+        my $test_id    = $utils->get_arg( 'test_id',    $args );
+
+        my $query = q{
+SELECT t.ctid::text AS ctid,
+        t.id AS test_id,
+        t.test_type_id,
+        t.type_name,
+        t.project_id,
+        t.test_name,
+        t.wiki_format_id,
+        t.description_text,
+        t.description_html,
+        t.created_by,
+        fmt_tmsp ( t.created_dt ) AS created_dt,
+        t.updated_by,
+        fmt_tmsp ( t.updated_dt ) AS updated_dt,
+        t.created_username,
+        t.created_user_full_name,
+        t.updated_username,
+        t.updated_user_full_name
+    FROM v_test t
+    WHERE t.project_id = ?::integer
+        AND t.id = ?::integer
+};
+
+        return $db_conn->record( { query => $query, parms => [ $project_id, $test_id ] } );
+    }
+    else {
+        return { error => ['FORBIDDEN'] };
+    }
+}
+
+=item create_test
+
+Create a test
+
+=cut
+
+sub create_test {
+    my ( $self, $args ) = @_;
+
+    if ( $self->can_edit($args) ) {
+
+        my $auth_user        = $utils->get_arg( 'auth_user',        $args );
+        my $category_csv     = $utils->get_arg( 'categories',       $args );
+        my $description_html = $utils->get_arg( 'description_html', $args );
+        my $description_text = $utils->get_arg( 'description_text', $args );
+        my $project_id       = $utils->get_arg( 'project_id',       $args );
+        my $tag_csv          = $utils->get_arg( 'tags',             $args );
+        my $test_name        = $utils->get_arg( 'test_name',        $args );
+        my $test_type_id     = $utils->get_arg( 'test_type_id',     $args );
+        my $wiki_format_id   = $utils->get_arg( 'wiki_format_id',   $args );
+        my $lang             = $utils->get_arg( 'lang',             $args );
+
+        my $query = q{
+SELECT test__insert AS test_id
+    FROM test__insert(
+        ?::integer,
+        ?::integer,
+        ?::integer,
+        ?::character varying,
+        ?::text,
+        ?::text,
+        ?::character varying )
+};
+
+        my @parms = (
+            $project_id, $test_type_id, $wiki_format_id, $test_name, $description_text, $description_html, $auth_user,
+        );
+
+        my $d = $db_conn->record( { query => $query, parms => \@parms } );
+
+        if ( $d->{data} ) {
+            my $test_id = $d->{data}{test_id};
+            if ( defined $test_id && $test_id < 0 ) {
+                my $error_description = $db_conn->error_description( { error_code => $test_id } );
+                return { failed => [ _loc( 'Failed to add test.', $lang ) . ' ' . _loc( $error_description, $lang ) ] };
+            }
+
+            $categories->update_item_categories(
+                {
+                    'project_id' => $project_id,
+                    'item_type'  => 'test',
+                    'item_id'    => $test_id,
+                    'categories' => $category_csv,
+                    'auth_user'  => $auth_user,
+                }
+            );
+
+            $tags->update_item_tags(
+                {
+                    'project_id' => $project_id,
+                    'item_type'  => 'test',
+                    'item_id'    => $test_id,
+                    'tags'       => $tag_csv,
+                    'auth_user'  => $auth_user,
+                }
+            );
+
+            $d->{success} = [ _loc( 'Test added.', $lang ) ];
+
+            return $d;
+        }
+        else {
+            return { failed => [ _loc( 'Failed to add test.', $lang ) ] };
+        }
+    }
+    else {
+        return { error => ['FORBIDDEN'] };
+    }
+}
+
+=item update_test
+
+Update a test
+
+=cut
+
+sub update_test {
+    my ( $self, $args ) = @_;
+
+    if ( $self->can_edit($args) ) {
+
+        # TODO: include project_id in update
+        my $test_id   = $utils->get_arg( 'test_id', $args );
+        my $prev_ctid = $utils->get_arg( 'ctid',    $args );
+
+        my $auth_user        = $utils->get_arg( 'auth_user',        $args );
+        my $category_csv     = $utils->get_arg( 'categories',       $args );
+        my $description_html = $utils->get_arg( 'description_html', $args );
+        my $description_text = $utils->get_arg( 'description_text', $args );
+        my $project_id       = $utils->get_arg( 'project_id',       $args );
+        my $tag_csv          = $utils->get_arg( 'tags',             $args );
+        my $test_name        = $utils->get_arg( 'test_name',        $args );
+        my $test_type_id     = $utils->get_arg( 'test_type_id',     $args );
+        my $wiki_format_id   = $utils->get_arg( 'wiki_format_id',   $args );
+        my $lang             = $utils->get_arg( 'lang',             $args );
+
+        # Check the edit-lock status:
+        {
+            my ( $is_locked, $username, $message, $lock_remaining ) =
+                $editlock->edit_lock_status(
+                { item_type => 'test', item_id => $test_id, auth_user => $auth_user, lang => $lang } );
+
+            if ( $is_locked and $username ne $auth_user ) {
+                return { failed => [ _loc( 'Failed to update test.', $lang ) . ' ' . $message ] };
+            }
+        }
+
+        # If the project record has changed since it was retrieved then it
+        # should fail as we do not want to overwrite someone elses changes.
+        my $ctid_query = 'SELECT ctid::text FROM pt_test WHERE id = ?::integer';
+        my ($curr_ctid) = $db_conn->record( { query => $ctid_query, parms => [$test_id] } )->{data}{ctid};
+
+        if ( $curr_ctid ne $prev_ctid ) {
+            $editlock->clear_edit_lock( { item_type => 'test', item_id => $test_id, auth_user => $auth_user } );
+
+            return {
+                failed => [ _loc( 'Failed to update test. The test changed between retrieve and update.', $lang ) ]
+            };
+        }
+
+        my $query = q{
+SELECT test__update AS rc
+    FROM test__update (
+        ?::integer,
+        ?::integer,
+        ?::integer,
+        ?::character varying,
+        ?::text,
+        ?::text,
+        ?::character varying )
+};
+
+        my @parms =
+            ( $test_id, $test_type_id, $wiki_format_id, $test_name, $description_text, $description_html, $auth_user );
+
+        my $d = $db_conn->record( { query => $query, parms => \@parms } );
+
+        if ( $d->{data} ) {
+            my $rc = $d->{data}{rc};
+            if ( defined $rc && $rc < 0 ) {
+                my $error_description = $db_conn->error_description( { error_code => $rc } );
+                return {
+                    failed => [ _loc( 'Failed to update test.', $lang ) . ' ' . _loc( $error_description, $lang ) ]
+                };
+            }
+
+            $categories->update_item_categories(
+                {
+                    'project_id' => $project_id,
+                    'item_type'  => 'test',
+                    'item_id'    => $test_id,
+                    'categories' => $category_csv,
+                    'auth_user'  => $auth_user,
+                }
+            );
+
+            $tags->update_item_tags(
+                {
+                    'project_id' => $project_id,
+                    'item_type'  => 'test',
+                    'item_id'    => $test_id,
+                    'tags'       => $tag_csv,
+                    'auth_user'  => $auth_user,
+                }
+            );
+
+            $watcher->notify_watchers(
+                {
+                    'subject'    => [ 'pTracker notification: Test %1 updated for project %2', $test_id, $project_id ],
+                    'action'     => 'updated',
+                    'item_id'    => $test_id,
+                    'item_type'  => 'test',
+                    'project_id' => $project_id,
+                    'auth_user'  => $auth_user,
+                }
+            );
+
+            $d->{success} = [ _loc( 'Test updated.', $lang ) ];
+
+        }
+        else {
+            $d->{failed} = [ _loc( 'Failed to update test.', $lang ) ];
+        }
+        $editlock->clear_edit_lock( { item_type => 'test', item_id => $test_id, auth_user => $auth_user } );
+        return $d;
+
+    }
+    else {
+        return { error => ['FORBIDDEN'] };
+    }
+}
+
+=item delete_test
+
+Delete a test. Note that a issue may not be deleted if another
+user has an edit-lock on the issue.
+
+=cut
+
+sub delete_test {
+    my ( $self, $args ) = @_;
+
+    if ( $self->can_edit($args) ) {
+
+        my $auth_user  = $utils->get_arg( 'auth_user',  $args );
+        my $test_id    = $utils->get_arg( 'test_id',    $args );
+        my $project_id = $utils->get_arg( 'project_id', $args );
+        my $lang       = $utils->get_arg( 'lang',       $args );
+        # TODO: include project_id in delete
+
+        # Ensure there are no referencing requirements
+        if ( $self->has_requirements($args) ) {
+            return {
+                failed => [
+                    _loc(
+                        'Failed to delete test. The test is referenced by one or more requirements and may not be deleted.',
+                        $lang
+                    )
+                ]
+            };
+        }
+
+        # Ensure that there is no edit-lock
+        {
+            my ( $is_locked, $username, $message, $lock_remaining ) =
+                $editlock->edit_lock_status(
+                { item_type => 'test', item_id => $test_id, auth_user => $auth_user, lang => $lang } );
+
+            if ( $is_locked and $username ne $auth_user ) {
+                return { failed => [ _loc( 'Failed to delete test.', $lang ) . ' ' . $message ] };
+            }
+            elsif ( $is_locked and $username eq $auth_user ) {
+                $editlock->clear_edit_lock( { item_type => 'test', item_id => $test_id, auth_user => $auth_user } );
+            }
+        }
+
+        my $query = 'SELECT test__delete( ?::integer )';
+
+        my $d = $db_conn->record( { query => $query, parms => [$test_id] } );
+
+        if ( $d->{data} ) {
+            my $rc = $d->{data}{rc};
+            if ( defined $rc && $rc < 0 ) {
+                my $error_description = $db_conn->error_description( { error_code => $rc } );
+                return {
+                    failed => [ _loc( 'Failed to delete test.', $lang ) . ' ' . _loc( $error_description, $lang ) ]
+                };
+            }
+
+            $files->delete_item_files( { project_id => $project_id, item_type => 'test', item_id => $test_id } );
+            $d->{success} = [ _loc( 'Test deleted.', $lang ) ];
+        }
+        else {
+            $d->{failed} = [ _loc( 'Failed to delete test.', $lang ) ];
+        }
+        return $d;
+    }
+    else {
+        return { error => ['FORBIDDEN'] };
+    }
+}
+
+sub requirement_list {
+    my ( $self, $args ) = @_;
+
+    my $test_id    = $utils->get_arg( 'test_id',    $args );
+    my $project_id = $utils->get_arg( 'project_id', $args );
+
+    my $query = q{
+SELECT REPEAT ('-- ', v.level ) AS prefix,
+        v.level,
+        v.reqt_number,
+        v.id AS requirement_id,
+        v.parent_id,
+        v.project_id,
+        v.parent_title,
+        v.requirement_title,
+        v.status_id,
+        v.status_name,
+        v.priority_id,
+        v.priority_name,
+        v.requirement_type_id,
+        v.type_name,
+        v.planned_pip_id,
+        v.planned_pip_name,
+        v.project_name
+    FROM requirement__list ( ?::integer ) v
+    JOIN pt_requirement_test t
+        ON ( t.requirement_id = v.id )
+    WHERE t.test_id = ?::integer
+};
+
+    return $db_conn->record_set( { query => $query, parms => [ $project_id, $test_id ] } );
+
+}
+
+=item has_requirements
+
+Determines if a test has any requirements referencing it.
+
+=cut
+
+sub has_requirements {
+    my ( $self, $args ) = @_;
+
+    my $test_id = $utils->get_arg( 'test_id', $args );
+
+    my $query = q{
+SELECT count (1) AS rc
+    WHERE EXISTS (
+        SELECT 1
+            FROM pt_requirement_test
+            WHERE test_id = ?::integer )
+};
+
+    return $db_conn->record( { query => $query, parms => [$test_id] } )->{data}{rc};
+}
+
+sub _loc {
+    my ( $msgid, $lang, @parms ) = @_;
+    return $utils->translate_msg( $msgid, $lang, @parms );
+}
+
+sub _whoami { return (caller)[0]; }
+
+1;
+
+=back
+
+=head1 Copyright (C) 2015-2016 gsiems.
+
+This file is licensed under the Artistic License 2.0
+
+=cut

@@ -1,0 +1,17 @@
+/* 1 Two Sum I
+ * O(n^2) runtime, O(n) space - Brute force
+ */
+public class Solution {
+  public int[] twoSum(int[] nums, int target) {
+    for (int i = 0; i < nums.length; i++) {
+      int ni = nums[i];
+      for (int j = i + 1; j < nums.length; j++) {
+        int nj = nums[j];
+        if (ni + nj == target) {
+          return new int[] {i, j};
+        }
+      }
+    }
+    throw new IllegalArgumentException("No two sum solution");
+  }
+}

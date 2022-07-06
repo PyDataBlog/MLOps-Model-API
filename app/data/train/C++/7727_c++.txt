@@ -1,0 +1,522 @@
+#ifndef CHILON_VARIANT_HPP
+#define CHILON_VARIANT_HPP
+
+#include <chilon/meta/at.hpp>
+#include <chilon/meta/index_of.hpp>
+#include <chilon/meta/max.hpp>
+#include <chilon/meta/return.hpp>
+#include <chilon/meta/void.hpp>
+#include <chilon/meta/call_type.hpp>
+#include <chilon/meta/contains.hpp>
+#include <chilon/meta/require.hpp>
+
+#include <chilon/singleton.hpp>
+#include <chilon/hash.hpp>
+
+#include <boost/ptr_container/ptr_array.hpp>
+
+#include <utility>
+#include <memory>
+
+#include <assert.h>
+
+namespace chilon {
+
+/// Thrown when a variant is initalised from another variant which
+/// current stores a type that the lhs variant cannot store.
+struct invalid_variant_initalisation {};
+
+/**
+ * @brief A simple variant which can store one of any of the types in
+ *        T on the heap.
+ * @detailed When it is constructed the variant is empty by default.
+ *           A verison of the variant that stores data on the stack can be
+ *           enabled by defining CHILON_VARIANT_USES_STACK. This version
+ *           can never be empty and constructs the first type when default
+ *           constructed. This version is less convenient to use in places
+ *           where only forward declarations of the variant types are
+ *           available.
+ * @tparam T pack of valid types the variant may store.
+ */
+template <class... T>
+struct variant {
+    enum { n_elements = sizeof...(T) };
+#ifdef CHILON_VARIANT_USES_STACK
+    enum { max_size = meta::max<sizeof(T)...>::value };
+#else
+  private:
+    struct copier {
+        template <class U> void operator()(U& v) const { v_ = v; }
+        void operator()() const { v_.set_empty(); }
+
+        copier(variant& v) : v_(v) {}
+        variant& v_;
+    };
+
+    struct comparator {
+        template <class U> bool operator()(U const& v) const {
+            return v == v_.at<U>();
+        }
+        bool operator()() const { return v_.empty(); }
+
+        comparator(variant const& v) : v_(v) {}
+        variant const& v_;
+    };
+
+  public:
+    bool operator==(variant const& rhs) const {
+        return type_index_ == rhs.type_index_ &&
+               variant_apply(rhs, comparator(*this));
+    };
+
+    bool operator!=(variant const& rhs) const {
+        return ! (*this == rhs);
+    };
+
+    template <class... U>
+    variant& operator=(variant<U...> const& rhs) {
+        variant_apply(rhs, copier(*this));
+        return *this;
+    }
+
+    variant& operator=(variant&& rhs) {
+        delete_if_not_empty();
+        data_ = rhs.data_;
+        type_index_ = rhs.type_index_;
+        rhs.data_ = 0;
+        return *this;
+    }
+
+    template <class V>
+    variant& operator=(std::auto_ptr<V>& rhs) {
+        int const new_index = meta::index_of<V, T...>::value;
+        static_assert(
+            new_index < n_elements, "type does not exist in variant");
+        delete_if_not_empty();
+        type_index_ = new_index;
+        data_ = rhs.release();
+        return *this;
+    }
+
+    template <class V>
+    variant& operator=(V const& rhs) {
+        int const new_index = meta::index_of<V, T...>::value;
+        static_assert(
+            new_index < n_elements, "type does not exist in variant");
+#ifdef CHILON_VARIANT_USES_STACK
+        type_index_ = new_index;
+        cast<V>() = rhs;
+#else
+        delete_if_not_empty();
+
+        type_index_ = new_index;
+        data_ = new V(rhs);
+#endif
+        return *this;
+    }
+
+    template <class V>
+    V *release() {
+        int const index = meta::index_of<V, T...>::value;
+        static_assert(
+            index < n_elements, "type does not exist in variant");
+        assert(type_index_ == index);
+        V *data = static_cast<V *>(data_);
+        data_ = 0;
+        return data;
+    }
+
+    bool empty() const { return ! data_; }
+    void set_empty() {
+        if (! empty()) {
+            variant_apply(*this, deleter());
+            data_ = 0;
+
+            int const void_idx = meta::index_of<void, T...>::value;
+            if (void_idx < n_elements) type_index_ = void_idx;
+        }
+    }
+
+  private:
+    void delete_if_not_empty() {
+        if (! empty())
+            variant_apply(*this, deleter());
+    }
+
+  public:
+#endif
+
+    typedef typename meta::head<T...>::type head_type;
+
+    /**
+     * Change variant to represent a default constructed V
+     */
+    template <class V>
+    V& construct_default() {
+        int const new_index = meta::index_of<V, T...>::value;
+        static_assert(
+            new_index < n_elements, "type does not exist in variant");
+#ifdef CHILON_VARIANT_USES_STACK
+        type_index_ = new_index;
+        return *new (data_) V;
+#else
+        set_empty();
+        type_index_ = new_index;
+        data_ = new V();
+        return cast<V>();
+#endif
+    }
+
+    template <class V, CHILON_REQUIRE(meta::is_void<V>)>
+    void construct_default() { set_empty(); }
+
+    /**
+     * Unsafe access to type at index I.
+     */
+    template <int I>
+    typename meta::at<I, T...>::type& at() {
+        static_assert(I < n_elements, "index too high");
+#ifndef NDEBUG
+        assert(type_index_ == I);
+#endif
+        return cast<typename meta::at<I, T...>::type>();
+    }
+
+    /**
+     * Unsafe const access to type at index I.
+     */
+    template <int I>
+    typename meta::at<I, T...>::type const& at() const {
+        static_assert(I < n_elements, "type not found in variant");
+#ifndef NDEBUG
+        assert(type_index_ == I);
+#endif
+        return cast<typename meta::at<I, T...>::type>();
+    }
+
+    template <int I,
+        CHILON_REQUIRE(meta::is_void<typename meta::at<I, T...>::type >) >
+    void at() const {};
+
+    template <class Y>
+    Y& at() {
+        return at<meta::index_of<Y, T...>::value>();
+    }
+
+    template <class Y>
+    Y const& at() const {
+        return at<meta::index_of<Y, T...>::value>();
+    }
+
+    template <class U>
+    bool is() const {
+        int const index = meta::index_of<U, T...>::value;
+        static_assert(index < n_elements, "type does not exist in variant");
+        return type_index_ == index;
+    }
+
+    int const type_index() const { return type_index_; }
+
+  private:
+    // unsafe casts
+    template <class Y>
+    Y const& cast() const {
+        return (*reinterpret_cast<Y const *>(data_));
+    }
+
+    template <class Y>
+    Y& cast() {
+        return (*reinterpret_cast<Y *>(data_));
+    }
+
+  public:
+    // default constructor constructs the first element in the tuple
+#ifdef CHILON_VARIANT_USES_STACK
+    variant() : type_index_(0) {
+        new (data_) head_type;
+    }
+
+  private:
+    char data_[max_size];
+#else
+  private:
+    struct initialiser {
+        template <class U>
+        void operator()(U const& v) const {
+            v_.data_ = new U(v);
+        }
+
+        void operator()() const {
+            v_.set_empty();
+        }
+
+        initialiser(variant& v) : v_(v) {}
+      protected:
+        variant& v_;
+    };
+
+    struct careful_initialiser : initialiser {
+        template <class U>
+        CHILON_RETURN_REQUIRE(void, meta::contains<U, T...>)
+        operator()(U const& v) const {
+            this->v_.type_index_ = meta::index_of<U, T...>::value;
+            initialiser::operator()(v);
+        }
+
+        template <class U>
+        CHILON_RETURN_NOT_REQUIRE(void, meta::contains<U, T...>)
+        operator()(U const& v) const {
+            throw invalid_variant_initalisation();
+        }
+
+        careful_initialiser(variant& v) : initialiser(v) {}
+    };
+
+    struct deleter {
+        template <class U> void operator()(U& v) const { delete &v; }
+        void operator()() const {}
+    };
+
+  public:
+    variant() : data_(0), type_index_(0) {
+        construct_default< typename meta::head<T...>::type >();
+    }
+
+    variant(variant const& rhs) : type_index_(rhs.type_index_) {
+        variant_apply(rhs, initialiser(*this));
+    }
+
+    variant(variant&& rhs)
+      : data_(rhs.data_), type_index_(rhs.type_index_)
+    { rhs.data_ = 0; }
+
+    template <class U,
+              CHILON_REQUIRE_I(meta::index_of<U, T...>::value < n_elements)>
+    variant(U const& u)
+      : data_(new U(u)),
+        type_index_(meta::index_of<U, T...>::value)
+    {}
+
+    template <class U,
+              CHILON_REQUIRE_I(meta::index_of<U, T...>::value < n_elements)>
+    variant(U&& u)
+      : data_(new U(std::move(u))),
+        type_index_(meta::index_of<U, T...>::value)
+    {}
+
+    // TODO: check variant is not subvariant first, then handle
+    //       it like a regular member type
+    template <class... U>
+    variant(variant<U...> const& rhs) {
+        variant_apply(rhs, careful_initialiser(*this));
+    }
+
+    ~variant() { set_empty(); }
+
+    template <class U>
+    variant(std::auto_ptr<U>& rhs)
+      : type_index_(meta::index_of<U, T...>::value)
+    {
+        static_assert(
+             meta::index_of<U, T...>::value < n_elements,
+             "type does not exist in variant");
+        data_ = rhs.release();
+    }
+  protected:
+    void *data_;
+#endif
+    int  type_index_;
+};
+
+#if 0 && ! defined(CHILON_VARIANT_USES_STACK)
+/**
+ * @brief If a void entry is used as the first entry in a variant, then
+ *        the variant can be empty. The void entry is not considered part
+ *        of the variant in the indexing system.
+ */
+template <class... T>
+struct variant<void, T...> : variant<T...> {
+    typedef variant<T...> base_t;
+
+    template <class U>
+    variant<void, T...>& operator=(U&& rhs) {
+        base_t::operator=(std::move<U>(rhs));
+    }
+
+    variant() : base_t() {}
+
+    template <class U>
+    variant(U&& rhs) : base_t(std::forward<U>(rhs)) {}
+};
+#endif
+
+namespace detail {
+    template <class T, class F>
+    struct variant_apply_helper {};
+
+    template <class F, class T>
+    struct variant_call_type;
+
+    template <class F, class... T>
+    struct variant_call_type<F, variant<T...> > :
+        meta::call_type_ref<F, typename meta::at<0, T...>::type> {};
+
+    template <class F, class... T>
+    struct variant_apply_lookup_table {
+        typedef variant<T...> type;
+
+        struct apply {
+            virtual typename variant_call_type<F, type>::type
+            operator()(type const& v, F const& f) =0;
+
+            virtual typename variant_call_type<F, type>::type
+            operator()(type& v, F const& f) =0;
+        };
+
+        boost::ptr_array<apply, type::n_elements> appliers_;
+
+        template <int I, class U>
+        struct apply_idx : apply {
+            virtual auto operator()(type const& v, F const& f)
+                CHILON_RETURN(f(v.template at<I>()))
+            virtual auto operator()(type& v, F const& f)
+                CHILON_RETURN(f(v.template at<I>()))
+        };
+
+        template <int I>
+        struct apply_idx<I, void> : apply {
+            virtual auto operator()(type const& v, F const& f)
+                CHILON_RETURN(f())
+
+            virtual auto operator()(type& v, F const& f)
+                CHILON_RETURN(f())
+        };
+
+        template <int I, int L>
+        struct create_applier {
+            static void exec(decltype(appliers_)& appliers) {
+                appliers.replace(
+                    I,
+                    new apply_idx<I, typename meta::at<I, T...>::type >()
+                );
+                create_applier<I + 1, L>::exec(appliers);
+            }
+        };
+
+        template <int I>
+        struct create_applier<I, I> {
+            static void exec(decltype(appliers_)& appliers) {}
+        };
+
+        variant_apply_lookup_table() {
+            create_applier<0, type::n_elements>::exec(appliers_);
+        }
+    };
+
+    template <class... T, class F>
+    struct variant_apply_helper< variant<T...>, F > {
+        typedef variant<T...> type;
+
+        inline static typename variant_call_type<F, type>::type
+        exec(type const& v, F const& f) {
+            return chilon::singleton<
+                variant_apply_lookup_table<F, T...>
+            >::instance().appliers_[v.type_index()](v, f);
+        }
+
+        inline static typename variant_call_type<F, type>::type
+        exec(type& v, F const& f) {
+            return chilon::singleton<
+                variant_apply_lookup_table<F, T...>
+            >::instance().appliers_[v.type_index()](v, f);
+        }
+
+        inline static typename variant_call_type<F, type>::type
+        exec(int const idx, type const& v, F const& f) {
+            return chilon::singleton<
+                variant_apply_lookup_table<F, T...>
+            >::instance().appliers_[idx](v, f);
+        }
+
+        inline static typename variant_call_type<F, type>::type
+        exec(int const idx, type& v, F const& f) {
+            return chilon::singleton<
+                variant_apply_lookup_table<F, T...>
+            >::instance().appliers_[idx](v, f);
+        }
+    };
+}
+
+template <class F, class T>
+inline auto variant_apply(T& v, F const& f)
+    CHILON_RETURN(detail::variant_apply_helper<T, F>::exec(v, f))
+
+template <class F, class T>
+inline auto variant_apply(T const& v, F const& f)
+    CHILON_RETURN(detail::variant_apply_helper<T, F>::exec(v, f))
+
+template <class F, class T>
+inline auto variant_construct_apply(int const idx, T const& v, F const& f)
+    CHILON_RETURN(detail::variant_apply_helper<T, F>::exec(idx, v, f))
+
+template <class F, class T>
+inline auto variant_construct_apply(int const idx, T& v, F const& f)
+    CHILON_RETURN(detail::variant_apply_helper<T, F>::exec(idx, v, f))
+
+template <class T, class... Y>
+inline T& variant_as(variant<Y...>& v) {
+    return v.template at<T>();
+}
+
+template <class T, class... Y>
+inline T& variant_as(variant<Y...> const& v) {
+    return v.template at<T>();
+}
+
+template <class T>
+inline T& variant_as(T& v) { return v; }
+
+template <class T>
+inline T const& variant_as(T const& v) { return v; }
+
+/**
+ * call construct_default on a variant.
+ */
+template <class T, class... Y>
+inline void construct_default(variant<Y...>& v) {
+    v.template construct_default<T>();
+}
+
+/**
+ * construct_default on non-variant does nothing
+ */
+template <class T>
+inline void construct_default(T const& v) {}
+
+struct hash_variant {
+    size_t operator()() const { return 0; }
+
+    template <class T>
+    size_t operator()(T const& t) const { return chilon::hash(t); }
+};
+
+/**
+ * register with boost::hash
+ */
+template <class... T>
+std::size_t inline hash_value(variant<T...> const& t) {
+    return variant_apply(t, hash_variant());
+}
+
+}
+
+namespace std {
+    template <class... T>
+    struct hash<chilon::variant<T...>> {
+        std::size_t operator()(chilon::variant<T...> const& arg) const {
+            return chilon::hash_value(arg);
+        }
+    };
+}
+
+#endif

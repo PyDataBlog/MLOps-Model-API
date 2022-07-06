@@ -1,0 +1,297 @@
+﻿
+<#------------- CONNECT TO SWIS -------------#>
+# load the snappin if it's not already loaded (step 1)
+if (!(Get-PSSnapin | Where-Object { $_.Name -eq "SwisSnapin" })) {
+    Add-PSSnapin "SwisSnapin"
+}
+
+#define target host and credentials
+
+$hostname = 'localhost'
+#$user = "admin"
+#$password = "password"
+# create a connection to the SolarWinds API
+#$swis = connect-swis -host $hostname -username $user -password $password -ignoresslerrors
+$swis = Connect-Swis -Hostname $hostname -Trusted
+
+
+
+<#------------- ACTUAL SCRIPT -------------#>
+##### Phase 1 - Create groups tree #######
+cls
+"`nGetting Initial Group Tree"
+
+
+#########get applications list
+$applications = get-swisdata $swis @"
+select distinct toupper(n.CustomProperties.applications) as Applications
+from orion.nodes n 
+left join orion.Container c on c.name = n.CustomProperties.applications
+where n.CustomProperties.applications is not null and n.CustomProperties.applications not in ('','unknown','N/A','not applicable') and n.CustomProperties.applications not like '%,%'
+order by n.CustomProperties.applications
+"@
+
+foreach($app in $applications) {
+    #get groupid for parent folder
+    $parent = get-swisdata $swis "select top 1 containerid from orion.container where name='Applications'"
+
+    if(!$parent) {
+        "Creating group for Applications"
+        $members = @( )
+        $parent = (invoke-swisverb $swis "orion.container" "CreateContainer" @(
+        "Applications",
+        "Core",
+        300,
+        0,
+        "Applications root level parent",
+        "true",
+        ([xml]@("<ArrayOfMemberDefinitionInfo xmlns='http://schemas.solarwinds.com/2008/Orion'>",
+	    [string]($members |% {
+    	    "<MemberDefinitionInfo><Name>$($_.Name)</Name><Definition>$($_.Definition)</Definition></MemberDefinitionInfo>"
+    		    } 
+        ),
+        "</ArrayOfMemberDefinitionInfo>"
+        )).DocumentElement 
+        )).innertext 
+    }
+
+
+    $appcheck = get-swisdata $swis "select containerid from orion.container where name = '$app'"
+    if(!$appcheck) {
+        "   Creating group for $app"
+        $members = @( # ***IMPORTANT --- THESE DEFINITIONS ARE CASE SENSITIVE!***
+    	    @{ Name = "$app Nodes"; Definition = "filter:/Orion.Nodes[Contains(CustomProperties.Applications,'$app') AND CustomProperties.ApplicationsRole='Unknown' AND CustomProperties.Environment='Unknown']" },
+            @{ Name = "$app Applications"; Definition = "filter:/Orion.APM.GenericApplication[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.SPPApplicationsRole='Unknown' AND CustomProperties.Environment='Unknown']" },
+    	    @{ Name = "$app IIS"; Definition = "filter:/Orion.APM.IIS.Application[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.SPPApplicationsRole='Unknown' AND CustomProperties.Environment='Unknown']" },
+    	    @{ Name = "$app SQL"; Definition = "filter:/Orion.APM.SqlServerApplication[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.SPPApplicationsRole='Unknown' AND CustomProperties.Environment='Unknown']" }
+    	)
+        $appid = (invoke-swisverb $swis "orion.container" "CreateContainerWithParent" @(
+        "$parent",
+        "$app",
+        "Core",
+        300,
+        0,
+        "$app child nodes and applications"
+        "true",
+        ([xml]@("<ArrayOfMemberDefinitionInfo xmlns='http://schemas.solarwinds.com/2008/Orion'>",
+	    [string]($members |% {
+    	    "<MemberDefinitionInfo><Name>$($_.Name)</Name><Definition>$($_.Definition)</Definition></MemberDefinitionInfo>"
+    		    } 
+        ),
+        "</ArrayOfMemberDefinitionInfo>"
+        )).DocumentElement 
+        )).innertext 
+    } else {
+        "   $app group already exists"
+    }
+
+
+############get environment list
+    $environments = get-swisdata $swis @"
+select distinct toupper(concat(n.CustomProperties.Applications,' ',n.CustomProperties.Environment)) as environments
+from orion.nodes n 
+left join orion.Container c on c.name= concat(n.CustomProperties.Applications,' ',n.CustomProperties.Environment)
+where 
+n.CustomProperties.Applications is not null and n.CustomProperties.Applications not in ('','unknown','N/A','not applicable')
+and n.CustomProperties.Environment is not null and n.CustomProperties.Environment not in ('','unknown','N/A','not applicable')
+and n.CustomProperties.Applications = '$app'
+order by concat(n.CustomProperties.Applications,' ',n.CustomProperties.Environment)
+"@
+
+    foreach($env in $environments) {
+
+        #get groupid for parent folder
+        $parent = get-swisdata $swis "select top 1 containerid from orion.container where name='$app'"
+
+        $envcheck = get-swisdata $swis "select containerid from orion.container where name = '$env'"
+        if(!$envcheck) {
+            #creating variables for definitions
+            $env2 = $env -replace "$app ",''
+                
+            "    Creating group for $env"
+            $members = @(
+    	    	@{ Name = "$env Nodes"; Definition = "filter:/Orion.Nodes[Contains(CustomProperties.Applications,'$app') AND CustomProperties.Environment='$env2' AND CustomProperties.ApplicationsRole='Unknown']" },
+                @{ Name = "$env Applications"; Definition = "filter:/Orion.APM.GenericApplication[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.Environment='$env2' AND CustomProperties.SPPApplicationsRole='Unknown']" },
+    	        @{ Name = "$env IIS"; Definition = "filter:/Orion.APM.IIS.Application[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.Environment='$env2' AND CustomProperties.SPPApplicationsRole='Unknown']" },
+    	        @{ Name = "$env SQL"; Definition = "filter:/Orion.APM.SqlServerApplication[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.Environment='$env2' AND CustomProperties.SPPApplicationsRole='Unknown']" }
+    	    )
+            $envid = (invoke-swisverb $swis "orion.container" "CreateContainerWithParent" @(
+            "$parent",
+            "$env",
+            "Core",
+            300,
+            0,
+            "$env child nodes and applications",
+            "true",
+            ([xml]@("<ArrayOfMemberDefinitionInfo xmlns='http://schemas.solarwinds.com/2008/Orion'>",
+	        [string]($members |% {"<MemberDefinitionInfo><Name>$($_.Name)</Name><Definition>$($_.Definition)</Definition></MemberDefinitionInfo>"} ),
+            "</ArrayOfMemberDefinitionInfo>")).DocumentElement )
+            ).innertext 
+        } else {
+            "    $env group already exists"
+        }
+
+############get components list
+        $roles = get-swisdata $swis @"
+select distinct toupper(concat(n.CustomProperties.Applications,' ',n.CustomProperties.Environment,' ',n.CustomProperties.ApplicationsRole)) as applicationsrole
+from orion.nodes n 
+left join orion.Container c on c.name= concat(n.CustomProperties.Applications,' ',n.CustomProperties.Environment,' ',n.CustomProperties.ApplicationsRole)
+where 
+n.CustomProperties.Applications is not null and n.CustomProperties.Applications not in ('','unknown','N/A','not applicable')
+and n.CustomProperties.Environment is not null and n.CustomProperties.Environment not in ('','unknown','N/A','not applicable')
+and n.CustomProperties.ApplicationsRole is not null and n.CustomProperties.ApplicationsRole not in ('','unknown','N/A','not applicable')
+and n.CustomProperties.Applications = '$app'
+and n.CustomProperties.Environment = '$env2'
+and n.CustomProperties.ApplicationsRole not like '%,%'
+order by concat(n.CustomProperties.Applications,' ',n.CustomProperties.Environment,' ',n.CustomProperties.ApplicationsRole)
+"@
+
+        foreach($role in $roles) {
+
+            #get groupid for parent folder
+            $parent = get-swisdata $swis "select top 1 containerid from orion.container where name='$env'"
+
+            $rolecheck = get-swisdata $swis "select containerid from orion.container where name = '$role'"
+            if(!$rolecheck) {
+                #creating variables for definitions
+                $role2 = $role -replace "$env ",''
+                
+                "      Creating group for $role"
+                $members = @(
+    	    	    @{ Name = "$role Nodes"; Definition = "filter:/Orion.Nodes[Contains(CustomProperties.Applications,'$app') AND CustomProperties.Environment='$env2' AND Contains(CustomProperties.ApplicationsRole,'$role2')]" },
+                    @{ Name = "$role Applications"; Definition = "filter:/Orion.APM.GenericApplication[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.Environment='$env2' AND Contains(CustomProperties.SPPApplicationsRole,'$role2')]" },
+    	            @{ Name = "$role IIS"; Definition = "filter:/Orion.APM.IIS.Application[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.Environment='$env2' AND Contains(CustomProperties.SPPApplicationsRole,'$role2')]" },
+    	            @{ Name = "$role SQL"; Definition = "filter:/Orion.APM.SqlServerApplication[Contains(CustomProperties.SPPApplications,'$app') AND CustomProperties.Environment='$env2' AND Contains(CustomProperties.SPPApplicationsRole,'$role2')]" }
+    	        )
+                $envid = (invoke-swisverb $swis "orion.container" "CreateContainerWithParent" @(
+                "$parent",
+                "$role",
+                "Core",
+                300,
+                0,
+                "$role child nodes and applications",
+                "true",
+                ([xml]@("<ArrayOfMemberDefinitionInfo xmlns='http://schemas.solarwinds.com/2008/Orion'>",
+	            [string]($members |% {"<MemberDefinitionInfo><Name>$($_.Name)</Name><Definition>$($_.Definition)</Definition></MemberDefinitionInfo>"} ),
+                "</ArrayOfMemberDefinitionInfo>")).DocumentElement )
+                ).innertext 
+            } else {
+                "      $role group already exists"
+            }
+        }
+    }
+}
+
+
+##### Phase 2 - Create dashboard for each application #######
+"`nGetting list of application groups that need dashboards"
+
+# check if application has a view already
+$needviews = @"
+select distinct toupper(ncp.Applications) as applications, c.ContainerID, c.name, v.ViewID, v.ViewTitle, v.ViewGroupName
+from orion.NodesCustomProperties ncp
+left join orion.Container c on c.name like ncp.Applications
+left join orion.views v on v.viewtitle like ('SPP Application - '+ c.name) or (v.ViewGroupName like ('SPP Application - '+ c.name) and v.ViewGroupPosition=1)
+
+where ncp.Applications is not null and ncp.Applications not in ('','N/A') and ncp.Applications not like '%,%'
+and v.viewid is null
+and c.containerid is not null
+"@
+
+$views = get-swisdata $swis $needviews
+
+$Gettemplate = @"
+SELECT ViewID
+FROM Orion.Views
+where viewtitle = '_Template Application -'
+"@
+$viewtemplateid = get-swisdata $swis $Gettemplate
+
+# clone applications view template
+foreach($view in $views) {
+    "Creating view for $($view.Applications)"
+        
+    invoke-swisverb $swis "Orion.Views" "CloneView" @(
+        #View to clone
+        "$viewtemplateid",
+        #name to give
+        "SPP Application - $($view.Applications)"
+    )
+
+    $getnewview = @"
+SELECT ViewID
+FROM Orion.Views
+where viewtitle = 'SPP Application - $($view.Applications)'
+"@
+    $newviewid = get-swisdata $swis $getnewview
+           
+    #copy resources from template to new view
+    $clone = invoke-swisverb $swis "Orion.Views" "CloneViewContents" @(
+        #source view
+        "$viewtemplateid",
+        #destination view
+        "$newviewid"   
+    )
+}
+
+  ########## Phase 3 - Apply Limitations ###########
+"`nCreating filters for dashboards"
+
+$uriroot = get-swisdata $swis "SELECT SettingValue FROM Orion.WebSettings where settingname='SwisUriSystemIdentifier'"
+
+#check for existing limitation
+$limittype = get-swisdata $swis "SELECT LimitationTypeID FROM Orion.LimitationTypes where name  = 'Group of Groups'"
+
+$needlimits = @"
+select distinct toupper(ncp.Applications) as applications, c.ContainerID, c.name, v.ViewID, v.ViewTitle, v.ViewGroupName, l.LimitationID 
+from orion.NodesCustomProperties ncp
+left join orion.Container c on c.name like ncp.Applications
+left join orion.views v on v.viewtitle like ('SPP Application - '+ c.name) or (v.ViewGroupName like ('SPP Application - '+ c.name) and v.ViewGroupPosition=1)
+left join orion.Limitations l on l.WhereClause like ('% '+tostring(c.ContainerID)+')%') and LimitationTypeID=$limittype
+
+where ncp.Applications is not null and ncp.Applications not in ('','N/A') and ncp.Applications not like '%,%'
+and l.limitationid is null
+"@
+
+$limitations = get-swisdata $swis $needlimits
+
+
+#create application group based limitation
+foreach($limit in $limitations) { 
+    "Creating limitation for $($limit.Applications)"
+    $limit = invoke-swisverb $swis "Orion.Limitations" "CreateLimitation" @( "$limittype",$null,@("$($limit.containerid)"),$null,$null )
+}
+
+
+$needtoapply = @"
+select distinct toupper(ncp.Applications) as applications, c.ContainerID, c.name, v.ViewID, v.ViewTitle, v.ViewGroupName, l.LimitationID 
+from orion.NodesCustomProperties ncp
+left join orion.Container c on c.name like ncp.Applications
+left join orion.views v on v.viewtitle like ('SPP Application - '+ c.name) or (v.ViewGroupName like ('SPP Application - '+ c.name) and v.ViewGroupPosition=1)
+left join orion.Limitations l on l.WhereClause like ('% '+tostring(c.ContainerID)+')%') and LimitationTypeID=$limittype
+
+where ncp.Applications is not null and ncp.Applications not in ('','N/A') and ncp.Applications not like '%,%'
+and l.limitationid is not null
+and v.LimitationID != l.LimitationID
+"@
+
+
+$toapply = get-swisdata $swis $needtoapply
+
+
+#create application group based limitation
+foreach($view in $toapply) { 
+
+    #apply limitation to view
+    "Applying limitation $($view.limitationid) to the $($view.Applications) view "
+    Set-SwisObject $swis -Uri "swis://$uriroot/Orion/Orion.Views/ViewID=$($view.viewid)" -Properties @{"limitationid"="$($view.limitationid)"}
+
+}
+
+
+"`nComplete"
+
+if ($Error) {
+    "The following errors were encountered:"
+    $error
+}

@@ -1,0 +1,1 @@
+cmd_drivers/scsi/libiscsi_tcp.ko := ../tools/arm-bcm2708/arm-bcm2708hardfp-linux-gnueabi/bin/arm-bcm2708hardfp-linux-gnueabi-ld -EL -r  -T ./scripts/module-common.lds --build-id  -o drivers/scsi/libiscsi_tcp.ko drivers/scsi/libiscsi_tcp.o drivers/scsi/libiscsi_tcp.mod.o

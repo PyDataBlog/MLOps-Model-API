@@ -1,0 +1,347 @@
+package EPrints::Plugin::Convert::AddWatermark;
+
+=pod
+
+=head1 NAME
+
+EPrints::Plugin::Convert::AddWatermark - add a watermark to the first page of the requested pdf
+
+=cut
+
+use strict;
+use warnings;
+use encoding 'utf-8';
+use PDF::API2;
+
+use File::Copy;
+use Cwd;
+#use Encode qw(encode);
+
+use EPrints::Plugin::Convert;
+our @ISA = qw/ EPrints::Plugin::Convert /;
+
+our (%FORMATS, @ORDERED, %FORMATS_PREF);
+@ORDERED = %FORMATS = qw(
+pdf application/pdf
+);
+
+# formats pref maps mime type to file suffix. Last suffix
+# in the list is used.
+for(my $i = 0; $i < @ORDERED; $i+=2)
+{
+         $FORMATS_PREF{$ORDERED[$i+1]} = $ORDERED[$i];
+}
+
+our $EXTENSIONS_RE = join '|', keys %FORMATS;
+
+use constant mm => 25.4 / 72;
+use constant pt => 1;
+
+sub new
+{
+	my( $class, %opts ) = @_;
+
+	my $self = $class->SUPER::new( %opts );
+
+	$self->{name} = "Watermark";
+	$self->{visible} = "";
+
+	$self->{visible} = "all";
+
+	return $self;
+}
+
+sub can_convert
+{
+	my ( $plugin, $doc ) = @_;
+
+        my %types;
+
+        # Get the main file name
+        my $fn = $doc->get_main() or return ();
+        
+        if( $fn =~ /\.($EXTENSIONS_RE)$/oi )
+        {
+        	$types{"watermark"} = { plugin => $plugin, };
+        }
+        
+	return %types;
+}
+
+
+sub export
+{
+	my ( $plugin, $target_dir, $doc, $type) = @_;
+
+	my $repo = $plugin->get_repository;
+	my $original_pdf = $doc->get_stored_file( $doc->get_main )->get_local_copy();
+
+        unless( -d $target_dir )
+        {
+                EPrints::Platform::mkdir( $target_dir);
+        }
+
+	my $output_file = EPrints::Platform::join_path( $target_dir, $doc->get_main );
+	if( -e $output_file )
+	{
+		# remove old temp watermarked file
+		unlink( $output_file );
+	}
+
+	copy($original_pdf, $output_file);
+	EPrints::Utils::chown_for_eprints( $output_file );
+	unless ( -e $output_file )
+	{
+                $repo->log("[Convert::AddWatermark] could not copy '$output_file'. Check the PDF is not password-protected.");
+		return;
+	}
+
+	# edit the copy
+	my $pdf;
+	eval {
+		$pdf = PDF::API2->open( $output_file );
+	}; warn $@ if $@;
+	unless ( $pdf )
+	{
+                $repo->log("[Convert::AddWatermark] could not open '$output_file'. This may be due to pdf version - will try pdftk.");
+		# From the PDF::API2 documentation:
+		# PDFs using cross-reference streams instead of cross-reference tables are not yet supportedi by the PDF::API2. 
+		# Cross-reference streams were added as an option in version 1.5 of the PDF spec, but were only used infrequently 
+		# until Adobe Acrobat 9 started using them by default.
+		#
+		# pdftk however appears to have no such problems when applying a stamp. However, unless you can read the pdf it is
+		# not easy to create a suitable pdf to be a stamp e.g. landscape pdfs have the stamp in the wrong place.
+		#
+		# What we can try is to apply an empty stamp using pdftk and then we should have a pdf in a version that we can 
+		# edit. i.e. we can use pdftk to convert the pdf to an earlier version. The proper solution is to update the PDF::API2
+		# to support pdf version 1.6 and above. 
+
+		return $plugin->export_with_pdftk( $output_file, $doc );
+	}
+
+	return unless $pdf;
+
+	my $page = $pdf->openpage( 1 );
+	$page = $plugin->write_watermark_details($pdf, $page, $doc->get_eprint->get_url() );
+	$page->update();	# mark the page as needing to be saved 
+	$pdf->update();		# this calls saveas
+	$pdf->end; 		# this should not be needed and will probably not help
+
+	# return the filename without the abs. path
+	return( $doc->get_main );
+}
+
+sub write_watermark_details
+{
+	my ( $plugin, $pdf, $page, $url ) = @_; 
+	my $repo = $plugin->repository;
+	my $font_name = $repo->config( "watermark_font_name" ) || "Courier-Bold";
+	my $font_size = $repo->config( "watermark_font_size" ) || 9;
+	my $font = $pdf->corefont( $font_name, -encoding => 'utf-8' );
+	$font_size = $font_size;
+	my $text = $page->text();
+	# set colour to charcoal
+	$text->fillcolor( "#444444" );
+
+	my $date_now = $plugin->get_date_now;
+	my @date_bits = split /-/, $date_now;
+	my $phrase1 = $plugin->phrase( "watermark_source", url=> "", );
+	my $phrase2 = $plugin->phrase( "watermark_date", year=>$date_bits[0], month=>$date_bits[1], day=>$date_bits[2] );
+
+	my $next_y = 20/mm;
+	my $wht = $text->textlabel( 3/mm, $next_y, $font, $font_size, $phrase1, -rotate => 90);
+
+	# set colour to red
+	$text->fillcolor( "#E3003D" );
+	$next_y += $wht;
+	$wht = $text->textlabel( 3/mm, $next_y, $font, $font_size, $url, -rotate => 90);
+
+	# set colour to charcoal
+	$text->fillcolor( "#444444" );
+	$next_y += $wht;
+	$wht = $text->textlabel( 3/mm, $next_y, $font, $font_size, $phrase2, -rotate => 90);
+	return $page;
+}
+
+
+sub export_with_pdftk
+{
+	my ( $plugin, $output_file, $doc, ) = @_;
+
+	my $repo = $plugin->get_repository;
+
+	my $page_width;
+	my $page_height;
+
+	my $temp_output_dir = File::Temp->newdir( "ep-watermark-tempXXXX", TMPDIR => 1 );
+	my $data_file = $temp_output_dir."/pdf_data.txt";
+	my $sys_info = system( "pdfinfo ".$output_file." > ".$data_file );
+	if ( -e $data_file )
+	{
+		open my $info, $data_file or warn "Couldn't open file: $!";
+		while( my $line = <$info>)  {   
+			if ( $line =~ /Page size:\s+([0-9\.]+)\s*x\s*([0-9\.]+)/ )
+			{
+				$page_width = $1;
+				$page_height = $2;
+			}
+		}
+	}
+
+	my $wm_pdf = $plugin->create_watermark( $temp_output_dir, $doc->get_eprint->get_id(), $doc->get_eprint->get_url(), $page_width, $page_height  );
+	return unless $wm_pdf;
+
+	my $temp_output_file = $temp_output_dir.'/temp.pdf';
+
+	my $pdftk_cmd = "pdftk ".$output_file." multistamp ".$wm_pdf." output ".$temp_output_file;
+
+	my $sys_call_status = system($pdftk_cmd);
+	# check it worked
+	if (0 == $sys_call_status)
+	{
+		copy($temp_output_file, $output_file);
+	}
+	else
+        {
+                $repo->log("[Convert::AddWatermark] PDFTK could not create '$output_file'. Check the PDF is not password-protected.");
+                return;
+        }
+
+	EPrints::Utils::chown_for_eprints( $output_file );
+
+	# return the filename without the abs. path
+	return( $doc->get_main );
+}
+
+
+sub create_watermark
+{
+	my ( $plugin, $watermark_path, $id, $url, $width, $height ) = @_;
+ 
+	my $repo = $plugin->repository;
+	my $date_now = $plugin->get_date_now;
+
+	my $watermark_file = $watermark_path."/WM-".$id."-".$date_now.".pdf";
+
+	return $watermark_file if -e $watermark_file; 
+
+	# Today's file was not found so we need to create it
+	my $pdf = PDF::API2->new( -file => $watermark_file );
+	my $page1 = $pdf->page();
+	my $page2 = $pdf->page();
+
+	$width = 210/mm unless $width;
+	$height = 297/mm unless $height;
+	foreach my $page ( $page1, $page2 )
+	{
+		$page->mediabox ($width, $height);
+		$page->bleedbox( 1/mm,  1/mm,  $width-1,  $height-1);
+		$page->cropbox ( 1/mm,  1/mm,  $width-1,  $height-1);
+		$page->artbox  ( 1/mm,  1/mm,  $width-1,  $height-1);
+	}
+
+	$page1 = $plugin->write_watermark_details($pdf, $page1, $url );
+
+	my $text2 = $page2->text();
+	my $EGTransparent = $pdf->egstate();
+	$EGTransparent->transparency(1.0);
+	$text2->egstate($EGTransparent);
+
+	$pdf->save; 
+
+	return $watermark_file;
+}
+
+sub get_watermarked_doc
+{
+        my( $self, $doc ) = @_;
+
+        my $watermarkdoc;
+        if (defined $doc)
+        {
+                # get related documents
+                my $related_docs_list = $doc->search_related( "isWatermarkVersionOf" );
+                if ($related_docs_list->count)
+                {
+                        # there should be only one (in true highlander fashion)
+                        # but get the latest just in case there has been some issue.
+                        my $ordered_docs = $related_docs_list->reorder( "-docid" );
+                        $watermarkdoc = $ordered_docs->item( 0 );
+                }
+        }
+        return $watermarkdoc;
+}
+
+sub get_date_now
+{
+	my( $plugin ) = @_;
+
+	my ($sec,$min,$hour,$mday,$mon,$year,$wday,$yday,$isdst) = localtime(time);
+	$year += 1900;
+	$mon++;
+	my $date_now = join( "-", $year, $mon, $mday );
+	return $date_now;
+}
+
+sub apply_watermark
+{
+	my( $plugin, $doc, $debug ) = @_;
+
+	my $repo = $plugin->{repository};
+	my $date_now = $plugin->get_date_now;
+	my $watermarkeddoc = $plugin->get_watermarked_doc( $doc );
+        if( defined $watermarkeddoc )
+        {	
+		print STDERR "Convert::AddWatermark::apply_watermark watermark doc exists \n" if $debug;
+		my $last_watermark = $watermarkeddoc->get_value( "watermark_date" );
+		my $regenerate = 0;
+		$regenerate = 1 if $last_watermark && $last_watermark ne $date_now;
+		if ( $regenerate || $debug )
+		{ 
+			print STDERR "Convert::AddWatermark::apply_watermark watermark doc exists but needs updating\n" if $debug;
+			# export will create the new file based on the one from the original doc
+			# by supplying the path to the file stored in the watermarkdoc the export
+			# call will overwrite the old watermarked file
+			my @files = $plugin->export( $watermarkeddoc->local_path, $doc, "application/pdf" );
+			my $filesize = ( -s $watermarkeddoc->local_path."/".$files[0] );
+			foreach my $file ( @{$watermarkeddoc->get_value( "files" )} )
+			{
+				if ( $file->get_value( "filename" ) eq $files[0] && $file->get_value( "filesize" ) != $filesize  )
+				{ 
+					$file->set_value( "filesize",  $filesize );
+					$file->commit;
+				}
+			}
+
+			$watermarkeddoc->get_eprint->set_under_construction( 1 );
+			$watermarkeddoc->set_value( "watermark_date", $date_now );
+			$watermarkeddoc->commit;
+			$watermarkeddoc->get_eprint->set_under_construction( 0 );
+		}
+        }
+	else
+	{
+		print STDERR "Convert::AddWatermark::apply_watermark create new watermark doc \n" if $debug;
+		# calling convert will create the new doc dataobj and will then call export to create the file
+		$watermarkeddoc = $plugin->convert( $doc->get_eprint, $doc, "application/pdf" );
+		unless( defined $watermarkeddoc )
+        	{
+                	$repo->get_repository->log( "[Convert::AddWatermark] Couldn't create watermarked document for item[".$doc->get_eprint->get_id."]\n" );
+			return;
+		}
+
+		# add relation to new covered version
+		$doc->get_eprint->set_under_construction( 1 );
+		$watermarkeddoc->add_relation( $doc, "isWatermarkVersionOf" );
+		$watermarkeddoc->set_value( "security", $doc->get_value( "security" ) );
+		$watermarkeddoc->set_value( "watermark_date", $date_now );
+		$watermarkeddoc->commit;
+		$doc->commit;
+		$doc->get_eprint->set_under_construction( 0 );
+	}
+
+	return $watermarkeddoc;
+}
+
+
+1;

@@ -1,0 +1,241 @@
+package main
+
+import (
+	"encoding/json"
+	"fmt"
+	"log"
+	"time"
+
+	"github.com/boltdb/bolt"
+)
+
+type Entry struct {
+	Id        string `json:"id"`
+	Url       string `json:"url"`
+	Subreddit string `json:"subreddit"`
+}
+
+//InitDB initializes the BoltDB instance and loads in the database file.
+func InitDB() {
+	var err error
+	db, err = bolt.Open("data.db", 0600, &bolt.Options{Timeout: 1 * time.Second})
+	CheckErr(err, "InitDB() - Open Database", true)
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		var err error
+		_, err = tx.CreateBucketIfNotExists([]byte("to_handle"))
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+
+		_, err = tx.CreateBucketIfNotExists([]byte("handled"))
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+
+		_, err = tx.CreateBucketIfNotExists([]byte("credentials"))
+		if err != nil {
+			return fmt.Errorf("create bucket: %s", err)
+		}
+
+		return nil
+	})
+	CheckErr(err, "InitDB() - Create Buckets", true)
+}
+
+//CloseDB closes the BoltDB database safely during the shutdown cleanup.
+func CloseDB() {
+	fmt.Print("Closing database...")
+	db.Close()
+	fmt.Println("Done!")
+	fmt.Println("Goodbye! <3")
+}
+
+//ReadCreds reads the credential bucket from BotlDB.
+func ReadCreds() {
+	var user, pass []byte
+
+	err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("credentials"))
+
+		u := b.Get([]byte("user"))
+		p := b.Get([]byte("pass"))
+		if u != nil && p != nil {
+			user = make([]byte, len(u))
+			pass = make([]byte, len(p))
+			copy(user, u)
+			copy(pass, p)
+		}
+
+		return nil
+	})
+
+	CheckErr(err, "ReadCreds() - Read Database", true)
+
+	username = string(user)
+	password = string(pass)
+
+	if username == "" || password == "" {
+		log.Fatalln("Fatal Error: One or more stored credentials are missing, cannot continue without credentials!")
+	}
+}
+
+//UpdateCreds takes the current credentials and inserts them into
+//the BoltDB database.
+func UpdateCreds(user, pass string) {
+	err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("credentials"))
+
+		err := b.Put([]byte("user"), []byte(user))
+		if err != nil {
+			return err
+		}
+
+		err = b.Put([]byte("pass"), []byte(pass))
+
+		return err
+	})
+
+	CheckErr(err, "UpdateCreds() - Write Database", true)
+}
+
+//ClearCreds removes the stores credentials from the database.
+func ClearCreds() {
+	err := db.Update(func(tx *bolt.Tx) error {
+		err := tx.DeleteBucket([]byte("credentials"))
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.CreateBucketIfNotExists([]byte("credentials"))
+
+		return err
+	})
+
+	CheckErr(err, "ClearCreds() - Delete Bucket", true)
+}
+
+//ClearDB removes all entires from the BotlDB database.
+func ClearDB() {
+
+	ClearCreds()
+
+	err := db.Update(func(tx *bolt.Tx) error {
+		err := tx.DeleteBucket([]byte("to_handle"))
+		if err != nil {
+			return err
+		}
+
+		err = tx.DeleteBucket([]byte("handled"))
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.CreateBucketIfNotExists([]byte("to_handle"))
+		if err != nil {
+			return err
+		}
+
+		_, err = tx.CreateBucketIfNotExists([]byte("handled"))
+
+		return err
+	})
+
+	CheckErr(err, "ClearDB() - Delete Bucket", true)
+}
+
+//KeyExists checks if a given key exists within the given BoltDB bucket.
+func KeyExists(id, bucket string) bool {
+	exists := false
+
+	err := db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucket))
+		v := b.Get([]byte(id))
+		exists = v != nil
+		return nil
+	})
+
+	CheckErr(err, "KeyExists() - Read Database", true)
+
+	return exists
+}
+
+//HandleLater takes the id (reddit thing_id) of a submission that the
+//bot has determined to be offending, and adds it to the bucket of
+//posts to be handled in the future.
+func HandleLater(entry Entry) {
+	bytes, err := json.Marshal(entry)
+	if !CheckErr(err, "HandleLater() - Marshal JSON", false) {
+		err := db.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("to_handle"))
+			err := b.Put([]byte(entry.Id), bytes)
+			return err
+		})
+
+		CheckErr(err, "HandleLater() - Add ID", true)
+	}
+}
+
+//AddToHandled adds the id (reddit thing_id) to the BoltDB handled bucket.
+func AddToHandled(id string) {
+	err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("handled"))
+		err := b.Put([]byte(id), []byte(""))
+		return err
+	})
+
+	CheckErr(err, "AddToHandled() - Add 'handled' ID", true)
+
+	err = db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("to_handle"))
+		err := b.Delete([]byte(id))
+		return err
+	})
+
+	CheckErr(err, "AddToHandled() - Delete 'to_handle' ID", true)
+}
+
+func FetchFromQueue() *Entry {
+	var val []byte
+	needhandle := false
+
+	err := db.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("to_handle"))
+		c := b.Cursor()
+
+		k, v := c.First()
+		if k != nil {
+			needhandle = true
+			val = make([]byte, len(v))
+			copy(val, v)
+		}
+
+		return nil
+	})
+
+	CheckErr(err, "FetchFromQueue() - Read Database", true)
+
+	if needhandle {
+		log.Printf("Handling one post: %s\n", val)
+		entry := &Entry{}
+		json.Unmarshal(val, entry)
+		return entry
+	}
+
+	return nil
+}
+
+//PrintList reads all of the data from the specified BoltDB bucket
+//and lists it out to the console.
+func PrintList(bucket string) {
+	db.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte(bucket))
+		c := b.Cursor()
+
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			fmt.Printf("key=%s, value=%s\n", k, v)
+		}
+
+		return nil
+	})
+}

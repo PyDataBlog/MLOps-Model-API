@@ -1,0 +1,71 @@
+package tholowka.diz.unmarshalling.terms
+
+import tholowka.diz.interfaces._
+/**
+ * This parser represents the parsing of a 'row' in a Json object definition. 
+ * It assumes that there is a left side of the row, and a right side, delimited by a colon. 
+ * The left side should parse to a string, the right can parse to any of the basic types. 
+ * Architecturally, the parser is positioned as follows: 
+ * 
+ * {{{
+     JsonObjectContent 
+     |
+     |
+     Row
+     |   \
+     |     \
+  RowKey   RowValue
+ }}}
+ */
+private [terms] object Row {}
+
+private [terms] case class Row extends Parser[(String,Any)] {
+    def consume(input: Stream[Char]): Option[(String,Any)] = {
+        var keyElements = true
+        var valueElements = false
+        var keyPrevChars = EscapeSequenceCheck()
+        var valuePrevChars = EscapeSequenceCheck()
+        var colonCount = 0
+        var keyParenthesesCount = InParenthesesCheck()
+        var splitStreamEscapeSeqCheck = EscapeSequenceCheck()
+        var splitStreamParenthesesCheck = InParenthesesCheck()
+        def splitter(ch: Char) = {
+            (ch, splitStreamEscapeSeqCheck.escapeSeqFound || splitStreamParenthesesCheck.inParentheses) match {
+                case (':', false) => {
+                    colonCount = colonCount + 1
+                    splitStreamEscapeSeqCheck = EscapeSequenceCheck(splitStreamEscapeSeqCheck, ch)
+                    splitStreamParenthesesCheck = InParenthesesCheck(splitStreamParenthesesCheck, ch)
+                    colonCount match {
+                        case 1=> 2//ignored
+                        case _=> 1
+                    }
+                }
+                case (_,_) => {
+                    splitStreamEscapeSeqCheck = EscapeSequenceCheck(splitStreamEscapeSeqCheck, ch)
+                    splitStreamParenthesesCheck = InParenthesesCheck(splitStreamParenthesesCheck, ch)
+                    colonCount match {
+                        case 1 => 1
+                        case 0 => 0
+                        case _ => 1
+                    }
+                }
+            }
+        }
+        // print("row=> ")
+        val streams = input.groupBy(splitter)
+        var key = None : Option[String] 
+        var value = None : Option[Any]
+        streams.foreach(stream => {
+            stream._1 match {
+                case 0 => key = RowKey().consume(stream._2)
+                case 1 => value = RowValue().consume(stream._2)
+                case _ => {}
+            }
+        })
+        // print(">=row ")
+        
+        if (!key.isDefined) throw new IllegalArgumentException("Expecting a key to be provided in the Json object")
+        if (!value.isDefined) throw new IllegalArgumentException("Expecting a value to be provided in the Json object")
+        Some((key.get,value.get))
+    }
+}

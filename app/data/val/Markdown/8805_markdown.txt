@@ -1,0 +1,298 @@
+---
+layout: post
+title: mybatis 源码分析之 XMLStatementBuilder
+categories: mybatis
+tags: 笔记, mybatis
+---
+
+## XMLStatementBuilder.parseStatementNode 第四步
+
+第四步就一句话，但是里面的内容很多，我们慢慢分析：
+
+```java
+// Parse selectKey after includes and remove them.
+    processSelectKeyNodes(id, parameterTypeClass, langDriver);
+```
+
+看英文注释，主要的作用就是解析 selectKey 并且在当前节点下移除掉。
+
+selectKey 节点只可能在 insert 和 update 当中出现。
+
+继续看详细代码：
+
+```java
+private void processSelectKeyNodes(String id, Class<?> parameterTypeClass, LanguageDriver langDriver) {
+    List<XNode> selectKeyNodes = context.evalNodes("selectKey");
+    if (configuration.getDatabaseId() != null) {
+      parseSelectKeyNodes(id, selectKeyNodes, parameterTypeClass, langDriver, configuration.getDatabaseId());
+    }
+    parseSelectKeyNodes(id, selectKeyNodes, parameterTypeClass, langDriver, null);
+    removeSelectKeyNodes(selectKeyNodes);
+  }
+```
+
+先解析 selectKey，然后移除 selectKey。
+
+```java
+private void parseSelectKeyNodes(String parentId, List<XNode> list, Class<?> parameterTypeClass, LanguageDriver langDriver, String skRequiredDatabaseId) {
+    for (XNode nodeToHandle : list) {
+      String id = parentId + SelectKeyGenerator.SELECT_KEY_SUFFIX;
+      String databaseId = nodeToHandle.getStringAttribute("databaseId");
+      if (databaseIdMatchesCurrent(id, databaseId, skRequiredDatabaseId)) {
+        parseSelectKeyNode(id, nodeToHandle, parameterTypeClass, langDriver, databaseId);
+      }
+    }
+  }
+```
+
+循环全部的 selectKey 的节点，如果没有那么什么操作都不作。
+
+```java
+private void parseSelectKeyNode(String id, XNode nodeToHandle, Class<?> parameterTypeClass, LanguageDriver langDriver, String databaseId) {
+    String resultType = nodeToHandle.getStringAttribute("resultType");
+    // 当中省略了基本属性的解析
+    ResultSetType resultSetTypeEnum = null;
+
+    SqlSource sqlSource = langDriver.createSqlSource(configuration, nodeToHandle, parameterTypeClass);
+    SqlCommandType sqlCommandType = SqlCommandType.SELECT;
+
+    builderAssistant.addMappedStatement(id, sqlSource, statementType, sqlCommandType,
+        fetchSize, timeout, parameterMap, parameterTypeClass, resultMap, resultTypeClass,
+        resultSetTypeEnum, flushCache, useCache, resultOrdered,
+        keyGenerator, keyProperty, keyColumn, databaseId, langDriver, null);
+
+    id = builderAssistant.applyCurrentNamespace(id, false);
+
+    MappedStatement keyStatement = configuration.getMappedStatement(id, false);
+    configuration.addKeyGenerator(id, new SelectKeyGenerator(keyStatement, executeBefore));
+  }
+```
+
+这个重载的方法里面主要做如下几个事情：
+
+1. 解析 selectKey 的基本属性
+2. 通过 langDriver 生成 SqlSource
+3. 创建 selectKey 查询语句的 KeyGenerator，添加到 configuration 当中
+
+下面详细分析  langDriver 生成 SqlSource 的过程：
+
+首先看 LanguageDriver 是一个接口：
+
+```java
+public interface LanguageDriver {
+
+  ParameterHandler createParameterHandler(MappedStatement mappedStatement, Object parameterObject, BoundSql boundSql);
+
+  SqlSource createSqlSource(Configuration configuration, XNode script, Class<?> parameterType);
+
+  SqlSource createSqlSource(Configuration configuration, String script, Class<?> parameterType);
+
+}
+```
+
+LanguageDriver 有三个方法，一个是创建参数 Handler，另外两个是创建 SqlSource。
+
+LanguageDriver
+- XMLLanguageDriver
+	- RawLanguageDriver
+
+上面是 LanguageDriver 的继承结构。
+
+当然在 Configuration 的构造方法当中，我们以及设置了默认的 Driver class ： languageRegistry.setDefaultDriverClass(XMLLanguageDriver.class);
+
+在这个 parseSelectKeyNode 方法当中传递进来的也是默认的 XMLLanguageDriver 的实例。
+
+下面就是 XMLLanguageDriver.createSqlSource 方法：
+
+```java
+public SqlSource createSqlSource(Configuration configuration, XNode script, Class<?> parameterType) {
+    XMLScriptBuilder builder = new XMLScriptBuilder(configuration, script, parameterType);
+    return builder.
+    ();
+  }
+```
+
+可以看到是通过创建 XMLScriptBuilder 实例来继而调用 parseScriptNode 方法获得到 SqlSource。
+
+XMLScriptBuilder 同样继承了 BaseBuilder。
+
+```java
+public class XMLScriptBuilder extends BaseBuilder {
+
+  private XNode context;
+  private boolean isDynamic;
+  private Class<?> parameterType;
+}
+```
+
+下面是 parseScriptNode 方法：
+
+```java
+public SqlSource parseScriptNode() {
+    List<SqlNode> contents = parseDynamicTags(context);
+    MixedSqlNode rootSqlNode = new MixedSqlNode(contents);
+    SqlSource sqlSource = null;
+    if (isDynamic) {
+      sqlSource = new DynamicSqlSource(configuration, rootSqlNode);
+    } else {
+      sqlSource = new RawSqlSource(configuration, rootSqlNode, parameterType);
+    }
+    return sqlSource;
+  }
+
+List<SqlNode> parseDynamicTags(XNode node) {
+    List<SqlNode> contents = new ArrayList<SqlNode>();
+    NodeList children = node.getNode().getChildNodes();
+    for (int i = 0; i < children.getLength(); i++) {
+      XNode child = node.newXNode(children.item(i));
+      if (child.getNode().getNodeType() == Node.CDATA_SECTION_NODE || child.getNode().getNodeType() == Node.TEXT_NODE) {
+        String data = child.getStringBody("");
+        TextSqlNode textSqlNode = new TextSqlNode(data);
+        if (textSqlNode.isDynamic()) {
+          contents.add(textSqlNode);
+          isDynamic = true;
+        } else {
+          contents.add(new StaticTextSqlNode(data));
+        }
+      } else if (child.getNode().getNodeType() == Node.ELEMENT_NODE) { // issue #628
+        String nodeName = child.getNode().getNodeName();
+        NodeHandler handler = nodeHandlers(nodeName);
+        if (handler == null) {
+          throw new BuilderException("Unknown element <" + nodeName + "> in SQL statement.");
+        }
+        handler.handleNode(child, contents);
+        isDynamic = true;
+      }
+    }
+    return contents;
+  }
+```
+
+首先判断当前的节点是不是有动态的 tag，动态的 tag 包括一些 where、choose 等。
+
+看 parseDynamicTags 的代码的判断入下：
+
+1. 获取 SelectKey 的所有子节点
+2. 循环判断如果子节点的元素类型的 ELEMENT 那么这个一定是动态的，并且根据不同的元素生成不同的 NodeHandler
+3. 生成 SqlNode 的 list 并且返回
+
+根据代码再来一遍流程：
+
+```java
+if (child.getNode().getNodeType() == Node.CDATA_SECTION_NODE || child.getNode().getNodeType() == Node.TEXT_NODE) {
+	//如果是文本的子节点
+	String data = child.getStringBody("");//获取文本信息
+        TextSqlNode textSqlNode = new TextSqlNode(data);//创建TextSqlNode
+        if (textSqlNode.isDynamic()) {//如果 sql 当中包含有未被属性替换的 ${} 字符串那么就是动态的
+          contents.add(textSqlNode);//添加到 list 当中
+          isDynamic = true;
+        } else {
+          contents.add(new StaticTextSqlNode(data));
+        }
+}
+```
+
+下面在看下 SqlNode 接口：
+
+```java
+public interface SqlNode {
+  boolean apply(DynamicContext context);
+}
+```
+
+TextSqlNode 和 StaticTextSqlNode 有时间，单独分析，他的体系，他们都实现了 SqlNode 接口。
+
+继续看其他的 if 分支：
+
+```java
+else if (child.getNode().getNodeType() == Node.ELEMENT_NODE) { // issue #628
+        String nodeName = child.getNode().getNodeName();//获取子节点的name
+        NodeHandler handler = nodeHandlers(nodeName);//根据name获取到NodeHandler
+        if (handler == null) {
+          throw new BuilderException("Unknown element <" + nodeName + "> in SQL statement.");
+        }
+        handler.handleNode(child, contents);
+        isDynamic = true;
+      }
+
+NodeHandler nodeHandlers(String nodeName) {
+    Map<String, NodeHandler> map = new HashMap<String, NodeHandler>();
+    map.put("trim", new TrimHandler());
+    map.put("where", new WhereHandler());
+    map.put("set", new SetHandler());
+    map.put("foreach", new ForEachHandler());
+    map.put("if", new IfHandler());
+    map.put("choose", new ChooseHandler());
+    map.put("when", new IfHandler());
+    map.put("otherwise", new OtherwiseHandler());
+    map.put("bind", new BindHandler());
+    return map.get(nodeName);
+  }
+```
+
+解析动态的 tag 并且获得了 SqlNode 的 list 之后，需要根据是否是动态的创建响应的 SqlSource：
+
+```java
+public SqlSource parseScriptNode() {
+    List<SqlNode> contents = parseDynamicTags(context);
+    MixedSqlNode rootSqlNode = new MixedSqlNode(contents);
+    SqlSource sqlSource = null;
+    if (isDynamic) {
+      sqlSource = new DynamicSqlSource(configuration, rootSqlNode);
+    } else {
+      sqlSource = new RawSqlSource(configuration, rootSqlNode, parameterType);
+    }
+    return sqlSource;
+  }
+```
+
+SqlSource 以后仔细分析。
+
+至此 XMLStatementBuilder.parseSelectKeyNode 的创建 SqlSource 已经完成。
+
+方法下面就是通过 builderAssistant 创建 MappedStatement：
+
+```java
+builderAssistant.addMappedStatement(id, sqlSource, statementType, sqlCommandType,
+        fetchSize, timeout, parameterMap, parameterTypeClass, resultMap, resultTypeClass,
+        resultSetTypeEnum, flushCache, useCache, resultOrdered,
+        keyGenerator, keyProperty, keyColumn, databaseId, langDriver, null);
+```
+
+builderAssistant.addMappedStatement 里面代码就不贴了，基本上套路相同先创建 MappedStatement.Builder 实例，然后设置各种传递进来的参数，最后添加到 configuration 当中。
+
+在 configuration 当中添加完 MappedStatement 后，继续在 configuration 当中添加 SelectKeyGenerator。
+
+这样 XMLStatementBuilder.parseStatementNode 第四步完成。
+
+## XMLStatementBuilder.parseStatementNode 第五步
+
+第五步比较简单就是创建当前 insert 或者 update 的 MappedStatement 对象，并且添加到 configuration 当中。
+
+```java
+SqlSource sqlSource = langDriver.createSqlSource(configuration, context, parameterTypeClass);
+    String resultSets = context.getStringAttribute("resultSets");
+    String keyProperty = context.getStringAttribute("keyProperty");
+    String keyColumn = context.getStringAttribute("keyColumn");
+    KeyGenerator keyGenerator;
+    String keyStatementId = id + SelectKeyGenerator.SELECT_KEY_SUFFIX;
+    keyStatementId = builderAssistant.applyCurrentNamespace(keyStatementId, true);
+    if (configuration.hasKeyGenerator(keyStatementId)) {
+      keyGenerator = configuration.getKeyGenerator(keyStatementId);
+    } else {
+      keyGenerator = context.getBooleanAttribute("useGeneratedKeys",
+          configuration.isUseGeneratedKeys() && SqlCommandType.INSERT.equals(sqlCommandType))
+          ? new Jdbc3KeyGenerator() : new NoKeyGenerator();
+    }
+
+    builderAssistant.addMappedStatement(id, sqlSource, statementType, sqlCommandType,
+        fetchSize, timeout, parameterMap, parameterTypeClass, resultMap, resultTypeClass,
+        resultSetTypeEnum, flushCache, useCache, resultOrdered, 
+        keyGenerator, keyProperty, keyColumn, databaseId, langDriver, resultSets);
+```
+
+上面代码省略了一部分。
+
+以后继续分析没有完善的内容
+
+---EOF---

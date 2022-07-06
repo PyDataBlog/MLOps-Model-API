@@ -1,0 +1,336 @@
+\documentclass{article}
+\usepackage{amsthm}
+\usepackage{fullpage}
+\title{Lecture Notes on Decompilation}
+\author{15411: Compiler Design\\ Maxime Serrano}
+\date{Lecture 20\\October 31, 2013}
+\begin{document}
+\maketitle
+\section{Introduction}
+In this lecture, we consider the problem of doing compilation ``backwards'' - that is,
+transforming from a compiled binary into a reasonable representation of its original
+source. Solving this problem will involve significant consideration of our standard
+dataflow analyses, as well as a discussion of good selection of internal representations
+of code.
+
+While the motivation for the existence of compilers is fairly clear, the motivation
+for the existence of {\em decompilers} is less so. However, in the modern world there
+exist {\em many} legacy systems for which the original source code has been lost, 
+which need bugs fixed in them or to be ported to a more modern architecture. Decompilers
+facilitate this process greatly. In addition, in malware analysis, generally source
+is not provided. It is therefore extremely useful to have some way to go from binary
+to a reasonable approximation of the original code.
+
+For this lecture, we will focus on decompiling machine code, originally C0 code,
+that conforms to the C ABI, into a version of C0 with pointer arithmetic
+and \verb+goto+. This comes {\em nowhere near} to being a treatment of
+decompilation of arbitrary binaries, though (generally more complex) variants of
+the same ideas will continue to work.
+
+\section{Steps of Decompilation}
+Roughly, decompilation follows a few steps:
+\begin{enumerate}
+\item Disassembly - transformation from machine code to the assembly equivalent. There
+are a surprising number of pitfalls here.
+\item Lifting and dataflow analysis - transforming the resulting assembly code into a
+higher-level internal representation, such as our three-operand assembly. One of the
+tricky parts here is recognizing distinct variables, and detaching variables from
+registers or addresses. We also recover expressions, function return values and arguments.
+\item Control flow analysis - recovering control flow structure information, such as
+if and while statements, as well as their nesting level.
+\item Type analysis - recovering types of variables, functions, and other pieces
+of data.
+\end{enumerate}
+
+\section{Disassembly}
+The first step of writing a good decompiler is writing a good disassembler. While the
+details of individual disassemblers can be extremely complex, the general idea is 
+fairly simple. The mapping between assembly and machine code is in theory one-to-one,
+so a straight-line translation should be feasible.
+
+However, disassemblers rapidly run into a problem: it is {\em very difficult}
+to reliably distinguish code from data.
+
+In order to do so, generally disassemblers will take one of two strategies:
+\begin{enumerate}
+\item Disassemble the sections that are generally filled with code (\verb+.plt+, \verb+.text+,
+some others) and treat the rest of them as data. One tool that follows this strategy is 
+\verb+objdump+. While this works decently well on code produced by most modern compilers,
+there exist (or existed!) compilers that place data into these executable sections, causing
+the disassembler some confusion. Further, any confusingly-aligned instructions will also
+confuse these disassemblers.
+\item Consider the starting address given by the binary's header, and recursively disassemble
+all code reachable from that address. This approach is frequently defeated by indirect jumps,
+though most of the disassemblers that use it have additional heuristics that allow them to
+deal with this. An example tool that follows this strategy is Hex-Ray's Interactive Disassembler.
+\end{enumerate}
+
+While disassembly is a difficult problem with many pitfalls, it is not particularly interesting
+from an implementation perspective for us. Many program ``obfuscators'' have many steps that
+are targeted at fooling disassemblers, however, as without correct disassembly it is impossible
+to carry on the later steps.
+\section{Lifting and Dataflow Analysis}
+Given correct disassembly, another problem rears its head. As you may have noticed while
+writing your compilers, doing any form of reasonable analysis on x86\_64 is an exercise
+in futility. The structure of most assembly language does not lend itself well to any kind
+of sophisticated analysis.
+
+In order to deal with this, decompilers generally do something which closely resembles 
+a backwards form of instruction selection. However, decompilers cannot just tile sequences
+of assembly instructions with sequences of abstract instructions, as different compilers
+may produce radically different assembly for the same sequence of abstract instructions.
+
+Further, frequently a single abstract instruction can expand into a very long sequence of ``real''
+instructions, many of which are optimized away by the compiler later on.
+
+There are two primary approaches to dealing with this issue. The first is to simply
+translate our complex x86\_64 into a simpler RISC instruction set. The tools produced by
+Zynamics frequently take this approach. The alternative is to translate into an exactly
+semantics-preserving, perhaps more complicated, instruction set, which has more cross-platform
+ways of performing analysis on it. This is the approach taken by CMU's BAP research project,
+as well as by the Hex-Rays decompiler.
+
+The choice of the internal representation can be very important. For our purposes,
+we'll consider a modified version of the $3$-operand IR that we've been using
+throughout the semester. We'll consider a version that is extended to allow
+instructions of the form \verb+s <- e+ where \verb+e+ is an expression.
+
+We will summarize the translation from x86\_64 to our IR by simply
+effectively doing instruction selection in reverse. The difficulty here is
+generally in the design of the IR, which we most likely do not have the time to
+discuss in detail. Some places to learn about IRs include the BAP website 
+(\verb+bap.ece.cmu.edu+) and the Zynamics paper ``REIL: A platform-independent
+intermediate representation of disassembled code for static code analysis'' by
+Thomas Dullien and Sebastian Porst.
+
+Once we have obtained an IR, we would now like to eliminate as many details 
+about the underlying machine as possible. This is generally done using a 
+form of dataflow analysis, in order to recover variables, expressions and 
+the straight-line statements.
+
+Recall the dataflow analyses that have been presented in past lectures. Many of
+these analyses will be available to help us ``refactor'' the IR produced by
+our direct translation.
+
+We will follow two preliminary analyses, both of which are predicated on liveness
+analysis:
+\begin{enumerate}
+\item Dead register elimination. This is necessary to efficiently deal with
+	instructions such as \verb+idiv+, as well as to notice \verb+void+ functions.
+	It should be noted that unlike in your compilers, it is {\em sometimes} 
+	possible to eliminate instructions with additional state.
+	For example, if \verb+idiv %ecx+ translates into:
+	\begin{verbatim}
+		t <- %edx:%eax
+		%eax <- t / %ecx
+		%edx <- t % %ecx
+	\end{verbatim}
+	and \verb+%eax+ is not live in the successor, {\em it is permissible} 
+	to remove the second line of the result, since the third line will
+	cause the division by $0$ in the case that \verb+%ecx+ is zero.
+	
+	Dead register elimination is done following effectively the same
+	rules as dead code elimination from the homeworks, with some special
+	cases like the above.
+\item Dead flag elimination. Our translation makes direct use of the condition
+	flags, and keeps track of which of them are defined and used at which time.
+	We treat flags effectively as registers of their own. In this case,
+	if a flag $f$ is defined at a line $l$ and is not live-in in $l+1$,
+	then we remove the definition of $f$ from the line $l$. This will
+	simplify our later analyses greatly, allowing us to collapse conditions
+	more effectively.
+\item Conditional collapsing. At this stage, we collapse sequences of the form
+	comparison-cjump into a conditional jump on an expression.
+	For example, after flag elimination, we collapse:
+	\begin{verbatim}
+		zf <- cmp(%eax,0)
+		jz label
+	\end{verbatim}
+	into
+	\begin{verbatim}
+		jcond (%eax == 0) label
+	\end{verbatim}
+	In C0, generally every conditional will have this form. However, sufficiently
+	clever optimizing compilers may be able to optimize some conditional chains
+	more efficiently. A discussion of transforming more optimized conditions
+	can be found in Cristina Cifuentes' thesis.
+\end{enumerate}
+
+Having reached this point in the analysis, we would like to lose registers.
+Hence, we may simply replace each register with an appropriate temp,
+{\em taking care to keep argument and result registers pinned}. We then
+do the function-call-expansion step in reverse, replacing sequences of moves into argument
+registers followed by a call with a parametrized call. We note that in order to do so,
+we must first make a pass over all functions to determine how many arguments they take,
+in order to deal with the possibility of certain moves being optimized out.
+
+At this stage, it is possible to effectively perform a slightly modified SSA analysis
+on the resulting code. Hence, for the future we will assume that this SSA analysis has been
+executed, and define our further analysis over SSA code.
+We may now perform an extended copy-propagation pass to collapse expressions.
+
+This is sufficient to perform the next stages of the analysis. However, many decompilers
+apply much more sophisticated techniques to this stage. Cristina Cifuentes' thesis contains
+a description of many such algorithms.
+
+\section{Control Flow Analysis}
+Having reached this stage, we now have a reasonable control flow graph, with ``real'' variables
+in it. At this point, we {\em could} produce C code which is semantically equivalent to the
+original machine code. However, this is frequently undesirable. Few programs are written with
+as much abuse of the \verb+goto+ keyword as this approach would entail. Most control flow graphs
+are generated by {\em structured} programs, using \verb+if+, \verb+for+ and \verb+while+. It
+is then desirable for the decompiler to attempt to recover this original structure and arrive
+at a fair approximation of the original code.
+
+This form of analysis relies largely on graph transformations. A primary element of this analysis
+relies on considering {\em dominator} nodes. Given a start node $a$, a node $b$ is said to 
+dominate a node $c$ if every path from $a$ to $c$ in the graph passes through $b$. The 
+{\em immediate dominator} of $c$ is the node $b$ such that for every node $d$, if $d$ dominates
+$c$, then either $d = b$ or $d$ dominates $b$.
+
+\subsection{Structuring Loops}
+We will consider three primary different classes of loops. While other loops may appear
+in decompiled code, analysis of these more complex loops is more difficult. Further reading can
+be found in the paper ``A Structuring Algorithm for Decompilation'' by Cristina Cifuentes.
+Our three primary classes are as follows:
+\begin{enumerate}
+\item {\em While loops}: the node at the start of the loop is a conditional,
+	and the latching node is unconditional.
+\item {\em Repeat loops}: the latching node is conditional.
+\item {\em Endless loops}: both the latching and the start nodes are unconditional.
+\end{enumerate}
+The {\em latching node} here is the node with the back-edge to the start node.
+We note that there are at most {\em one of these} per loop in our language, as \verb+break+
+and \verb+continue+ do not exist.
+
+In order to do so, we will consider {\em intervals} on a digraph. If $h$ is a node in $G$,
+the interval $I(h)$ is the maximal subgraph in which $h$ is the only entry node and 
+in which all closed paths contain $h$. It is a theorem that there exists a set 
+$\{h_1, ... h_k\}$ of header nodes such that the set $\{ I(h_1), ... I(h_k) \}$ is
+a partition of the graph, and further there exists an algorithm to find this partition.
+
+We then define the sequence of {\em derived graphs} of $G$ as follows:
+\begin{enumerate}
+\item $G^1 = G$.
+\item $G^{n+1}$ is the graph formed by contracting every interval of $G^n$ into a single node.
+\end{enumerate}
+This procedure eventually reaches a fixed point, at which point the resulting graph is
+{\em irreducible}.
+
+Note that for any interval $I(h)$, there exists a loop rooted at $h$ if there is a back-edge
+to $h$ from some node $z \in I(h)$. One way to find such a node is to simply perform DFS
+on the interval. Then, in order to find the nodes in the loop, we define $h$ as being part of
+the loop and then proceed by noting that a node $k$ is in the loop if and only if its immediate
+dominator is in the loop and $h$ is reachable from $k$.
+
+The algorithm for finding loops in the graph then proceeds as follows.
+Compute the derived graphs of $G$ until you reach the fixed point, and find the loops in each
+derived graph. Note that if any node is found to be the latching node for {\em two} loops,
+one of these loops will need to be labeled with a goto instead. While there do exist algorithms
+that can recover more complex structures, this is not one of them.
+\subsection{Structuring Ifs}
+An {\em if} statement is a $2$-way conditional branch with a common end node. 
+The final end node is referred to as the {\em follow} node and is immediately dominated
+by the header node.
+
+First, compute a post-ordering of the graph, and traverse it in that order. This guarantees
+that we will analyze inner nested ifs before outer ones.
+
+We now find if statements as follows:
+\begin{enumerate}
+\item For every conditional node $a$,
+find the set of nodes immediately dominated by $a$.
+\item Produce $G'$ from $G$ by
+reversing all the arrows. Filter out nodes from the set above that do 
+not dominate $a$ in $G'$.
+\item Find the closest node to $a$ 
+in the resulting set, by considering
+the one with the highest post-order
+number.
+\end{enumerate}
+The resulting node is the {\em follow} node of $a$.
+
+We note that this algorithm does not do a particularly good job of dealing
+with boolean short-circuiting.
+
+Any control flow that does not match the patterns above will be replaced
+with a \verb+goto+.
+\section{Type Analysis}
+Given control flow and some idea of which variables are which, it is frequently useful to be
+able to determine what the {\em types} of various variables are. While it may be correct
+to produce a result where every variable is of type \verb+void *+, no one actually writes
+programs that way. Therefore, we would like to be able to assign variables and functions their
+types, as well as hopefully recover structure layout.
+
+A compiler has significant advantages over a decompiler in this respect. The compiler knows
+which sections of a structure are padding, and which are actually useful; it also knows which
+things a function can take or accept. A compiler notices that the functions below are 
+different, and so compiles them separately; a decompiler may not be able to notice that these
+functions accept different types without some more sophisticated analysis. In particular, 
+on a 32-bit machine, these functions will produce {\em identical} assembly.
+
+\begin{verbatim}
+struct s1 { int a; };
+int s1_get(struct s1 *s) { return s->a; }
+struct s2 { struct s1 *a; };
+struct s1 *s2_get(struct s2 *s) { return s->a; }
+\end{verbatim}
+
+Given this problem, how does type analysis work?
+
+In short, the answer is: this is an open problem. The TIE paper by CyLab claims to resolve
+many such cases, but is far from complete. The Hex-Rays decompiler fails to recognize structures
+altogether, and often defaults to \verb+int+ even when the variable is in fact a pointer.
+
+We can model a simple type analysis as follows:
+\begin{enumerate}
+\item Multiplication, substraction, shifting, xor, binary and, binary or
+	and division force their ``parameters'' to be integers.
+\item Dereferencing forces its parameter to be a pointer.
+\item The return values of standard library functions are maintained.
+\item Any variable that is branched on is a boolean.
+\item If two variables are added together and one is a pointer, the other is an integer.
+\item If two variables are added together and one is an integer, the other is either a pointer
+	or an integer.
+\item If two variables are compared with \verb+<+, \verb+>+, \verb+>=+ or \verb+<=+,
+	they are both integers.
+\item If two variables are compared with \verb+==+ or \verb+!=+, they have the same type.
+\item If something is returned from \verb+main()+, it is an integer.
+\item If the value of one variable is moved into another variable, they have the same type.
+\item If the dereferenced value of a pointer has type $\tau$, then the pointer has type
+	$\tau^*$.
+\item The sum of a pointer of type $\tau^*$ and an integer is a pointer, but not necessarily
+of type $\tau^*$.
+\end{enumerate}
+
+We note that in order to get high-quality types, we will often need to perform analysis across
+function boundaries. We also note that this analysis is entirely unable to distinguish between
+structures and arrays. A more sophisticated type analysis is described in the TIE paper 
+in the references section. There is plenty of research being done in this area, however!
+\section{Other Issues}
+Other issues that haven't been discussed here include doing things like automatically detecting
+vulnerabilities, detecting and possibly collapsing aliases, recovering scoping information,
+extracting inlined functions, or dealing with tail call optimizations. Many of these problems (and,
+in fact, many of the things discussed above!) do not have satisfactory solutions, and remain open
+research problems. For one, CMU's CyLab contains a group actively doing research on these topics.
+They recently (a few days ago!) released a paper containing a description of their solutions to many 
+of these problems. Since they decompile arbitrary native code, rather than caring mostly about
+a specific language, they encounter some very interesting and difficult problems.
+
+Decompilation as a whole is very much an open research topic, and there exist very few reasonable
+decompilers. One of the better-known ones is the Hex-Rays decompiler, and it is sadly entirely
+closed-source. As far as I know, there are {\em no} high-quality open-source decompilers
+for x86 or x86\_64.
+
+\section{References}
+The material for this lecture was almost entirely gleaned from the following:
+\begin{enumerate}
+\item Cifuentes, Cristina. ``A Structuring Algorithm for Decompilation.'' {\em XIX 
+Conferencia Latinoamericana de Inform\'atica}, 2-6 August 1993, 267-276.
+\item Cifuentes, Cristina. ``Reverse Compilation Techniques.'' PhD thesis, Queensland University of Technology, 1994.
+\item Dullien, Thomas, and Sebastian Porst. ``REIL: A platform-independent intermediate
+representation of disassembled code for static code analysis.'' {\em CanSecWest},  2009.
+\item Lee, JongHyup, Thanassis Avgerinos, and David Brumley. ``TIE: Principled Reverse Engineering of Types in Binary Programs.'' {\em NDSS Symposium}, 2011.
+\item Schwartz, Edward J., JongHyup Lee, Maverick Woo, and David Brumley. ``Native x86 Decompilation using Semantics-Preserving Structural Analysis and Iterative Control-Flow Structuring.'' {\em Usenix}, 2013.
+\end{enumerate}
+\end{document}

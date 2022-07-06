@@ -1,0 +1,568 @@
+<?php
+
+function migrate_blog() {
+    /*
+     * $tabRub[0] = "Annonces";
+    $tabRub[1] = "Partenariat";
+    $tabRub[2] = "Vie d'Anciela";
+    $tabRub[3] = "Autres";
+     * */
+    $categories = array('annonces','partenariat','anciela','autres');
+    $categoryNames = array('annonces'=>"Annonces",'partenariat'=>'Partenariats','anciela'=>"Vie d'anciela",'autres'=>'Autres');
+
+    foreach($categoryNames as $categorySlug => $categoryName) {
+        wp_insert_term($categoryName, 'category', array('slug'=>$categorySlug));
+    }
+
+    $db = mysqli_connect("localhost","root","","db161162332") or die("Error " . mysqli_error($link));
+
+    // Setup the author, slug, and title for the post
+    $author_id = 1;
+
+    $args = array(
+        'post_type' => 'attachment',
+        'numberposts' => -1,
+        'post_status' => null,
+        'post_parent' => null, // any parent
+    );
+    $attachments = get_posts($args);
+
+    $db->query('set names utf8');
+    $db->query("SET character_set_connection = 'UTF8'");
+    $db->query("SET character_set_client = 'UTF8'");
+    $db->query("SET character_set_results = 'UTF8'");
+    $result = $db->query("select * from `anc_info_blog`");
+
+    while($row = $result->fetch_array()) {
+        $categoryIntId = ($row["rub_blog"]-1);
+        $category = $categories[$categoryIntId];
+        $category = get_category_by_slug($category);
+        if ($category) {
+            $category = $category->term_id;
+        }
+        $title = stripslashes($row["titre_blog"]);
+        $date = $row["date_pub_deb_blog"];
+        $content = stripslashes($row['texte_blog']);
+        $img = $row['image_blog'];
+        $align = $row['image_pos_blog'] == 0 ? 'center' : 'right';
+
+        if ($img) {
+            foreach ($attachments as $post) {
+                setup_postdata($post);
+                the_title();
+                $mediaTitle = $post->post_title;
+                $img = explode('.', $img)[0];
+                if ($mediaTitle == $img) {
+                    $id = $post->ID;
+                    $content = '[image id="'.$id.'" align="'.$align.'"]<br/>'.$content;
+                }
+
+                /*$dataToSave = array(
+                    'ID' => $post->ID,
+                    'post_title' =>
+                );
+                wp_update_post($dataToSave);*/
+            }
+        }
+
+        if (null == get_page_by_title($title, null, 'post')) {
+            wp_insert_post(
+                array(
+                    'comment_status'	=>	'open',
+                    'ping_status'		=>	'closed',
+                    'post_author'		=>	$author_id,
+                    'post_title'		=>	$title,
+                    'post_status'		=>	'publish',
+                    'post_type'		    =>	'post',
+                    'post_category'     =>  array($category),
+                    'post_date'         =>  $date . ' 12:00:00',
+                    'post_content'      =>  $content
+                )
+            );
+        }
+    }
+    mysqli_close($db);
+
+} // end migrate_blog
+//migrate_blog();
+
+function migrate_events() {
+    global $wpdb;
+
+    $db = mysqli_connect("localhost","root","","db161162332") or die("Error " . mysqli_error($db));
+
+    // Setup the author, slug, and title for the post
+    $author_id = 1;
+
+    $db->query('set names utf8');
+    $db->query("SET character_set_connection = 'UTF8'");
+    $db->query("SET character_set_client = 'UTF8'");
+    $db->query("SET character_set_results = 'UTF8'");
+    $result = $db->query("select * from `anc_info_even_renc`");
+
+    $querystr = "SELECT meta_key FROM $wpdb->postmeta WHERE meta_value LIKE '%location%'";
+    $locationKey =  $wpdb->get_results($querystr, OBJECT);
+    if ($locationKey[0]) {
+        $locationKey = $locationKey[0]->meta_key;
+    }
+
+    $querystr = "SELECT meta_key FROM $wpdb->postmeta WHERE meta_value LIKE '%beginDate%'";
+    $beginDateKey =  $wpdb->get_results($querystr, OBJECT);
+    if ($beginDateKey[0]) {
+        $beginDateKey = $beginDateKey[0]->meta_key;
+    }
+
+    $querystr = "SELECT meta_key FROM $wpdb->postmeta WHERE meta_value LIKE '%endDate%'";
+    $endDateKey =  $wpdb->get_results($querystr, OBJECT);
+    if ($endDateKey[0]) {
+        $endDateKey = $endDateKey[0]->meta_key;
+    }
+
+    $querystr = "SELECT meta_key FROM $wpdb->postmeta WHERE meta_value LIKE '%beginTime%'";
+    $beginTimeKey =  $wpdb->get_results($querystr, OBJECT);
+    if ($beginTimeKey[0]) {
+        $beginTimeKey = $beginTimeKey[0]->meta_key;
+    }
+
+    $querystr = "SELECT meta_key FROM $wpdb->postmeta WHERE meta_value LIKE '%endTime%'";
+    $endTimeKey =  $wpdb->get_results($querystr, OBJECT);
+    if ($endTimeKey[0]) {
+        $endTimeKey = $endTimeKey[0]->meta_key;
+    }
+
+    while ($row = $result->fetch_array()) {
+        $title = stripslashes($row["titre_even_renc"]);
+        $content = stripslashes($row['texte_even_renc'].'<br /><br />Intervenants : '.$row['intervenants_even_renc']);
+        $location = stripslashes($row['lieu_even_renc']);
+        $beginDate = $row['date_pub_deb_even_renc'];
+        $endDate = $row['date_pub_fin_even_renc'];
+
+        $timeStr = $row['horaire_even_renc'];
+        $time = str_replace('h', ':', $timeStr);
+        $time = explode(' ', $time);
+        $beginTime = $time[0];
+        if (strlen($beginTime) == 3) {
+            $beginTime = $beginTime . '00';
+        }
+
+        $endTime = $time[2];
+        if (strlen($endTime) == 3) {
+            $endTime = $endTime . '00';
+        }
+
+        if (null == get_page_by_title($title, null, 'event')) {
+            $postId = wp_insert_post(
+                array(
+                    'comment_status' => 'open',
+                    'ping_status'	 => 'closed',
+                    'post_author'	 => $author_id,
+                    'post_title'	 => $title,
+                    'post_status'	 => 'publish',
+                    'post_type'		 => 'event',
+                    'post_date'      => $row['date_crea_even_renc'],
+                    'post_content'   => $content,
+                )
+            );
+            $beginDate = str_replace('-','',$beginDate);
+            $endDate = str_replace('-','',$endDate);
+            if ($endDate == '00000000') {
+                $endDate = $beginDate;
+            }
+            $acf = array(
+                $locationKey => array('address' => $location),
+                $beginTimeKey => $beginTime,
+                $endTimeKey => $endTime,
+                $beginDateKey => $beginDate,
+                $endDateKey => $endDate
+            );
+            foreach($acf as $k => $v ) {
+                $f = apply_filters('acf/load_field', false, $k );
+                do_action('acf/update_value', $v, $postId, $f );
+            }
+        }
+    }
+    mysqli_close($db);
+
+} // end migrate_events
+//migrate_events();
+
+function image_shortcode($atts, $content = null) {
+    extract( shortcode_atts( array(
+        'id' => '',
+        'align' => 'center',
+    ), $atts ) );
+    if (isset($id)) {
+        $url = wp_get_attachment_image_src($id, 'large')[0];
+
+        if ($align == 'center') {
+            $output = '<p style="text-align:center;"><a href="'.$url.'""><img style="max-width:100%;" src="'.$url.'" /></a></p>';
+        } else {
+            $output = '<a href="'.$url.'""><img style="max-width:100%;float:right;margin-left:20px;" src="'.$url.'" /></a>';
+        }
+
+        return $output;
+    }
+
+    trigger_error($id." image not found", E_USER_WARNING);
+    return '';
+}
+add_shortcode('image','image_shortcode');
+
+function setupPages() {
+
+    $pages = array(
+        "Découvrir Anciela",
+        "Agenda des activités",
+        "Blog",
+        "Contact",
+        "Anciela : Nos objectifs",
+        "Anciela : Notre équipe",
+        "Anciela : Devenir Bénévole",
+        "Anciela : Nous soutenir",
+        "Anciela : Actualités d'Anciela",
+        "Démarches participatives : Collégiens et lycéens éco-citoyens",
+        "Démarches participatives : Étudiants éco-citoyens",
+        "Démarches participatives : Territoires de vie",
+        "Démarches participatives : Animations ponctuelles",
+        "Pépinière d'initiatives citoyennes : La démarche",
+        "Pépinière d'initiatives citoyennes : Les cycles d'activités",
+        "Pépinière d'initiatives citoyennes : Les initiatives accompagnées",
+        "Pépinière d'initiatives citoyennes : Participez !",
+        "Projets numériques : democratie-durable.info",
+        "Projets numériques : ressources-ecologistes.org",
+        "Projets internationaux : Notre démarche",
+        "Projets internationaux : Jeunesse francophone pour un monde écologique et solidaire",
+        "Projets internationaux : Nos partenaires",
+        "Projets internationaux : Construire des projets avec nous ?",
+        "Recherche : Esprit de la recherche",
+        "Recherche : Partages et publications",
+        "Recherche : Participez à la recherche !",
+        "Recherche : Le Conseil scientifique",
+        "Formations : Esprit des formations",
+        "Formations : Formations ouvertes",
+        "Formations : Service civique",
+        "Formations : Formation et accompagnement des structures",
+        "Nous rejoindre",
+        "Réseaux, agréments et partenaires",
+        "Ils parlent de nous",
+        "Communiqués et logos",
+        "Nos rapports d’activités",
+        "Mentions légales",
+        "Faire un don : pourquoi ? Comment ?",
+        "Newsletter",
+        "J'ai une idée !"
+    );
+
+    foreach($pages as $pageTitle) {
+        if (null == get_page_by_title($pageTitle, null, 'page')) {
+            wp_insert_post(
+                array(
+                    'comment_status'	=>	'closed',
+                    'ping_status'		=>	'closed',
+                    'post_author'		=>	'1',
+                    'post_title'		=>	$pageTitle,
+                    'post_status'		=>	'publish',
+                    'post_type'		    =>	'page'
+                )
+            );
+        }
+    }
+} // end setupPages
+//setupPages();
+
+function setup_header_menu() {
+    $menuName = 'header';
+    $exists = wp_get_nav_menu_object($menuName);
+    if(!$exists){
+        $menuId = wp_update_nav_menu_object(0, array(
+            'menu-name' => $menuName,
+            'theme-location' => 'header'
+        ));
+
+        $entries = array(
+            'Découvrir Anciela' => '',
+            'Agenda des activités' => 'Agenda',
+            'Blog' => '',
+            'Contact' => ''
+        );
+
+        foreach ($entries as $pageName => $linkTitle) {
+            $page = get_page_by_title($pageName, null, 'page');
+            if (empty($linkTitle)) {
+                $linkTitle = $pageName;
+            }
+
+            wp_update_nav_menu_item($menuId, 0, array(
+                'menu-item-title' =>  $linkTitle,
+                'menu-item-type' => 'post_type',
+                'menu-item-object' => 'page',
+                'menu-item-object-id' => $page->ID,
+                'menu-item-status' => 'publish'));
+        }
+    }
+}
+//setup_header_menu();
+
+function setup_home_menu() {
+    $menuName = 'home';
+    $exists = wp_get_nav_menu_object($menuName);
+    if(!$exists){
+        $menuId = wp_update_nav_menu_object(0, array(
+            'menu-name' => $menuName,
+            'theme-location' => $menuName
+        ));
+
+        $entries = array(
+            'Anciela : Devenir Bénévole' => 'Devenir Bénévole',
+            'Faire un don : pourquoi ? Comment ?' => 'Dons citoyens',
+            'Newsletter' => '',
+            "J'ai une idée" => "J'ai une idée !"
+        );
+
+        foreach ($entries as $pageName => $linkTitle) {
+            $page = get_page_by_title($pageName, null, 'page');
+            if (empty($linkTitle)) {
+                $linkTitle = $pageName;
+            }
+
+            wp_update_nav_menu_item($menuId, 0, array(
+                'menu-item-title' =>  $linkTitle,
+                'menu-item-type' => 'post_type',
+                'menu-item-object' => 'page',
+                'menu-item-object-id' => $page->ID,
+                'menu-item-status' => 'publish'));
+        }
+    }
+}
+//setup_home_menu();
+
+function setup_footer_menu() {
+    $menuName = 'footer';
+    $exists = wp_get_nav_menu_object($menuName);
+    if(!$exists){
+        $menuId = wp_update_nav_menu_object(0, array(
+            'menu-name' => $menuName,
+            'theme-location' => 'footer'
+        ));
+
+        $entries = array(
+            'Anciela : Notre équipe' => 'Notre équipe',
+            'Nous rejoindre' => '',
+            "Réseaux, agréments et partenaires" => '',
+            'Ils parlent de nous' => '',
+            "Communiqués et logos" => 'Communiqués & logos',
+            "Nos rapports d’activités" => '',
+            'Mentions légales' => ''
+        );
+
+        foreach ($entries as $pageName => $linkTitle) {
+            $page = get_page_by_title($pageName, null, 'page');
+            if (empty($linkTitle)) {
+                $linkTitle = $pageName;
+            }
+
+            wp_update_nav_menu_item($menuId, 0, array(
+                'menu-item-title' =>  $linkTitle,
+                'menu-item-type' => 'post_type',
+                'menu-item-object' => 'page',
+                'menu-item-object-id' => $page->ID,
+                'menu-item-status' => 'publish'));
+        }
+    }
+}
+//setup_footer_menu();
+
+function setup_side_menu() {
+    $menuName = 'side';
+    //wp_delete_nav_menu($menuName);
+    $exists = wp_get_nav_menu_object($menuName);
+    if(!$exists){
+        $menuId = wp_update_nav_menu_object(0, array(
+            'menu-name' => $menuName,
+            'theme-location' => $menuName
+        ));
+
+        $entries = array(
+            'Anciela' => array(
+                'Anciela : Nos objectifs' => 'Nos objectifs',
+                'Anciela : Notre équipe' => 'Notre équipe',
+                'Anciela : Devenir bénévole' => 'Devenir bénévole',
+                'Anciela : Nous soutenir' => 'Nous soutenir',
+                'Anciela : Actualités d\'Anciela' => 'Actualités d\'Anciela'
+            ),
+            'Démarches participatives' => array(
+                'Démarches participatives : Collégiens et lycéens éco-citoyens' => 'Jeunes éco-citoyens',
+                'Démarches participatives : Étudiants éco-citoyens' => 'Étudiants éco-citoyens',
+                'Démarches participatives : Territoires de vie' => 'Territoires de vie',
+                'Démarches participatives : Animations ponctuelles' => 'Animations ponctuelles'
+            ),
+            'Pépinière d\'initiatives' => array(
+                'Pépinière d\'initiatives citoyennes : La démarche' => 'La démarche',
+                "Pépinière d'initiatives citoyennes : Les cycles d'activités" => "Les cycles d'activités",
+                "Pépinière d'initiatives citoyennes : Les initiatives accompagnées" => 'Les initiatives',
+                'Pépinière d\'initiatives citoyennes : Participez !' => 'Participez !'
+            ),
+            'Projets numériques' => array(
+                'Projets numériques : democratie-durable.info' => 'Démocratie Durable',
+                'Projets numériques : ressources-ecologistes.org' => 'Ressources écologistes'
+            ),
+            'Projets internationaux' => array(
+                "Projets internationaux : Notre démarche" => "Notre démarche",
+                "Projets internationaux : Jeunesse francophone pour un monde écologique et solidaire" => "Jeunesse francophone",
+                "Projets internationaux : Nos partenaires" => "Nos partenaires",
+                "Projets internationaux : Construire des projets avec nous ?" => "Construire des projets<br/>avec nous ?"
+            ),
+            'Recherche' => array(
+                "Recherche : Esprit de la recherche" => "Esprit de la recherche",
+                "Recherche : Partages et publications" => "Partages et publications",
+                "Recherche : Participez à la recherche !" => "Participez à la recherche !",
+                "Recherche : Le Conseil scientifique" => "Le Conseil scientifique"
+            ),
+            'Formations' => array(
+                'Formations : Esprit des formations' => 'Esprit des formations',
+                'Formations : Formations ouvertes' => 'Formations ouvertes',
+                'Formations : Service civique' => 'Service civique',
+                'Formations : Formation et accompagnement des structures' => 'Formation et accompagnement<br/>des structures'
+            )
+        );
+
+        foreach ($entries as $pageName => $data) {
+
+            if (is_array($data)) {
+                $parentItemId = wp_update_nav_menu_item($menuId, 0, array(
+                    'menu-item-title'  => $pageName,
+                    'menu-item-url'    => '',
+                    'menu-item-status' => 'publish'));
+
+                foreach($data as $childPageName => $childPageTitle) {
+                    $page = get_page_by_title($childPageName, null, 'page');
+                    wp_update_nav_menu_item($menuId, 0, array(
+                        'menu-item-title' =>  $childPageTitle,
+                        'menu-item-parent-id' => $parentItemId,
+                        'menu-item-type' => 'post_type',
+                        'menu-item-object' => 'page',
+                        'menu-item-object-id' => $page->ID,
+                        'menu-item-status' => 'publish'));
+                }
+
+            } else {
+
+                $page = get_page_by_title($pageName, null, 'page');
+                wp_update_nav_menu_item($menuId, 0, array(
+                    'menu-item-title' =>  $pageName,
+                    'menu-item-type' => 'post_type',
+                    'menu-item-object' => 'page',
+                    'menu-item-object-id' => $page->ID,
+                    'menu-item-status' => 'publish'));
+            }
+        }
+    }
+}
+//setup_side_menu();
+
+function setup_menu_locations() {
+
+    $headerMenu = wp_get_nav_menu_object('header');
+    $footerMenu = wp_get_nav_menu_object('footer');
+    $sideMenu = wp_get_nav_menu_object('side');
+    $homeMenu = wp_get_nav_menu_object('home');
+
+    set_theme_mod('nav_menu_locations', array(
+        'header' => $headerMenu->term_id,
+        'side'   => $sideMenu->term_id,
+        'footer' => $footerMenu->term_id,
+        'home' => $homeMenu->term_id
+    ));
+}
+//setup_menu_locations();
+
+update_option('timezone_string', 'Europe/Paris');
+
+function add_custom_taxonomies() {
+    // Add new "Locations" taxonomy to Posts
+    $taxonomy = 'articles';
+    if (!taxonomy_exists($taxonomy)) {
+        register_taxonomy($taxonomy, 'post', array(
+            'hierarchical' => false,
+            // This array of options controls the labels displayed in the WordPress Admin UI
+            'labels' => array(
+                'name' => _x('Types', 'taxonomy general name'),
+                'singular_name' => _x('Type d\'articles', 'taxonomy singular name'),
+                'search_items' =>  __('Chercher un type d\'articles'),
+                'all_items' => __('Tous les types d\'articles'),
+                'edit_item' => __('Modifier ce type d\'articles'),
+                'update_item' => __('Modifier ce type d\'articles'),
+                'add_new_item' => __('Ajouter un nouveau type d\'articles'),
+                'new_item_name' => __('Nouveau type d\'articles'),
+                'menu_name' => __('Types'),
+            ),
+            // Control the slugs used for this taxonomy
+            'rewrite' => array(
+                'with_front' => false, // Don't display the category base before "/locations/"
+                'hierarchical' => false // This will allow URL's like "/locations/boston/cambridge/"
+            ),
+        ));
+        $array = array('Blog', 'Jeunes Éco-citoyens', 'Étudiants Éco-citoyens', 'Territoires de vie', 'Pépinière (démarche)', 'Démocratie Durable',
+            'Recherche', 'Formations', 'Projets internationaux', 'Projets numériques');
+        foreach($array as $page) {
+            wp_insert_term($page, $taxonomy);
+        }
+    }
+}
+//add_custom_taxonomies();
+
+function renameMedia() {
+
+    $db = mysqli_connect("localhost","root","","db161162332") or die("Error " . mysqli_error($db));
+
+    // Setup the author, slug, and title for the post
+    $author_id = 1;
+
+    $db->query('set names utf8');
+    $db->query("SET character_set_connection = 'UTF8'");
+    $db->query("SET character_set_client = 'UTF8'");
+    $db->query("SET character_set_results = 'UTF8'");
+
+    $files = array();
+    $result = $db->query("select * from `anc_info_fichier`");
+    while ($row = $result->fetch_array()) {
+        $fileId = strtolower(current(explode(".", $row['nom_file'])));
+        $files[$fileId] = $row['libelle_file'];
+    }
+
+    $args = array(
+        'post_type' => 'attachment',
+        'numberposts' => -1,
+        'post_status' => null,
+        'post_parent' => null, // any parent
+    );
+    $attachments = get_posts($args);
+    if ($attachments) {
+        foreach ($attachments as $post) {
+            the_title();
+            wp_update_post(array('ID'=>$post->ID, 'post_title'=>$files[$post->post_name]));
+        }
+    }
+
+    $db->close();
+}
+//renameMedia();
+
+function my_excerpt_length($length) {
+    return 50;
+}
+add_filter('excerpt_length', 'my_excerpt_length');
+
+if(!is_admin()) {
+    wp_deregister_script('jquery');
+    wp_register_script('jquery', get_template_directory_uri() . '/lib/jquery/dist/jquery.min.js', array(), null, true);
+    wp_register_script('momentjs-core', get_template_directory_uri() . '/lib/momentjs/min/moment.min.js', array(), null, true);
+    wp_register_script('momentjs', get_template_directory_uri() . '/lib/momentjs/lang/fr.js', array('momentjs-core'), null, true);
+    wp_register_script('underscorejs', get_template_directory_uri() . '/lib/underscore/underscore.js', array(), null, true);
+    wp_register_script('clndr', get_template_directory_uri() . '/lib/clndr/clndr.min.js', array('jquery', 'momentjs', 'underscorejs'), null, true);
+    wp_register_script('tooltipster', get_template_directory_uri() . '/lib/tooltipster/js/jquery.tooltipster.min.js', array(), null, true);
+    wp_register_style('anciela-style', get_template_directory_uri() . '/style.css', array(), null);
+    wp_register_style('tooltipster-style', get_template_directory_uri() . '/lib/tooltipster/css/tooltipster.css', array('anciela-style'), null);
+}
+
+wp_register_style('fontawesome', 'http://netdna.bootstrapcdn.com/font-awesome/4.1.0/css/font-awesome.min.css', array('anciela-style'), null);

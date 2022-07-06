@@ -1,0 +1,254 @@
+#include "stdafx.h"
+#include "TerrainTileset.h"
+
+namespace GameScope
+{
+
+//////////////////////////////////////////////////////////////////////////
+
+bool TerrainTilesetDesc::ReadDescription(FileSystem& fileSystem, JsonElement jsonSource)
+{
+    if (!jsonSource)
+    {
+        return false;
+    }
+
+    // read tileset palette
+    std::string palettePath;
+    std::string filesource = JsonGet(jsonSource, "palette", "");
+    if (!fileSystem.PathToFile(filesource, palettePath))
+    {
+        Logf("Warning: terrain tileset palette not found");
+        return false;
+    }
+    if (!tilesetPalette.LoadFromFile(palettePath))
+    {
+        Logf("Warning: cannot load terrain tileset palette");
+        return false;
+    }
+
+    // get sprite sheet path
+    filesource = FSCombinePath({"tilesets", tilesetName, "terrain", tilesetName + ".png"});
+    if (!fileSystem.PathToFile(filesource, terrainSpriteSheet))
+    {
+        Logf("Warning: cannot locate terrain sprite sheet for %s", tilesetName.c_str());
+        return false;
+    }
+
+    // read palette color cycing effects
+    for (JsonElement effect = jsonSource.FindElement("palette_color_cycling").FirstChild(); 
+        effect; effect = effect.NextSibling())
+    {
+        PaletteColorCycling effectDescription {};
+        if (!effect.GetElementName(effectDescription.effectName))
+        {
+            Logf("Warning: cannot find effect name");
+            continue;
+        }
+
+        // read effect properties
+        effectDescription.colorFirst = JsonGet(effect, "from", 0);
+        effectDescription.colorLast = JsonGet(effect, "to", 0);
+
+        // verify effect properties
+        bool goodEffect = 
+            (effectDescription.colorFirst > -1 && effectDescription.colorFirst < NUM_PALETTE_COLORS) &&
+            (effectDescription.colorLast > -1 && effectDescription.colorLast < NUM_PALETTE_COLORS) &&
+            (effectDescription.colorFirst <= effectDescription.colorLast);
+        assert(goodEffect);
+        if(!goodEffect)
+        {
+            Logf("Warning: palette effect has bad parameters");
+            continue;
+        }
+
+        paletteEffects.emplace_back(effectDescription);
+    }
+
+    // read solid tiles
+    int32_t itype = 0;
+    for (JsonElement terrainTile = jsonSource.FindElement("solid_tiles").FirstChild();
+        terrainTile; terrainTile = terrainTile.NextSibling())
+    {
+        assert(itype < NUM_TERRAIN_TILE_TYPES);
+        if (itype == NUM_TERRAIN_TILE_TYPES)
+        {
+            break;
+        }
+        JsonReadArray(terrainTile, solidTiles.indices[itype++]);
+    }
+
+    // read mixed tiles
+    itype = 0;
+    for (JsonElement mixed = jsonSource.FindElement("mixed_tiles").FirstChild();
+        mixed; mixed = mixed.NextSibling())
+    {
+        assert(itype < NUM_MIXED_TERRAIN_TILE_TYPES);
+        if (itype == NUM_MIXED_TERRAIN_TILE_TYPES)
+        {
+            break;
+        }
+
+        int32_t itile = 0;
+        for (JsonElement tile = mixed.FirstChild(); 
+            tile; tile = tile.NextSibling())
+        {
+            JsonReadArray(tile, mixedTiles.indices[itype][itile++]);
+        }
+        ++itype;
+    }
+
+    return true;
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+bool TerrainTileset::Initialize(const TerrainTilesetDesc& desc)
+{
+    m_NumTilesPerX = {};
+    m_NumTilesPerY = {};
+
+    m_TilesetImage = GfxLoadImage(m_RenderDeviceInstance, desc.terrainSpriteSheet);
+    assert(m_TilesetImage);
+    if (!m_TilesetImage)
+    {
+        return false;
+    }
+
+    m_TerrainTilesetDesc = desc;
+
+    m_NumTilesPerX = m_TilesetImage->GetTextureSizeW() / MAP_TILE_SIZE_W;
+    m_NumTilesPerY = m_TilesetImage->GetTextureSizeH() / MAP_TILE_SIZE_H;
+
+    assert(m_NumTilesPerX > 0 || m_NumTilesPerY > 0);
+    if (m_NumTilesPerX < 1 || m_NumTilesPerY < 1)
+    {
+        return false;
+    }
+
+    return true;
+}
+
+void TerrainTileset::DrawTerrainTile(const Point& topLeftCorner, int32_t terrainTileIndex)
+{
+    const Rectangle rcImage = {
+        (terrainTileIndex % m_NumTilesPerX) * MAP_TILE_SIZE_W, 
+        (terrainTileIndex / m_NumTilesPerX) * MAP_TILE_SIZE_H, 
+        MAP_TILE_SIZE_W, 
+        MAP_TILE_SIZE_H
+    };
+    const Point3D position = {
+        topLeftCorner.x, 
+        topLeftCorner.y, 0
+    };
+    GfxDrawImageParams params;
+        params.paletteIndex = GFX_PALETTE_PRIMARY;
+        params.flipx = 0;
+        params.flipy = 0;
+    m_RenderDeviceInstance.RenderSubImage(m_TilesetImage, rcImage, position, params);
+}
+
+bool TerrainTileset::GetSolidTerrainTile(eTerrainTile terrainTile, int32_t& tileIndex) const
+{
+    bool isTerrainTile = terrainTile < NUM_TERRAIN_TILE_TYPES;
+    assert(isTerrainTile);
+    if (isTerrainTile) {
+        tileIndex = m_TerrainTilesetDesc.solidTiles.indices[terrainTile][0];
+    }
+    return isTerrainTile;
+}
+
+bool TerrainTileset::GetMixedTerrainTile(eMixedTerrainTile terrainTile, int32_t index, int32_t& tileIndex) const
+{
+    bool isTerrainTile = terrainTile < NUM_MIXED_TERRAIN_TILE_TYPES;
+    assert(isTerrainTile);
+    if (isTerrainTile) {
+        assert(index < 15);
+        if (index > 14)
+        {
+            return false;
+        }
+        tileIndex = m_TerrainTilesetDesc.mixedTiles.indices[terrainTile][index][0];
+    }
+    return isTerrainTile;
+}
+
+void TerrainTileset::UpdatePaletteCyclingEffects(int32_t msDeltaTime)
+{
+    m_CyclingEffectsTime += msDeltaTime;
+    if (m_CyclingEffectsTime < TIME_FOR_CYCLING_FRAME_MSECONDS)
+    {
+        return;
+    }
+
+    for (const PaletteColorCycling& effect: m_TerrainTilesetDesc.paletteEffects)
+    {
+        ShiftPaletteColors(m_TerrainTilesetDesc.tilesetPalette,
+            effect.colorFirst,
+            effect.colorLast);
+    }
+
+    m_CyclingEffectsTime -= TIME_FOR_CYCLING_FRAME_MSECONDS;
+}
+
+void TerrainTileset::ApplyPaletteCycling()
+{
+    for (const PaletteColorCycling& effect: m_TerrainTilesetDesc.paletteEffects)
+    {
+        m_RenderDeviceInstance.SetPaletteEntries(
+            m_TerrainTilesetDesc.tilesetPalette.entries + effect.colorFirst,
+            effect.colorLast - effect.colorFirst + 1,
+            effect.colorFirst, GFX_PALETTE_PRIMARY
+        );
+    }
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+bool TerrainTilesetManager::Initialize(FileSystem& fileSystem)
+{
+    std::string descDocumentPath;
+    if (!fileSystem.PathToFile("Configurations/TerrainTilesets.json", descDocumentPath))
+    {
+        Logf("Warning: cannot find terrain tilesets configuration file");
+        return false;
+    }
+
+    JsonDocument document;
+    if (!document.LoadFromFile(descDocumentPath, document))
+    {
+        Logf("Warning: cannot load terrain tilesets configuration file");
+        return false;
+    }
+
+    // elements
+    mTilesets[TILESET_SUMMER].tilesetName = "summer";
+    mTilesets[TILESET_WINTER].tilesetName = "winter";
+    mTilesets[TILESET_SWAMP].tilesetName = "swamp";
+    mTilesets[TILESET_WASTELAND].tilesetName = "wasteland";
+
+    // load descriptions
+    for (TerrainTilesetDesc& element: mTilesets)
+    {
+        JsonElement descElement = document.GetRootElement().FindElement(element.tilesetName);
+        if (!element.ReadDescription(fileSystem, descElement))
+        {
+            Logf("Warning: description for %s not found", element.tilesetName.c_str());
+            continue;
+        }
+    } // for element
+
+    return true;
+}
+
+// Load specified terrain tileset
+// @param renderDeviceInstance: Render device instance
+// @param terrainTilesetID: Terrain tileset identifier
+Reference<TerrainTileset> TerrainTilesetManager::LoadTileset(GfxRenderDevice& renderDeviceInstance, 
+    eTileset terrainTilesetID) const
+{
+    assert(terrainTilesetID < NUM_TILESETS);
+    return TerrainTileset::CreateInstance(renderDeviceInstance, mTilesets[terrainTilesetID]);
+}
+
+} // namespace GameScope

@@ -1,0 +1,118 @@
+Function Get-AgGridColumnDefs([TableInfo] $tableInfo) {
+	Write-Host "### Generating ag-grid ColumnDefs for table $($tableInfo.tableCapitalCamel)"
+
+	# Piece them all together
+	[string]$result = ""
+	[int]$index = -1
+	foreach($columnInfo in $tableInfo.columnInfos) {
+		$index++
+		$result = $result + (Get-AgGridColumnDef $columnInfo)
+
+		# If not last entry, put comma and newline
+		[bool]$last = ($index -eq $tableInfo.columnInfos.Length - 1)
+		if(-not $last) {
+			$result = $result + ",`r`n"
+		}
+	}
+
+	# put some tabs in front of each line
+	$result = "`t`t`t" + ($result -replace "`r`n","`r`n`t`t`t")
+
+	return $result
+}
+
+<#
+ # Get the ag-grid column-def as a string from ColumnInfo
+ #>
+Function Get-AgGridColumnDef([ColumnInfo] $columnInfo) {
+	Write-Host "### Generating ag-grid ColumnDef for $($columnInfo.columnLowerCamel)"
+	[string]$result = @"
+{
+	headerName: '$($columnInfo.caption)',
+	field: '$($columnInfo.columnLowerCamel)',
+
+"@
+	#### PRIMARY KEY ####
+	if($columnInfo.isPrimaryKey) {
+		$result = $result + @"
+	width: 80,
+	cellRenderer: function (params: any) {
+		// If we do a true hyperlink, then angular gets
+		// all messed up and reloads the entire SPA page.
+		// Instead, put in a dummy link, and we'll plug
+		// code later to handle the onCellClick
+		return params.value ? "<a href='javascript:void(0)' >" + params.value + "</a>" : "";
+	}
+
+"@
+	#### DATE ####
+	} elseif(($columnInfo.dataType -eq "date") -or ($columnInfo.dataType -eq "datetime") -or ($columnInfo.dataType -eq "datetime2")) {
+		$result = $result + @"
+	width: 150,
+	cellRenderer: function (params:any) {
+		return params.value ? moment(params.value).format('M/D/YY h:mm a') : '';
+	}
+
+"@
+	#### INTEGER ####
+	} elseif(($columnInfo.dataType -eq "bigint") -or ($columnInfo.dataType -eq "int") -or ($columnInfo.dataType -eq "smallint")) {
+		$result = $result + @"
+	width: 20,
+	filter: 'number',
+	cellRenderer: function (params) {
+		return Intl.NumberFormat().format(params.value);
+	},
+	tooltipField: '$($columnInfo.columnLowerCamel)',
+	cellStyle: { 'text-align': 'right' }
+
+"@
+	#### DECIMAL ####
+	} elseif(($columnInfo.dataType -eq "numeric") -or ($columnInfo.dataType -eq "decimal")) {
+		$result = $result + @"
+	width: 100,
+	filter: 'number',
+	cellStyle: { 'text-align': 'right' }
+
+"@
+	#### BOOLEAN ####
+	} elseif(($columnInfo.dataType -eq "bit")) {
+		$result = $result + @"
+	width: 50
+
+"@
+	#### TEXT ####
+	} else {
+		# These are all just vague approximations
+
+		# Minimum width of ag-grid column
+		[int]$agGridColWidthMin = 10
+		# Minimum width of ag-grid column
+		[int]$agGridColWidthMax = 200
+		# Each character in db field takes up this many numbers in ag-grid col width
+		[int]$agGridColWidthMultiplier = 8
+
+		# We have to cheat and compromise to turn the database
+		# field size into a reasonable column width
+		[int]$width = 0
+		# Smooth out the widths of columns as compromises
+		if($columnInfo.maxLength -lt 10) {
+			$width = $agGridColWidthMin
+		} elseif($columnInfo.maxLength -lt 100) {
+			# Just match supplied db size
+			$width = [System.Math]::Min($columnInfo.maxLength * $agGridColWidthMultiplier, $agGridColWidthMax)
+		} else {
+			$width = $agGridColWidthMax
+		}
+
+		$result = $result + @"
+	width: $($width),
+	filter: 'text',
+	tooltipField: '$($columnInfo.columnLowerCamel)'
+
+"@
+	}
+
+	$result = $result + "}"
+	
+	return $result
+}	

@@ -1,0 +1,932 @@
+__author__ = 'jdaniel'
+
+import copy
+import random
+import itertools
+import operator
+import math
+import struct
+import os
+import sys
+import json
+from collections import defaultdict
+
+
+class AlgorithmBase(object):
+    def __init__(self, objective_function):
+        """
+        Base Algorithm class which contains utility functionality
+        common to all other algorithms and acts as the standalone
+        API for Algorithm usage.
+        :param objective_function: <function> The model function to be used
+            def my_objective(x):
+                f = list_of_objective_values
+                h = list_of_equality_constraint_values
+                g = list_of_inequality_constraint_values
+                return [f,h,g]
+        :return: None
+        """
+        self._objective_function = objective_function
+        self._variables = []
+        self._equality_constraints = []
+        self._inequality_constraints = []
+        self._objectives = []
+
+        # Algorithm Options
+        self._pop_size = None
+        self._generations = None
+        self._conv_tol = None
+        self._eqcon_tol = None
+        self._seed = None
+        self._eta_c = None
+        self._eta_m = None
+        self._p_cross = None
+        self._p_mut = None
+        self._islands = None
+        self._epoch = None
+        self._migrants = None
+        self._spheres = None
+
+        # Problem information
+        self._ndim = None
+        self._neqcon = None
+        self._nneqcon = None
+        self._lower_bound = []
+        self._upper_bound = []
+
+        # Data objects
+        self._history = History()
+        self._archive = Archive()
+        self._metadata = Metadata()
+
+        # Random number generator
+        self._rnd = random.Random()
+
+    def register_variable(self, name, lower, upper):
+        """
+        Register a decision variable with the algorithm
+        :param name: <string> Reference name of the decision variable
+        :param lower: <float> Lower bound for the variable
+        :param upper: <float> Upper bound for the variable
+        :return: None
+        """
+        var = Variable(name, lower, upper)
+        self._variables.append(var)
+
+    def register_constraint(self, name, ctype):
+        """
+        Register a constraint variable with the algorithm
+        :param name: <string> Reference name of the constraint variable
+        :param ctype: <string> Set constraint type, 'e': equality constraint; 'i': inequality constraint
+        :return: None
+        """
+        con = Constraint(name)
+        if ctype == 'e':
+            self._equality_constraints.append(con)
+        elif ctype == 'i':
+            self._inequality_constraints.append(con)
+        else:
+            err_msg = 'Unrecognized constraint type ' + repr(ctype)
+            raise AlgorithmException(err_msg)
+
+    def register_objective(self, name):
+        """
+        Register an objective variable with the algorithm
+        :param name: <string> Reference name of the objective variable
+        :return: None
+        """
+        obj = Objective(name)
+        self._objectives.append(obj)
+
+    def set_options(self, option, value):
+        """
+        Set an algorithm option value
+        :param option: <string> Name of the option to set
+        :param value: <int, float> Value of the option to set
+        :return: None
+        """
+        if option == 'population_size':
+            self.check_population_size(value)
+            self._pop_size = value
+        elif option == 'generations':
+            self.check_generations(value)
+            self._generations = value
+        elif option == 'conv_tol':
+            self.check_conv_tol(value)
+            self._conv_tol = value
+        elif option == 'eqcon_tol':
+            self.check_eqcon_tol(value)
+            self._eqcon_tol = value
+        elif option == 'eta_c':
+            self.check_eta_c(value)
+            self._eta_c = value
+        elif option == 'eta_m':
+            self.check_eta_m(value)
+            self._eta_m = value
+        elif option == 'p_cross':
+            self.check_p_cross(value)
+            self._p_cross = value
+        elif option == 'p_mut':
+            self.check_p_mut(value)
+            self._p_mut = value
+        elif option == 'islands':
+            self.check_islands(value)
+            self._islands = value
+        elif option == 'epoch':
+            self.check_epoch(value)
+            self._epoch = value
+        elif option == 'migrants':
+            self.check_migrants(value)
+            self._migrants = value
+        elif option == 'spheres':
+            self.check_spheres(value)
+            self._spheres = value
+        elif option == 'seed':
+            self.set_seed(value)
+        else:
+            err_msg = 'Unrecognized option ' + repr(option)
+            raise AlgorithmException(err_msg)
+
+    def set_seed(self, value):
+        """
+        Set the seed value for the optimisation
+        :param value: Value to set
+        :return: None
+        """
+        if value == 0:
+            self._seed = struct.unpack("<L", os.urandom(4))[0]
+        else:
+            self._seed = value
+
+        self._rnd.seed(self._seed)
+
+    @staticmethod
+    def check_population_size(value):
+        """
+        Check the population value
+        :param value: Value to set
+        :return:
+        """
+        # Check if integer
+        if not isinstance(value, (int, long)):
+            err_msg = 'Population is not an integer'
+            raise AlgorithmException(err_msg)
+
+        # Check if greater than zero
+        if value <= 0:
+            err_msg = 'Population size must be greater than zero'
+            raise AlgorithmException(err_msg)
+
+        # Check if divisible by 4
+        if value % 4 != 0:
+            err_msg = 'Population size must be evenly divisible by four'
+            raise AlgorithmException(err_msg)    
+
+    @staticmethod
+    def check_generations(value):
+        """
+        Check the generations value
+        :param value: Value to set
+        :return: None
+        """
+        if value <= 0:
+            err_msg = 'The generations value but be an integer greater than 0'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_conv_tol(value):
+        """
+        Check the convergence tolerance value
+        :param value: Value to set
+        :return: None
+        """
+        # Check if between (0.0, 1.0)
+        if value >= 1.0 or value <= 0.0:
+            err_msg = 'The convergence tolerance value conv_tol must be between (0.0, 1.0)'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_eqcon_tol(value):
+        """
+        Check the equality constraint tolerance value
+        :param value: Value to set
+        :return: None
+        """
+        # Check if greater than 0
+        if value <= 0.0:
+            err_msg = 'The equality constraint tolerance value eqcon_tol must be greater than 0'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_eta_c(value):
+        """
+        Check the crossover distribution index value
+        :param value: Value to set
+        :return: None
+        """
+        # Check if greater than zero
+        if value <= 0:
+            err_msg = 'The crossover distribution index eta_c must be greater than zero'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_eta_m(value):
+        """
+        Check the mutation distribution index value
+        :param value: Value to set
+        :return: None
+        """
+        # Check if greater than zero
+        if value <= 0:
+            err_msg = 'The mutation distribution index eta_m must be greater than zero'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_p_cross(value):
+        """
+        Check the crossover probability value
+        :param value: Value to set
+        :return: None
+        """
+        # Check if between (0.0, 1.0)
+        if value < 0.0 or value > 1.0:
+            err_msg = 'The crossover probability p_cross must be between 0.0 and 1.0'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_p_mut(value):
+        """
+        Check the mutation probability value
+        :param value: Value to set
+        :return: None
+        """
+        # Check if between (0.0, 1.0)
+        if value < 0.0 or value > 1.0:
+            err_msg = 'The mutation probability p_mut must be between 0.0 and 1.0'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_islands(value):
+        """
+        Check the number of islands
+        :param value: Value to set
+        :return: None
+        """
+        # Check greater than zero
+        if value <= 0:
+            err_msg = 'Number of islands must be a positive integer greater than zero'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_spheres(value):
+        """
+        Check the number of spheres
+        :param value: Value to set
+        :return: None
+        """
+        if value <= 0:
+            err_msg = 'Number of spheres must be a positive integer greater than zero'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_epoch(value):
+        """
+        Check the epoch rate
+        :param value: Value to set
+        :return: None
+        """
+        if value <= 0:
+            err_msg = 'The epoch rate must be a positive integer greater than zero'
+            raise AlgorithmException(err_msg)
+
+    @staticmethod
+    def check_migrants(value):
+        """
+        Check the migrants value
+        :param value: Value to set
+        :return: None
+        """
+        if value < 0:
+            err_msg = 'The number of migrants must be zero or greater'
+            raise AlgorithmException(err_msg)
+
+    def setup_variables(self):
+        """
+        Get information about the model once all the variables
+        have been added.
+        :return: None
+        """
+        self._ndim = len(self._variables)
+        self._neqcon = len(self._equality_constraints)
+        self._nneqcon = len(self._inequality_constraints)
+
+        for var in self._variables:
+            self._lower_bound.append(var.lower)
+            self._upper_bound.append(var.upper)
+
+    def evaluate_population(self, population):
+        """
+        Evaluate a population
+        :param population: <Population> Population to evaluate
+        :return: None
+        """
+        for ind in population:
+            self.evaluate(ind)
+
+    def evaluate(self, individual):
+        """
+        Evaluate an individual
+        :param individual: <Individual> Individual to evaluate
+        :return: None
+        """
+        f, h, g = self._objective_function(individual.x)
+
+        individual.f = f
+        individual.h = h
+        individual.g = g
+
+        # Calculate the constraint violation
+        s = 0.0
+        for i in xrange(self._neqcon):
+            s += math.fabs(h[i]) - self._eqcon_tol
+
+        for i in xrange(self._nneqcon):
+            s += max(0.0, g[i])
+
+        self._history.add_point(individual)
+
+
+class Individual(object):
+    def __init__(self):
+        """
+        Class for holding information and methods related to the concept
+        of an individual.
+        :return: None
+        """
+        # Decision variables
+        self.x = None
+        # Objective variables
+        self.f = None
+        # Equality constraint variables
+        self.h = None
+        # Inequality constraint variables
+        self.g = None
+        # Distance metric
+        self.d = None
+        # Constraint violation
+        self.s = None
+        # Domination count
+        self.n = None
+        # Rank
+        self.r = None
+        # ID
+        self.id = None
+
+    def dominates(self, other):
+        """
+        Method to determine if the individual dominates another individual using
+        the constraint dominance approach.
+        :param other: <Individual> Other individual to test against
+        :return: <bool> True if self dominates other, False if other dominates self or both are equal
+        """
+        not_equal = False
+        flag1 = 0
+        flag2 = 0
+
+        if self.s > 0:
+            flag1 = 1
+
+        if other.s > 0:
+            flag2 = 1
+
+        # Both individuals are invalid
+        if flag1 == 1 and flag2 == 1:
+            if self.s < other.s:
+                return True
+            else:
+                return False
+        # One of the individuals is invalid
+        elif flag1 ^ flag2:
+            if flag1:
+                return False
+            else:
+                return True
+        # Both individuals are valid
+        else:
+            for self_fit, other_fit in zip(self.f, other.f):
+
+                if self_fit > other_fit:
+                    return False
+                elif self_fit < other_fit:
+                    not_equal = True
+
+            return not_equal
+
+    def __hash__(self):
+        """
+        Return a hash based on the objective values of the individuals decision values
+        :return: Hash for the individual
+        """
+        return hash(repr(self.x))
+
+    def __repr__(self):
+        s = 'ID: ' + repr(self.id) + '\n'
+        s += 'x: ' + repr(self.x) + '\n'
+        s += 'f: ' + repr(self.f) + '\n'
+
+        if self.h is not None:
+            s += 'h: ' + repr(self.h) + '\n'
+
+        if self.g is not None:
+            s += 'g: ' + repr(self.g) + '\n'
+
+        if self.d is not None:
+            s += 'd: ' + repr(self.d) + '\n'
+
+        if self.s is not None:
+            s += 's: ' + repr(self.s) + '\n'
+
+        if self.r is not None:
+            s += 'r: ' + repr(self.r) + '\n'
+
+        return s
+
+    def __eq__(self, other):
+        for self_x, other_x in zip(self.x, other.x):
+            if self_x != other_x:
+                return False
+
+        return True
+
+
+class Population(list):
+    def __init__(self):
+        super(Population, self).__init__()
+
+    def populate(self, individuals):
+        """
+        Populate the population with a list of individuals
+        :param individuals: <List<Individual>> List of individuals to use
+        :return: None
+        """
+        for ind in individuals:
+            self.append(copy.deepcopy(ind))
+
+    def to_json(self):
+        return json.dumps(self, default=lambda o: o.__dict__)
+
+    def __repr__(self):
+        s = ''
+        for idx, ind in enumerate(self):
+            s += repr(ind) + '\n'
+
+        return s
+
+
+class SubPopulation(list):
+    def __init__(self):
+        super(SubPopulation, self).__init__()
+
+    def populate(self, individuals):
+        """
+        Populate the sub-population with a list of individuals
+        :param individuals: <List<Individual>> List of individuals to use
+        :return: None
+        """
+        for ind in individuals:
+
+            self.append(copy.deepcopy(ind))
+
+
+class Archive(object):
+    def __init__(self):
+        """
+        Optimization run archive of non-dominated solutions at each generation
+        which is used to predict convergence of the algorithm.
+        :return: None
+        """
+        # Tracks the archive of non-dominated solutions
+        self._archive = []
+        # Tracks the size of the non-dominated archive
+        self._idx = 0
+        # Tracks the consolidation ratio
+        self._consolidation_ratio = []
+        # Population size
+        self._population_size = None
+
+    def initialize(self, population):
+        """
+        Initialize the archive
+        :param population: <Population> Individuals to initialize the population with
+        :return: None
+        """
+        self._archive.append(nondominated_sort(population, len(population), first_front_only=True)[0])
+        self._consolidation_ratio.append(0)
+        self._population_size = len(population)
+
+    def update(self, population):
+        """
+        Update the archive
+        :param population: <Population> Population to update the archive with
+        :return: None
+        """
+        nondominated_solutions = nondominated_sort(copy.deepcopy(population), len(population), first_front_only=True)[0]
+        archive_copy = copy.deepcopy(self._archive[self._idx])
+        archive_copy = archive_copy + nondominated_solutions
+        nondominated_solutions = nondominated_sort(archive_copy, len(archive_copy), first_front_only=True)[0]
+
+        # Remove copies
+        nondominated_solutions = list(set(nondominated_solutions))
+
+        # Update the archive
+        self._archive.append(nondominated_solutions)
+        self._idx += 1
+
+        self._consolidation_ratio.append(len(self._archive[self._idx])/float(2*self._population_size))
+
+    def get_consolidation_ratio(self):
+        """
+        Return the most recent calculated consolidation ratio
+        :return: <float> Current consolidation ratio value
+        """
+        return self._consolidation_ratio[self._idx]
+
+    def get_consolidation_ratio_history(self):
+        """
+        Return the consolidation ratio history
+        :return: <List<float>> Consolidation ratio history
+        """
+        return self._consolidation_ratio
+
+    def get_archive(self):
+        """
+        Get the saved archive at each update
+        :return: <List<Population>> archive
+        """
+        return self._archive
+
+
+class Metadata:
+    def __init__(self):
+        self.end_msg = None
+        self.fevals = None
+        self.gen = None
+
+    def __repr__(self):
+        s = '\n' + self.end_msg + '\n'
+        s += 'fevals: ' + repr(self.fevals) + '\n'
+        s += 'gen: ' + repr(self.gen) + '\n'
+        return s
+
+
+class History(list):
+    def __init__(self):
+        super(History, self).__init__()
+
+    def add_point(self, individual):
+        """
+        Add a design point to the history
+        :param individual: <Individual> Individual to add to the history
+        :return: None
+        """
+        self.append(individual)
+
+
+class Variable(object):
+    def __init__(self, name, lower, upper):
+        """
+        Data structure that contains decision variable information.
+        :param name: <string> Reference name for the decision variable
+        :param lower: <float> Lower bound of the decision variable
+        :param upper: <float> Upper bound of the decision variable
+        :return: None
+        """
+        self.name = name
+        self.lower = lower
+        self.upper = upper
+
+
+class Constraint(object):
+    def __init__(self, name):
+        """
+        Data structure that contains constraint variable information.
+        :param name: <string> Reference name for the constraint variable
+        :return: None
+        """
+        self.name = name
+
+
+class Objective(object):
+    def __init__(self, name):
+        """
+        Data structure that contains objective variable information.
+        :param name: <string> Reference name for the objective variable
+        :return: None
+        """
+        self.name = name
+
+
+class AlgorithmException(Exception):
+    def __init__(self, message):
+        """
+        Exception class that gets raised when an error occurs with the algorithm.
+        :param message: Error message to display
+        :return: None
+        """
+        Exception.__init__(self, message)
+
+
+# Utility functions for dealing with algorithms containing sub-populations
+def flatten_population(population_list):
+    """
+    Combine each of the sub-populations into a single global population
+    :param population_list: <List<Population>>
+    :return: <List<Individual>>
+    """
+    global_pop = Population()
+    for pop in population_list:
+        global_pop.append(pop[:])
+
+    return global_pop
+
+
+# Genetic Operators
+def mutation(population, n_dim, lower, upper, eta_m, p_mut):
+    """
+    Performs bounded polynomial mutation on the population.
+    :param population: <Population> Population to perform mutation on
+    :param n_dim: <int> Number of decision variable dimensions
+    :param lower: <list<float>> List of decision variable lower bound values
+    :param upper: <list<float>> List of upper bound decision variable values
+    :param eta_m: <float> Mutation index
+    :param p_mut: <float> Mutation probability
+    :return: None
+    """
+    for ind in population:
+        mutate(ind, n_dim, lower, upper, eta_m, p_mut)
+
+
+def mutate(individual, n_dim, lower, upper, eta_m, p_mut):
+    """
+    Performs bounded polynomial mutation on an individual.
+    :param individual: <Individual> Individual to perform mutation on
+    :param n_dim: <int> Number of decision variable dimension
+    :param lower: <list<float>> List of decision variable lower bound values.
+    :param upper: <list<float>> List of decision variable upper bound values.
+    :param eta_m: <float> Mutation index
+    :param p_mut: <float> Mutation probability
+    :return: None
+    """
+    for i, xl, xu in zip(xrange(n_dim), lower, upper):
+        if random.random() <= p_mut:
+            x = copy.deepcopy(individual.x[i])
+            delta_1 = (x - xl) / (xu - xl)
+            delta_2 = (xu - x) / (xu - xl)
+            rand = random.random()
+            mut_pow = 1.0 / (eta_m + 1.0)
+
+            if rand < 0.5:
+                xy = 1.0 - delta_1
+                val = 2.0 * rand + (1.0 - 2.0*rand)*(xy**(eta_m + 1))
+                delta_q = val**mut_pow - 1.0
+            else:
+                xy = 1.0 - delta_2
+                val = 2.0 * (1.0 - rand) + 2.0 * (rand - 0.5)*(xy**(eta_m + 1))
+                delta_q = 1.0 - val**mut_pow
+
+            x += delta_q * (xu - xl)
+            x = min(max(x, xl), xu)
+            individual.x[i] = x
+
+
+def crossover(population, n_dim, lower, upper, eta_c, p_cross):
+    """
+    Perform simulated binary crossover on the population.
+    :param population: <Population> Population to perform crossover on.
+    :param n_dim: <int> Number of decision variable dimensions.
+    :param lower: <list<float>> List of decision variable lower bound values.
+    :param upper: <list<float>> List of decision variable upper bound values.
+    :param eta_c: <float> Crossover index.
+    :param p_cross: <float> Crossover probability.
+    :return: <Population> Child population
+    """
+    child_pop = Population()
+    child_pop.populate(population)
+    for ind1, ind2 in zip(child_pop[::2], child_pop[1::2]):
+        if random.random() <= p_cross:
+            mate(ind1, ind2, n_dim, lower, upper, eta_c)
+
+    return child_pop
+
+
+def mate(ind1, ind2, n_dim, lower, upper, eta_c):
+    """
+    Performs simulated binary crossover between two individuals to produce
+    two offspring.
+    :param ind1: <Individual> First individual involved in crossover
+    :param ind2: <Individual> Second individual involved in crossover
+    :param n_dim: <int> Number of decision variable dimensions.
+    :param lower: <list<float>> List of decision variable lower bound values.
+    :param upper: <list<float>> List of decision variable upper bound values.
+    :param eta_c: <float> Crossover index.
+    :return: None
+    """
+    for i, xl, xu in zip(xrange(n_dim), lower, upper):
+        if random.random() <= 0.5:
+            if abs(ind1.x[i] - ind2.x[i]) > 1e-14:
+                x1 = min(ind1.x[i], ind2.x[i])
+                x2 = max(ind1.x[i], ind2.x[i])
+                rand = random.random()
+
+                beta = 1.0 + (2.0*(x1 - xl) / (x2 - x1))
+                alpha = 2.0 - beta**-(eta_c + 1)
+                if rand <= 1.0 / alpha:
+                    beta_q = (rand*alpha)**(1.0 / (eta_c + 1))
+                else:
+                    beta_q = (1.0 / (2.0 - rand*alpha))**(1.0 / (eta_c + 1))
+
+                c1 = 0.5 * (x1 + x2 - beta_q * (x2 - x1))
+
+                beta = 1.0 + (2.0*(xu - x2) / (x2 - x1))
+                alpha = 2.0 - beta**-(eta_c + 1)
+                if rand <= 1.0 / alpha:
+                    beta_q = (rand*alpha)**(1.0 / (eta_c + 1))
+                else:
+                    beta_q = (1.0 / (2.0 - rand * alpha))**(1.0 / (eta_c + 1))
+                c2 = 0.5 * (x1 + x2 + beta_q*(x2 - x1))
+
+                c1 = min(max(c1, xl), xu)
+                c2 = min(max(c2, xl), xu)
+
+                if random.random() <= 0.5:
+                    ind1.x[i] = c2
+                    ind2.x[i] = c1
+                else:
+                    ind1.x[i] = c1
+                    ind2.x[i] = c2
+
+
+def selection(population, k):
+    """
+    Apply the NSGA-II selection operator on a population of individuals.
+    :param population: <Population> Population of individuals to select from
+    :param k: <int> The number of individuals to select
+    :return: <Population> Selected population of individuals
+    """
+    pareto_fronts = nondominated_sort(population, k)
+
+    for front in pareto_fronts:
+        assign_crowding_distance(front)
+
+    chosen = list(itertools.chain(*pareto_fronts[:-1]))
+
+    k -= len(chosen)
+    if k > 0:
+        sorted_front = sorted(pareto_fronts[-1], key=operator.attrgetter("d"), reverse=True)
+        chosen.extend(sorted_front[:k])
+
+    return copy.deepcopy(chosen)
+
+
+def nondominated_sort(population, k, first_front_only=False):
+    """
+    Sort the first k individuals from the population into different nondomination
+    levels using the Fast Nondominated Sorting Approach proposed by Deb et al.
+    Function structure and implementation adapted from the DEAP package.
+    :param first_front_only:
+    :param population: <Population> Population of individuals to sort
+    :param k: The number of individuals to select
+    :return: <List<Individual>> A list of ordered Pareto fronts
+    """
+    if k == 0:
+        return []
+
+    map_fit_ind = defaultdict(list)
+    for ind in population:
+        map_fit_ind[(tuple(ind.f))] = ind
+    fits = map_fit_ind.keys()
+
+    current_front = []
+    next_front = []
+    dominating_fits = defaultdict(int)
+    dominated_fits = defaultdict(list)
+
+    # Rank first Pareto front
+    for i, fit_i in enumerate(fits):
+        for fit_j in fits[i+1:]:
+            if map_fit_ind[tuple(fit_i)].dominates(map_fit_ind[tuple(fit_j)]):
+                dominating_fits[fit_j] += 1
+                dominated_fits[fit_i].append(fit_j)
+            elif map_fit_ind[tuple(fit_j)].dominates(map_fit_ind[tuple(fit_i)]):
+                dominating_fits[fit_i] += 1
+                dominated_fits[fit_j].append(fit_i)
+        if dominating_fits[fit_i] == 0:
+            map_fit_ind[tuple(fit_i)].r = 1
+            current_front.append(fit_i)
+
+    fronts = [[]]
+    for fit in current_front:
+        fronts[-1].append(map_fit_ind[tuple(fit)])
+    pareto_sorted = len(fronts[-1])
+
+    # Rank the next front until all individuals are sorted or
+    # the given number of individual are sorted.
+    if not first_front_only:
+        N = min(len(population), k)
+        while pareto_sorted < N:
+            fronts.append([])
+            for fit_p in current_front:
+                for fit_d in dominated_fits[fit_p]:
+                    dominating_fits[fit_d] -= 1
+                    if dominating_fits[fit_d] == 0:
+                        next_front.append(fit_d)
+                        pareto_sorted += 1
+                        fronts[-1].append(map_fit_ind[tuple(fit_d)])
+                        map_fit_ind[tuple(fit_d)].r = len(fronts)
+            current_front = next_front
+            next_front = []
+
+    return copy.deepcopy(fronts)
+
+
+def assign_crowding_distance(individuals):
+    """
+    Assign the crowding distance to each individual.
+    :param individuals: <Population, List> Individuals to assign crowding distance to.
+    :return: None
+    """
+    if len(individuals) == 0:
+        return
+
+    distances = [0.0] * len(individuals)
+    crowd = [(ind.f, i) for i, ind in enumerate(individuals)]
+    nobj = len(individuals[0].f)
+
+    for i in xrange(nobj):
+        crowd.sort(key=lambda element: element[0][i])
+        distances[crowd[0][1]] = float("inf")
+        distances[crowd[-1][1]] = float("inf")
+        if crowd[-1][0][i] == crowd[0][0][i]:
+            continue
+        norm = nobj * float(crowd[-1][0][i] - crowd[0][0][i])
+        for prev, cur, nexxt in zip(crowd[:-2], crowd[1:-1], crowd[2:]):
+            distances[cur[1]] += (nexxt[0][i] - prev[0][i]) / norm
+
+    for i, dist in enumerate(distances):
+        individuals[i].d = dist
+
+
+def tournament_select(population, k):
+    """
+    Tournament selection based on the constraint dominance principle and the
+    crowding distance.
+    :param population: <Population, List> Individuals to select from
+    :param k: <int> The number of individuals to select.
+    :return: <List<Individual>> The list of selected individuals
+    """
+    def tournament(ind1, ind2):
+        if ind1.dominates(ind2):
+            return copy.deepcopy(ind1)
+        elif ind2.dominates(ind1):
+            return copy.deepcopy(ind2)
+
+        if ind1.d < ind2.d:
+            return copy.deepcopy(ind2)
+        elif ind1.d > ind2.d:
+            return copy.deepcopy(ind1)
+
+        if random.random() <= 0.5:
+            return copy.deepcopy(ind1)
+        return copy.deepcopy(ind2)
+
+    population_1 = random.sample(population, len(population))
+    population_2 = random.sample(population, len(population))
+
+    chosen = []
+    for i in xrange(0, k, 4):
+        chosen.append(tournament(population_1[i], population_1[i+1]))
+        chosen.append(tournament(population_1[i+1], population_1[i+3]))
+        chosen.append(tournament(population_2[i], population_2[i+1]))
+        chosen.append(tournament(population_2[i+2], population_2[i+3]))
+
+    return chosen
+
+
+def update_progress(progress):
+    bar_length = 20  # Modify this to change the length of the progress bar
+    status = ""
+    if isinstance(progress, int):
+        progress = float(progress)
+    if not isinstance(progress, float):
+        progress = 0
+        status = "error: progress var must be float\r\n"
+    if progress < 0:
+        progress = 0
+        status = "Halt...\r\n"
+    if progress >= 1:
+        progress = 1
+        status = "Done...\r\n"
+    block = int(round(bar_length*progress))
+    text = "\rPercent: [{0}] {1}% {2}".format("="*block + " "*(bar_length-block), progress*100, status)
+    sys.stdout.write(text)
+    sys.stdout.flush()

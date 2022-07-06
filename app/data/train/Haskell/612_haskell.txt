@@ -1,0 +1,117 @@
+module Commands (parseCommand,
+                 handleCommand
+                )
+where
+
+  import Control.Monad.IO.Class (liftIO)
+  import Control.Exception (catch, IOException)
+  import System.IO
+
+  import Data.Maybe
+  import Data.List
+  import Data.Char
+
+  import Types
+  import Parser
+  import Eval
+  import Monad
+  import Download
+  import PrettyPrinter
+
+  data InteractiveCommand = Cmd String String (String -> Command) String
+  
+  data Command = None
+               | Quit
+               | Reload
+               | Download String
+               | Compile String
+               | CompileFile String 
+               | Show String
+               | PrintAll
+               | Stop
+               | Delete String
+               | Help
+
+  commands :: [InteractiveCommand]
+  commands = [ Cmd ":show"     "<film list>"           Show              "Muestra las películas contenidas en la lista.",
+               Cmd ":help"     ""                      (const Help)      "Imprime este menú.",
+               Cmd ":all"      ""                      (const PrintAll)  "Muestra todas las listas disponibles.",
+               Cmd ":delete"   "<film list>"           Delete            "Borra la lista seleccionada.",
+               Cmd ":load"     "<path>"                CompileFile       "Cargar listas desde un archivo.",
+               Cmd ":reload"   "<path>"                (const Reload)    "Volver a cargar las listas del ultimo archivo.",
+               Cmd ":download" "<film list>@<quality>" Download          "Descarga la lista de películas en la calidad seteada.",
+               Cmd ":stop"     ""                      (const Stop)      "Detiene todas las descargas iniciadas desde el programa.",
+               Cmd ":quit"     ""                      (const Quit)      "Salir del interprete."]
+  
+  -- Parser para los comandos del intérprete. Si la entrada no empieza con un ":",
+  -- se considerará la misma una expresión del lenguaje.
+  parseCommand :: String -> IO Command
+  parseCommand input = 
+    if isPrefixOf ":" input 
+      then do let (cmd, arg') = break isSpace input
+                  arg = dropWhile isSpace arg' 
+                  validCommand = filter (\ (Cmd c _ _ _) -> isPrefixOf cmd c) commands
+              case validCommand of
+                []            -> do putStrLn ("Comando desconocido: " ++ cmd ++ 
+                                              ". Escriba :help para recibir ayuda.")
+                                    return None
+                [Cmd _ _ f _] -> return (f arg)
+                _             -> do putStrLn ("Comando ambigüo: " ++ cmd ++
+                                              ". Podría ser: " ++
+                                              concat (intersperse ", " [ cs | Cmd cs _ _ _ <- validCommand ]) ++ ".")
+                                    return None
+      else return (Compile input)
+
+  -- Esta función es la que realiza las acciones pertinentes a cada comando
+  handleCommand :: Command -> StateError ()
+  handleCommand comm = 
+    case comm of
+      None       -> return ()
+      Quit       -> throw IQuit
+      Help       -> liftIO $ putStrLn (printHelp commands)
+      Show l     -> do s <- get
+                       case lookup l (list s) of
+                         Just fl -> liftIO $ putStrLn (show (printfl fl))
+                         Nothing -> liftIO $ putStrLn "Lista no encontrada. Escriba :all para ver las listas disponibles."
+      PrintAll   -> do s <- get 
+                       let allLists = concat $ intersperse ", " (sort (map fst (list s)))
+                       if null allLists
+                         then liftIO $ putStrLn ("Aún no hay listas definidas.")
+                         else liftIO $ putStrLn (allLists)
+      Reload     -> do s <- get
+                       handleCommand (CompileFile (lfile s))
+      Delete n   -> do s <- get
+                       put (s {list = filter (\(x,_) -> n /= x) (list s)})
+      Compile s  -> case runParser s of
+                      Right defList -> eval defList
+                      Left error    -> liftIO $ putStrLn ("Error de parseo: " ++ show error) 
+      Download f -> let (n, q') = break (\c -> c == '@') f
+                        q = dropWhile (\c -> c == '@') q'
+                    in do s <- get
+                          case lookup n (list s) of
+                            Just fl -> do pids <- liftIO $ download fl q (d_dir s) 
+                                          put (s {dlist = pids})
+                            Nothing -> liftIO $ putStrLn "Lista no encontrada. Escriba :all para ver las listas disponibles."
+      Stop       -> do s  <- get
+                       liftIO $ stopDownload (dlist s)
+                       put (s {dlist = []}) 
+      CompileFile path -> do f <- liftIO (catch (readFile path)
+                                                (\e -> do let err = show (e :: IOException)
+                                                          hPutStr stderr ("Error: El archivo " ++ path ++ 
+                                                                          " no pudo abrirse. \n" ++ err ++ ".\n") 
+                                                          return ""))
+                             if null f
+                               then return ()
+                               else do s <- get
+                                       put (s {lfile = path})
+                                       handleCommand (Compile f) 
+       
+  -- Genera el texto que se mostrará en el comando de ayuda (:help) 
+  printHelp :: [InteractiveCommand] -> String
+  printHelp xs = "Lista de comandos: \n\n" ++
+                 "<expresion>                        Evaluar la expresión.\n" ++ 
+                  unlines (map (\ (Cmd c arg _ d) -> let fstSpace = replicate (10 - length c) ' '
+                                                         sndSpace = replicate (35 - length (c ++ fstSpace ++ arg)) ' '
+                                                      in c ++ fstSpace ++ arg ++ sndSpace ++ d) xs)
+                     
+                   

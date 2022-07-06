@@ -1,0 +1,138 @@
+#!/usr/bin/env python
+# encoding: utf-8
+"""
+Copyright 2011, 2012 Google Inc. All Rights Reserved.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+"""
+
+import os, time, logging, threading, Queue
+
+class Threadable:
+	def __init__(self,name="tvod.util.Threadable"):
+		self._exit = False
+		self._name = name
+	# properties
+	def get_exit(self):
+		return self._exit
+	def set_exit(self,value):
+		assert isinstance(value,bool)
+		self._exit = value
+	def get_name(self):
+		return self._name
+	exit = property(get_exit,set_exit)
+	name = property(get_name)
+	# methods
+	def runloop(self):
+		while not self.exit:
+			self.dowork()
+			time.sleep(0.5)
+	def dowork(self):
+		pass
+
+class WatchFolder(Threadable):
+	def __init__(self,path,timedelta=10.0):
+		assert os.path.isdir(path)
+		assert timedelta > 0
+		Threadable.__init__(self,name="<WatchFolder %s>" % os.path.basename(path))
+		self._path = path
+		self._files = dict()
+		self._timedelta = timedelta
+		self._scantime = None
+	# properties
+	def get_path(self):
+		return self._path
+	path = property(get_path)
+	# methods
+	def scan(self):
+		# scan for new files
+		new_files = dict([(f, None) for f in os.listdir(self._path)])
+		added_files = [f for f in new_files if (not f in self._files and self.valid_filename(f))]
+		deleted_files = [f for f in self._files if (not f in new_files and self.valid_filename(f))]
+		# report on changes
+		if added_files:
+			self.added(added_files)
+		if deleted_files:
+			self.deleted(deleted_files)
+		# reset files
+		self._files = new_files
+	def dowork(self):
+		if self._scantime==None or (time.time() - self._scantime) > self._timedelta:
+			logging.debug("SCANNING")
+			self.scan()
+			self._scantime = time.time()
+	# These are the messages which need to be overridden
+	def valid_filename(self,filename):
+		if filename.startswith('.') or filename.endswith('~'):
+			return False
+		return True
+	def added(self,paths):
+		pass
+	def deleted(self,paths):
+		pass
+
+class XMLWatchFolder(WatchFolder):
+	def __init__(self,path,queue):
+		assert isinstance(queue,Queue.Queue)
+		WatchFolder.__init__(self,path)
+		self.queue = queue
+	def valid_filename(self,filename):
+		if not WatchFolder.valid_filename(self,filename):
+			return False
+		(basename,extension) = os.path.splitext(filename)
+		if extension.lower() != ".xml":
+			return False
+		return True
+	def added(self,filenames):
+		for f in filenames:
+			path = os.path.join(self.path,f)
+			if not (os.path.exists(path) and os.path.getsize(path)):
+				logging.debug("Ignoring non-existent or empty file: %s" % path)
+				continue
+			if not os.path.isfile(path):
+				continue
+			logging.debug("ADDED: %s/%s" % (os.path.basename(self.path),f))
+			self.queue.put(WorkerItem(path))
+	def deleted(self,filenames):
+		for f in filenames:
+			logging.debug("DELETED: %s/%s" % (os.path.basename(self.path),f))
+
+class Worker(Threadable):
+	def __init__(self,queue,number=0):
+		assert isinstance(queue,Queue.Queue)
+		Threadable.__init__(self,name="<Worker %d>" % number)
+		self._queue = queue
+	# methods
+	def dowork(self):
+		try:
+			item = self._queue.get(True,0.5)
+			assert isinstance(item,WorkerItem)
+			self.process(item)
+		except Queue.Empty, e:
+			pass
+	def process(self,item):
+		pass
+
+class WorkerItem:
+	def __init__(self,path):
+		assert path
+		self._path = path
+	# properties
+	def get_path(self):
+		return self._path
+	path = property(get_path)
+	# convert into a string
+	def __str__(self):
+		return "<WorkerItem %s>" % self._path
+
+

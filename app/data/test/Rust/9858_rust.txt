@@ -1,0 +1,501 @@
+// Legato - Statsd Server in Rust
+//
+// Copyright 2016 TSH Labs
+//
+// Licensed under the Apache License, Version 2.0 <LICENSE-APACHE or
+// http://www.apache.org/licenses/LICENSE-2.0> or the MIT license
+// <LICENSE-MIT or http://opensource.org/licenses/MIT>, at your
+// option. This file may not be copied, modified, or distributed
+// except according to those terms.
+
+//! Parse and validate CLI and file configuration sources
+
+use log;
+use toml;
+use clap::ArgMatches;
+
+use std::error::{self, Error};
+use std::fmt;
+use std::net::SocketAddr;
+
+use ::types::MetricResult;
+
+pub use self::validate::{validate_addr, validate_percentiles};
+use self::parse::{parse_addr, parse_log_level, parse_flush_period_from_str,
+                  parse_prefix, parse_percentiles_from_str,
+                  parse_percentiles_from_values, parse_flush_period_from_int64,
+                  parse_ident, parse_as_str, parse_as_integer, parse_as_bool,
+                  parse_as_slice, parse_as_table};
+
+mod validate;
+mod parse;
+
+
+const DEFAULT_ENABLE_CONSOLE: bool = true;
+const DEFAULT_ENABLE_GRAPHITE: bool = false;
+const DEFAULT_FLUSH_PERIOD_MILLIS: u64 = 10_000;
+const DEFAULT_GRAPHITE_ADDR: &'static str = "127.0.0.1:2003";
+const DEFAULT_LOCAL_ADDR: &'static str = "127.0.0.1:8125";
+const DEFAULT_LOG_LEVEL: log::LogLevelFilter = log::LogLevelFilter::Warn;
+const DEFAULT_PREFIX_GLOBAL: &'static str = "statsd";
+const DEFAULT_PREFIX_COUNTERS: &'static str = "counters";
+const DEFAULT_PREFIX_TIMERS: &'static str = "timers";
+const DEFAULT_PREFIX_GAUGES: &'static str = "gauges";
+const DEFAULT_TIMER_PERCENTILES: &'static [u8] = &[75, 90, 95, 98, 99];
+
+
+///
+pub type ConfigResult<T> = Result<T, ConfigError>;
+
+
+///
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConfigErrorKind {
+    InvalidAddress,
+    InvalidLogLevel,
+    InvalidPercentiles,
+    InvalidFlushPeriod,
+    InvalidPrefix,
+    InvalidType,
+    InvalidSection,
+}
+
+
+///
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ConfigError {
+    kind: ConfigErrorKind,
+    field: String,
+    value: Option<String>,
+}
+
+
+impl ConfigError {
+    ///
+    pub fn kind(&self) -> ConfigErrorKind {
+        self.kind
+    }
+
+    ///
+    pub fn field(&self) -> &str {
+        &self.field
+    }
+
+    ///
+    pub fn value(&self) -> &Option<String> {
+        &self.value
+    }
+}
+
+
+impl<T: Into<String>> From<(ConfigErrorKind, T)> for ConfigError {
+    fn from((kind, field): (ConfigErrorKind, T)) -> ConfigError {
+        ConfigError {
+            kind: kind,
+            field: field.into(),
+            value: None,
+        }
+    }
+}
+
+
+impl<T: Into<String>> From<(ConfigErrorKind, T, T)> for ConfigError {
+    fn from((kind, field, value): (ConfigErrorKind, T, T)) -> ConfigError {
+        ConfigError {
+            kind: kind,
+            field: field.into(),
+            value: Some(value.into()),
+        }
+    }
+}
+
+
+impl error::Error for ConfigError {
+    fn description(&self) -> &str {
+        match self.kind {
+            ConfigErrorKind::InvalidAddress => "invalid address",
+            ConfigErrorKind::InvalidLogLevel => "invalid log level",
+            ConfigErrorKind::InvalidPercentiles => "invalid percentiles",
+            ConfigErrorKind::InvalidFlushPeriod => "invalid flush period",
+            ConfigErrorKind::InvalidPrefix => "invalid prefix",
+            ConfigErrorKind::InvalidType => "invalid type",
+            ConfigErrorKind::InvalidSection => "missing or invalid section",
+        }
+    }
+
+    fn cause(&self) -> Option<&error::Error> {
+        None
+    }
+}
+
+
+impl fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        try!(write!(f, "{} for {}", self.description(), self.field));
+
+        if let Some(ref v) = self.value {
+            try!(write!(f, ": '{}'", v));
+        }
+
+        Ok(())
+    }
+}
+
+
+///
+///
+///
+#[derive(Eq, PartialEq, Debug, Clone)]
+pub struct ServerConfig {
+    pub enable_console: bool,
+    pub enable_graphite: bool,
+    pub flush_period_ms: u64,
+    pub graphite_addr: SocketAddr,
+    pub local_addr: SocketAddr,
+    pub log_level: log::LogLevelFilter,
+    pub prefix_global: String,
+    pub prefix_counters: String,
+    pub prefix_timers: String,
+    pub prefix_gauges: String,
+    pub timer_percentiles: Vec<u8>,
+    pub config_file: Option<String>,
+}
+
+
+impl Default for ServerConfig {
+    fn default() -> ServerConfig {
+        ServerConfig {
+            enable_console: DEFAULT_ENABLE_CONSOLE,
+            enable_graphite: DEFAULT_ENABLE_GRAPHITE,
+            flush_period_ms: DEFAULT_FLUSH_PERIOD_MILLIS,
+            graphite_addr: DEFAULT_GRAPHITE_ADDR.parse().unwrap(),
+            local_addr: DEFAULT_LOCAL_ADDR.parse().unwrap(),
+            log_level: DEFAULT_LOG_LEVEL,
+            prefix_global: DEFAULT_PREFIX_GLOBAL.to_string(),
+            prefix_counters: DEFAULT_PREFIX_COUNTERS.to_string(),
+            prefix_timers: DEFAULT_PREFIX_TIMERS.to_string(),
+            prefix_gauges: DEFAULT_PREFIX_GAUGES.to_string(),
+            timer_percentiles: Vec::from(DEFAULT_TIMER_PERCENTILES),
+            config_file: None,
+        }
+    }
+}
+
+
+///
+///
+///
+pub trait MergeConfig {
+    fn merge_to(self, conf: &ServerConfig) -> ServerConfig;
+}
+
+
+///
+///
+///
+#[derive(Eq, PartialEq, Debug)]
+pub struct FileConfig {
+    pub enable_console: Option<bool>,
+    pub enable_graphite: Option<bool>,
+    pub flush_period_ms: Option<u64>,
+    pub graphite_addr: Option<SocketAddr>,
+    pub local_addr: Option<SocketAddr>,
+    pub log_level: Option<log::LogLevelFilter>,
+    pub prefix_global: Option<String>,
+    pub prefix_counters: Option<String>,
+    pub prefix_timers: Option<String>,
+    pub prefix_gauges: Option<String>,
+    pub timer_percentiles: Option<Vec<u8>>,
+}
+
+
+impl FileConfig {
+    pub fn from(table: &toml::Table) -> MetricResult<FileConfig> {
+        let server = try!(table.get("legato")
+                          .ok_or(ConfigError::from((ConfigErrorKind::InvalidSection, "legato")))
+                          .and_then(|v| parse_as_table(v, "legato", parse_ident)));
+
+        let enable_console = if let Some(v) = server.get("enable_console") {
+            Some(try!(parse_as_bool(v, "enabled_console", parse_ident)))
+        } else {
+            None
+        };
+
+        let enable_graphite = if let Some(v) = server.get("enable_graphite") {
+            Some(try!(parse_as_bool(v, "enable_graphite", parse_ident)))
+        } else {
+            None
+        };
+
+        let flush_period_ms = if let Some(v) = server.get("flush_period_ms") {
+            Some(try!(parse_as_integer(v, "flush_period_ms", parse_flush_period_from_int64)))
+        } else {
+            None
+        };
+
+        let graphite_addr = if let Some(v) = server.get("graphite_addr") {
+            Some(try!(parse_as_str(v, "graphite_addr", parse_addr)))
+        } else {
+            None
+        };
+
+        let local_addr = if let Some(v) = server.get("local_addr") {
+            Some(try!(parse_as_str(v, "local_addr", parse_addr)))
+        } else {
+            None
+        };
+
+        let log_level = if let Some(v) = server.get("log_level") {
+            Some(try!(parse_as_str(v, "log_level", parse_log_level)))
+        } else {
+            None
+        };
+
+        let prefix_global = if let Some(v) = server.get("prefix_global") {
+            Some(try!(parse_as_str(v, "prefix_global", parse_prefix)))
+        } else {
+            None
+        };
+
+        let prefix_counters = if let Some(v) = server.get("prefix_counters") {
+            Some(try!(parse_as_str(v, "prefix_counters", parse_prefix)))
+        } else {
+            None
+        };
+
+        let prefix_timers = if let Some(v) = server.get("prefix_timers") {
+            Some(try!(parse_as_str(v, "prefix_timers", parse_prefix)))
+        } else {
+            None
+        };
+
+        let prefix_gauges = if let Some(v) = server.get("prefix_gauges") {
+            Some(try!(parse_as_str(v, "prefix_gauges", parse_prefix)))
+        } else {
+            None
+        };
+
+        let timer_percentiles = if let Some(v) = server.get("timer_percentiles") {
+            Some(try!(parse_as_slice(v, "timer_percentiles", parse_percentiles_from_values)))
+        } else {
+            None
+        };
+
+        Ok(FileConfig {
+            enable_console: enable_console,
+            enable_graphite: enable_graphite,
+            flush_period_ms: flush_period_ms,
+            graphite_addr: graphite_addr,
+            local_addr: local_addr,
+            log_level: log_level,
+            prefix_global: prefix_global,
+            prefix_counters: prefix_counters,
+            prefix_timers: prefix_timers,
+            prefix_gauges: prefix_gauges,
+            timer_percentiles: timer_percentiles,
+        })
+    }
+}
+
+
+impl MergeConfig for FileConfig {
+    fn merge_to(self, conf: &ServerConfig) -> ServerConfig {
+        let mut merged = conf.clone();
+
+        if let Some(v) = self.enable_console {
+            merged.enable_console = v;
+        }
+
+        if let Some(v) = self.enable_graphite {
+            merged.enable_graphite = v;
+        }
+
+        if let Some(v) = self.flush_period_ms {
+            merged.flush_period_ms = v;
+        }
+
+        if let Some(v) = self.graphite_addr {
+            merged.graphite_addr = v;
+        }
+
+        if let Some(v) = self.local_addr {
+            merged.local_addr = v;
+        }
+
+        if let Some(v) = self.log_level {
+            merged.log_level = v;
+        }
+
+        if let Some(v) = self.prefix_global {
+            merged.prefix_global = v;
+        }
+
+        if let Some(v) = self.prefix_counters {
+            merged.prefix_counters = v;
+        }
+
+        if let Some(v) = self.prefix_timers {
+            merged.prefix_timers = v;
+        }
+
+        if let Some(v) = self.prefix_gauges {
+            merged.prefix_gauges = v;
+        }
+
+        if let Some(v) = self.timer_percentiles {
+            merged.timer_percentiles = v;
+        }
+
+        merged
+    }
+}
+
+
+///
+///
+///
+#[derive(Eq, PartialEq, Debug)]
+pub struct CliConfig {
+    pub enable_console: Option<bool>,
+    pub enable_graphite: Option<bool>,
+    pub flush_period_ms: Option<u64>,
+    pub graphite_addr: Option<SocketAddr>,
+    pub local_addr: Option<SocketAddr>,
+    pub log_level: Option<log::LogLevelFilter>,
+    pub prefix_global: Option<String>,
+    pub prefix_counters: Option<String>,
+    pub prefix_timers: Option<String>,
+    pub prefix_gauges: Option<String>,
+    pub timer_percentiles: Option<Vec<u8>>,
+    pub config_file: Option<String>,
+}
+
+
+impl CliConfig {
+    pub fn from<'a>(matches: ArgMatches<'a>) -> MetricResult<CliConfig> {
+        let enable_console = if matches.is_present("enable-console") {
+            Some(true)
+        } else if matches.is_present("disable-console") {
+            Some(false)
+        } else {
+            None
+        };
+
+        let enable_graphite = if matches.is_present("enable-graphite") {
+            Some(true)
+        } else if matches.is_present("disable-graphite") {
+            Some(false)
+        } else {
+            None
+        };
+
+        let flush_period_ms = if let Some(v) = matches.value_of("flush-period-ms") {
+            Some(try!(parse_flush_period_from_str(v, "flush-period-ms")))
+        } else {
+            None
+        };
+
+        let graphite_addr = if let Some(v) = matches.value_of("graphite-addr") {
+            Some(try!(parse_addr(v, "graphite-addr")))
+        } else {
+            None
+        };
+
+        let local_addr = if let Some(v) = matches.value_of("local-addr") {
+            Some(try!(parse_addr(v, "local-addr")))
+        } else {
+            None
+        };
+
+        let log_level = if matches.is_present("debug") {
+            Some(log::LogLevelFilter::Debug)
+        } else if matches.is_present("verbose") {
+            Some(log::LogLevelFilter::Info)
+        } else if matches.is_present("quiet") {
+            Some(log::LogLevelFilter::Error)
+        } else {
+            None
+        };
+
+        let prefix_global = matches.value_of("prefix-global").map(|v| v.to_string());
+        let prefix_counters = matches.value_of("prefix-counters").map(|v| v.to_string());
+        let prefix_timers = matches.value_of("prefix-timers").map(|v| v.to_string());
+        let prefix_gauges = matches.value_of("prefix-gauges").map(|v| v.to_string());
+
+        let timer_percentiles = if let Some(v) = matches.value_of("timer-percentiles") {
+            Some(try!(parse_percentiles_from_str(v, "timer-percentiles")))
+        } else {
+            None
+        };
+
+        let config_file = matches.value_of("config").map(|v| v.to_string());
+
+        Ok(CliConfig {
+            enable_console: enable_console,
+            enable_graphite: enable_graphite,
+            flush_period_ms: flush_period_ms,
+            graphite_addr: graphite_addr,
+            local_addr: local_addr,
+            log_level: log_level,
+            prefix_global: prefix_global,
+            prefix_counters: prefix_counters,
+            prefix_timers: prefix_timers,
+            prefix_gauges: prefix_gauges,
+            timer_percentiles: timer_percentiles,
+            config_file: config_file,
+        })
+    }
+}
+
+
+impl MergeConfig for CliConfig {
+    fn merge_to(self, conf: &ServerConfig) -> ServerConfig {
+        let mut merged = conf.clone();
+
+        if let Some(v) = self.enable_console {
+            merged.enable_console = v;
+        }
+
+        if let Some(v) = self.enable_graphite {
+            merged.enable_graphite = v;
+        }
+
+        if let Some(v) = self.flush_period_ms {
+            merged.flush_period_ms = v;
+        }
+
+        if let Some(v) = self.graphite_addr {
+            merged.graphite_addr = v;
+        }
+
+        if let Some(v) = self.local_addr {
+            merged.local_addr = v;
+        }
+
+        if let Some(v) = self.log_level {
+            merged.log_level = v;
+        }
+
+        if let Some(v) = self.prefix_global {
+            merged.prefix_global = v;
+        }
+
+        if let Some(v) = self.prefix_counters {
+            merged.prefix_counters = v;
+        }
+
+        if let Some(v) = self.prefix_timers {
+            merged.prefix_timers = v;
+        }
+
+        if let Some(v) = self.prefix_gauges {
+            merged.prefix_gauges = v;
+        }
+
+        if let Some(v) = self.timer_percentiles {
+            merged.timer_percentiles = v;
+        }
+
+        merged
+    }
+}

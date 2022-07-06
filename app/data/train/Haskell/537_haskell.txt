@@ -1,0 +1,88 @@
+module Reader where
+
+import Control.Applicative ((<$>), (<*>))
+
+import Text.ParserCombinators.Parsec
+import Text.ParserCombinators.Parsec.Language
+import Text.ParserCombinators.Parsec.Token
+
+import LispData
+import Numbers
+
+-- | parses lisp code from a string and returns either the code an error message
+reader :: String -> Either String LispVal
+reader str = case parse parser "Lisp" str of
+    Left err -> Left (show err)
+    Right res -> Right res
+    where parser = const . makeForms <$> many lispParser <*> eof
+          makeForms [form] = form
+          makeForms forms = List (Symbol "begin" : forms)
+
+-- | parses one lisp token
+lexer :: TokenParser ()
+lexer = makeTokenParser LanguageDef
+    { commentStart = "#|"
+    , commentEnd = "|#"
+    , commentLine = ";"
+    , nestedComments = True
+    , identStart = symChar
+    , identLetter = symChar
+    , opStart = oneOf ""
+    , opLetter = oneOf ""
+    , reservedNames = []
+    , reservedOpNames = []
+    , caseSensitive = False
+    }
+    where symChar = alphaNum <|> oneOf "?+*~#-_.:=&%$!^<>|/"
+
+-- | parses lisp
+lispParser :: Parser LispVal
+lispParser = do
+    whiteSpace lexer
+    val <- try numberParser <|>
+           try boolParser <|>
+           symbolParser <|>
+           stringParser <|>
+           listParser <|>
+           quoteParser <|>
+           quasiQuoteParser <|>
+           unquoteParser
+    whiteSpace lexer
+    return val
+
+symbolParser :: Parser LispVal
+symbolParser = do
+    name <- identifier lexer
+    return $ if name == "nil"
+        then Nil
+        else Symbol name
+
+-- TODO: nice literals for rationals and complex numbers
+numberParser :: Parser LispVal
+numberParser = do
+    sign <- optionMaybe (oneOf "-+")
+    let mySign = case sign of
+            Just '-' -> -1
+            _ -> 1
+    number <- naturalOrFloat lexer
+    return $ Number $ case number of
+        Left i -> LispInt (mySign * i)
+        Right f -> LispFloat (fromIntegral mySign * f)
+
+stringParser :: Parser LispVal
+stringParser = LispString <$> stringLiteral lexer
+
+listParser :: Parser LispVal
+listParser = (\_ content _ -> List content) <$> char '(' <*> many lispParser <*> char ')'
+
+quoteParser :: Parser LispVal
+quoteParser = (\_  val -> List [Symbol "quote", val]) <$> char '\'' <*> lispParser
+
+quasiQuoteParser :: Parser LispVal
+quasiQuoteParser = (\_ val -> List [Symbol "quasiquote", val]) <$> char '`' <*> lispParser
+
+unquoteParser :: Parser LispVal
+unquoteParser = (\_ val -> List [Symbol "unquote", val]) <$> char ',' <*> lispParser
+
+boolParser :: Parser LispVal
+boolParser = char '#' >> ((char 't' >> return (Boolean True)) <|> (char 'f' >> return (Boolean False)))

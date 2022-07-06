@@ -1,0 +1,2525 @@
+#!/bin/bash
+# ssh -x dwragg@eddie3.ecdf.ed.ac.uk
+
+# Update files time stamp to prevent deletion
+# find . -exec touch -h {} \;
+
+# qsub -tc <int> restricts number of concurrent jobs to be run
+
+# Sync folder to datastore
+# qsub -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stageout.sh \
+#   -s ${SCRATCH}/${PROJECT} \
+#   -d /exports/cmvm/datastore/eb/groups/prendergast_grp/dw
+
+# Sync file to datastore
+# qsub -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stageout-cp.sh \
+#   -s ${SCRATCH}/${PROJECT}/Results/1kG_kurtosis_2.nominalP \
+#   -d ${DATASTORE}/dw/Epistasis/Results
+
+# Copy from datastore
+# qsub -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stagein.sh  \
+#   -s ${DATASTORE}/jamesp/Analysis/ExprPred/LBC/NewDosages/chr*.* \
+#   -d ${SCRATCH}/${PROJECT}/Dosages/LBC/original
+
+# ==================================================================================================
+
+# Modules
+module load igmm/apps/python/2.7.10
+#module load igmm/apps/R/3.3.3
+module load igmm/apps/R/3.5.1
+module load igmm/apps/plink/1.90b4
+module load igmm/apps/vcftools/0.1.13
+module load igmm/apps/tabix/0.2.5
+module load igmm/apps/bcftools/1.3
+module load igmm/libs/htslib/1.6
+# Cross Map installed on Eddie now (not tested)
+# module load igmm/apps/python/2.7.10
+
+# Variables
+DATASTORE=/exports/cmvm/datastore/eb/groups/prendergast_grp
+SCRATCH=/exports/eddie/scratch/dwragg
+SCRIPTS=/home/dwragg/scripts
+PROJECT="Epistasis"
+#VERSION="10-2018"
+VERSION="03-2019_regcov" # PEER covariates regressed out
+#VERSION="03-2019b" # unknown
+CORES="roslin_ctlgh"
+
+
+# Directory structure
+mkdir -p ${SCRATCH}/${PROJECT}/logs
+mkdir -p ${SCRATCH}/${PROJECT}/scripts
+mkdir -p ${SCRATCH}/${PROJECT}/vcfs/LBC/pca
+mkdir -p ${SCRATCH}/${PROJECT}/vcfs/1kG/pca
+mkdir -p ${SCRATCH}/${PROJECT}/vcfs/intersect
+mkdir -p ${SCRATCH}/${PROJECT}/Annotation
+mkdir -p ${SCRATCH}/${PROJECT}/Dosages/LBC
+mkdir -p ${SCRATCH}/${PROJECT}/Dosages/1kG
+mkdir -p ${SCRATCH}/${PROJECT}/Expression/LBC
+mkdir -p ${SCRATCH}/${PROJECT}/Expression/1kG
+mkdir -p ${SCRATCH}/${PROJECT}/glms/1kG
+mkdir -p ${SCRATCH}/${PROJECT}/glms/LBC
+mkdir -p ${SCRATCH}/${PROJECT}/glms/1kG-LBC
+
+
+
+
+# ==================================================================================================
+# Pre-processing of LBC data
+# ==================================================================================================
+
+
+# QC LBC data to reduce to 908 samples identified by PCA
+# Identify SNPs common to both datasets
+# Generate dosage and expression files for LBC
+
+
+# Download ensembl-vep cache for GRCh38
+mkdir -p ${SCRATCH}/${PROJECT}/ensembl-vep
+cd ${SCRATCH}/${PROJECT}/ensembl-vep
+wget ftp://ftp.ensembl.org/pub/release-88/variation/VEP/homo_sapiens_vep_88_GRCh38.tar.gz
+tar xzf homo_sapiens_vep_88_GRCh38.tar.gz
+
+# Download LBC vcf files
+qsub -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stagein.sh  \
+  -s ${DATASTORE}/qian/PredictDB/lbc_vcf/lbc.chr2.vcf.gz \
+  -d ${SCRATCH}/${PROJECT}/vcfs/LBC
+
+# Annotate LBC VCFs with rsids
+mkdir -p ${SCRATCH}/${PROJECT}/rsid
+cd ${SCRATCH}/${PROJECT}/rsid
+wget ftp://ftp.ncbi.nlm.nih.gov/snp/organisms/human_9606_b150_GRCh38p7/VCF/All_20170710.vcf.gz*
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/annotate_vcf_rsid.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr \
+    -r ${SCRATCH}/${PROJECT}/rsid/All_20170710.vcf.gz
+
+# QC LBC data
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-qc_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.vcf.gz" \
+    -x ${SCRATCH}/${PROJECT}/Annotation/LBC.ids
+
+# Extract rsids from LBC data
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_rsid.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.vcf.gz"
+
+
+
+
+# ==================================================================================================
+# Pre-processing of 1kG data
+# ==================================================================================================
+
+
+# Download 1kG data
+cd ${SCRATCH}/${PROJECT}/Dosages/1kG/vcfs
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get1kG.sh -i ${SCRATCH}/${PROJECT}/Annotation/EUR.ids 
+
+# CrossMap 1kG_b37 to 1kG_b38
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/crossmap.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG \
+    -f ${SCRATCH}/${PROJECT}/CrossMap/fasta/hg38.fa \
+    -c ${SCRATCH}/${PROJECT}/CrossMap/chains/GRCh37_to_GRCh38.chain.gz 
+
+# Filter 1kG on European individuals
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-sample_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b37.vcf.gz" \
+    -x ${SCRATCH}/${PROJECT}/Annotation/EUR.ids
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-sample_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.vcf.gz" \
+    -x ${SCRATCH}/${PROJECT}/Annotation/EUR.ids
+
+# Extract rsids from 1kG data
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_rsid.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.vcf.gz"
+
+
+
+
+
+# ==================================================================================================
+# Intersection of LBC and 1kG rsids, and subsequent filtering of VCF fies
+# ==================================================================================================
+
+# once rsids have been extracted, the intersect of LBC + 1kG rsids for each chromosome
+# needs to be recorded and used to subset both datasets
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/intersect_rsid.sh \
+    -a ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr \
+    -b ${SCRATCH}/${PROJECT}/vcfs/1kG/chr \
+    -o ${SCRATCH}/${PROJECT}/vcfs/intersect
+
+# filter LBC VCF file on intersecting SNPs
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-site_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.vcf.gz" \
+    -x ${SCRATCH}/${PROJECT}/vcfs/intersect
+# filter 1kG_b37 VCF on intersecting SNPs (needs running for 1-21)
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-site_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b37.eur.vcf.gz" \
+    -x ${SCRATCH}/${PROJECT}/vcfs/intersect
+# filter 1kG_b38 VCF on intersecting SNPs (needs running for 1-21)
+qsub -l h_vmem=16G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-site_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.vcf.gz" \
+    -x ${SCRATCH}/${PROJECT}/vcfs/intersect
+
+# Get LBC line count from VCF files to check consistency post-filtering on rsids
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_linecount.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.intersect.vcf.gz"
+# Get 1kG line count from VCF files to check consistency post-filtering on rsids
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_linecount.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.intersect.vcf.gz"
+
+# Remove biallelic SNPs in 1kG_b38 data, forgot to remove these in an earlier filter step
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-biallelic_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.intersect.vcf.gz"
+# Remove biallelic SNPs in 1kG_b37 data, forgot to remove these in an earlier filter step
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-biallelic_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b37.eur.intersect.vcf.gz"
+# Remove 1kG biallelic SNPs from LBC data, forgot to remove these in an earlier filter step
+qsub -hold_jid vcf-biallelic_filter.sh -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-rsid_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.intersect.vcf.gz" \
+    -x ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -y "_b38.eur.intersect.bi.vcf.rsids"
+
+# Get LBC line count from VCF files to check consistency post-filtering on biallelic snps
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_linecount.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.intersect.bi.vcf.gz"
+# Get 1kG line count from VCF files to check consistency post-filtering on biallelic snps
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_linecount.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.intersect.bi.vcf.gz"
+# Still more SNPS that there are unique SNPS, suggesting INDELs
+
+# Remove INDELs from LBC data
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-indel_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.intersect.bi.vcf.gz"
+# Remove INDELs from 1kG_b38 data
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-indel_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.intersect.bi.vcf.gz"
+# Remove INDELs from 1kG_b37 data
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/vcf-indel_filter.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b37.eur.intersect.bi.vcf.gz"
+
+# Get LBC line count from VCF files to check consistency post-filtering on biallelic snps
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_linecount.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.intersect.bi.noindels.vcf.gz"
+# Get 1kG line count from VCF files to check consistency post-filtering on biallelic snps
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_linecount.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.intersect.bi.noindels.vcf.gz"
+# Perfect.
+
+# Extract LBC SNP annotation from LBC and 1kG_b37 for fixing 1kG SNP annotations
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_annotation.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.intersect.bi.noindels.vcf.gz"
+# Extract 1kG SNP annotation from LBC and 1kG_b37 for fixing 1kG SNP annotations
+qsub -l h_vmem=2G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/get_vcf_annotation.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b37.eur.intersect.bi.noindels.vcf.gz"
+
+
+
+
+# ==================================================================================================
+# Generate dosage files (for PrediXcan) and genotype file (for PredictDB)
+# ==================================================================================================
+
+# Generate LBC dosages files via Plink and PrediXcan
+qsub -l h_vmem=32G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_dosages_file.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.intersect.bi.noindels.vcf.gz" \
+    -o ${SCRATCH}/${PROJECT}/Dosages/LBC
+# Generate 1kG dosages files via Plink and PrediXcan
+qsub -l h_vmem=32G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_dosages_file.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.intersect.bi.noindels.vcf.gz" \
+    -o ${SCRATCH}/${PROJECT}/Dosages/1kG
+
+# Check for difference in ref allele and position of LBC vs 1kG data for each chromosome
+for CHR in {1..22}
+do
+  zcat ${SCRATCH}/${PROJECT}/Dosages/LBC/chr${CHR}.txt.gz | cut -d' ' -f1-5 > ${SCRATCH}/${PROJECT}/Dosages/logs/lbc.chr${CHR}.ref
+  zcat ${SCRATCH}/${PROJECT}/Dosages/1kG/chr${CHR}.txt.gz | cut -d' ' -f1-5 > ${SCRATCH}/${PROJECT}/Dosages/logs/1kg.chr${CHR}.ref
+  R CMD ${SCRATCH}/${PROJECT}/scripts/check_dosages.R \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/lbc.chr${CHR}.ref \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/1kg.chr${CHR}.ref \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/lbc-1kg.chr${CHR}.fail \
+    > ${SCRATCH}/${PROJECT}/Dosages/logs/lbc-1kg.chr${CHR}.log
+done
+# Once the SNPs with inconsistent positions have been identified, these need removing from the
+# dosage files
+for CHR in {1..21}
+do
+  zcat ${SCRATCH}/${PROJECT}/Dosages/1kG/chr${CHR}.txt.gz | \
+    grep -vFwf ${SCRATCH}/${PROJECT}/Dosages/logs/lbc-1kg.chr${CHR}.fail - \
+    > ${SCRATCH}/${PROJECT}/Dosages/1kG/chr${CHR}.txt
+  gzip -f ${SCRATCH}/${PROJECT}/Dosages/1kG/chr${CHR}.txt
+  zcat ${SCRATCH}/${PROJECT}/Dosages/LBC/chr${CHR}.txt.gz | \
+    grep -vFwf ${SCRATCH}/${PROJECT}/Dosages/logs/lbc-1kg.chr${CHR}.fail - \
+    > ${SCRATCH}/${PROJECT}/Dosages/LBC/chr${CHR}.txt
+  gzip -f ${SCRATCH}/${PROJECT}/Dosages/LBC/chr${CHR}.txt
+done
+# Check for difference in ref allele and position of LBC vs 1kG data for each chromosome
+for CHR in {1..22}
+do
+  zcat ${SCRATCH}/${PROJECT}/Dosages/LBC/chr${CHR}.txt.gz | cut -d' ' -f1-5 > ${SCRATCH}/${PROJECT}/Dosages/logs/lbc.chr${CHR}.ref
+  zcat ${SCRATCH}/${PROJECT}/Dosages/1kG/chr${CHR}.txt.gz | cut -d' ' -f1-5 > ${SCRATCH}/${PROJECT}/Dosages/logs/1kg.chr${CHR}.ref
+  R CMD ${SCRATCH}/${PROJECT}/scripts/check_dosages.R \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/lbc.chr${CHR}.ref \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/1kg.chr${CHR}.ref \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/lbc-1kg.chr${CHR}.fail2 \
+    > ${SCRATCH}/${PROJECT}/Dosages/logs/lbc-1kg.chr${CHR}.log2
+done
+# All files have matching numbers of lines, reference alleles and positions
+
+# Fix alt allele for SNPs with different ref allele in 1kG_b38 to 1kG_b37
+for CHR in {1..22}
+do
+  R CMD ${SCRATCH}/${PROJECT}/scripts/fix_dosage_alt_allele.R \
+    ${SCRATCH}/${PROJECT}/Dosages/1kG/chr${CHR}.txt.gz \
+    ${SCRATCH}/${PROJECT}/vcfs/1kG/chr${CHR}_b37.eur.intersect.bi.noindels.annotation
+done
+mkdir -p ${SCRATCH}/${PROJECT}/Dosages/1kG/original
+cp ${SCRATCH}/${PROJECT}/Dosages/1kG/*.txt.gz ${SCRATCH}/${PROJECT}/Dosages/1kG/original
+rename .fix.txt .txt ${SCRATCH}/${PROJECT}/Dosages/1kG/*.fix.txt
+gzip -f ${SCRATCH}/${PROJECT}/Dosages/1kG/*.txt
+
+
+# Make 1kG genotype file
+qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_genotype_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/1kG -o ${SCRATCH}/${PROJECT}/Dosages/1kG.geno
+# Make LBC genotype file
+qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_genotype_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/LBC -o ${SCRATCH}/${PROJECT}/Dosages/LBC.geno
+
+# Make LBC SNP annotation file
+qsub -hold_jid make_genotype_file.sh  -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_annotation_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/LBC -o ${SCRATCH}/${PROJECT}/Dosages/LBC.snp.annotation
+# Make 1kG SNP annotation file
+qsub -hold_jid make_genotype_file.sh -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_annotation_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/1kG -o ${SCRATCH}/${PROJECT}/Dosages/1kG.snp.annotation
+
+# Retrospectively identifcation of SNPs with different alt alleles in both populations
+# BASH diff function does the trick, otherwise the annotation files would be identical
+diff ${SCRATCH}/${PROJECT}/Dosages/LBC.snp.annotation ${SCRATCH}/${PROJECT}/Dosages/1kG.snp.annotation \
+  | grep "^>" > ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.snps
+cut -f3 ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.snps \
+  > ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.variantID
+cut -f1,6 ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.snps \
+  > ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.rsid
+sed -i 's/^> //g' ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.rsid
+sed -i 's/\t/ /g' ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.rsid
+
+# Remove these from the genotype files
+grep -vFwf ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.variantID \
+  ${SCRATCH}/${PROJECT}/Dosages/1kG.geno > ${SCRATCH}/${PROJECT}/Dosages/1kG.geno.alt1
+mv ${SCRATCH}/${PROJECT}/Dosages/1kG.geno.alt1 ${SCRATCH}/${PROJECT}/Dosages/1kG.geno
+grep -vFwf ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.variantID \
+  ${SCRATCH}/${PROJECT}/Dosages/1kG.geno > ${SCRATCH}/${PROJECT}/Dosages/LBC.geno.alt1
+mv ${SCRATCH}/${PROJECT}/Dosages/LBC.geno.alt1 ${SCRATCH}/${PROJECT}/Dosages/LBC.geno
+
+# Remove these from dosage files
+qsub -l h_vmem=32G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/filter_dosage_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/LBC \
+    -s ${SCRATCH}/${PROJECT}/Dosages/different.alt.allele.rsid
+
+# Re-make LBC SNP annotation file
+qsub -hold_jid make_genotype_file.sh  -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_annotation_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/LBC -o ${SCRATCH}/${PROJECT}/Dosages/LBC.snp.annotation
+# Re-make 1kG SNP annotation file
+qsub -hold_jid make_genotype_file.sh -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_annotation_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/1kG -o ${SCRATCH}/${PROJECT}/Dosages/1kG.snp.annotation
+# files have been checked and are identical
+
+# SNPs for inclusion in analyses are:
+cut -f6 ${SCRATCH}/${PROJECT}/Dosages/1kG.snp.annotation | sed '1d' \
+  > ${SCRATCH}/${PROJECT}/Dosages/rsids.pass
+
+
+
+
+# ==================================================================================================
+# Identify samples that are too closely related, these need removing from downsteram analyses
+# ==================================================================================================
+
+# Merge LBC VCF files
+FILES=(${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr*_rsid.qc.intersect.bi.noindels.vcf.gz)
+printf "%s\n" ${FILES[@]} > ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc_rsid.qc.intersect.bi.noindels.vcflist
+qsub -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/bcftools-concat.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc_rsid.qc.intersect.bi.noindels.vcflist \
+    -o ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc_rsid.qc.intersect.bi.noindels.vcf.gz
+# Merge 1kG VCF files
+FILES=(${SCRATCH}/${PROJECT}/vcfs/1kG/chr*_b38.eur.intersect.bi.noindels.vcf.gz)
+printf "%s\n" ${FILES[@]} > ${SCRATCH}/${PROJECT}/vcfs/1kG/1kG_b38.eur.intersect.bi.noindels.vcflist
+qsub -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/bcftools-concat.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/1kG_b38.eur.intersect.bi.noindels.vcflist \
+    -o ${SCRATCH}/${PROJECT}/vcfs/1kG/1kG_b38.eur.intersect.bi.noindels.vcf.gz
+
+# Run LBC PCA
+qsub -l h_vmem=48G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/pca.sh \
+    -i ${SCRATCH}/${PROJECT}/Annotation/carys.blacklist \
+    -v ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc_rsid.qc.intersect.bi.noindels.vcf.gz \
+    -o ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01
+
+# Run 1kG PCA
+qsub -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/pca.sh \
+    -v ${SCRATCH}/${PROJECT}/vcfs/1kG/1kG_b38.eur.intersect.bi.noindels.vcf.gz \
+    -o ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01
+
+
+# Individuals to be retained in each dataset
+#	cp ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.rel.id \
+#	   ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.pass
+#	cp ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.rel.id \
+#	   ${SCRATCH}/${PROJECT}/Annotation/LBC.pass
+
+
+
+
+# ==================================================================================================
+# Re-create input files (dosage, genotype, expression) on new subset of samples and SNPs
+# ==================================================================================================
+
+
+# Due to individuals needed to be removed from each dataset, the dosage files need re-creating,
+# only really a problem for LBC where dosage is imputed from MAF, but doing both populations...
+
+mkdir -p ${SCRATCH}/${PROJECT}/Dosages/pass1
+mv ${SCRATCH}/${PROJECT}/Dosages/1kG ${SCRATCH}/${PROJECT}/Dosages/pass1
+mv ${SCRATCH}/${PROJECT}/Dosages/LBC ${SCRATCH}/${PROJECT}/Dosages/pass1
+mkdir ${SCRATCH}/${PROJECT}/Dosages/1kG
+mkdir ${SCRATCH}/${PROJECT}/Dosages/LBC
+
+# Generate 1kG dosages files via Plink and PrediXcan
+qsub -l h_vmem=32G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_dosages_file2.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/1kG/chr -s "_b38.eur.intersect.bi.noindels.vcf.gz" \
+    -o ${SCRATCH}/${PROJECT}/Dosages/1kG \
+    -a ${SCRATCH}/${PROJECT}/Dosages/rsids.pass \
+    -b ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.rel.id
+
+# Generate LBC dosages files via Plink and PrediXcan
+qsub -l h_vmem=32G -t 1-22 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_dosages_file2.sh \
+    -i ${SCRATCH}/${PROJECT}/vcfs/LBC/lbc.chr -s "_rsid.qc.intersect.bi.noindels.vcf.gz" \
+    -o ${SCRATCH}/${PROJECT}/Dosages/LBC \
+    -a ${SCRATCH}/${PROJECT}/Dosages/rsids.pass \
+    -b ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.rel.id
+
+# Double-check no differences in ref allele and positions
+for CHR in {1..22}
+do
+  zcat ${SCRATCH}/${PROJECT}/Dosages/LBC/chr${CHR}.txt.gz | cut -d' ' -f1-5 > ${SCRATCH}/${PROJECT}/Dosages/logs/lbc.chr${CHR}.ref
+  zcat ${SCRATCH}/${PROJECT}/Dosages/1kG/chr${CHR}.txt.gz | cut -d' ' -f1-5 > ${SCRATCH}/${PROJECT}/Dosages/logs/1kg.chr${CHR}.ref
+  R CMD ${SCRATCH}/${PROJECT}/scripts/check_dosages.R \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/lbc.chr${CHR}.ref \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/1kg.chr${CHR}.ref \
+    ${SCRATCH}/${PROJECT}/Dosages/logs/lbc-1kg.chr${CHR}.fail \
+    > ${SCRATCH}/${PROJECT}/Dosages/logs/lbc-1kg.chr${CHR}.log
+done
+# All clear.
+
+# Fix alt allele for SNPs with different ref allele in 1kG_b38 to 1kG_b37
+for CHR in {1..22}
+do
+  R CMD ${SCRATCH}/${PROJECT}/scripts/fix_dosage_alt_allele.R \
+    ${SCRATCH}/${PROJECT}/Dosages/1kG/chr${CHR}.txt.gz \
+    ${SCRATCH}/${PROJECT}/vcfs/1kG/chr${CHR}_b37.eur.intersect.bi.noindels.annotation
+done
+mkdir -p ${SCRATCH}/${PROJECT}/Dosages/1kG/original
+cp ${SCRATCH}/${PROJECT}/Dosages/1kG/*.txt.gz ${SCRATCH}/${PROJECT}/Dosages/1kG/original
+rename .fix.txt .txt ${SCRATCH}/${PROJECT}/Dosages/1kG/*.fix.txt
+gzip -f ${SCRATCH}/${PROJECT}/Dosages/1kG/*.txt
+
+# Make 1kG genotype file
+qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_genotype_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/1kG -o ${SCRATCH}/${PROJECT}/Dosages/1kG.geno
+# Make LBC genotype file
+qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_genotype_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/LBC -o ${SCRATCH}/${PROJECT}/Dosages/LBC.geno
+
+
+# Annotation files should be identical
+# Re-make 1kG SNP annotation file
+qsub -hold_jid make_genotype_file.sh -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_annotation_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/1kG -o ${SCRATCH}/${PROJECT}/Dosages/1kG.snp.annotation
+# Re-make LBC SNP annotation file
+qsub -hold_jid make_genotype_file.sh  -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/make_annotation_file.sh \
+    -i ${SCRATCH}/${PROJECT}/Dosages/LBC -o ${SCRATCH}/${PROJECT}/Dosages/LBC.snp.annotation
+# Identical
+
+
+# Filter LBC expression data on samples that pass QC
+R CMD ${SCRATCH}/${PROJECT}/scripts/expression-samples_filter.R \
+  ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.txt \
+  ${SCRATCH}/${PROJECT}/Annotation/LBC.pass
+
+# Filter 1kG expression data on samples that pass QC
+R CMD ${SCRATCH}/${PROJECT}/scripts/expression-samples_filter.R \
+  ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.txt \
+  ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.pass
+
+# Transpose expression data for later analysis in models
+${SCRATCH}/${PROJECT}/scripts/transpose_expr.R \
+  ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.txt \
+  ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt
+
+# Transpose expression data for later analysis in models
+${SCRATCH}/${PROJECT}/scripts/transpose_expr.R \
+  ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.txt \
+  ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt
+
+# Copy files to PredictDB folders
+cp ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.txt \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/input/expression_phenotypes
+cp ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.txt \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/input/expression_phenotypes
+cp ${SCRATCH}/${PROJECT}/Dosages/1kG.snp.annotation \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/input/annotations/snp_annotation
+cp ${SCRATCH}/${PROJECT}/Dosages/LBC.snp.annotation \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/input/annotations/snp_annotation
+cp ${SCRATCH}/${PROJECT}/Dosages/1kG.geno \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/input/genotypes
+cp ${SCRATCH}/${PROJECT}/Dosages/LBC.geno \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/input/genotypes
+
+
+
+
+
+# ==================================================================================================
+# PredictDB
+# ==================================================================================================
+
+STUDY="1kG"
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+python preprocess.py
+# Check SEED and STUDY values in model_parameters.py before proceeding
+python train_models.py
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/scripts
+python check_job_logs.py ${STUDY}/
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+python post_process.py
+
+STUDY="LBC"
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+python preprocess.py
+# Check SEED and STUDY values in model_parameters.py before proceeding
+python train_models.py
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/scripts
+python check_job_logs.py ${STUDY}/
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+python post_process.py
+# weights filtered db has 143910 distinct SNPs, 6971 distinct gene IDs (5852 actual genes)
+
+
+
+
+# ==================================================================================================
+# PrediXcan
+# ==================================================================================================
+
+# Predict gene expression in 1kG
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/1kG \
+    -i ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/OnekG_HapMap_alpha0.5_window1e6_filtered.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur
+
+# Generate seed file (list of genes) for use in glms
+head --l 1 ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.txt | sed 's/\t/\n/g' - \
+  > ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.genes
+sed -i '1d' ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.genes
+sed -i '1d' ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.genes
+
+# Predict gene expression in LBC
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/LBC \
+    -i ${SCRATCH}/${PROJECT}/Annotation/LBC.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/LBC_HapMap_alpha0.5_window1e6_filtered.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/LBC/LBC
+
+# Generate seed file (list of genes) for use in glms
+head --l 1 ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.txt | sed 's/\t/\n/g' - \
+  > ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.genes
+sed -i '1d' ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.genes
+sed -i '1d' ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.genes
+
+# Predict gene expression in 1kG using LBC database
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/1kG \
+    -i ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/LBC_HapMap_alpha0.5_window1e6_filtered.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC
+
+# Generate seed file (list of genes) for use in glms
+head --l 1 ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.txt | sed 's/\t/\n/g' - \
+  > ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.genes
+sed -i '1d' ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.genes
+sed -i '1d' ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.genes
+
+# Predict gene expression in LBC using 1kG database
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/LBC \
+    -i ${SCRATCH}/${PROJECT}/Annotation/LBC.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/OnekG_HapMap_alpha0.5_window1e6_filtered.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.1kG.eur
+
+# Generate seed file (list of genes) for use in glms
+head --l 1 ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.1kG.eur_predicted_expression.txt | sed 's/\t/\n/g' - \
+  > ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.1kG.eur_predicted_expression.genes
+sed -i '1d' ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.1kG.eur_predicted_expression.genes
+sed -i '1d' ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.1kG.eur_predicted_expression.genes
+
+
+
+
+
+# Also generate prediction data for ALL Genes, not just those that have significant models
+
+# Predict gene expression in LBC
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/LBC \
+    -i ${SCRATCH}/${PROJECT}/Annotation/LBC.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/LBC_HapMap_alpha0.5_window1e6.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_all
+
+# Predict gene expression in 1kG using LBC database
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/1kG \
+    -i ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/LBC_HapMap_alpha0.5_window1e6.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_all
+
+# Predict gene expression in 1kG
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/1kG \
+    -i ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/OnekG_HapMap_alpha0.5_window1e6.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_all
+
+
+
+
+
+# Count SNPs in each dataset, change directory to Dosages/<dataset>
+#FILES=(*.txt.gz)
+#for FILE in ${FILES[@]}
+#do
+#  zcat ${FILE} | wc -l
+#done
+
+
+
+
+
+# ==================================================================================================
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+# ==================================================================================================
+
+# GLMs
+
+# ==================================================================================================
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+# ==================================================================================================
+
+
+
+
+
+# ==================================================================================================
+# GLMs	(tests obsA ~ predA * predB)
+# ==================================================================================================
+
+# 1kG using 1kG database, seed file is predicted gene (~ 5450 genes)
+qsub -l h_vmem=4G -t 1-5450 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-c.R \
+    -f ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.genes \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec
+
+# LBC using LBC database, seed file is predicted gene (~ 6971 genes)
+qsub -l h_vmem=8G -t 1-6971 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-d.R \
+    -f ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.genes \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec
+
+# 1kG using LBC database, seed file is predicted gene (~ 6971 genes)
+qsub -l h_vmem=4G -t 1-6971 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-c.R \
+    -f ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.genes \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms/1kG-LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec
+# Will generate some errors for genes not in the observed dataset, these can be ignored
+
+# 1kG: Identify genes in model that passed kurtosis threshold
+grep -Fxf ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.genes \
+  ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.expr.filtered.transposed.kurtosis.9.pass \
+  > ${SCRATCH}/${PROJECT}/glms/1kG/1kG_kurtosis.pass
+# Concatenate these into single file
+FILES=($(cat ${SCRATCH}/${PROJECT}/glms/1kG/1kG_kurtosis.pass))
+cd ${SCRATCH}/${PROJECT}/glms/1kG
+head --l 1 ${FILES[0]/%/.nominal} > ${SCRATCH}/${PROJECT}/glms/1kG.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE/%/.nominal} >> ${SCRATCH}/${PROJECT}/glms/1kG.nominal
+done
+
+# LBC: Identify genes in model that passed kurtosis threshold
+grep -Fxf ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.genes \
+  ${SCRATCH}/${PROJECT}/Annotation/LBC.expr.filtered.transposed.kurtosis.9.pass \
+  > ${SCRATCH}/${PROJECT}/glms/LBC/LBC_kurtosis.pass
+# Concatenate these into single file
+FILES=($(cat ${SCRATCH}/${PROJECT}/glms/LBC/LBC_kurtosis.pass)) # 6091 genes
+cd ${SCRATCH}/${PROJECT}/glms/LBC
+head --l 1 ${FILES[0]/%/.nominal} > ${SCRATCH}/${PROJECT}/glms/LBC.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE/%/.nominal} >> ${SCRATCH}/${PROJECT}/glms/LBC.nominal
+done
+# 150366663 /exports/eddie/scratch/dwragg/Epistasis/glms/LBC.nominal
+
+# 1kG-LBC: Identify genes in model that passed kurtosis threshold
+grep -Fxf ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.genes \
+  ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.expr.filtered.transposed.kurtosis.9.pass \
+  > ${SCRATCH}/${PROJECT}/glms/1kG-LBC/1kG_kurtosis.pass
+# Concatenate these into single file
+FILES=($(cat ${SCRATCH}/${PROJECT}/glms/1kG-LBC/1kG_kurtosis.pass))
+cd ${SCRATCH}/${PROJECT}/glms/1kG-LBC
+head --l 1 ${FILES[0]/%/.nominal} > ${SCRATCH}/${PROJECT}/glms/1kG-LBC.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE/%/.nominal} >> ${SCRATCH}/${PROJECT}/glms/1kG-LBC.nominal
+done
+
+
+
+
+
+
+
+# ==================================================================================================
+# GLMs	(v2 which tests obsA ~ predA * obsB)
+# ==================================================================================================
+
+# 1kG using 1kG database, seed file is predicted gene (~ 5450 genes)
+qsub -l h_vmem=4G -t 1-5450 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v2c.R \
+    -f ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.genes \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms-v2/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec
+
+# LBC using LBC database, seed file is predicted gene (~ 6971 genes)
+qsub -l h_vmem=4G -t 1-6971 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v2d.R \
+    -f ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.genes \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms-v2/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec
+
+# 1kG using LBC database, seed file is predicted gene (~ 6971 genes)
+qsub -l h_vmem=4G -t 1-6971 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v2c.R \
+    -f ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.genes \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms-v2/1kG-LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec
+# Will generate some errors for genes not in the observed dataset, these can be ignored
+
+# 1kG: Identify genes in model that passed kurtosis threshold
+grep -Fxf ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.genes \
+  ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.expr.filtered.transposed.kurtosis.9.pass \
+  > ${SCRATCH}/${PROJECT}/glms-v2/1kG/1kG_kurtosis.pass
+# Concatenate these into single file
+FILES=($(cat ${SCRATCH}/${PROJECT}/glms-v2/1kG/1kG_kurtosis.pass))
+cd ${SCRATCH}/${PROJECT}/glms-v2/1kG
+head --l 1 ${FILES[0]/%/.nominal} > ${SCRATCH}/${PROJECT}/glms-v2/1kG.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE/%/.nominal} >> ${SCRATCH}/${PROJECT}/glms-v2/1kG.nominal
+done
+
+# LBC: Identify genes in model that passed kurtosis threshold
+grep -Fxf ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.genes \
+  ${SCRATCH}/${PROJECT}/Annotation/LBC.expr.filtered.transposed.kurtosis.9.pass \
+  > ${SCRATCH}/${PROJECT}/glms-v2/LBC/LBC_kurtosis.pass
+# Concatenate these into single file
+FILES=($(cat ${SCRATCH}/${PROJECT}/glms-v2/LBC/LBC_kurtosis.pass))
+cd ${SCRATCH}/${PROJECT}/glms-v2/LBC
+head --l 1 ${FILES[0]/%/.nominal} > ${SCRATCH}/${PROJECT}/glms-v2/LBC.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE/%/.nominal} >> ${SCRATCH}/${PROJECT}/glms-v2/LBC.nominal
+done
+
+# 1kG-LBC: Identify genes in model that passed kurtosis threshold
+grep -Fxf ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.genes \
+  ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.expr.filtered.transposed.kurtosis.9.pass \
+  > ${SCRATCH}/${PROJECT}/glms-v2/1kG-LBC/1kG_kurtosis.pass
+# Concatenate these into single file
+FILES=($(cat ${SCRATCH}/${PROJECT}/glms-v2/1kG-LBC/1kG_kurtosis.pass))
+cd ${SCRATCH}/${PROJECT}/glms-v2/1kG-LBC
+head --l 1 ${FILES[0]/%/.nominal} > ${SCRATCH}/${PROJECT}/glms-v2/1kG-LBC.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE/%/.nominal} >> ${SCRATCH}/${PROJECT}/glms-v2/1kG-LBC.nominal
+done
+
+
+
+# ==================================================================================================
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+# ==================================================================================================
+
+# Post-GLM processing (focus is on LBC + 1kG-LBC epistatic interactions)
+
+# [DONE]	PredictDB > PrediXcan
+# [DONE]	Identify predicted ~ observed expression r2 > 0.1, intersect[LBC,1kG-LBC]
+# [DONE]	(GLM,GLM2) > kurtosis.filter + concat > adjust P > add sign
+# [DONE]	Get beta sign distribution for predA:obsB
+# [DONE]	Identify pairs > plot.venn (all pairs)
+# [DONE]	Generate annotation file of gene pair positions (LBC)
+# [DONE]	Summarise annotation data
+# [DONE]	r2.filter to retain only pairs where geneA is on r2.pass list from previous step
+# [DONE]	Identify pairs > plot.venn (all pairs)
+# [DONE]	fdr.filter >, identify intserect  > plot.venn
+# [DONE]	On laptop test the 766 significant interactions for:
+# [DONE]		genetic component (predA:predB)
+# [DONE]		environmental component 1 (predA:obsB + SNPsB)
+# [DONE]		environmental component 2 (predA:obsB + SNPsB + LBCphenotype)
+# [DONE]	Network diagrams with and without sign filter
+
+
+# []	Blob plots (766 pairs, too many to plot all)
+# []	extend 1:M sub-networks to test for 3rd gene
+
+
+# ==================================================================================================
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+# ==================================================================================================
+
+
+
+
+
+# ==================================================================================================
+# Adjust P values and reduce to 3 significant figures to save storage
+# ==================================================================================================
+qsub -l h_vmem=64G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glms/LBC.nominal
+# ==================================================================================================
+# Identify gene IDs from pairs, sort, and append as column, append beta signs as columns also
+# ==================================================================================================
+TMPDIR=${SCRATCH}/${PROJECT}/glms
+mkdir -p ${TMPDIR}/tmp
+FILE=LBC.nominal.Padj
+split -l 1000000 -a 3 ${TMPDIR}/${FILE} ${TMPDIR}/tmp/${FILE}.
+FILES=(${TMPDIR}/tmp/${FILE}.*)
+printf "%s\n" ${FILES[@]} > ${TMPDIR}/${FILE}.chunks
+qsub  -l h_vmem=8G -t 1-151 -tc 50 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_pair_v2.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair.R \
+    -i ${TMPDIR}/${FILE}.chunks
+
+# Concatenate these into single file
+TMPDIR=${SCRATCH}/${PROJECT}/glms
+FILE=LBC.nominal.Padj
+FILES=(${TMPDIR}/tmp/${FILE}.*tmp)
+head --l 1 ${FILES[0]} > ${TMPDIR}/${FILE}.csv
+for FILEA in ${FILES[@]}
+do
+  sed '1d' ${FILEA} >> ${TMPDIR}/${FILE}.csv
+done
+FILES=(${TMPDIR}/tmp/${FILE}*)
+rm ${FILES[@]}
+rm ${TMPDIR}/${FILE}.chunks
+rm ${TMPDIR}/${FILE}
+rm ${TMPDIR}/${FILE%.Padj}
+
+# ==================================================================================================
+# From intersect of unfiltered results, generate table of sign concordance
+# ==================================================================================================
+FILEA=${SCRATCH}/${PROJECT}/glms/LBC.nominal.Padj.csv
+FILEB=${SCRATCH}/${PROJECT}/glms/1kG-LBC.nominal.Padj.csv
+cut -d',' -f7-8,15 ${FILEA} > ${FILEA}.genes
+cut -d',' -f7-8,15 ${FILEB} > ${FILEB}.genes
+# R
+library(data.table)
+args <- NULL
+args[1] <- "/exports/eddie/scratch/dwragg/Epistasis/glms/LBC.nominal.Padj.csv.genes"
+args[2] <- "/exports/eddie/scratch/dwragg/Epistasis/glms/1kG-LBC.nominal.Padj.csv.genes"
+dat1 <- fread(args[1], header=T, sep=",")
+dat2 <- fread(args[2], header=T, sep=",")
+keycols <- c("geneA", "geneB")
+setkeyv(dat1, keycols)
+setkeyv(dat2, keycols)
+tmp <- merge(dat1, dat2, by = c("geneA", "geneB"))
+tmp$sign_beta_predA.obsB.x <- gsub("1", "", gsub("^1", "+1", tmp$sign_beta_predA.obsB.x))
+tmp$sign_beta_predA.obsB.y <- gsub("1", "", gsub("^1", "+1", tmp$sign_beta_predA.obsB.y))
+tmp$sign_beta_predA.obsB <- paste(tmp$sign_beta_predA.obsB.x, tmp$sign_beta_predA.obsB.y, sep="/")
+tmp <- tmp[,c("geneA", "geneB", "sign_beta_predA.obsB")]
+fname <- paste(dirname(args[1]), "/", 
+  unlist(strsplit(basename(args[1]), "\\."))[1], "_", unlist(strsplit(basename(args[2]), "\\."))[1],
+  "_beta_sign_pAoB.csv", sep="")
+write.table(tmp, fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+# BASH
+rm ${FILEA}.genes
+rm ${FILEB}.genes
+
+
+# ==================================================================================================
+# Extract pairs (column 12) and plot Venn
+# ==================================================================================================
+cd ${SCRATCH}/${PROJECT}/glms
+FILEA=LBC.nominal.Padj.csv
+cut -d',' -f 12 ${FILEA} | sed '1d' > ${FILEA}.pairs
+FILEB=1kG-LBC.nominal.Padj.csv
+cut -d',' -f 12 ${FILEB} | sed '1d' > ${FILEB}.pairs
+# Venn Diagram
+qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_nominal_venn.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_nominal_pair_venn.R \
+    -a ${FILEA}.pairs -b ${FILEB}.pairs \
+    -o ${SCRATCH}/${PROJECT}/glms/LBC_1kG-LBC_pairs.venn.png \
+    -t "All gene pairs"
+
+# ==================================================================================================
+# Annotate nominal P pair files with gene annotations
+# ==================================================================================================
+FILE=${SCRATCH}/${PROJECT}/glms/LBC.nominal.Padj.csv
+# Split nominal P file into many smaller files
+split -l 1000000 -a 3 ${FILE} ${SCRATCH}/${PROJECT}/glms/tmp/chunk.
+FILES=(${SCRATCH}/${PROJECT}/glms/tmp/chunk.*)
+printf "%s\n" ${FILES[@]} > ${FILE}.chunks
+sed -i '1d' ${SCRATCH}/${PROJECT}/glms/tmp/chunk.aaa
+qsub -l h_vmem=8G -t 1-151 -tc 100 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_nominal_annotate_distance.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_nominal_annotate_distance.R \
+    -g ${SCRATCH}/${PROJECT}/Annotation/GRCh38.88.gtf \
+    -i ${FILE}.chunks
+# Merge results and append header
+FILES=(${SCRATCH}/${PROJECT}/glms/tmp/chunk.*.annotated)
+echo 'geneA,geneB,Achr,Astart,Astop,Bchr,Bstart,Bstop,distance' > ${FILE}.annotation.header
+cat ${FILE}.annotation.header ${FILES[@]} > ${FILE}.annotation
+rm ${FILE}.annotation.header
+rm ${SCRATCH}/${PROJECT}/glms/tmp/*
+# Generate annotation summary files
+# Check that the correct method of filtering duplicated/unique pairs is not commented out
+qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_pair_annotation_summary.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_annotation_summary.R \
+    -i ${FILE}.annotation
+
+
+
+# ==================================================================================================
+# Filter glm results to those where geneA has good predicted~observed correlation coefficient
+# ==================================================================================================
+TMPDIR=${SCRATCH}/${PROJECT}/glms
+mkdir -p ${TMPDIR}/tmp
+FILE=LBC.nominal.Padj.csv
+split -l 1000000 -a 3 ${TMPDIR}/${FILE} ${TMPDIR}/tmp/${FILE}.
+FILES=(${TMPDIR}/tmp/${FILE}.*)
+printf "%s\n" ${FILES[@]} > ${TMPDIR}/${FILE}.chunks
+qsub  -l h_vmem=8G -t 1-151 -tc 50 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_filter_r2pass.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_filter_R2pass.R \
+    -i ${TMPDIR}/${FILE}.chunks \
+    -r ${SCRATCH}/${PROJECT}/r2.pass
+
+# Concatenate these into single file
+TMPDIR=${SCRATCH}/${PROJECT}/glms
+FILE=LBC.nominal.Padj.csv
+FILES=(${TMPDIR}/tmp/${FILE}.*tmp)
+head --l 1 ${FILES[0]} > ${TMPDIR}/${FILE%.csv}.filtered.csv
+for FILEA in ${FILES[@]}
+do
+  sed '1d' ${FILEA} >> ${TMPDIR}/${FILE%.csv}.filtered.csv # 7159101
+done
+FILES=(${TMPDIR}/tmp/${FILE}*)
+rm ${FILES[@]}
+rm ${TMPDIR}/${FILE}.chunks
+
+# Copy files to datastore so results can be tabulated on laptop (glm_tabulate.R)
+# This will identify significant results in LBC & 1kG-LBC, which are then subject
+# to further GLM analyses on laptop, including more informative VennDiagrams, etc.
+
+
+# ==================================================================================================
+# Exrtact details from the LBC.nominal.Padj.filtered.csv to enable
+# 1) Summary of chromosome interactions to be generated
+# 2) Summary of sign confordance to be generaged
+# ==================================================================================================
+FILE=${SCRATCH}/${PROJECT}/glms-v2/1kG-LBC.nominal.Padj.csv
+# Cut gene pair and sign
+cut -d',' -f12,15 ${FILE%.csv}.filtered.csv > ${FILE%.csv}.filtered.pair.sign.csv
+sed -i 's/:/,/g' ${FILE%.csv}.filtered.pair.sign.csv
+sed -i "1s/.*/geneA,geneB,sign_predA.obsB/" ${FILE%.csv}.filtered.pair.sign.csv
+# Split nominal P file into many smaller files
+split -l 1000000 -a 3 ${FILE%.csv}.filtered.pair.sign.csv ${SCRATCH}/${PROJECT}/glms-v2/tmp/chunk.
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/tmp/chunk.*)
+printf "%s\n" ${FILES[@]} > ${FILE}.chunks
+sed -i '1d' ${SCRATCH}/${PROJECT}/glms-v2/tmp/chunk.aaa
+qsub -l h_vmem=8G -t 1-7 -tc 50 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_nominal_annotate_distance.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_nominal_annotate_chrs.R \
+    -g ${SCRATCH}/${PROJECT}/Annotation/GRCh38.88.gtf \
+    -i ${FILE}.chunks
+# Merge results and append header
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/tmp/chunk.*.annotated)
+echo 'geneA,geneB,sign_predA.obsB,chrA,chrB,chrPair' > ${FILE%.csv}.filtered.pair.sign.annotation.header
+cat ${FILE%.csv}.filtered.pair.sign.annotation.header ${FILES[@]} > ${FILE%.csv}.filtered.pair.sign.annotation.csv
+rm ${FILE%.csv}.filtered.pair.sign.annotation.header
+rm ${SCRATCH}/${PROJECT}/glms-v2/tmp/*
+# Once complete, use qlogin to analyze the data in R to generate summary of chromosome interactions
+library(data.table)
+args <- NULL
+args[1] <- "/exports/eddie/scratch/dwragg/Epistasis/glms-v2/LBC.nominal.Padj.filtered.pair.sign.annotation.csv"
+args[2] <- "/exports/eddie/scratch/dwragg/Epistasis/glms-v2/1kG-LBC.nominal.Padj.filtered.pair.sign.annotation.csv"
+args[3] <- "/exports/eddie/scratch/dwragg/Epistasis/glms-v2/LBC_1kG-LBC.nominal.Padj.filtered.pair.chr.summary.csv"
+dat1 <- fread(args[1], header=T, sep=",", stringsAsFactors=F) # [1] 7159100       6
+dat2 <- fread(args[2], header=T, sep=",", stringsAsFactors=F) # [1] 6001413       6
+# Remove gene pairs where at least one gene is on sex chromosome
+dat1 <- dat1[-grep("X|Y", dat1$chrPair),]
+dat2 <- dat2[-grep("X|Y", dat2$chrPair),]
+# Exclude gene pairs where only one gene could be annotated for a chromosome
+dat1 <- dat1[grep(":", dat1$chrPair),] # [1] 6861560       6
+dat2 <- dat2[grep(":", dat2$chrPair),] # [1] 5473908       6
+# Retain unique gene pairs
+dat1 <- unique(dat1[,c("geneA", "geneB", "chrPair")]) # [1] 4666535       3
+dat2 <- unique(dat2[,c("geneA", "geneB", "chrPair")]) # [1] 5442030       3
+dat.bkg <- unique(rbind(dat1, dat2)) # [1] 7281193       3
+# Output summary of counts per chr:chr interaction
+write.table(data.frame(table(dat.bkg$chrPair)), file=args[3], row.names=F, col.names=T, append=F, quote=F, sep=",")
+# Once complete, use qlogin to analyze the data in R to generate summary of sign interactions
+library(data.table)
+args <- NULL
+args[1] <- "/exports/eddie/scratch/dwragg/Epistasis/glms-v2/LBC.nominal.Padj.filtered.pair.sign.annotation.csv"
+args[2] <- "/exports/eddie/scratch/dwragg/Epistasis/glms-v2/1kG-LBC.nominal.Padj.filtered.pair.sign.annotation.csv"
+dat1 <- fread(args[1], header=T, sep=",", stringsAsFactors=F) # [1] 7159100       6
+dat2 <- fread(args[2], header=T, sep=",", stringsAsFactors=F) # [1] 6001413       6
+tmp <- merge(dat1, dat2, by=c("geneA", "geneB"))
+tmp$LBC <- gsub("-1", "-", tmp$sign_predA.obsB.x)
+tmp$LBC <- gsub("1", "+", tmp$LBC)
+tmp$OkG <- gsub("-1", "-", tmp$sign_predA.obsB.y)
+tmp$OkG <- gsub("1", "+", tmp$OkG)
+tmp$sign <- unlist(lapply(1:nrow(tmp), function(x) paste(tmp$LBC[x], tmp$OkG[x], sep="/")))
+data.frame(table(tmp$sign))
+#  Var1    Freq
+#1  -/- 1109970
+#2  -/+ 1175697
+#3  +/- 1149154
+#4  +/+ 1234653
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# Extract pairs (column 12) and plot Venn
+# ==================================================================================================
+cd ${SCRATCH}/${PROJECT}/glms
+FILEA=LBC.nominal.Padj.filtered.csv
+cut -d',' -f 12 ${FILEA} | sed '1d' > ${FILEA}.pairs
+FILEB=1kG-LBC.nominal.Padj.filtered.csv
+cut -d',' -f 12 ${FILEB} | sed '1d' > ${FILEB}.pairs
+# Venn Diagram
+qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_nominal_venn.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_nominal_pair_venn.R \
+    -a ${FILEA}.pairs -b ${FILEB}.pairs \
+    -o ${SCRATCH}/${PROJECT}/glms/LBC_1kG-LBC_pairs_filtered.venn.png \
+    -t "All gene pairs"
+
+
+# ==================================================================================================
+# Filter results on FDR, plot Venn write results to file
+# ==================================================================================================
+cd ${SCRATCH}/${PROJECT}/glms
+qsub -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_filter_fdr_sign.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_filter_fdr_sign.R \
+    -a LBC.nominal.Padj.filtered.csv \
+    -b 1kG-LBC.nominal.Padj.filtered.csv \
+    -x 0.05
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# Check significant results from glms-v2 in glms
+# ==================================================================================================
+
+# GLMS to check for interactions in 1kG-LBC data
+#qsub -l h_vmem=64G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+#  ${SCRATCH}/${PROJECT}/scripts/filter-glm-on-glmv2.sh \
+#    -s ${SCRATCH}/${PROJECT}/scripts/filter-glm-on-glmv2.R \
+#    -i ${SCRATCH}/${PROJECT}/glms/1kG.nominal.Padj.filtered.csv \
+#    -x ${SCRATCH}/${PROJECT}/glms-v2/1kG-LBC.nominal.Padj.filtered.sig.epi.LBC.csv \
+#    -o ${SCRATCH}/${PROJECT}/glms/1kG_glms-v2_sig_epi_LBC_1kG-LBC.csv
+
+
+
+# ==================================================================================================
+# Annotate nominal P pair files with gene annotations
+# ==================================================================================================
+
+#FILE=${SCRATCH}/${PROJECT}/glms-v2/LBC.nominal.Padj.filtered.sig.epi.1kG-LBC.csv
+#qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+#  ${SCRATCH}/${PROJECT}/scripts/glm_sig_annotate_distance.sh \
+#    -s ${SCRATCH}/${PROJECT}/scripts/glm_nominal_annotate_distance.R \
+#    -g ${SCRATCH}/${PROJECT}/Annotation/GRCh38.88.gtf \
+#    -i ${FILE}
+#sed -i '1d' ${FILE}.annotated
+#sed -i '1igeneA,geneB,Achr,Astart,Astop,Bchr,Bstart,Bstop,distance' ${FILE}.annotated
+# Check that the correct method of filtering duplicated/unique pairs is not commented out
+#qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+#  ${SCRATCH}/${PROJECT}/scripts/glm_pair_annotation_summary.sh \
+#    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_annotation_summary.R \
+#    -i ${FILE}.annotated
+
+
+
+
+
+# ==================================================================================================
+# Testing for obsC (due to LDHC network issue suggesting hidden gene(s) likely involved)
+# ==================================================================================================
+# Significant gene pairs for predA:obsB, LBC gene names
+PAIRS=${SCRATCH}/${PROJECT}/glms-v2/sig497_gene_pairs.csv
+# Check for interaction with obsC in LBC data
+qsub -l h_vmem=8G -t 1-497 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms-v2/obsC/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt
+
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/obsC/LBC/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glms-v2/obsC/LBC.obsC.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glms-v2/obsC/LBC.obsC.glms
+done
+
+# Check for interaction with obsC in 1kG-LBC data (fewer files due to multiple probes in LBC)
+qsub -l h_vmem=8G -t 1-497 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms-v2/obsC/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec \
+    -a NULL
+
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/obsC/1kG/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glms-v2/obsC/1kG.obsC.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glms-v2/obsC/1kG.obsC.glms
+done
+
+
+
+
+# Fix numbers down to 3 significiant figures, annotate sign, etc.
+DATA=1kG
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glms-v2/obsC/${DATA}.obsC.glms
+# Identify gene IDs from pairs, sort, and append as column, append beta signs as columns also
+mkdir -p ${SCRATCH}/${PROJECT}/glms-v2/obsC/${DATA}/tmp
+FILE=${DATA}.obsC.glms.Padj
+split -l 1000000 -a 3 ${SCRATCH}/${PROJECT}/glms-v2/obsC/${FILE} \
+  ${SCRATCH}/${PROJECT}/glms-v2/obsC/${DATA}/tmp/${FILE}.
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/obsC/${DATA}/tmp/${FILE}.*)
+printf "%s\n" ${FILES[@]} > ${SCRATCH}/${PROJECT}/glms-v2/obsC/${DATA}/${FILE}.chunks
+qsub  -l h_vmem=8G -t 1-11 -tc 50 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_pair_obsC.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pairC.R \
+    -l ${SCRATCH}/${PROJECT}/glms-v2/obsC/${DATA}/${FILE}.chunks
+# Concatenate these into single file
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/obsC/${DATA}/tmp/${FILE}.*tmp)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glms-v2/obsC/${FILE}.csv
+for FILEA in ${FILES[@]}
+do
+  sed '1d' ${FILEA} >> ${SCRATCH}/${PROJECT}/glms-v2/obsC/${FILE}.csv
+done
+rm -r ${SCRATCH}/${PROJECT}/glms-v2/obsC/${DATA}/tmp
+rm ${SCRATCH}/${PROJECT}/glms-v2/obsC/${FILE}
+rm ${SCRATCH}/${PROJECT}/glms-v2/obsC/${FILE%.Padj}
+
+
+
+# Identify predA:obsB interactions that are no longer significant after accounting for obsC
+# R (qlogin)
+cd ${SCRATCH}/${PROJECT}/glms-v2/obsC
+R
+library(data.table)
+dat <- fread("1kG.obsC.glms.Padj.csv", header=T, sep=",")
+length(unique(dat$pair)) # 460 (LBC), 460 (1kG)
+dat <- dat[which(dat$Pfdr_predA.obsB >= 0.05),]
+length(unique(dat$pair)) # 111 (LBC), 48 (1kG)
+write.table(dat, "1kG.obsC.glms.predA.obsB.insig.csv", row.names=F, col.names=T, append=F, quote=F, sep=",")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# For environmental GLMs
+# ==================================================================================================
+
+# After tabulating the results (glm_tabulate.R) the rsids are extracted for LBC gene B for those
+# pairs with predA:obsB pFDR < 0.05 (to v2_LBC.geneB.snps)
+# This file needs copying to Eddie so that it can be used to retrieve SNP dosages:
+
+# ${SCRATCH}/${PROJECT}/glms-v2/v2_LBC.geneB.snps
+
+
+DATA=1kG
+
+# extract-snps-from-dosages.R
+qsub  -l h_vmem=64G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_pair.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/extract-snps-from-dosages.R \
+    -d ${SCRATCH}/${PROJECT}/Dosages/${DATA} \
+    -l ${SCRATCH}/${PROJECT}/glms-v2/v3_LBC.geneB.snps \
+    -o ${SCRATCH}/${PROJECT}/glms-v2/${DATA}_geneB_snp.dosages
+
+# The environmental GLM is then run on laptop
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# Test for interacting SNPs not captured by PrediXcan
+# ==================================================================================================
+# This is to corroborate (or not) the analysis of Wang et al.
+# obsA ~ predA * obsB + snpX
+# Where snpX is each of every SNP within 1 Mb of transcription start and end sites, not just the 
+# SNPs that were retained by the PrediXcan analysis
+
+# Download list of the 497 significant gene pairs and unique gene A from these pairs
+qsub -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stagein.sh  \
+  -s ${DATASTORE}/dw/${PROJECT}/glms-v2/sig497* -d ${SCRATCH}/${PROJECT}/glms-v2 -r 0
+# Download PredictDB folder which includes snp and gene annotations
+qsub -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stagein.sh  \
+  -s ${DATASTORE}/dw/${PROJECT}/PredictDBPipeline \
+  -d ${SCRATCH}/${PROJECT} \
+  -r 1
+# Need to retrieve position data for each gene
+GTF="PredictDBPipeline/data/intermediate/annotations/gene_annotation/GRCh38.88.parsed.txt"
+GENEA=${SCRATCH}/${PROJECT}/glms-v2/sig497_geneA.csv
+grep -Fwf ${GENEA} ${SCRATCH}/${PROJECT}/${GTF} > ${GENEA%.csv}_annotated.csv
+# R qlogin
+library(data.table)
+genes <- read.table("/exports/eddie/scratch/dwragg/Epistasis/glms-v2/sig497_geneA_annotated.csv", header=F, stringsAsFactors=F)
+names(genes) <- c("chr", "ensembl", "hgnc", "start", "end", "type")
+genes <- genes[!duplicated(genes$hgnc),]
+path_snps <- "/exports/eddie/scratch/dwragg/Epistasis/PredictDBPipeline/data/intermediate/annotations/snp_annotation"
+distbp <- 1000000
+for(chr in unique(genes$chr)) {
+  cat(chr, "\n")
+  tmp <- genes[which(genes$chr==chr),]
+  rsid_lbc <- read.table(paste(path_snps, "/LBC.snp.annota.chr", chr, ".txt", sep=""), header=T, stringsAsFactors=F)
+  rsids <- lapply(1:nrow(tmp), function(x) rsid_lbc[which(rsid_lbc$pos >= max(0, tmp[x,]$start-distbp) & rsid_lbc$pos <= (tmp[x,]$start+distbp)),])
+  names(rsids) <- tmp$ensembl
+  # 1kG dosage data
+  f <- paste("/exports/eddie/scratch/dwragg/Epistasis/Dosages/1kG/chr", chr, ".txt.gz", sep="")
+  dosages.1kG <- fread(paste("zcat ", f), header=F)
+  f <- paste("/exports/eddie/scratch/dwragg/Epistasis/Dosages/LBC/chr", chr, ".txt.gz", sep="")
+  dosages.LBC <- fread(paste("zcat ", f), header=F)
+  # Output per gene and dataset
+  for(i in 1:length(rsids)) {
+    fname <- paste("/exports/eddie/scratch/dwragg/Epistasis/glms-v2/rsids_", names(rsids[i]), ".csv", sep="")
+    write.table(rsids[[i]]$rsid, file=fname, row.names=F, col.names=F, append=F, quote=F)
+    fname <- paste("/exports/eddie/scratch/dwragg/Epistasis/glms-v2/dosages_1kG_", names(rsids[i]), ".csv", sep="")
+    write.table(dosages.1kG[V2 %in% rsids[[i]]$rsid], file=fname, row.names=F, col.names=F, append=F, quote=F)
+    fname <- paste("/exports/eddie/scratch/dwragg/Epistasis/glms-v2/dosages_LBC_", names(rsids[i]), ".csv", sep="")
+    write.table(dosages.LBC[V2 %in% rsids[[i]]$rsid], file=fname, row.names=F, col.names=F, append=F, quote=F)    
+  }  
+}
+# exit R
+# Check for interaction with rsids of geneA in LBC data
+PAIRS=${SCRATCH}/${PROJECT}/glms-v2/sig497_gene_pairs.csv
+qsub -l h_vmem=8G -t 1-497 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms-v2/rsidA/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt \
+    -d ${SCRATCH}/${PROJECT}/glms-v2/dosages_LBC
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/rsidA/LBC/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glms-v2/rsidA/LBC.rsidA.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glms-v2/rsidA/LBC.rsidA.glms
+done
+# Check for interaction with rsids of geneA in 1kG data
+qsub -l h_vmem=8G -t 1-497 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glms-v2/rsidA/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec \
+    -a NULL \
+    -d ${SCRATCH}/${PROJECT}/glms-v2/dosages_1kG
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/rsidA/1kG/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glms-v2/rsidA/1kG.rsidA.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glms-v2/rsidA/1kG.rsidA.glms
+done
+# where are the missing 25 genes? = not missing, is due to multiple probes in LBC
+# 347 gene pairs representing 321 unique gene pairs
+
+
+
+# Fix numbers down to 3 significiant figures, annotate sign, etc.
+DATA=1kG
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${DATA}.rsidA.glms
+# Identify gene IDs from pairs, sort, and append as column, append beta signs as columns also
+mkdir -p ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${DATA}/tmp
+FILE=${DATA}.rsidA.glms.Padj
+split -l 1000000 -a 3 ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${FILE} \
+  ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${DATA}/tmp/${FILE}.
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/rsidA/${DATA}/tmp/${FILE}.*)
+printf "%s\n" ${FILES[@]} > ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${DATA}/${FILE}.chunks
+qsub  -l h_vmem=8G -t 1-3 -tc 50 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_pair_obsC.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA.R \
+    -l ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${DATA}/${FILE}.chunks
+# Concatenate these into single file
+FILES=(${SCRATCH}/${PROJECT}/glms-v2/rsidA/${DATA}/tmp/${FILE}.*tmp)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${FILE}.csv
+for FILEA in ${FILES[@]}
+do
+  sed '1d' ${FILEA} >> ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${FILE}.csv
+done
+rm -r ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${DATA}/tmp
+rm ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${FILE}
+rm ${SCRATCH}/${PROJECT}/glms-v2/rsidA/${FILE%.Padj}
+
+# Identify predA:obsB interactions that are no longer significant after accounting for rsidA
+# R (after qlogin)
+cd ${SCRATCH}/${PROJECT}/glms-v2/rsidA
+R
+library(data.table)
+dat <- fread("1kG.rsidA.glms.Padj.csv", header=T, sep=",")
+length(unique(dat$pair)) # 460 (LBC), 460 (1kG)
+dat <- dat[which(dat$Pfdr_predA.obsB >= 0.05),]
+length(unique(dat$pair)) # 5 (LBC), 4 (1kG)
+write.table(dat, "1kG.rsidA.glms.predA.obsB.insig.csv", row.names=F, col.names=T, append=F, quote=F, sep=",")
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+# ==================================================================================================
+
+# Sync files to/from datastore
+
+# ==================================================================================================
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+# ==================================================================================================
+
+# Sync folder to datastore
+qsub -hold_jid glm_pair.sh -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stageout.sh \
+  -s ${SCRATCH}/${PROJECT} \
+  -d /exports/cmvm/datastore/eb/groups/prendergast_grp/dw
+
+# Download a file/folder if accidently broken it! (-r is recursive flag (1 = recursive, 0 = not))
+qsub -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stagein.sh  \
+  -s ${DATASTORE}/dw/${PROJECT}/Dosages \
+  -d ${SCRATCH}/${PROJECT} \
+  -r 1
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+# ==================================================================================================
+# Re-run using only geneA that pass the initial prediction R2 and kurtosis criteria
+# ==================================================================================================
+# ::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+# ==================================================================================================
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsIDs
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/dosages
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/LBC
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/1kG
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/LBC
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/1kG
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/variance
+
+# LBC (obsA ~ predA * obsB)
+qsub -l h_vmem=8G -t 1-299 -tc 100 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v2e.R \
+    -f ${SCRATCH}/${PROJECT}/Annotation/258-geneA-pass-R2-kurtosis.csv \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -k ${SCRATCH}/${PROJECT}/Annotation/LBC.expr.filtered.transposed.kurtosis.9.pass \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt
+
+# Output length of each file (including header)
+wc -l ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC/*.nominal > ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.nominal.wcl
+# Some genes have shorter files (e.g. by 1-3 lines) is due to not testing probes from same gene
+# against one-another in a model, 6255910 probe-pairs tested in total
+# Cocnatenate into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC/*.nominal)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.nominal
+done
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -l h_vmem=64G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.nominal
+
+# 1kG (obsA ~ predA * obsB), run for all genes as with LBC then filter after
+qsub -l h_vmem=8G -t 1-299 -tc 100 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v2e.R \
+    -f ${SCRATCH}/${PROJECT}/Annotation/258-geneA-pass-R2-kurtosis.csv \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec \
+    -k ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.expr.filtered.transposed.kurtosis.9.pass
+
+# Output length of each file (including header)
+wc -l ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG/*.nominal > ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.nominal.wcl
+# Cocnatenate into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG/*.nominal)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.nominal
+done
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -l h_vmem=64G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.nominal
+
+# Identify gene IDs from pairs, sort, and append as column, append beta signs as columns
+VERSION="10-2018"
+TMPDIR=${SCRATCH}/${PROJECT}/glm_${VERSION}
+mkdir -p ${TMPDIR}/tmp
+FILE=1kG.nominal.Padj
+split -l 1000000 -a 3 ${TMPDIR}/${FILE} ${TMPDIR}/tmp/${FILE}.
+FILES=(${TMPDIR}/tmp/${FILE}.*)
+printf "%s\n" ${FILES[@]} > ${TMPDIR}/${FILE}.chunks
+qsub  -l h_vmem=8G -t 1-7 -tc 50 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_pair_v2.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair.R \
+    -i ${TMPDIR}/${FILE}.chunks
+# Concatenate these into single file
+FILES=(${TMPDIR}/tmp/${FILE}.*tmp)
+head --l 1 ${FILES[0]} > ${TMPDIR}/${FILE}.csv
+for FILEA in ${FILES[@]}
+do
+  sed '1d' ${FILEA} >> ${TMPDIR}/${FILE}.csv
+done
+FILES=(${TMPDIR}/tmp/${FILE}*)
+rm ${FILES[@]}
+rm ${TMPDIR}/${FILE}.chunks
+rm ${TMPDIR}/${FILE}
+rm ${TMPDIR}/${FILE%.Padj}
+rm -r ${TMPDIR}/tmp
+
+# ==================================================================================================
+# R: 
+#	Identify gene-gene pairs significant in both datasets
+#	Annotate with gene names and chromosomes
+#	Generate table of sign concordance for these and the background gene list
+#	Perform chi-squared test on sign proportions
+#	Output background gene list for later GO and pathway analyses
+#	Identify rsIDs of all SNPs within 1 Mb of geneA's and output these and their dosages
+# ==================================================================================================
+library(data.table)
+library(UpSetR)
+library(RSQLite)
+args <- NULL
+args[1] <- "/exports/eddie/scratch/dwragg/Epistasis/glm_10-2018/LBC.nominal.Padj.csv"
+args[2] <- "/exports/eddie/scratch/dwragg/Epistasis/glm_10-2018/1kG.nominal.Padj.csv"
+args[3] <- "/exports/eddie/scratch/dwragg/Epistasis/glm_10-2018/LBC-1kG"
+dat1 <- fread(args[1], header=T, sep=",")
+dat2 <- fread(args[2], header=T, sep=",")
+keycols <- c("geneA", "geneB")
+setkeyv(dat1, keycols)
+setkeyv(dat2, keycols)
+# Import GTF file for annotation data
+extract_attributes <- function(gtf_attributes, att_of_interest){
+  att <- strsplit(gtf_attributes, "; ")
+  att <- gsub("\"","",unlist(att))
+  if(!is.null(unlist(strsplit(att[grep(att_of_interest, att)], " ")))){
+    return( unlist(strsplit(att[grep(att_of_interest, att)], " "))[2])
+  }else{
+    return(NA)}
+}
+geneInfo <- fread("/exports/eddie/scratch/dwragg/Epistasis/Annotation/GRCh38.88.gtf", header=F, stringsAsFactors=F)
+geneInfo <- geneInfo[which(geneInfo[,3]=="gene"),]
+names(geneInfo) <- c("chromosome_name", "source", "feature", "start_position", "end_position", "score", "strand", "frame", "attributes")
+geneInfo$ensembl_gene_id <- unlist(lapply(geneInfo$attributes, extract_attributes, "gene_id"))
+geneInfo$gene_name <- unlist(lapply(geneInfo$attributes, extract_attributes, "gene_name"))
+geneInfo <- unique(geneInfo[,c('ensembl_gene_id', 'gene_name', 'chromosome_name', 'start_position', 'end_position')])
+# Merge LBC and 1kG datasets on matching gene pairs (3598990)
+tmp <- merge(dat1, dat2, by="pair")
+sig <- tmp[Pfdr_predA.obsB.x < 0.05 & Pfdr_predA.obsB.y < 0.05] # 740 probe pairs (659 gene pairs)
+sig$HGNC.A <- geneInfo[match(gsub("\\..", "", sig$geneA.x), geneInfo$ensembl_gene_id),]$gene_name
+sig$HGNC.B <- geneInfo[match(gsub("\\..", "", sig$geneB.x), geneInfo$ensembl_gene_id),]$gene_name
+sig$CHR.A  <- geneInfo[match(gsub("\\..", "", sig$geneA.x), geneInfo$ensembl_gene_id),]$chromosome_name
+sig$CHR.B  <- geneInfo[match(gsub("\\..", "", sig$geneB.x), geneInfo$ensembl_gene_id),]$chromosome_name
+fname <- paste(args[3], "_significant_pAoB.csv", sep="")
+write.table(sig, fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+# Generate table of sign concordance for significant results
+fname <- paste(args[3], "_sign_summary.csv", sep="")
+sig.signs <- data.frame(table(paste(sig$sign_beta_predA.obsB.x, sig$sign_beta_predA.obsB.y, sep="/")), stringsAsFactors=F)
+write.table(sig.signs, fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+# Generate table of sign concordance for background results
+fname <- paste(args[3], "_all-pairs_sign_summary.csv", sep="")
+all.signs <- data.frame(table(paste(tmp$sign_beta_predA.obsB.x, tmp$sign_beta_predA.obsB.y, sep="/")), stringsAsFactors=F)
+write.table(all.signs, fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+chi.signs <- merge(sig.signs, all.signs, by="Var1")
+chisq.test(chi.signs[,2:3]) #  P = 1.654999e-47, df = 3, X-squared = 220.39
+# Output the background list of genes for later GO and pathway analyses
+genes <- unique(c(geneInfo[match(gsub("\\..", "", dat1$geneA), geneInfo$ensembl_gene_id),]$gene_name, 
+    geneInfo[match(gsub("\\..", "", dat1$geneB), geneInfo$ensembl_gene_id),]$gene_name,
+    geneInfo[match(gsub("\\..", "", dat2$geneA), geneInfo$ensembl_gene_id),]$gene_name,
+    geneInfo[match(gsub("\\..", "", dat2$geneB), geneInfo$ensembl_gene_id),]$gene_name))
+write.table(genes, file="/exports/eddie/scratch/dwragg/Epistasis/Annotation/background_list_gene.csv",
+  row.names=F, col.names=F, append=F, quote=F)
+# Summary chromosome interations for all gene pairs tested
+chrs <- data.frame(A = geneInfo[match(gsub("\\..", "", dat1$geneA), geneInfo$ensembl_gene_id),]$chromosome_name,
+    B = geneInfo[match(gsub("\\..", "", dat1$geneB), geneInfo$ensembl_gene_id),]$chromosome_name,
+    stringsAsFactors=F)
+chrs <- data.frame(table(chrs), stringsAsFactors = F)
+chrs$pair <- sapply(1:nrow(chrs), function(x) paste(sort(as.character(chrs[x,1:2])), collapse=":"))
+tmp <- do.call("rbind", lapply(unique(chrs$pair), function(x) 
+    data.frame(A = chrs[which(chrs$pair==x),]$A[1], B = chrs[which(chrs$pair==x),]$B[1],
+               Freq = sum(chrs[which(chrs$pair==x),]$Freq), stringsAsFactors=F)))
+fname <- paste(args[3], "_all-pairs_chr_summary.csv", sep="")
+write.table(tmp, file=fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+# To test for interacting SNPs not captured by PrediXcan:
+#   obsA ~ predA * obsB + snpX
+#   where snpX is each of every SNP within 1 Mb of transcription start and end sites of geneA
+#   (not just the SNPs that were retained by the PrediXcan analysis)
+# Need to retrieve rsIDs -> dosage data for the SNPs in question
+sig.con <- sig[sign_beta_predA.obsB.x == sign_beta_predA.obsB.y] # 472 probe pairs (429 gene pairs)
+path_snps <- "/exports/eddie/scratch/dwragg/Epistasis/PredictDBPipeline/data/intermediate/annotations/snp_annotation"
+out_rsids <- "/exports/eddie/scratch/dwragg/Epistasis/glm_10-2018/rsIDs"
+out_dosages <- "/exports/eddie/scratch/dwragg/Epistasis/glm_10-2018/dosages" 
+distbp <- 1000000
+for(chr in unique(sig.con$CHR.A)) {
+  cat(chr, "\n")
+  tmp <- geneInfo[match(sig.con[which(sig.con$CHR.A==chr),]$HGNC.A, geneInfo$gene_name),]
+  rsid_lbc <- read.table(paste(path_snps, "/LBC.snp.annota.chr", chr, ".txt", sep=""), header=T, stringsAsFactors=F)
+  rsids <- lapply(1:nrow(tmp), function(x) 
+    rsid_lbc[which(rsid_lbc$pos >= max(0, tmp[x,]$start_position-distbp) & 
+    rsid_lbc$pos <= (tmp[x,]$end_position+distbp)),])
+#  names(rsids) <- tmp$ensembl_gene_id
+  names(rsids) <- sig.con[which(sig.con$CHR.A==chr),]$geneA.x
+  # 1kG dosage data
+  f <- paste("/exports/eddie/scratch/dwragg/Epistasis/Dosages/1kG/chr", chr, ".txt.gz", sep="")
+  dosages.1kG <- fread(paste("zcat ", f), header=F)
+  f <- paste("/exports/eddie/scratch/dwragg/Epistasis/Dosages/LBC/chr", chr, ".txt.gz", sep="")
+  dosages.LBC <- fread(paste("zcat ", f), header=F)
+  # Output per gene and dataset
+  for(i in 1:length(rsids)) {
+    fname <- paste(out_rsids, "/rsids_", names(rsids[i]), ".csv", sep="")
+    write.table(rsids[[i]]$rsid, file=fname, row.names=F, col.names=F, append=F, quote=F)
+    fname <- paste(out_dosages, "/dosages_1kG_", names(rsids[i]), ".csv", sep="")
+    write.table(dosages.1kG[V2 %in% rsids[[i]]$rsid], file=fname, row.names=F, col.names=F, append=F, quote=F)
+    fname <- paste(out_dosages, "/dosages_LBC_", names(rsids[i]), ".csv", sep="")
+    write.table(dosages.LBC[V2 %in% rsids[[i]]$rsid], file=fname, row.names=F, col.names=F, append=F, quote=F)    
+  }  
+}
+fname <- paste(args[3], "_significant_pAoB_concordant_pairs.csv", sep="")
+write.table(sig.con[,.(geneA.x, geneB.x)], file=fname, row.names=F, col.names=F, quote=F, append=F, sep="\t")
+# Extract rsids for significant gene B's so that the dosages can be retrieved from the dosage files on Eddie
+# These are required so that dosgaes can be retrieved for all SNPs near gene B's with the environmetal GLMs
+# - this is done on laptop
+db = dbConnect(SQLite(), dbname="/exports/eddie/scratch/dwragg/Epistasis//PredictDBPipeline/data/output/dbs/LBC_HapMap_alpha0.5_window1e6.db")
+db.SNPs <- dbGetQuery(db, "SELECT * FROM weights INNER JOIN extra ON weights.gene = extra.gene")
+fname <- paste(args[3], "_LBC_geneB_rsIDs.csv", sep="")
+write.table(db.SNPs[which(db.SNPs$gene %in% unique(sig.con$geneB.x)),], file=fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+
+
+
+# ==================================================================================================
+# To test for interacting SNPs not captured by PrediXcan:
+#   obsA ~ predA * obsB + snpX
+# ==================================================================================================
+PAIRS=${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC-1kG_significant_pAoB_concordant_pairs.csv
+# LBC (obsA ~ predA * obsB +snpX)
+qsub -l h_vmem=8G -t 1-472 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt \
+    -d ${SCRATCH}/${PROJECT}/glm_${VERSION}/dosages/dosages_LBC
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/LBC/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.rsidA.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.rsidA.glms
+done
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.rsidA.glms
+# Identify rsidA with max Pfdr for each probe pair
+qsub  -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA_maxFail.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.rsidA.glms.Padj
+
+# 1kG (obsA ~ predA * obsB +snpX)
+qsub -l h_vmem=8G -t 1-472 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec \
+    -a NULL \
+    -d ${SCRATCH}/${PROJECT}/glm_${VERSION}/dosages/dosages_1kG
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/1kG/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.rsidA.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.rsidA.glms
+done
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.rsidA.glms
+# Identify rsidA with max Pfdr for each probe pair
+qsub  -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA_maxFail.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.rsidA.glms.Padj
+
+
+
+# ==================================================================================================
+# Testing for obsC 
+#   obsA ~ predA * obsB + obsC
+# ==================================================================================================
+# Significant gene pairs for predA:obsB, LBC gene names
+PAIRS=${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC-1kG_significant_pAoB_concordant_pairs.csv
+# Check for interaction with obsC in LBC data
+qsub -l h_vmem=8G -t 1-472 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.obsC.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.obsC.glms
+done
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.obsC.glms
+# Identify obsC with max Pfdr for each probe pair
+qsub  -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA_maxFail.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.obsC.glms.Padj
+
+# Check for interaction with obsC in 1kG-LBC data (fewer files due to multiple probes in LBC)
+qsub -l h_vmem=8G -t 1-472 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec \
+    -a NULL
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.obsC.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.obsC.glms
+done
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.obsC.glms
+# Identify obsC with max Pfdr for each probe pair
+qsub  -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA_maxFail.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.obsC.glms.Padj
+
+
+
+
+# ==================================================================================================
+# Testing for genetic interaction only
+#   obsA ~ predA * predB
+# ==================================================================================================
+# This is run on laptop (glm_10-2018_genetic.R)
+
+# ==================================================================================================
+# Testing for genetic interaction using reverse approach
+#   obsA ~ predA * obsB + snpX
+# where snpX are genotypes proximal to geneB
+# ==================================================================================================
+DATA=1kG
+# extract-snps-from-dosages.R
+qsub  -l h_vmem=64G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_pair.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/extract-snps-from-dosages.R \
+    -d ${SCRATCH}/${PROJECT}/Dosages/${DATA} \
+    -l ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC-1kG_LBC_geneB_rsIDs.csv \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC-1kG_LBC_geneB_${DATA}.dosages
+# Analysis then run on laptop (glm_10-2018_environment.R)
+
+
+
+# ==================================================================================================
+# Variance accounted for by additive effects and interactions within networks (step analysis)
+# Networks having 10+ interactions (minB in the script) are processed
+# ==================================================================================================
+qsub -l h_vmem=8G -t 37-38 -tc 50 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_network_variance_accounting.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_network_variance_accounting_v2.R \
+    -f ${SCRATCH}/${PROJECT}/glm_${VERSION}/cytoscape_10-2018.csv \
+    -p ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/variance \
+    -a ${SCRATCH}/${PROJECT}/Expression/LBC/LBC_all_predicted_expression.txt \
+    -b ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.txt \
+    -c ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -d ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -t ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC_all_predicted_expression.txt \
+    -u ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -v ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -w ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# ==================================================================================================
+# ==================================================================================================
+# Nature Comms. Rev. (PEER to account for batch effects)
+# ==================================================================================================
+# ==================================================================================================
+# ==================================================================================================
+VERSION="03-2019_regcov" # PEER covariates regressed out
+VERSION="03-2019_lmer"   # sex, age and technical covariates regressed out
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}
+# Copy from datastore
+mkdir -p ${SCRATCH}/${PROJECT}/logs
+qsub ${SCRIPTS}/stagein.sh -s ${DATASTORE}/dw/Epistasis/scripts -d ${SCRATCH}/${PROJECT} -r 1
+qsub ${SCRIPTS}/stagein.sh -s ${DATASTORE}/dw/Epistasis/Dosages -d ${SCRATCH}/${PROJECT} -r 1
+qsub ${SCRIPTS}/stagein.sh -s ${DATASTORE}/dw/Epistasis/Annotation -d ${SCRATCH}/${PROJECT} -r 1
+qsub ${SCRIPTS}/stagein.sh -s ${DATASTORE}/dw/Epistasis/Expression -d ${SCRATCH}/${PROJECT} -r 1
+qsub ${SCRIPTS}/stagein.sh -s ${DATASTORE}/dw/Epistasis/vcfs -d ${SCRATCH}/${PROJECT} -r 1
+qsub ${SCRIPTS}/stagein.sh -s ${DATASTORE}/dw/Epistasis/PredictDBPipeline -d ${SCRATCH}/${PROJECT} -r 1
+qsub ${SCRIPTS}/stagein.sh -s ${DATASTORE}/dw/Epistasis/PrediXcan -d ${SCRATCH}/${PROJECT} -r 1
+qsub ${SCRIPTS}/stagein.sh -s ${DATASTORE}/dw/Epistasis/glm_10-2018 -d ${SCRATCH}/${PROJECT} -r 1
+
+# ==================================================================================================
+# PEER
+# ==================================================================================================
+# Install PEER for R 3.3.3 (won't work on more recent version)
+# cd ${SCRATCH}/${PROJECT}/scripts
+# wget https://github.com/downloads/PMBio/peer/R_peer_source_1.3.tgz
+# R CMD INSTALL -l ${SCRATCH}/Rlibrary ${SCRATCH}/${PROJECT}/scripts/R_peer_source_1.3.tgz
+# Run PEER (R v3.3.3) peer2.sh includes covariates peer3.sh does not.
+qsub -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/peer.sh \
+    -e ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.reg.cov.txt \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt \
+    -i 1000 -f 15
+# Converged after 248 iterations (50 factors)
+# Converged after 39 iterations (15 factors)
+
+# ==================================================================================================
+# PredictDB (qlogin required) without PEER
+# ==================================================================================================
+module load igmm/apps/R/3.5.1 # version under which glmnet was built
+# Copy the grouped-probe PEER residual expression data to the PredictDB data input folder
+cp ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.reg.lmer.predDB \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/input/expression_phenotypes/LBC.lmer.txt
+# Copy a PredictDB job folder
+STUDY="LBC2"
+cp ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/LBC \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+# Run pre-process step
+python preprocess.py
+# Check file, SEED and STUDY in model_parameters.py before proceeding (*NOT* ro be run in qlogin)
+python train_models.py
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/scripts
+python check_job_logs.py ${STUDY}/
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+python post_process.py
+
+# ==================================================================================================
+# PredictDB (qlogin required)
+# ==================================================================================================
+module load igmm/apps/R/3.5.1 # version under which glmnet was built
+# Copy the grouped-probe PEER residual expression data to the PredictDB data input folder
+cp ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.reg.cov.predDB \
+  ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/input/expression_phenotypes/LBC.peer.txt
+STUDY="LBC3"
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+python preprocess.py
+# Check SEED and STUDY values in model_parameters.py before proceeding (*NOT* ro be run in qlogin)
+python train_models.py
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/scripts
+python check_job_logs.py ${STUDY}/
+cd ${SCRATCH}/${PROJECT}/PredictDBPipeline/joblogs/${STUDY}
+python post_process.py
+
+# ==================================================================================================
+# PrediXcan (LBC2 = uncorrected PEER + PCA | LBC3 = PEER)
+# ==================================================================================================
+# LBC: Predict gene expression using LBC model
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -P ${CORES} -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/LBC \
+    -i ${SCRATCH}/${PROJECT}/Annotation/LBC.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/LBC3_HapMap_alpha0.5_window1e6_filtered.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/LBC/LBC3
+# 1kG: Predict gene expression using LBC model
+cd ${SCRATCH}/${PROJECT}/PrediXcan/Software
+qsub -P ${CORES} -pe sharedmem 4 -l h_vmem=8G -l h_rt=48:00:00 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/PrediXcan/Software/PrediXcan-predict.sh \
+    -d ${SCRATCH}/${PROJECT}/Dosages/1kG \
+    -i ${SCRATCH}/${PROJECT}/Annotation/1kG.eur.pass \
+    -w ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/LBC3_HapMap_alpha0.5_window1e6_filtered.db \
+    -o ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC3
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# R2 and Kurtosis filters
+# ==================================================================================================
+# These are performed on laptop (kurtosis.R and glm_r2_data.R)
+# The 292 gene A to be tested as here:
+# Annotation/292-geneA-pass-R2-kurtosis.csv
+# 414-geneA-pass-R2-kurtosis.csv (PEER with covariates regressed out, 489 probes)
+
+# ==================================================================================================
+# GLM: obsA ~ predA * obsB
+# ==================================================================================================
+# LBC (obsA ~ predA * obsB)
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC
+qsub -P ${CORES} -l h_vmem=8G -t 1-489 -tc 100 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_Rev.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v2e_Rev.R \
+    -f ${SCRATCH}/${PROJECT}/Annotation/414-geneA-pass-R2-kurtosis.csv \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC3_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.reg.cov.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -k ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.reg.cov.txt.kurtosis.9.pass \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt
+# --------------------------------------------------------------------------------------------------
+# 1kG (obsA ~ predA * obsB)
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG
+qsub -P ${CORES} -l h_vmem=8G -t 1-489 -tc 100 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_Rev.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v2e_Rev.R \
+    -f ${SCRATCH}/${PROJECT}/Annotation/414-geneA-pass-R2-kurtosis.csv \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC3_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec \
+    -k ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt.kurtosis.9.pass \
+    -a NA
+
+# ==================================================================================================
+# Process GLM outputs
+# ==================================================================================================
+PREFIX="1kG"
+# --------------------------------------------------------------------------------------------------
+# Cocnatenate into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/${PREFIX}/*.nominal)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/${PREFIX}.nominal
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/${PREFIX}.nominal
+done
+# --------------------------------------------------------------------------------------------------
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -P ${CORES} -l h_vmem=64G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/${PREFIX}.nominal
+# --------------------------------------------------------------------------------------------------
+# Identify gene IDs from pairs, sort, and append as column, append beta signs as columns
+TMPDIR=${SCRATCH}/${PROJECT}/glm_${VERSION}
+mkdir -p ${TMPDIR}/tmp
+FILE=${PREFIX}.nominal.Padj
+split -l 1000000 -a 3 ${TMPDIR}/${FILE} ${TMPDIR}/tmp/${FILE}.
+FILES=(${TMPDIR}/tmp/${FILE}.*)
+printf "%s\n" ${FILES[@]} > ${TMPDIR}/${FILE}.chunks
+# --------------------------------------------------------------------------------------------------
+# Number of array jobs is the number of lines in the chunks file
+qsub -P ${CORES} -l h_vmem=8G -t 1-9 -tc 10 -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_pair_v2.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair.R \
+    -i ${TMPDIR}/${FILE}.chunks
+# --------------------------------------------------------------------------------------------------
+# Concatenate these into single file
+FILES=(${TMPDIR}/tmp/${FILE}.*tmp)
+head --l 1 ${FILES[0]} > ${TMPDIR}/${FILE}.csv
+for FILEA in ${FILES[@]}
+do
+  sed '1d' ${FILEA} >> ${TMPDIR}/${FILE}.csv
+done
+FILES=(${TMPDIR}/tmp/${FILE}*)
+rm ${FILES[@]}
+rm ${TMPDIR}/${FILE}.chunks
+rm ${TMPDIR}/${FILE}
+rm ${TMPDIR}/${FILE%.Padj}
+rm -r ${TMPDIR}/tmp
+mkdir ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsIDs
+mkdir ${SCRATCH}/${PROJECT}/glm_${VERSION}/dosages
+# ==================================================================================================
+# R: 
+#	Identify gene-gene pairs significant in both datasets
+#	Annotate with gene names and chromosomes
+#	Generate table of sign concordance for these and the background gene list
+#	Perform chi-squared test on sign proportions
+#	Output background gene list for later GO and pathway analyses
+#	Identify rsIDs of all SNPs within 1 Mb of geneA's and output these and their dosages
+qsub -P ${CORES} -l h_vmem=32G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_process.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_process.R \
+    -a ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.nominal.Padj.csv \
+    -b ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.nominal.Padj.csv \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC-1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/GRCh38.88.gtf \
+    -x ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/intermediate/annotations/snp_annotation \
+    -r ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsIDs \
+    -d ${SCRATCH}/${PROJECT}/glm_${VERSION}/dosages \
+    -q ${SCRATCH}/${PROJECT}/PredictDBPipeline/data/output/dbs/LBC3_HapMap_alpha0.5_window1e6.db
+
+# Not clear if multiple probes will cause an issue (since last changed for grouped probes)
+# Appears to be in order compared to running in qlogin node (-l h_vmem=32G)
+# ==================================================================================================
+library(data.table)
+library(UpSetR)
+library(RSQLite)
+args <- NULL
+args[1] <- "/exports/eddie/scratch/dwragg/Epistasis/glm_03-2019_regcov/LBC.nominal.Padj.csv"
+args[2] <- "/exports/eddie/scratch/dwragg/Epistasis/glm_03-2019_regcov/1kG.nominal.Padj.csv"
+args[3] <- "/exports/eddie/scratch/dwragg/Epistasis/glm_03-2019_regcov/LBC-1kG"
+dat1 <- fread(args[1], header=T, sep=",")
+dat2 <- fread(args[2], header=T, sep=",")
+keycols <- c("geneA", "geneB")
+setkeyv(dat1, keycols)
+setkeyv(dat2, keycols)
+# Number of significant interactions in LBC
+nrow(dat1[which(dat1$Pfdr_predA.obsB < 0.05),]) # 64341 (107532 without grouping)
+# Import GTF file for annotation data
+extract_attributes <- function(gtf_attributes, att_of_interest){
+  att <- strsplit(gtf_attributes, "; ")
+  att <- gsub("\"","",unlist(att))
+  if(!is.null(unlist(strsplit(att[grep(att_of_interest, att)], " ")))){
+    return( unlist(strsplit(att[grep(att_of_interest, att)], " "))[2])
+  }else{
+    return(NA)}
+}
+geneInfo <- fread("/exports/eddie/scratch/dwragg/Epistasis/Annotation/GRCh38.88.gtf", header=F, stringsAsFactors=F)
+geneInfo <- geneInfo[which(geneInfo[,3]=="gene"),]
+names(geneInfo) <- c("chromosome_name", "source", "feature", "start_position", "end_position", "score", "strand", "frame", "attributes")
+geneInfo$ensembl_gene_id <- unlist(lapply(geneInfo$attributes, extract_attributes, "gene_id"))
+geneInfo$gene_name <- unlist(lapply(geneInfo$attributes, extract_attributes, "gene_name"))
+geneInfo <- unique(geneInfo[,c('ensembl_gene_id', 'gene_name', 'chromosome_name', 'start_position', 'end_position')])
+# Merge LBC and 1kG datasets on matching gene pairs (2447252 or 6041174 without grouping)
+tmp <- merge(dat1, dat2, by="pair")
+sig <- tmp[Pfdr_predA.obsB.x < 0.05 & Pfdr_predA.obsB.y < 0.05] # 135 gene pairs (304 without grouping)
+sig$HGNC.A <- geneInfo[match(gsub("\\..", "", sig$geneA.x), geneInfo$ensembl_gene_id),]$gene_name
+sig$HGNC.B <- geneInfo[match(gsub("\\..", "", sig$geneB.x), geneInfo$ensembl_gene_id),]$gene_name
+sig$CHR.A  <- geneInfo[match(gsub("\\..", "", sig$geneA.x), geneInfo$ensembl_gene_id),]$chromosome_name
+sig$CHR.B  <- geneInfo[match(gsub("\\..", "", sig$geneB.x), geneInfo$ensembl_gene_id),]$chromosome_name
+fname <- paste(args[3], "_significant_pAoB.csv", sep="")
+write.table(sig, fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+# Generate table of sign concordance for significant results
+fname <- paste(args[3], "_sign_summary.csv", sep="")
+sig.signs <- data.frame(table(paste(sig$sign_beta_predA.obsB.x, sig$sign_beta_predA.obsB.y, sep="/")), stringsAsFactors=F)
+write.table(sig.signs, fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+# Generate table of sign concordance for background results
+fname <- paste(args[3], "_all-pairs_sign_summary.csv", sep="")
+all.signs <- data.frame(table(paste(tmp$sign_beta_predA.obsB.x, tmp$sign_beta_predA.obsB.y, sep="/")), stringsAsFactors=F)
+write.table(all.signs, fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+chi.signs <- merge(sig.signs, all.signs, by="Var1")
+chisq.test(chi.signs[,2:3]) #  P = 6.254e-14, df = 3, X-squared = 64.552 (P = 1.73E-28, df = 3, X-squared = 132.29, without grouping)
+# Output the background list of genes for later GO and pathway analyses
+genes <- unique(c(geneInfo[match(gsub("\\..", "", dat1$geneA), geneInfo$ensembl_gene_id),]$gene_name, 
+    geneInfo[match(gsub("\\..", "", dat1$geneB), geneInfo$ensembl_gene_id),]$gene_name,
+    geneInfo[match(gsub("\\..", "", dat2$geneA), geneInfo$ensembl_gene_id),]$gene_name,
+    geneInfo[match(gsub("\\..", "", dat2$geneB), geneInfo$ensembl_gene_id),]$gene_name))
+fname <- paste(args[3], "_background_list_gene.csv", sep="")
+write.table(genes, file=fname, row.names=F, col.names=F, append=F, quote=F)
+# Summary chromosome interations for all gene pairs tested
+chrs <- data.frame(A = geneInfo[match(gsub("\\..", "", dat1$geneA), geneInfo$ensembl_gene_id),]$chromosome_name,
+    B = geneInfo[match(gsub("\\..", "", dat1$geneB), geneInfo$ensembl_gene_id),]$chromosome_name,
+    stringsAsFactors=F)
+chrs <- data.frame(table(chrs), stringsAsFactors = F)
+chrs$pair <- sapply(1:nrow(chrs), function(x) paste(sort(as.character(chrs[x,1:2])), collapse=":"))
+tmp <- do.call("rbind", lapply(unique(chrs$pair), function(x) 
+    data.frame(A = chrs[which(chrs$pair==x),]$A[1], B = chrs[which(chrs$pair==x),]$B[1],
+               Freq = sum(chrs[which(chrs$pair==x),]$Freq), stringsAsFactors=F)))
+fname <- paste(args[3], "_all-pairs_chr_summary.csv", sep="")
+write.table(tmp, file=fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+# To test for interacting SNPs not captured by PrediXcan:
+#   obsA ~ predA * obsB + snpX
+#   where snpX is each of every SNP within 1 Mb of transcription start and end sites of geneA
+#   (not just the SNPs that were retained by the PrediXcan analysis)
+# Need to retrieve rsIDs -> dosage data for the SNPs in question
+sig.con <- sig[sign_beta_predA.obsB.x == sign_beta_predA.obsB.y] # 87 gene pairs with concordant coefficient signs
+path_snps <- "/exports/eddie/scratch/dwragg/Epistasis/PredictDBPipeline/data/intermediate/annotations/snp_annotation"
+out_rsids <- "/exports/eddie/scratch/dwragg/Epistasis/glm_03-2019_regcov/rsIDs"
+out_dosages <- "/exports/eddie/scratch/dwragg/Epistasis/glm_03-2019_regcov/dosages" 
+distbp <- 1000000
+for(chr in unique(sig.con$CHR.A)) {
+  cat(chr, "\n")
+  tmp <- geneInfo[match(sig.con[which(sig.con$CHR.A==chr),]$HGNC.A, geneInfo$gene_name),]
+  rsid_lbc <- read.table(paste(path_snps, "/LBC.snp.annota.chr", chr, ".txt", sep=""), header=T, stringsAsFactors=F)
+  rsids <- lapply(1:nrow(tmp), function(x) 
+    rsid_lbc[which(rsid_lbc$pos >= max(0, tmp[x,]$start_position-distbp) & 
+    rsid_lbc$pos <= (tmp[x,]$end_position+distbp)),])
+#  names(rsids) <- tmp$ensembl_gene_id
+  names(rsids) <- sig.con[which(sig.con$CHR.A==chr),]$geneA.x
+  # 1kG dosage data
+  f <- paste("/exports/eddie/scratch/dwragg/Epistasis/Dosages/1kG/chr", chr, ".txt.gz", sep="")
+  dosages.1kG <- fread(paste("zcat ", f), header=F)
+  f <- paste("/exports/eddie/scratch/dwragg/Epistasis/Dosages/LBC/chr", chr, ".txt.gz", sep="")
+  dosages.LBC <- fread(paste("zcat ", f), header=F)
+  # Output per gene and dataset
+  for(i in 1:length(rsids)) {
+    fname <- paste(out_rsids, "/rsids_", names(rsids[i]), ".csv", sep="")
+    write.table(rsids[[i]]$rsid, file=fname, row.names=F, col.names=F, append=F, quote=F)
+    fname <- paste(out_dosages, "/dosages_1kG_", names(rsids[i]), ".csv", sep="")
+    write.table(dosages.1kG[V2 %in% rsids[[i]]$rsid], file=fname, row.names=F, col.names=F, append=F, quote=F)
+    fname <- paste(out_dosages, "/dosages_LBC_", names(rsids[i]), ".csv", sep="")
+    write.table(dosages.LBC[V2 %in% rsids[[i]]$rsid], file=fname, row.names=F, col.names=F, append=F, quote=F)    
+  }  
+}
+fname <- paste(args[3], "_significant_pAoB_concordant_pairs.csv", sep="")
+write.table(sig.con[,.(geneA.x, geneB.x)], file=fname, row.names=F, col.names=F, quote=F, append=F, sep="\t")
+# Extract rsids for significant gene B's so that the dosages can be retrieved from the dosage files on Eddie
+# These are required so that dosgaes can be retrieved for all SNPs near gene B's with the environmetal GLMs
+# - this is done on laptop
+db = dbConnect(SQLite(), dbname="/exports/eddie/scratch/dwragg/Epistasis//PredictDBPipeline/data/output/dbs/LBC3_HapMap_alpha0.5_window1e6.db")
+db.SNPs <- dbGetQuery(db, "SELECT * FROM weights INNER JOIN extra ON weights.gene = extra.gene")
+fname <- paste(args[3], "_LBC_geneB_rsIDs.csv", sep="")
+write.table(db.SNPs[which(db.SNPs$gene %in% unique(sig.con$geneB.x)),], file=fname, row.names=F, col.names=T, append=F, quote=F, sep=",")
+
+# ==================================================================================================
+# To test for interacting SNPs not captured by PrediXcan:
+#   obsA ~ predA * obsB + snpX
+# ==================================================================================================
+PAIRS=${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC-1kG_significant_pAoB_concordant_pairs.csv
+# LBC (obsA ~ predA * obsB +snpX)
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/LBC
+qsub -P ${CORES} -l h_vmem=8G -t 1-87 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid_Rev.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC3_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.reg.cov.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt \
+    -d ${SCRATCH}/${PROJECT}/glm_${VERSION}/dosages/dosages_LBC
+# --------------------------------------------------------------------------------------------------
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/LBC/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.rsidA.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.rsidA.glms
+done
+# --------------------------------------------------------------------------------------------------
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -P ${CORES} -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.rsidA.glms
+# --------------------------------------------------------------------------------------------------
+# Identify rsidA with max Pfdr for each probe pair
+qsub -P ${CORES} -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA_maxFail.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.rsidA.glms.Padj
+# --------------------------------------------------------------------------------------------------
+# 1kG (obsA ~ predA * obsB +snpX)
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/1kG
+qsub -P ${CORES} -l h_vmem=8G -t 1-87 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3rsid_Rev.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC2_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec \
+    -a NA \
+    -d ${SCRATCH}/${PROJECT}/glm_${VERSION}/dosages/dosages_1kG
+
+# --------------------------------------------------------------------------------------------------
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/rsidA/1kG/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.rsidA.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.rsidA.glms
+done
+# --------------------------------------------------------------------------------------------------
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -P ${CORES} -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.rsidA.glms
+# --------------------------------------------------------------------------------------------------
+# Identify rsidA with max Pfdr for each probe pair
+qsub -P ${CORES} -l h_vmem=8G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA_maxFail.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.rsidA.glms.Padj
+
+# ==================================================================================================
+# Testing for obsC 
+#   obsA ~ predA * obsB + obsC
+# ==================================================================================================
+# Significant gene pairs for predA:obsB, LBC gene names
+PAIRS=${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC-1kG_significant_pAoB_concordant_pairs.csv
+# Check for interaction with obsC in LBC data
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/LBC
+qsub -P ${CORES} -l h_vmem=8G -t 1-87 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3_Rev.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/LBC/LBC3_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/LBC/LBC.expr.filtered.transposed.reg.cov.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/LBC \
+    -g ${SCRATCH}/${PROJECT}/Annotation/LBC.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/LBC/pca/LBC_1000kb_50_01.prune.in.eigenvec \
+    -a ${SCRATCH}/${PROJECT}/Annotation/01_lbc36_phen_for_dw.txt
+# --------------------------------------------------------------------------------------------------
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/LBC/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.obsC.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.obsC.glms
+done
+# --------------------------------------------------------------------------------------------------
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -P ${CORES} -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.obsC.glms
+# --------------------------------------------------------------------------------------------------
+# Identify obsC with max Pfdr for each probe pair
+qsub -P ${CORES} -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA_maxFail.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/LBC.obsC.glms.Padj
+
+# --------------------------------------------------------------------------------------------------
+# Check for interaction with obsC in 1kG data
+mkdir -p ${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/1kG
+qsub -l h_vmem=8G -t 1-87 -tc 50 \
+  -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm-v3.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm-v3_Rev.R \
+    -f ${PAIRS} \
+    -x ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.LBC2_predicted_expression.txt \
+    -p ${SCRATCH}/${PROJECT}/Expression/1kG/1kG.eur.expr.filtered.transposed.txt \
+    -o ${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/1kG \
+    -g ${SCRATCH}/${PROJECT}/Annotation/1kG.sex.csv \
+    -e ${SCRATCH}/${PROJECT}/vcfs/1kG/pca/1kG_1000kb_50_01.prune.in.eigenvec \
+    -a NA 
+# --------------------------------------------------------------------------------------------------
+# Concatenate files into single file
+FILES=(${SCRATCH}/${PROJECT}/glm_${VERSION}/obsC/1kG/*)
+head --l 1 ${FILES[0]} > ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.obsC.glms
+for FILE in ${FILES[@]}
+do
+  sed '1d' ${FILE} >> ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.obsC.glms
+done
+# --------------------------------------------------------------------------------------------------
+# Adjust P values and reduce to 3 significant figures to save storage
+qsub -P ${CORES} -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_padjust.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.obsC.glms
+# --------------------------------------------------------------------------------------------------
+# Identify obsC with max Pfdr for each probe pair
+qsub -P ${CORES} -l h_vmem=16G -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs \
+  ${SCRATCH}/${PROJECT}/scripts/glm_padj.sh \
+    -s ${SCRATCH}/${PROJECT}/scripts/glm_pair_rsidA_maxFail.R \
+    -i ${SCRATCH}/${PROJECT}/glm_${VERSION}/1kG.obsC.glms.Padj
+
+
+
+
+
+
+
+
+
+
+
+
+
+# ==================================================================================================
+# Sync folder to datastore
+# ==================================================================================================
+qsub -hold_jid glm_padj.sh -o ${SCRATCH}/${PROJECT}/logs -e ${SCRATCH}/${PROJECT}/logs ${SCRIPTS}/stageout.sh \
+  -s ${SCRATCH}/${PROJECT}/glm_${VERSION} \
+  -d /exports/cmvm/datastore/eb/groups/prendergast_grp/dw/${PROJECT}
+
+
+
+
+
+
+
+

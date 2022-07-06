@@ -1,0 +1,1 @@
+cmd_drivers/misc/lis3lv02d/built-in.o :=  rm -f drivers/misc/lis3lv02d/built-in.o; ../tools/arm-bcm2708/arm-bcm2708hardfp-linux-gnueabi/bin/arm-bcm2708hardfp-linux-gnueabi-ar rcsD drivers/misc/lis3lv02d/built-in.o

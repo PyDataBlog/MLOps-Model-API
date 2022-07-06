@@ -1,0 +1,170 @@
+///// <reference path="babylon.2.5.d.ts" />
+
+import * as BABYLON from 'babylonjs';
+import * as firebase from 'firebase';
+
+// import { LeftPanel } from './ui/left-panel';
+
+import { Gamer } from "./gamer";
+import { UIService } from "../../providers/providers";
+import { STATE } from "./logic/state";
+import { AngularFireDatabase } from "angularfire2/database";
+// import { Round } from "./logic/round";
+
+export class Game {
+  private _canvas: HTMLCanvasElement;
+  private _engine: BABYLON.Engine;
+  private _scene: BABYLON.Scene;
+  private _camera: BABYLON.ArcRotateCamera;//FollowCamera;
+  private _light: BABYLON.Light;
+  private _hl: BABYLON.HighlightLayer;
+
+  private _box: BABYLON.Mesh;
+  private _ref: firebase.database.Reference;
+
+  state: STATE;
+  creator: Gamer;
+  joiner: Gamer;
+  name: string;
+  profilePic: string;
+  // ref: firebase.database.Reference;
+  // key: firebase.database.ThenableReference;
+
+
+  constructor(
+    public canvasElement: HTMLElement) {
+
+    if (canvasElement != null) { this.setCanvas(canvasElement); }
+    this.creator = new Gamer();
+    this.joiner = new Gamer();
+  }
+
+  setCanvas(canvasElement: HTMLElement) {
+
+    this._canvas = canvasElement as HTMLCanvasElement;
+    this._engine = new BABYLON.Engine(this._canvas, true);
+    this._scene = new BABYLON.Scene(this._engine);
+    this._camera = new BABYLON.ArcRotateCamera("Camera",
+      3 * Math.PI / 2, Math.PI / 8, 50, BABYLON.Vector3.Zero(), this._scene);
+    this._camera.lowerRadiusLimit = this._camera.upperRadiusLimit = this._camera.radius;
+    this._camera.setPosition(new BABYLON.Vector3(15, 5, 12));
+    this._light = new BABYLON.PointLight("Point", new BABYLON.Vector3(15, 5, 12), this._scene);
+    this._camera.attachControl(this._canvas, true);
+    this._box = BABYLON.Mesh.CreateBox("box1", 11.0, this._scene);
+    this._hl = new BABYLON.HighlightLayer("hl1", this._scene);
+  }
+
+  createScene(): void {
+
+  }
+
+  animate(): void {
+    // run the render loop
+    this._engine.runRenderLoop(() => this._scene.render());
+
+    // the canvas/window resize event handler
+    window.addEventListener('resize', () => this._engine.resize());
+  }
+
+  winHighlightLayer() {
+    this._hl.removeMesh(this._box);
+    this._hl.addMesh(this._box, BABYLON.Color3.Green());
+  }
+
+  loosHighlightLayer() {
+    this._hl.removeMesh(this._box);
+    this._hl.addMesh(this._box, BABYLON.Color3.Red());
+  }
+
+  watchGame(key: string,
+    ui: UIService): void {
+
+    let gameRef = this._ref.child(key);
+
+    gameRef.on("value", (snapshot) => {
+
+      let game = snapshot.val();
+      console.log("Game update:", game);
+
+      if (!game) {
+
+        ui.toastCreate("Game has finished. Please play again.");
+
+        let currentGame = {
+          state: STATE.COMPLETE
+        };
+
+        gameRef.update(currentGame);
+        return;
+      }
+
+      // switch (game.state) {
+      //   case STATE.JOINED:
+      //     joinedGame(game, gameRef);
+      //     break;
+      //   case STATE.TAKE_PICTURE:
+      //     countDownToTakingPicture(gameRef, game);
+      //     break;
+      //   case STATE.UPLOADED_PICTURE:
+      //     displayUploadedPicture(game);
+      //     detectMyFacialEmotion(gameRef, game);
+      //     break;
+      //   case STATE.FACE_DETECTED:
+      //     displayDetectedEmotion(game);
+      //     determineWinner(gameRef, game);
+      //     break;
+      //   case STATE.COMPLETE:
+      //     showWinner(game);
+      //     break;
+      // }
+    });
+  }
+
+  joinGame(key: string,
+    ref: firebase.database.Reference,
+    ui: UIService) {
+
+    var user = firebase.auth().currentUser;
+
+    ref.child(key).transaction(
+      (game) => {
+
+        if (!game.joiner) {
+          game.state = STATE.JOINED;
+          game.joiner = {
+            uid: user.uid,
+            displayName: user.displayName
+          }
+        }
+        return game;
+      },
+      (error: Error, committed: boolean, snapshot: firebase.database.DataSnapshot) => {
+        if (committed) {
+
+          if (snapshot.val().joiner.uid == user.uid) {
+
+            this.watchGame(key, ui);
+          } else {
+
+            ui.toastCreate("Game already joined. Please choose another.");
+          }
+        } else {
+
+          console.log("Could not commit when trying to join game", error);
+
+          ui.toastCreate("Error joining game.");
+        }
+      });
+  }
+
+  copmlete(gameRef, game) {
+
+    gameRef.update({
+      state: STATE.COMPLETE,
+      // move: { 'odd', 'even'}?
+      'creator/wins': game.creatorWins, // true | false
+      'joiner/wins': game.joinerWins
+    });
+  }
+}
+

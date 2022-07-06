@@ -1,0 +1,2 @@
+New-ItemProperty -Path HKLM:Software\Microsoft\Windows\CurrentVersion\Policies\System -Name EnableLUA -PropertyType DWord -Value 0 -Force | Out-Null
+Write-Host "User Access Control (UAC) has been disabled." -ForegroundColor Green

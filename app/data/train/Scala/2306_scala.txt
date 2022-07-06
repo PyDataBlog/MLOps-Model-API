@@ -1,0 +1,121 @@
+package adty.mr.pytag.spark
+
+import java.util
+import java.util.Properties
+import java.util.regex.Pattern
+
+import aiouniya.spark.util.{DateUtil, HBaseUtil, JdbcUtil}
+import org.apache.hadoop.hbase.client.Put
+import org.apache.hadoop.hbase.util.Bytes
+import org.apache.spark.SparkContext
+import org.apache.spark.sql.SQLContext
+
+import scala.collection.mutable
+
+/**
+  * Created by zstorm on 2017/6/14.
+  * 将某月机型数据转成标签数据放入TAGADTOYOU,以时间戳作为12个月的版本号
+  */
+object PytagModel extends PytagSparkJob {
+
+  override def run(sc: SparkContext, prop: Properties): Unit = {
+    val month = prop.getProperty("param.month")
+    val ts = DateUtil.toDate(month.toString, "yyyyMM").getTime
+
+    val sqlContext = new SQLContext(sc)
+
+    val modelDic = JdbcUtil.getDmpDF(sqlContext, "DYNA_PYTAG_Model").
+      select("model", "code_label", "llimit", "rlimit", "dlimit").
+      map(x => {
+        var llimit = 2
+        if (x(2) != null) {
+          val y = x(2).toString.toInt
+          if (y > 2) llimit = y
+        }
+        var rlimit = -1
+        if (x(3) != null) {
+          val y = x(3).toString.toInt
+          if (y > 2) rlimit = y
+        }
+        var dlimit = 2
+        if (x(4) != null) {
+          val y = x(4).toString.toInt
+          if (y > 4) dlimit = y
+        }
+
+        (x(0).toString.toLowerCase(), (x(1).toString, llimit, rlimit, dlimit))
+      }).groupByKey(1).collect().toMap
+    val modelDicBC = sc.broadcast(modelDic)
+    val tsBC = sc.broadcast(ts)
+
+    val rdd = sc.textFile(s"/drp/tyv2/data/tag/model/$month/")
+    val acc = sc.accumulator(0L)
+    rdd.foreachPartition { iter =>
+      acc.add(1L)
+      val modelDic = modelDicBC.value
+      val ts = tsBC.value
+      val family = "0".getBytes
+      val batchSize = 1000
+
+      val hbase = HBaseUtil.getTable("TAGADTOYOU")
+      val putList: util.List[Put] = new util.ArrayList[Put](batchSize)
+      var index = 0L
+      val pattern = Pattern.compile("\"([\\s\\w-,_\\.]+)\"\\|(\\d+)")
+      iter.map(_.split("\t", -2)).foreach { x =>
+        index = index + 1
+
+        val md516 = x(0)
+        val plain = x(1)
+        val vd = x(2).toInt
+        //val pv = x(3).toInt
+        val modelInfo = x(4)
+        val codeMap: mutable.Map[String, Int] = mutable.Map()
+
+        var model = ""
+        var count = 0
+
+        val matcher = pattern.matcher(modelInfo)
+        if (matcher.find()) {
+          model = matcher.group(1)
+          count = matcher.group(2).toInt
+        }
+
+        modelDic.get(model) match {
+          case Some(modelValue: Iterable[(String, Int, Int, Int)]) =>
+            modelValue.foreach { case (code, llimit, rlimit, dlimit) => {
+              //单包访问量下限
+              val condition1 = count >= llimit
+              //单包访问量上限
+              var condition2 = true
+              if (rlimit > 0) condition2 = count <= rlimit
+              //用户访问天数下限
+              val condition3 = vd >= dlimit
+              if (condition1 && condition2 && condition3)
+                codeMap += (code -> (count + codeMap.getOrElse(code, 0)))
+            }
+            }
+          case None =>
+        }
+
+        if (codeMap.size > 0) {
+          val put = new Put(Bytes.toBytes(md516))
+          if (plain.length > 0) put.addColumn(family, "00000".getBytes, ts, Bytes.toBytes(plain))
+          codeMap.foreach { case (code, pv) =>
+            put.addColumn(family, code.getBytes, ts, Bytes.toBytes(pv))
+          }
+          putList.add(put)
+          if (putList.size() >= batchSize) {
+            hbase._1.put(putList)
+            putList.clear()
+          }
+        }
+      }
+
+      hbase._1.put(putList)
+      putList.clear()
+      HBaseUtil.close(hbase)
+
+    }
+    println("records=" + acc.value)
+  }
+}

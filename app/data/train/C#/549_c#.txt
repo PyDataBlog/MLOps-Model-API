@@ -1,0 +1,51 @@
+﻿using NetworkProbe.Port.Services;
+using System.Collections.Generic;
+using System.Net;
+using NetworkProbe.Port;
+using NetworkProbe.Model;
+using System.Threading.Tasks;
+using System.Linq;
+
+namespace NetworkProbe
+{
+    public static class Probe
+    {
+        /// <summary>
+        /// Initiates a service scan on a single service to a single network device
+        /// </summary>
+        public static ProbeResult Single(ProbeEntity entity)
+        {
+            var result = Task.Run(() => ReturnSingleResult(entity));
+            return result.Result;
+        }
+
+        /// <summary>
+        /// Initiates a service scan on multiple services on multiple devices
+        /// </summary>
+        public static IEnumerable<ProbeResult> Multiple(IEnumerable<ProbeEntity> entities)
+        {
+            List<ProbeResult> results = new List<ProbeResult>();
+
+            //Run each probe in parallel
+            Parallel.ForEach(entities, x => 
+            {
+                var result = Task.Run(() => ReturnSingleResult(x));
+                results.Add(result.Result);
+            });
+
+            //Order results due to some tasks finishing earlier than others ***this adds around 5-7 seconds on 254 address scan :-( ***
+            return results.OrderBy(x => int.Parse(x.IP.ToString().Split('.')[3]));
+        }
+
+        private async static Task<ProbeResult> ReturnSingleResult(ProbeEntity entity)
+        {
+            var service = ServiceFactory.Create(entity.Type, entity.IP, entity.Port);
+
+            await service.ReturnPortData();
+            PortStatus status = service.PortLive ? PortStatus.Live : PortStatus.Dead;
+            bool isData = service.PortResult != null && service.PortResult.Count > 0 ? true : false;
+            Dictionary<string, string> data = isData ? service.PortResult : new Dictionary<string, string>();
+            return new ProbeResult(entity.Type, entity.Port, entity.IP, status, isData, data);
+        }
+    }
+}

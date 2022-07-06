@@ -1,0 +1,3794 @@
+#!/usr/bin/perl
+use strict 'vars';
+use warnings;
+use diagnostics;
+
+# Author: Rauan Sagit
+# Beginning Date: 5 June 2013
+# Name: tag_pgn_file.pl
+# Purpose: take a PGN file containing one or more games as input.
+# Write one material balance sheet per game as output. Use a new
+# field called "Key = " to connect the PGN file to the material
+# balance sheet file.
+
+# Next:
+# write a subroutine that writes out G_Board as a material balance string.
+# write the material balance, starting with a Key line, to an output file.
+# run tests.
+
+# New special case. A piece or pawn can be bound by a check. Thus, the
+# notation does not say Nge2 but Ne2, since the knight on c3 is bound
+# by a bishop on b4 to the king on e1. Similar cases can be found when
+# two pawns can capture on the same square, and different checks have
+# to be considered, depending on where the king is placed (same diagonal
+# or row or column as the square that would become free once the pawn or
+# piece moves out of the way.
+
+# A piece bound by a check is a situation with @found > 1 and where there
+# is no block on two or more pieces.
+
+our %G_King_Moves = &king_moves();
+our %G_Queen_Moves = &queen_moves();
+our %G_Rook_Moves = &rook_moves();
+our %G_Bishop_Moves = &bishop_moves();
+our %G_Knight_Moves = &knight_moves();
+our %G_Pawn_Moves_White = &pawn_moves_white();
+our %G_Pawn_Moves_Black = &pawn_moves_black();
+our %G_P = &initialize_pieces();
+our %G_Rows_Cols = &rows_cols();
+our %G_Diagonals = &diagonals();
+our %G_Board;
+our %G_Promotion_Pieces = &list_promotion_pieces();
+
+our @G_Order = ($G_P{"king"}, $G_P{"pawn"}, $G_P{"knight"}, $G_P{"bishop"}, $G_P{"rook"}, $G_P{"queen"});
+our @G_Letters = ("a", "b", "c", "d", "e", "f", "g", "h");
+our %G_L_A = &letters_in_array();
+our @G_Numbers = (1, 2, 3, 4, 5, 6, 7, 8);
+
+our $G_Empty = "null";
+our $G_White = "white";
+our $G_Black = "black";
+our $G_Check = "\\+";
+our $G_Mate  = "\\#";
+our $G_Capture = "x";
+our $G_Castle = "O-O";
+our $G_Castle_Kingside = "O-O";
+our $G_Castle_Queenside = "O-O-O";
+our $G_Unknown = "unknown";
+our $G_True = 1;
+our $G_False = 0;
+our $G_Length = 3;
+our $G_Length_Special = $G_Length + 1;
+our $G_Promotion = "=";
+
+
+if (scalar(@ARGV) != 1 ) {
+	die "Usage: $0 file_keys.pgn\n";
+}
+else {
+	# nothing.
+}
+
+my $this_out = shift @ARGV;
+
+# Bottleneck. All games are loaded in a single hash map.
+# my %games = &load_games($this_out);
+
+my $report_games = 1000;
+
+# Empty games are ignored. Good.
+my $load_file = $this_out;
+my $keyField = "Key = ";
+my $gameBegin = "1.";
+my %R = ();
+$R{"1-0"}++;
+$R{"1/2-1/2"}++;
+$R{"0-1"}++;
+my $keyNow = "null";
+
+my $sheet_out = $this_out;
+$sheet_out =~ s/\_keys\.pgn/\_sheet\.txt/;
+open(SHEET, ">$sheet_out") or die "error write $sheet_out\n";
+
+my $game_string = "";
+open(STREAM, $load_file) or die "error read $load_file\n";
+GAMES:
+while(<STREAM>) {
+	chomp;
+
+	# Get the current key. A new game has begun.
+	if (/$keyField/) {
+		$keyNow = $_;
+		$keyNow =~ s/.*\[Key = (\d+)\].*/$1/;
+		$game_string = ""; # New game.
+
+		if ($keyNow % $report_games == 0) {
+			my $date = `date`;
+			chomp $date;
+			
+			print STDERR "Report ($date): $keyNow\n";
+		}
+		else {
+			# nothing.
+		}
+	}
+	elsif ($_ =~ /\d/ and $_ !~ /\[/ and $_ !~ /\-\d/) {
+		$game_string .= $_." "; # Add moves.
+	}
+	elsif ($_ !~ /\[/ and $_ =~ /\-\d/) {
+		$game_string .= $_; # Add the final moves.
+
+		$game_string =~ s/\.\s+/\./g;
+		$game_string =~ s/^\s+//;
+		
+		my @moves = split(/\s+/, $game_string);
+		pop @moves; # remove the result at the end.
+
+		# Create a new board.
+		%G_Board = &initialize_board();
+
+	my $m_string = &string_material();
+	my $move_counter = 0;
+	print SHEET "[Key = $keyNow]\n$move_counter $m_string\n";
+
+	for (my $i = 0; $i < @moves; $i += 2) {
+		# White move.
+		if ($moves[$i] =~ /^\d/) {
+			my $m = $moves[$i];	
+			$m =~ s/^\d+\.//;
+			&calc_move_new_board($G_White, $m);
+		}
+		else {
+			die "Error: wrong white move ".$moves[$i]."\n";
+		}
+
+		my $k = $i+1;
+		# Black move.
+		if ($k < @moves) {
+			my $m = $moves[$k];
+			&calc_move_new_board($G_Black, $m);
+		}
+		else {
+			# nothing.
+		}
+
+		$move_counter++;
+		my $this_string = &string_material();
+		print SHEET "$move_counter $this_string\n";
+
+		#if ($k < @moves) {
+			# print STDERR $moves[$i]." ".$moves[$i+1]."\n";
+		#}
+		#else {
+			# print STDERR $moves[$i]."\n";
+		#}
+		# &print_the_board();
+	}
+	}
+}
+close(STREAM);
+# close(SHEET);
+exit;
+
+sub calc_move_new_board { # Fre  7 Jun 2013 02:04:23 CEST
+	my $color = shift @_;
+	my $move = shift @_;
+
+	$move =~ s/$G_Check//g;
+	$move =~ s/$G_Mate//g;
+	my $size = 2;
+	my $start = length($move) - $size;
+	# print STDERR "move ($color) = $move\n";
+	my $coor = substr($move, $start, $size);
+	my ($coor_l, $coor_n) = split("", $coor);
+
+	# Check the color
+	if ($color eq $G_White or $color eq $G_Black) {
+	}
+	else {
+		die "Error: unknown color $color\n";
+	}
+
+	# Pawn
+	if (&is_move_pawn($move)) {
+
+		# Pawn promotes or moves. Set new square to pawn or promoted piece. Set original square to empty.
+		if ($move =~ /$G_Promotion/) {
+			my $this_prom = $move;
+			$this_prom =~ s/.*(\w\d)\=.*/$1/;
+			my ($l_prom, $n_prom) = split("", $this_prom);
+			$G_Board{$l_prom}{$n_prom}{$color} = &get_promotion($move);
+			$move =~ s/$G_Promotion//;
+			# print STDERR "Promotion: G_Board{$l_prom}{$n_prom}{$color} = ".&get_promotion($move)."\n";
+			# Set new coor here.
+			$coor = $l_prom.$n_prom;
+			$coor_l = $l_prom;
+			$coor_n = $n_prom;
+		}
+		else {
+			$G_Board{$coor_l}{$coor_n}{$color} = $G_P{"pawn"};
+		}
+
+		# Pawn captures here.
+		if ($move =~ /$G_Capture/) {
+			&do_pawn_capture($move, $coor, $color);
+			$move =~ s/$G_Capture//;
+		}
+
+		# Pawn moves without capture.
+		else {
+			if ($color eq $G_White) {
+				ORIGIN:
+				foreach my $o (@{$G_Pawn_Moves_White{$coor}}) {
+					my ($ol, $on) = split("", $o);
+
+					#if (exists($G_Board{$ol}{$on}{$color})) {
+					#}
+					#else {
+					#	die "Error: origin ($o), missing $ol $on $color in G_Board\n";
+					#}
+
+					if ($G_Board{$ol}{$on}{$color} eq $G_Empty) {
+						# nothing.
+					}
+					else {
+						$G_Board{$ol}{$on}{$color} = $G_Empty;
+						last ORIGIN;
+					}
+				}
+			}
+			else {
+				ORIGIN:
+				foreach my $o (@{$G_Pawn_Moves_Black{$coor}}) {
+					my ($ol, $on) = split("", $o);
+					if ($G_Board{$ol}{$on}{$color} eq $G_Empty) {
+						# nothing.
+					}
+					else {
+						$G_Board{$ol}{$on}{$color} = $G_Empty;
+						last ORIGIN;
+					}
+				}
+			}
+		}
+	}
+
+	# Castle
+	elsif ($move =~ /^$G_Castle/) {
+
+		# Queenside
+		if ($move =~ /^$G_Castle_Queenside/) {
+			if ($color eq $G_White) {
+				$G_Board{"e"}{1}{$G_White} = $G_Empty;
+				$G_Board{"a"}{1}{$G_White} = $G_Empty;
+				$G_Board{"c"}{1}{$G_White} = $G_P{"king"};
+				$G_Board{"d"}{1}{$G_White} = $G_P{"rook"};
+			}
+			elsif ($color eq $G_Black) {
+				$G_Board{"e"}{8}{$G_Black} = $G_Empty;
+				$G_Board{"a"}{8}{$G_Black} = $G_Empty;
+				$G_Board{"c"}{8}{$G_Black} = $G_P{"king"};
+				$G_Board{"d"}{8}{$G_Black} = $G_P{"rook"};
+			}
+			else {
+				die "Error: unknown color $color\n";
+			}
+		}
+
+		# Kingside
+		else {
+			if ($color eq $G_White) {
+				$G_Board{"e"}{1}{$G_White} = $G_Empty;
+				$G_Board{"h"}{1}{$G_White} = $G_Empty;
+				$G_Board{"g"}{1}{$G_White} = $G_P{"king"};
+				$G_Board{"f"}{1}{$G_White} = $G_P{"rook"};
+			}
+			elsif ($color eq $G_Black) {
+				$G_Board{"e"}{8}{$G_Black} = $G_Empty;
+				$G_Board{"h"}{8}{$G_Black} = $G_Empty;
+				$G_Board{"g"}{8}{$G_Black} = $G_P{"king"};
+				$G_Board{"f"}{8}{$G_Black} = $G_P{"rook"};
+			}
+			else {
+				die "Error: unknown color $color\n";
+			}
+		}
+	}
+
+	# Pieces (knight, bishop, rook, queen or king)
+	else {
+		# Capture
+		if ($move =~ /$G_Capture/) {
+			$move =~ s/$G_Capture//;
+			if ($color eq $G_White) {
+				$G_Board{$coor_l}{$coor_n}{$G_Black} = $G_Empty;
+			}
+			else {
+				$G_Board{$coor_l}{$coor_n}{$G_White} = $G_Empty;
+			}
+		}
+		else {
+		}
+
+		# Knight (cannot be blocked)
+		if ($move =~ /^$G_P{"knight"}/) {
+			$G_Board{$coor_l}{$coor_n}{$color} = $G_P{"knight"};
+
+			my $special;
+			if (&is_move_special($move)) {
+				$special = &get_special($move);
+			}
+			else {
+				$special = $G_False;
+			}
+
+			my @found;
+			foreach my $o (@{$G_Knight_Moves{$coor}}) {
+				my ($l, $n) = split("", $o);
+				if ($G_Board{$l}{$n}{$color} eq $G_P{"knight"}) {
+					if ($special eq $G_False) {
+						push(@found, $o);
+					}
+					else {
+						if ($o =~ /$special/) {
+							push(@found, $o);
+						}
+						else {
+							# nothing.
+						}
+					}
+				}
+				else {
+					# nothing.
+				}
+			}
+
+			if (scalar(@found) == 1) {
+				my ($l, $n) = split("", $found[0]);
+				$G_Board{$l}{$n}{$color} = $G_Empty;
+			}
+			elsif(scalar(@found) > 1) {
+				# Most probably, this piece is bound to the king.
+				my %accept = ();
+
+				CANDIDATES:
+				foreach my $c (@found) {
+					my $check_bound = &bound_to_king($c, $color);
+					my @param = split(/\s+/, $check_bound);
+					my $test = shift @param;
+					my %hp = ();
+					foreach my $p (@param) { $hp{$p}++; }
+
+					if ($test == $G_True)
+					{
+						if (scalar(@param) > 0)
+						{
+							if (exists($hp{$coor}))
+							{
+								$accept{$c}++;
+							}
+							else {}
+						}
+						else {}
+					}
+					else
+					{
+						$accept{$c}++;
+					}
+				}
+
+				# Set original square to empty.
+				if (scalar(keys(%accept)) == 0) {
+					die "Error: hash map accept is empty\n";
+				}
+				elsif (scalar(keys(%accept)) == 1) {
+					my @this_k = keys(%accept);
+					my $this_o = shift @this_k;
+					my ($l, $n) = split("", $this_o);
+					$G_Board{$l}{$n}{$color} = $G_Empty;
+					# print STDERR "Knight: G_Board{$l}{$n}{$color} = $G_Empty\n";
+				}
+				else {
+					print STDERR "Unfixed case (Knight move $move)\n";
+				}
+			}
+			else {
+				die "Error: unknown knight candidates ".join(@found)."\n";
+			}
+		}
+
+		# Bishop (can have blocked diagonals)
+		elsif ($move =~ /^$G_P{"bishop"}/) {
+			$G_Board{$coor_l}{$coor_n}{$color} = $G_P{"bishop"};
+
+			my $special;
+			if (&is_move_special($move)) {
+				$special = &get_special($move);
+			}
+			else {
+				$special = $G_False;
+			}
+
+			my @found;
+			foreach my $o (@{$G_Bishop_Moves{$coor}}) {
+				my ($l, $n) = split("", $o);
+				if ($G_Board{$l}{$n}{$color} eq $G_P{"bishop"}) {
+					if ($special eq $G_False) {
+						push(@found, $o);
+					}
+					else {
+						if ($o =~ /$special/) {
+							push(@found, $o);
+						}
+						else {
+							# nothing.
+						}
+					}
+				}
+				else {
+					# nothing.
+				}
+			}
+
+			if (scalar(@found) == 1) {
+				my ($l, $n) = split("", $found[0]);
+				$G_Board{$l}{$n}{$color} = $G_Empty;
+			}
+
+			elsif (scalar(@found) > 1) {
+				# Check candidates for white and black blocking pieces.
+				my %accept = ();
+
+				CANDIDATES:
+				foreach my $c (@found) {
+					# Check diagonals.
+					if (&blocked_diagonal($coor, $c)) {
+						# nothing.
+					}
+					else {
+						$accept{$c}++;
+					}
+				}
+
+				# Set original square to empty.
+				if (scalar(keys(%accept)) == 0) {
+					die "Error: hash map accept is empty\n";
+				}
+				elsif (scalar(keys(%accept)) == 1) {
+					my @this_k = keys(%accept);
+					my $this_o = shift @this_k;
+					my ($l, $n) = split("", $this_o);
+					$G_Board{$l}{$n}{$color} = $G_Empty;
+					# print STDERR "Bishop: G_Board{$l}{$n}{$color} = $G_Empty\n";
+				}
+				else {
+					# Most probably one of the pieces is bound to the king
+					my %unbound = ();
+					CANDIDATES:
+					foreach my $c (@found) {
+						my $check_bound = &bound_to_king($c, $color);
+						my @param = split(/\s+/, $check_bound);
+						my $test = shift @param;
+						my %hp = ();
+						foreach my $p (@param) { $hp{$p}++; }
+
+						if ($test == $G_True)
+						{
+							if (scalar(@param) > 0)
+							{
+								if (exists($hp{$coor}))
+								{
+									$unbound{$c}++;
+								}
+								else {}
+							}
+							else {}
+						}
+						else
+						{
+							$unbound{$c}++;
+						}
+					}
+
+					# Set original square to empty.
+					if (scalar(keys(%unbound)) == 0) {
+						die "Error: hash map accept is empty\n";
+					}
+					elsif (scalar(keys(%unbound)) == 1) {
+						my @this_k = keys(%unbound);
+						my $this_o = shift @this_k;
+						my ($l, $n) = split("", $this_o);
+						$G_Board{$l}{$n}{$color} = $G_Empty;
+						# print STDERR "Bishop: G_Board{$l}{$n}{$color} = $G_Empty\n";
+					}
+					else {
+						print STDERR "Unfixed case (Bishop move $move)\n";
+					}
+				}
+			}
+			else {
+				die "Error: unknown original square for move $move (Bishop)\n";
+			}
+		}
+
+		# Rook (can have blocked rows or columns)
+		elsif ($move =~ /^$G_P{"rook"}/) {
+			$G_Board{$coor_l}{$coor_n}{$color} = $G_P{"rook"};
+
+			my $special;
+			if (&is_move_special($move)) {
+				$special = &get_special($move);
+			}
+			else {
+				$special = $G_False;
+			}
+
+			# print STDERR "special = $special\n";
+
+			my @found;
+			foreach my $o (@{$G_Rook_Moves{$coor}}) {
+				my ($l, $n) = split("", $o);
+				if ($G_Board{$l}{$n}{$color} eq $G_P{"rook"}) {
+					if ($special eq $G_False) {
+						push(@found, $o);
+					}
+					else {
+						if ($o =~ /$special/) {
+							push(@found, $o);
+						}
+						else {
+							# nothing.
+						}
+					}
+				}
+				else {
+					# nothing.
+				}
+			}
+
+			if (scalar(@found) == 1) {
+				my ($l, $n) = split("", $found[0]);
+				$G_Board{$l}{$n}{$color} = $G_Empty;
+				# print STDERR "Rook: G_Board{$l}{$n}{$color} = $G_Empty\n";
+			}
+			elsif (scalar(@found) > 1) {
+				# Check candidates for white and black blocking pieces.
+				my %accept = ();
+
+				CANDIDATES:
+				foreach my $c (@found) {
+					# Check rows and columns.
+					if (&blocked_rows_cols($coor, $c)) {
+						# nothing.
+					}
+					else {
+						$accept{$c}++;
+					}
+				}
+
+				# Set original square to empty.
+				if (scalar(keys(%accept)) == 0) {
+					die "Error: hash map accept is empty\n";
+				}
+				elsif (scalar(keys(%accept)) == 1) {
+					my @this_k = keys(%accept);
+					my $this_o = shift @this_k;
+					my ($l, $n) = split("", $this_o);
+					$G_Board{$l}{$n}{$color} = $G_Empty;
+					# print STDERR "Rook: G_Board{$l}{$n}{$color} = $G_Empty\n";
+				}
+				else {
+					# Most probably one of the pieces is bound to the king
+					my %unbound = ();
+					CANDIDATES:
+					foreach my $c (@found) {
+					my $check_bound = &bound_to_king($c, $color);
+					print STDERR "check_bound = $check_bound, c = $c, color = $color, move = $move\n";
+					my @param = split(/\s+/, $check_bound);
+					my $test = shift @param;
+					my %hp = ();
+					foreach my $p (@param) { $hp{$p}++; }
+
+					if ($test == $G_True)
+					{
+						if (scalar(@param) > 0)
+						{
+							if (exists($hp{$coor}))
+							{
+								$unbound{$c}++;
+							}
+							else {}
+						}
+						else {}
+					}
+					else
+					{
+						$unbound{$c}++;
+					}
+					}
+
+					# Set original square to empty.
+					if (scalar(keys(%unbound)) == 0) {
+						die "Error: hash map accept is empty\n";
+					}
+					elsif (scalar(keys(%unbound)) == 1) {
+						my @this_k = keys(%unbound);
+						my $this_o = shift @this_k;
+						my ($l, $n) = split("", $this_o);
+						$G_Board{$l}{$n}{$color} = $G_Empty;
+						# print STDERR "Rook: G_Board{$l}{$n}{$color} = $G_Empty\n";
+					}
+					else {
+						print STDERR "Unfixed case (Rook move $move)\n";
+					}
+				}
+			}
+			
+			else {
+				die "Error: unknown original square for move $move (Rook)\n";
+			}
+		}
+
+		# Queen (can have blocked rows, columns or diagonals)
+		elsif ($move =~ /^$G_P{"queen"}/) {
+			$G_Board{$coor_l}{$coor_n}{$color} = $G_P{"queen"};
+
+			my $special;
+			if (&is_move_special($move)) {
+				$special = &get_special($move); 
+			}
+			else {
+				$special = $G_False;
+			}
+
+			my @found;
+			foreach my $o (@{$G_Queen_Moves{$coor}}) {
+				my ($l, $n) = split("", $o);
+				if ($G_Board{$l}{$n}{$color} eq $G_P{"queen"}) {
+					if ($special eq $G_False) {
+						push(@found, $o);
+					}
+					else {
+						if ($o =~ /$special/) {
+							push(@found, $o);
+						}
+						else {
+							# nothing.
+						}
+					}
+				}
+				else {
+					# nothing.
+				}
+			}
+
+			if (scalar(@found) == 1) {
+				my ($l, $n) = split("", $found[0]);
+				$G_Board{$l}{$n}{$color} = $G_Empty;
+			}
+
+			elsif (scalar(@found) > 1) {
+				# Check candidates for white and black blocking pieces.
+				my %accept = ();
+
+				CANDIDATES:
+				foreach my $c (@found) {
+
+					# Check rows and columns.
+					if (&same_row_column($coor, $c)) {
+						if (&blocked_rows_cols($coor, $c)) {
+							# nothing.
+						}
+						else {
+							$accept{$c}++;
+						}
+
+					}
+
+					# Check diagonals.
+					else {
+						if (&blocked_diagonal($coor, $c)) {
+							# nothing.
+						}
+						else {
+							$accept{$c}++;
+						}
+					}
+				}
+
+				# Set original square to empty.
+				if (scalar(keys(%accept)) == 0) {
+					die "Error: hash map accept is empty\n";
+				}
+				elsif (scalar(keys(%accept)) == 1) {
+					my @this_k = keys(%accept);
+					my $this_o = shift @this_k;
+					my ($l, $n) = split("", $this_o);
+					$G_Board{$l}{$n}{$color} = $G_Empty;
+					# print STDERR "Rook: G_Board{$l}{$n}{$color} = $G_Empty\n";
+				}
+				else {
+					# Most probably one of the pieces is bound to the king
+					my %unbound = ();
+					CANDIDATES:
+					foreach my $c (@found) {
+					my $check_bound = &bound_to_king($c, $color);
+					my @param = split(/\s+/, $check_bound);
+					my $test = shift @param;
+					my %hp = ();
+					foreach my $p (@param) { $hp{$p}++; }
+
+					if ($test == $G_True)
+					{
+						if (scalar(@param) > 0)
+						{
+							if (exists($hp{$coor}))
+							{
+								$unbound{$c}++;
+							}
+							else {}
+						}
+						else {}
+					}
+					else
+					{
+						$unbound{$c}++;
+					}
+					}
+
+					# Set original square to empty.
+					if (scalar(keys(%unbound)) == 0) {
+						die "Error: hash map accept is empty\n";
+					}
+					elsif (scalar(keys(%unbound)) == 1) {
+						my @this_k = keys(%unbound);
+						my $this_o = shift @this_k;
+						my ($l, $n) = split("", $this_o);
+						$G_Board{$l}{$n}{$color} = $G_Empty;
+						# print STDERR "Queen: G_Board{$l}{$n}{$color} = $G_Empty\n";
+					}
+					else {
+						print STDERR "Unfixed case (Queen move $move)\n";
+					}
+				}
+			}
+			else {
+				die "Error: unknown original square for move $move (Queen)\n";
+			}
+		}
+
+		# King (cannot be blocked)
+		elsif ($move =~ /^$G_P{"king"}/) {
+			$G_Board{$coor_l}{$coor_n}{$color} = $G_P{"king"};
+
+			ORIGIN:
+			foreach my $o (@{$G_King_Moves{$coor}}) {
+				my ($l, $n) = split("", $o);
+				if ($G_Board{$l}{$n}{$color} eq $G_P{"king"}) {
+					$G_Board{$l}{$n}{$color} = $G_Empty;
+					last ORIGIN;
+				}
+				else {
+					# nothing.
+				}
+			}
+		}
+
+		# Unknown
+		else {
+			die "Error: unknown move $move\n";
+		}
+	}
+}
+
+sub letters_in_array {
+	my %h = ();
+	for (my $i = 0; $i < @G_Letters; $i++) {
+		my $l = $G_Letters[$i];
+		$h{$l} = $i;
+	}
+	return %h;
+}
+
+sub bound_to_king {
+	my $coor = shift @_;
+	my $king_color = shift @_;
+	my $o_color;
+
+	# Returns whether bound or unbound to king. Also. Returns squares between king and binding piece.
+
+	# Have to check whether there is a piece in between that blocks the check and thus removes the bind.
+	# For example. White Re1, Black Ne4, Black pawn e7 and Black Ke8. The knight is not bound.
+
+	if ($king_color eq $G_White) {
+		$o_color = $G_Black;
+	}
+	elsif ($king_color eq $G_Black) {
+		$o_color = $G_White;
+	}
+	else {
+		die "Error: wrong color inside bound_to_king for color $king_color\n";
+	}
+
+	my $king_coor;
+	BOARD:
+	foreach my $l (@G_Letters) {
+		foreach my $n (@G_Numbers) {
+			if ($G_Board{$l}{$n}{$king_color} eq $G_P{"king"}) {
+				$king_coor = $l.$n;
+				last BOARD;
+			}
+			else {
+				# nothing.
+			}
+		}
+	}
+
+	# Same diagonal
+	if (&same_diagonal($coor, $king_coor)) {
+		my @front = &front_king_on_diagonal($coor, $king_coor);
+		# print STDERR "Got the diagonal front: ".join(" ", @front)."\n";
+
+		my $result = $G_False;
+		FRONT:
+		for (my $i = 0; $i < @front; $i++)
+		{
+			my ($front_l, $front_n) = split("", $front[$i]);
+			my $o_piece    = $G_Board{$front_l}{$front_n}{$o_color};
+			my $king_piece = $G_Board{$front_l}{$front_n}{$king_color};
+
+			if ($o_piece eq $G_Empty and $king_piece eq $G_Empty) {
+				next FRONT;
+			}
+			elsif (($o_piece eq $G_P{"bishop"}) or ($o_piece eq $G_P{"queen"})) {
+				# Check if there is a piece in between that blocks the path. Except the coor
+				# where the potentially blocked piece already stands.
+				
+				my @d = @{$G_Diagonals{$front[$i]}{$king_coor}};
+				if ($d[0] eq $G_Empty)
+				{
+					$result = $G_True;
+				}
+				else
+				{
+				CHECK:
+				foreach my $check_coor (@d)
+				{
+					if ($check_coor eq $coor)
+					{
+						$result = $G_True;
+					}
+					else
+					{
+						my ($c_l, $c_n) = split("", $check_coor);
+						if ($G_Board{$c_l}{$c_n}{$G_White} eq $G_Empty and $G_Board{$c_l}{$c_n}{$G_Black} eq $G_Empty)
+						{
+							$result = $G_True;
+						}
+						else
+						{
+							$result = $G_False;
+							last CHECK;
+						}
+					}
+				}
+				}
+
+				if ($result eq $G_True)
+				{
+					# Get all squares between the o_piece and the king_coor.
+					my $str = join(" ", @{$G_Diagonals{$front[$i]}{$king_coor}});
+					$result .= " ".$str;
+					last FRONT;
+				}
+				else {}
+			}
+			elsif ($king_piece ne $G_Empty) {
+				$result = $G_False;
+				last FRONT;
+			}
+			else {
+				$result = $G_False;
+				last FRONT;
+			}
+		}
+		return $result;
+	}
+
+	# Same row (1...8)
+	elsif (&same_row($coor, $king_coor)) {
+		my @front = &front_king_on_row($coor, $king_coor);
+		# print STDERR "Got the row front: ".join(" ", @front)."\n";
+
+		my $result = $G_False;
+		FRONT:
+		for (my $i = 0; $i < @front; $i++)
+		{
+			my ($front_l, $front_n) = split("", $front[$i]);
+			my $o_piece    = $G_Board{$front_l}{$front_n}{$o_color};
+			my $king_piece = $G_Board{$front_l}{$front_n}{$king_color};
+
+			if ($o_piece eq $G_Empty and $king_piece eq $G_Empty) {
+				next FRONT;
+			}
+			elsif (($o_piece eq $G_P{"rook"}) or ($o_piece eq $G_P{"queen"})) {
+				my @d = @{$G_Rows_Cols{$front[$i]}{$king_coor}};
+				if ($d[0] eq $G_Empty)
+				{
+					$result = $G_True;
+				}
+				else
+				{
+				CHECK:
+				foreach my $check_coor (@d)
+				{
+					if ($check_coor eq $coor)
+					{
+						$result = $G_True;
+					}
+					else
+					{
+						my ($c_l, $c_n) = split("", $check_coor);
+						if ($G_Board{$c_l}{$c_n}{$G_White} eq $G_Empty and $G_Board{$c_l}{$c_n}{$G_Black} eq $G_Empty)
+						{
+							$result = $G_True;
+						}
+						else
+						{
+							$result = $G_False;
+							last CHECK;
+						}
+					}
+				}
+				}
+
+				if ($result eq $G_True)
+				{
+					# Get all squares between the o_piece and the king_coor.
+					my $str = join(" ", @{$G_Rows_Cols{$front[$i]}{$king_coor}});
+					$result .= " ".$str;
+					last FRONT;
+				}
+				else {}
+			}
+			elsif ($king_piece ne $G_Empty) {
+				$result = $G_False;
+				last FRONT;
+			}
+			else {
+				$result = $G_False;
+				last FRONT;
+			}
+			
+		}
+		return $result;
+	}
+
+	# Same column (a...h)
+	elsif (&same_column($coor, $king_coor)) {
+		my @front = &front_king_on_column($coor, $king_coor);
+		# print STDERR "Got the column front: ".join(" ", @front)."\n";
+
+		my $result = $G_False;
+		FRONT:
+		for (my $i = 0; $i < @front; $i++)
+		{
+			my ($front_l, $front_n) = split("", $front[$i]);
+			my $o_piece    = $G_Board{$front_l}{$front_n}{$o_color};
+			my $king_piece = $G_Board{$front_l}{$front_n}{$king_color};
+
+			if ($o_piece eq $G_Empty and $king_piece eq $G_Empty) {
+				next FRONT;
+			}
+			elsif (($o_piece eq $G_P{"rook"}) or ($o_piece eq $G_P{"queen"})) {
+				my @d = @{$G_Rows_Cols{$front[$i]}{$king_coor}};
+				if ($d[0] eq $G_Empty)
+				{
+					$result = $G_True;
+				}
+				else
+				{
+				CHECK:
+				foreach my $check_coor (@d)
+				{
+					if ($check_coor eq $coor)
+					{
+						$result = $G_True;
+					}
+					else
+					{
+						my ($c_l, $c_n) = split("", $check_coor);
+						if ($G_Board{$c_l}{$c_n}{$G_White} eq $G_Empty and $G_Board{$c_l}{$c_n}{$G_Black} eq $G_Empty)
+						{
+							$result = $G_True;
+						}
+						else
+						{
+							$result = $G_False;
+							last CHECK;
+						}
+					}
+				}
+				}
+
+				if ($result eq $G_True)
+				{
+					# Get all squares between the o_piece and the king_coor.
+					my $str = join(" ", @{$G_Rows_Cols{$front[$i]}{$king_coor}});
+					$result .= " ".$str;
+					last FRONT;
+				}
+				else {}
+			}
+			elsif ($king_piece ne $G_Empty) {
+				$result = $G_False;
+				last FRONT;
+			}
+			else {
+				$result = $G_False;
+				last FRONT;
+			}
+			
+		}
+		return $result;
+	}
+
+	# Not bound to king.
+	else {
+		return $G_False;
+	}
+}
+
+sub front_king_on_diagonal {
+	my $coor = shift @_;
+	my $king = shift @_;
+
+	my @found;
+	
+	my ($l, $n) = split("", $coor);
+
+	my ($lk, $nk) = split("", $king);
+
+	# Get direction pointing from king towards and behind the piece
+	# standing on the square $coor.
+
+	# Up or down. (1 => 8) or (8 => 1).
+	my $up;
+	if ($nk < $n) {
+		$up = $G_True;
+	}
+	else {
+		$up = $G_False;
+	}
+
+	# Left or right. (a => h) or (h => a).
+	my $left;
+	if ($lk gt $l) {
+		$left = $G_True;
+	}
+	else {
+		$left = $G_False;
+	}
+
+	# Up
+	if ($up) {
+		# Up and Left
+		if ($left) {
+			my $this_l_a = $G_L_A{$l}-1; # left
+			my $this_n   = $n+1; # up
+
+			do {
+				my $this_found = $G_Letters[$this_l_a].$this_n;
+				push(@found, $this_found);
+				$this_l_a--; # left
+				$this_n++; # up
+			}
+
+			#               left             up
+			until(($this_l_a < 0) or ($this_n > @G_Numbers));
+		}
+
+		# Up and Right
+		else {
+			my $this_l_a = $G_L_A{$l}+1; # right
+			my $this_n   = $n+1; # up
+
+			do {
+				my $this_found = $G_Letters[$this_l_a].$this_n;
+				push(@found, $this_found);
+				$this_l_a++; # right
+				$this_n++; # up
+			}
+
+			#               right                      up
+			until(($this_l_a >= @G_Numbers) or ($this_n > @G_Numbers));
+		}
+	}
+	
+	# Down
+	else {
+		# Down and Left
+		if ($left) {
+			my $this_l_a = $G_L_A{$l}-1; # left
+			my $this_n   = $n-1; # down
+
+			do {
+				my $this_found = $G_Letters[$this_l_a].$this_n;
+				push(@found, $this_found);
+				$this_l_a--; # left
+				$this_n--; # down
+			}
+
+			#               left             down
+			until(($this_l_a < 0) or ($this_n <= 0));
+		}
+
+		# Down and Right
+		else {
+			my $this_l_a = $G_L_A{$l}+1; # right
+			my $this_n   = $n-1; # down
+
+			do {
+				my $this_found = $G_Letters[$this_l_a].$this_n;
+				push(@found, $this_found);
+				$this_l_a++; # right
+				$this_n--; # down
+			}
+
+			#               right                      down
+			until(($this_l_a >= @G_Numbers) or ($this_n <= 0));
+		}
+	}
+
+	return @found;
+}
+
+sub front_king_on_row {
+	my $coor = shift @_;
+	my $king = shift @_;
+
+	my @found;
+	
+	my ($l, $n) = split("", $coor);
+
+	my ($lk, $nk) = split("", $king);
+
+	# Get direction pointing from king towards and behind the piece
+	# standing on the square $coor.
+
+	# Left or right. (a => h) or (h => a).
+	my $left;
+	if ($lk gt $l) {
+		$left = $G_True;
+	}
+	else {
+		$left = $G_False;
+	}
+
+	# Left
+	if ($left) {
+		my $this_l_a = $G_L_A{$l}-1; # left
+
+		do {
+			my $this_found = $G_Letters[$this_l_a].$n;
+			push(@found, $this_found);
+			$this_l_a--; # left
+		}
+		#              left
+		until($this_l_a < 0);
+	}
+
+	# Right
+	else {
+		my $this_l_a = $G_L_A{$l}+1; # right
+			
+		do {
+			my $this_found = $G_Letters[$this_l_a].$n;
+			push(@found, $this_found);
+			$this_l_a++; # right
+		}
+		#              right
+		until($this_l_a >= @G_Numbers);
+	}
+
+	return @found;
+}
+
+sub front_king_on_column {
+	my $coor = shift @_;
+	my $king = shift @_;
+
+	my @found;
+	
+	my ($l, $n) = split("", $coor);
+
+	my ($lk, $nk) = split("", $king);
+
+	# Get direction pointing from king towards and behind the piece
+	# standing on the square $coor.
+
+	# Up or down. (1 => 8) or (8 => 1).
+	my $up;
+	if ($nk < $n) {
+		$up = $G_True;
+	}
+	else {
+		$up = $G_False;
+	}
+
+	# Up
+	if ($up) {
+		my $this_n   = $n+1; # up
+
+		do {
+			my $this_found = $l.$this_n;
+			push(@found, $this_found);
+			$this_n++; # up
+		}
+
+		#            up
+		until($this_n > @G_Numbers);
+	}
+	
+	# Down
+	else {
+		my $this_n   = $n-1; # down
+
+		do {
+			my $this_found = $l.$this_n;
+			push(@found, $this_found);
+			$this_n--; # down
+		}
+
+		#            down
+		until($this_n <= 0);
+	}
+
+	return @found;
+}
+
+# Same diagonal (a1...h8)
+sub same_diagonal {
+	my $c1 = shift @_;
+	my $c2 = shift @_;
+
+	if (exists($G_Diagonals{$c1}{$c2})) {
+		return $G_True;
+	}
+	else {
+		return $G_False;
+	}
+}
+
+# Same row (1...8)
+sub same_row {
+	my $c1 = shift @_;
+	my $c2 = shift @_;
+
+	my ($l1, $n1) = split("", $c1);
+	my ($l2, $n2) = split("", $c2);
+
+	if ($n1 eq $n2) {
+		return $G_True;
+	}
+	else {
+		return $G_False;
+	}
+}
+
+
+# Same column (a...h)
+sub same_column {
+	my $c1 = shift @_;
+	my $c2 = shift @_;
+
+	my ($l1, $n1) = split("", $c1);
+	my ($l2, $n2) = split("", $c2);
+
+	if ($l1 eq $l2) {
+		return $G_True;
+	}
+	else {
+		return $G_False;
+	}
+}
+
+sub print_the_board {
+	foreach my $n (sort {$b <=> $a} (@G_Numbers)) {
+		foreach my $l (@G_Letters) {
+			my $square_white = $G_Board{$l}{$n}{$G_White};
+			my $square_black = $G_Board{$l}{$n}{$G_Black};
+
+			if ($square_white eq $G_Empty and $square_black ne $G_Empty) {
+				# print STDERR "$l$n(B$square_black) ";
+			}
+			elsif ($square_white ne $G_Empty and $square_black eq $G_Empty) {
+				# print STDERR "$l$n(W$square_white) ";
+			}
+			elsif ($square_white eq $G_Empty and $square_black eq $G_Empty) {
+				# print STDERR "$l$n(00) ";
+			}
+			else {
+				die "Error: square $l$n has one white and one black piece.\n";
+			}
+		}
+		# print STDERR "\n";
+	}
+}
+
+sub string_material {
+	my %M = &material_sheet();
+	my $str = "";
+	foreach my $piece (@G_Order) {
+		$str .= $M{$G_White}{$piece}." ";
+	}
+
+	foreach my $piece (@G_Order) {
+		$str .= $M{$G_Black}{$piece}." ";
+	}
+
+	$str =~ s/\s+$//;
+	return $str;
+}
+
+sub material_sheet {
+	my %M = &initialize_material();
+	foreach my $l (@G_Letters) {
+		foreach my $n (@G_Numbers) {
+			my $white_piece = $G_Board{$l}{$n}{$G_White};
+			my $black_piece = $G_Board{$l}{$n}{$G_Black};
+
+			if ($white_piece eq $G_Empty) {
+			}
+			else {
+				$M{$G_White}{$white_piece}++;
+			}
+
+			if ($black_piece eq $G_Empty) {
+			}
+			else {
+				$M{$G_Black}{$black_piece}++;
+			}
+		}
+	}
+
+	return %M;
+}
+
+sub initialize_material {
+	my %h = ();
+	
+	foreach my $piece (keys(%G_P)) {
+		$h{$G_White}{$G_P{$piece}} = 0;
+		$h{$G_Black}{$G_P{$piece}} = 0;
+	}
+
+	return %h;
+}
+
+sub do_pawn_capture {
+	# Set origin to empty. But also, set captured piece to empty.
+
+	my $move = shift @_;
+	my $coor = shift @_;
+	my $color = shift @_;
+	my $lpos;
+	
+	my @read = split("", $move);
+	my $lo = shift @read;
+	
+	my $no;
+	my ($l, $n) = split("", $coor);
+
+	# Set original square to empty.
+	if ($color eq $G_White) {
+		$no = $n - 1;
+	}
+	elsif ($color eq $G_Black) {
+		$no = $n + 1;
+	}
+	else {
+		die "Error: unknown color $color in do_pawn_capture\n";
+	}
+
+	if (exists($G_Board{$lo}{$no}{$color})) {
+		$G_Board{$lo}{$no}{$color} = $G_Empty;
+	}
+	else {
+		die "Error: G_Board{$lo}{$no}{$color} is missing\n";
+	}
+
+	# Set the captured square to emtpy. If the captured square was already
+	# empty, then the move was en passant, set the en passant square to empty.
+
+	if ($color eq $G_White) {
+		if ($G_Board{$l}{$n}{$G_Black} eq $G_Empty) {
+			if ($G_Board{$l}{$n-1}{$G_Black} eq $G_P{"pawn"}) {
+				$G_Board{$l}{$n-1}{$G_Black} = $G_Empty;
+			}
+			else {
+				die "Error: not en passant at do_pawn_capture with coor $coor\n";
+			}
+		}
+		else {
+			$G_Board{$l}{$n}{$G_Black} = $G_Empty;
+		}
+	}
+	elsif ($color eq $G_Black) {
+		if ($G_Board{$l}{$n}{$G_White} eq $G_Empty) {
+			if ($G_Board{$l}{$n+1}{$G_White} eq $G_P{"pawn"}) {
+				$G_Board{$l}{$n+1}{$G_White} = $G_Empty;
+			}
+			else {
+				die "Error: not en passant at do_pawn_capture with coor $coor\n";
+			}
+		}
+		else {
+			$G_Board{$l}{$n}{$G_White} = $G_Empty;
+		}
+	}
+	else {
+		die "Error: unknown color $color in do_pawn_capture\n";
+	}	
+}
+
+sub get_promotion {
+	my $move = shift @_;
+	my @read = split("", $move);
+	my $p = pop(@read);
+	if (exists($G_Promotion_Pieces{$p})) {
+		return $p;
+	}
+	else {
+		die "Error: unknown promotion piece $p for move $move\n";
+	}
+}
+
+sub get_special {
+	my $move = shift @_;
+	my $special = substr($move, 1, 1);
+	return $special;
+}
+
+sub is_move_special {
+	my $move = shift @_;
+	if (length($move) == $G_Length) {
+		return $G_False;
+	}
+	elsif (length($move) == $G_Length_Special) {
+		return $G_True;
+	}
+	else {
+		die "Error: unknown move length ".length($move)." for move $move\n";
+	}
+}
+
+sub same_row_column {
+	my $a = shift @_;
+	my $b = shift @_;
+
+	my ($la, $na) = split("", $a);
+	my ($lb, $nb) = split("", $b);
+
+	if (($la eq $lb) or ($na == $nb)) {
+		return $G_True;
+	}
+	else {
+		return $G_False;
+	}
+}
+
+sub blocked_diagonal {
+	my $a = shift @_;
+	my $b = shift @_;
+
+	if (exists($G_Diagonals{$a}{$b})) {
+		if ($G_Diagonals{$a}{$b} eq $G_Empty) {
+			return $G_False;
+		}
+		else {
+			my @check = @{$G_Diagonals{$a}{$b}};
+			my $count = 0;
+			foreach my $coor (@check) {
+				my ($l, $n) = split("", $coor);
+				if ($G_Board{$l}{$n}{$G_White} eq $G_Empty) {
+				}
+				else {
+					$count++;
+				}
+
+				if ($G_Board{$l}{$n}{$G_Black} eq $G_Empty) {
+				}
+				else {
+					$count++;
+				}
+			}
+			
+			if ($count > 0) {
+				return $G_True;
+			}
+			else {
+				return $G_False;
+			}
+		}
+	}
+	else {
+		die "Error: unknown coordinates $a or $b\n";
+	}
+}
+
+sub blocked_rows_cols {
+	my $a = shift @_;
+	my $b = shift @_;
+
+	if (exists($G_Rows_Cols{$a}{$b})) {
+		# print STDERR "G_Rows_Cols{$a}{$b}\n";
+
+		if ($G_Rows_Cols{$a}{$b} eq $G_Empty) {
+			return $G_False;
+		}
+		else {
+			my @check = @{$G_Rows_Cols{$a}{$b}};
+			my $count = 0;
+			foreach my $coor (@check) {
+				my ($l, $n) = split("", $coor);
+
+				if ($G_Board{$l}{$n}{$G_White} eq $G_Empty) {
+				}
+				else {
+					$count++;
+				}
+
+				if ($G_Board{$l}{$n}{$G_Black} eq $G_Empty) {
+				}
+				else {
+					$count++;
+				}
+			}
+			
+			if ($count > 0) {
+				return $G_True;
+			}
+			else {
+				return $G_False;
+			}
+		}
+	}
+	else {
+		die "Error: unknown coordinates $a or $b\n";
+	}
+}
+
+sub is_move_pawn {
+	my $move = shift @_;
+	my $first = substr($move, 0, 1);
+	my @m = grep(/$first/, @G_Letters);
+	if (scalar(@m) == 1) {
+		return $G_True;
+	}
+	else {
+		return $G_False;
+	}
+}
+
+sub write_file_with_keys {
+	my $file = shift @_;
+	open(IN, $file) or die "error read $file\n";
+
+	my $out = $file;
+	my $suffix = ".pgn";
+	my $add = "_keys";
+	$out =~ s/$suffix/$add$suffix/;
+	open(OUT, ">$out") or die "error write $out\n";
+
+	my $FirstTag = "Event ";
+	my $Key = 0;
+	my $KeyStart = "[Key = ";
+	my $KeyEnd = "]";
+	while(<IN>) {
+		chomp;
+		if (/$FirstTag/) {
+			$Key++;
+			print OUT "$_\n".$KeyStart.$Key.$KeyEnd."\n";
+		}
+		else {
+			print OUT "$_\n";
+		}
+	}
+	close(IN);
+	close(OUT);
+
+	return $out;
+}
+
+sub calc_material_sheet {
+	my %h = ();
+	my $calc_file = shift @_;
+	my %board = &initialize_board();
+	
+	# Use the concept of "locked square" by locking the piece
+	# in its new square and setting its old square to "empty".
+	# Also, use the locked square, i.e. its new position, in
+	# order to calculate its old position, i.e. dedice which
+	# square to set as empty.
+
+	
+}
+
+sub load_games {
+	# Empty games are ignored. Good.
+
+	my $load_file = shift @_;
+	my $keyField = "Key = ";
+	my $gameBegin = "1.";
+	my %R = ();
+	$R{"1-0"}++;
+	$R{"1/2-1/2"}++;
+	$R{"0-1"}++;
+	my %games = ();
+
+	my $keyNow = "null";
+	open(IN, $load_file) or die "error read $load_file\n";
+	my @read = <IN>;
+	chomp @read;
+	close(IN);
+
+	for (my $i = 0; $i < @read; $i++) {
+		if ($read[$i] =~ /$keyField/) {
+			$keyNow = $read[$i];
+			$keyNow =~ s/.*\[Key = (\d+)\].*/$1/;
+		}
+		else {
+		}
+
+		if ($read[$i] =~ /^$gameBegin/) {
+			LOAD:
+			for (my $k = $i; $k < @read; $k++) {
+				$games{$keyNow} .= " ".$read[$k];
+				my @parts = split(/\s+/, $games{$keyNow});
+				if (exists($R{$parts[scalar(@parts)-1]})) {
+					$i = $k;
+					$games{$keyNow} =~ s/\.\s+/\./g;
+					$games{$keyNow} =~ s/^\s+//;
+					last LOAD;
+				}
+				else {
+				}
+			}
+		}
+		else {
+		}
+	}
+
+	return %games;
+}
+
+sub activate_colors {
+	$G_White = "white";
+	$G_Black = "black";
+}
+
+sub initialize_board {
+	my %h = ();
+
+	&activate_colors();
+
+	foreach my $L (@G_Letters) {
+		foreach my $N (@G_Numbers) {
+			$h{$L}{$N}{$G_White} = $G_Empty;
+			$h{$L}{$N}{$G_Black} = $G_Empty;
+		}
+	}
+
+	$h{"a"}{1}{$G_White} = $G_P{"rook"};
+	$h{"b"}{1}{$G_White} = $G_P{"knight"};
+	$h{"c"}{1}{$G_White} = $G_P{"bishop"};
+	$h{"d"}{1}{$G_White} = $G_P{"queen"};
+	$h{"e"}{1}{$G_White} = $G_P{"king"};
+	$h{"f"}{1}{$G_White} = $G_P{"bishop"};
+	$h{"g"}{1}{$G_White} = $G_P{"knight"};
+	$h{"h"}{1}{$G_White} = $G_P{"rook"};
+
+	$h{"a"}{2}{$G_White} = $G_P{"pawn"};
+	$h{"b"}{2}{$G_White} = $G_P{"pawn"};
+	$h{"c"}{2}{$G_White} = $G_P{"pawn"};
+	$h{"d"}{2}{$G_White} = $G_P{"pawn"};
+	$h{"e"}{2}{$G_White} = $G_P{"pawn"};
+	$h{"f"}{2}{$G_White} = $G_P{"pawn"};
+	$h{"g"}{2}{$G_White} = $G_P{"pawn"};
+	$h{"h"}{2}{$G_White} = $G_P{"pawn"};
+
+	$h{"a"}{8}{$G_Black} = $G_P{"rook"};
+	$h{"b"}{8}{$G_Black} = $G_P{"knight"};
+	$h{"c"}{8}{$G_Black} = $G_P{"bishop"};
+	$h{"d"}{8}{$G_Black} = $G_P{"queen"};
+	$h{"e"}{8}{$G_Black} = $G_P{"king"};
+	$h{"f"}{8}{$G_Black} = $G_P{"bishop"};
+	$h{"g"}{8}{$G_Black} = $G_P{"knight"};
+	$h{"h"}{8}{$G_Black} = $G_P{"rook"};
+
+	$h{"a"}{7}{$G_Black} = $G_P{"pawn"};
+	$h{"b"}{7}{$G_Black} = $G_P{"pawn"};
+	$h{"c"}{7}{$G_Black} = $G_P{"pawn"};
+	$h{"d"}{7}{$G_Black} = $G_P{"pawn"};
+	$h{"e"}{7}{$G_Black} = $G_P{"pawn"};
+	$h{"f"}{7}{$G_Black} = $G_P{"pawn"};
+	$h{"g"}{7}{$G_Black} = $G_P{"pawn"};
+	$h{"h"}{7}{$G_Black} = $G_P{"pawn"};
+
+	return %h;
+}
+
+sub initialize_pieces {
+	my %h = ();
+	$h{"pawn"} = "P";
+	$h{"rook"} = "R";
+	$h{"knight"} = "N";
+	$h{"bishop"} = "B";
+	$h{"queen"} = "Q";
+	$h{"king"} = "K";
+	return %h;
+}
+
+sub list_promotion_pieces {
+	my %h = ();
+	$h{"N"}++;
+	$h{"B"}++;
+	$h{"R"}++;
+	$h{"Q"}++;
+	return %h;
+}
+
+sub king_moves {
+my %King_Moves = (
+a1 => [qw(a2 b2 b1)],
+b1 => [qw(a2 b2 c2 a1 c1)],
+c1 => [qw(b2 c2 d2 b1 d1)],
+d1 => [qw(c2 d2 e2 c1 e1)],
+e1 => [qw(d2 e2 f2 d1 f1)],
+f1 => [qw(e2 f2 g2 e1 g1)],
+g1 => [qw(f2 g2 h2 f1 h1)],
+h1 => [qw(g2 h2 g1)],
+a2 => [qw(a3 b3 b2 a1 b1)],
+b2 => [qw(a3 b3 c3 a2 c2 a1 b1 c1)],
+c2 => [qw(b3 c3 d3 b2 d2 b1 c1 d1)],
+d2 => [qw(c3 d3 e3 c2 e2 c1 d1 e1)],
+e2 => [qw(d3 e3 f3 d2 f2 d1 e1 f1)],
+f2 => [qw(e3 f3 g3 e2 g2 e1 f1 g1)],
+g2 => [qw(f3 g3 h3 f2 h2 f1 g1 h1)],
+h2 => [qw(g3 h3 g2 g1 h1)],
+a3 => [qw(a4 b4 b3 a2 b2)],
+b3 => [qw(a4 b4 c4 a3 c3 a2 b2 c2)],
+c3 => [qw(b4 c4 d4 b3 d3 b2 c2 d2)],
+d3 => [qw(c4 d4 e4 c3 e3 c2 d2 e2)],
+e3 => [qw(d4 e4 f4 d3 f3 d2 e2 f2)],
+f3 => [qw(e4 f4 g4 e3 g3 e2 f2 g2)],
+g3 => [qw(f4 g4 h4 f3 h3 f2 g2 h2)],
+h3 => [qw(g4 h4 g3 g2 h2)],
+a4 => [qw(a5 b5 b4 a3 b3)],
+b4 => [qw(a5 b5 c5 a4 c4 a3 b3 c3)],
+c4 => [qw(b5 c5 d5 b4 d4 b3 c3 d3)],
+d4 => [qw(c5 d5 e5 c4 e4 c3 d3 e3)],
+e4 => [qw(d5 e5 f5 d4 f4 d3 e3 f3)],
+f4 => [qw(e5 f5 g5 e4 g4 e3 f3 g3)],
+g4 => [qw(f5 g5 h5 f4 h4 f3 g3 h3)],
+h4 => [qw(g5 h5 g4 g3 h3)],
+a5 => [qw(a6 b6 b5 a4 b4)],
+b5 => [qw(a6 b6 c6 a5 c5 a4 b4 c4)],
+c5 => [qw(b6 c6 d6 b5 d5 b4 c4 d4)],
+d5 => [qw(c6 d6 e6 c5 e5 c4 d4 e4)],
+e5 => [qw(d6 e6 f6 d5 f5 d4 e4 f4)],
+f5 => [qw(e6 f6 g6 e5 g5 e4 f4 g4)],
+g5 => [qw(f6 g6 h6 f5 h5 f4 g4 h4)],
+h5 => [qw(g6 h6 g5 g4 h4)],
+a6 => [qw(a7 b7 b6 a5 b5)],
+b6 => [qw(a7 b7 c7 a6 c6 a5 b5 c5)],
+c6 => [qw(b7 c7 d7 b6 d6 b5 c5 d5)],
+d6 => [qw(c7 d7 e7 c6 e6 c5 d5 e5)],
+e6 => [qw(d7 e7 f7 d6 f6 d5 e5 f5)],
+f6 => [qw(e7 f7 g7 e6 g6 e5 f5 g5)],
+g6 => [qw(f7 g7 h7 f6 h6 f5 g5 h5)],
+h6 => [qw(g7 h7 g6 g5 h5)],
+a7 => [qw(a8 b8 b7 a6 b6)],
+b7 => [qw(a8 b8 c8 a7 c7 a6 b6 c6)],
+c7 => [qw(b8 c8 d8 b7 d7 b6 c6 d6)],
+d7 => [qw(c8 d8 e8 c7 e7 c6 d6 e6)],
+e7 => [qw(d8 e8 f8 d7 f7 d6 e6 f6)],
+f7 => [qw(e8 f8 g8 e7 g7 e6 f6 g6)],
+g7 => [qw(f8 g8 h8 f7 h7 f6 g6 h6)],
+h7 => [qw(g8 h8 g7 g6 h6)],
+a8 => [qw(b8 a7 b7)],
+b8 => [qw(a8 c8 a7 b7 c7)],
+c8 => [qw(b8 d8 b7 c7 d7)],
+d8 => [qw(c8 e8 c7 d7 e7)],
+e8 => [qw(d8 f8 d7 e7 f7)],
+f8 => [qw(e8 g8 e7 f7 g7)],
+g8 => [qw(f8 h8 f7 g7 h7)],
+h8 => [qw(g8 g7 h7)],
+);
+return %King_Moves;
+}
+
+sub queen_moves {
+my %Queen_Moves = (
+a1 => [qw(b1 c1 d1 e1 f1 g1 h1 a2 a3 a4 a5 a6 a7 a8 b2 c3 d4 e5 f6 g7 h8)],
+b1 => [qw(a1 c1 d1 e1 f1 g1 h1 b2 b3 b4 b5 b6 b7 b8 c2 d3 e4 f5 g6 h7 a2)],
+c1 => [qw(a1 b1 d1 e1 f1 g1 h1 c2 c3 c4 c5 c6 c7 c8 d2 e3 f4 g5 h6 b2 a3)],
+d1 => [qw(a1 b1 c1 e1 f1 g1 h1 d2 d3 d4 d5 d6 d7 d8 e2 f3 g4 h5 c2 b3 a4)],
+e1 => [qw(a1 b1 c1 d1 f1 g1 h1 e2 e3 e4 e5 e6 e7 e8 f2 g3 h4 d2 c3 b4 a5)],
+f1 => [qw(a1 b1 c1 d1 e1 g1 h1 f2 f3 f4 f5 f6 f7 f8 g2 h3 e2 d3 c4 b5 a6)],
+g1 => [qw(a1 b1 c1 d1 e1 f1 h1 g2 g3 g4 g5 g6 g7 g8 h2 f2 e3 d4 c5 b6 a7)],
+h1 => [qw(a1 b1 c1 d1 e1 f1 g1 h2 h3 h4 h5 h6 h7 h8 g2 f3 e4 d5 c6 b7 a8)],
+a2 => [qw(b2 c2 d2 e2 f2 g2 h2 a1 a3 a4 a5 a6 a7 a8 b3 c4 d5 e6 f7 g8 b1)],
+b2 => [qw(a2 c2 d2 e2 f2 g2 h2 b1 b3 b4 b5 b6 b7 b8 a1 c3 d4 e5 f6 g7 h8 c1 a3)],
+c2 => [qw(a2 b2 d2 e2 f2 g2 h2 c1 c3 c4 c5 c6 c7 c8 b1 d3 e4 f5 g6 h7 d1 b3 a4)],
+d2 => [qw(a2 b2 c2 e2 f2 g2 h2 d1 d3 d4 d5 d6 d7 d8 c1 e3 f4 g5 h6 e1 c3 b4 a5)],
+e2 => [qw(a2 b2 c2 d2 f2 g2 h2 e1 e3 e4 e5 e6 e7 e8 d1 f3 g4 h5 f1 d3 c4 b5 a6)],
+f2 => [qw(a2 b2 c2 d2 e2 g2 h2 f1 f3 f4 f5 f6 f7 f8 e1 g3 h4 g1 e3 d4 c5 b6 a7)],
+g2 => [qw(a2 b2 c2 d2 e2 f2 h2 g1 g3 g4 g5 g6 g7 g8 f1 h3 h1 f3 e4 d5 c6 b7 a8)],
+h2 => [qw(a2 b2 c2 d2 e2 f2 g2 h1 h3 h4 h5 h6 h7 h8 g1 g3 f4 e5 d6 c7 b8)],
+a3 => [qw(b3 c3 d3 e3 f3 g3 h3 a1 a2 a4 a5 a6 a7 a8 b4 c5 d6 e7 f8 c1 b2)],
+b3 => [qw(a3 c3 d3 e3 f3 g3 h3 b1 b2 b4 b5 b6 b7 b8 a2 c4 d5 e6 f7 g8 d1 c2 a4)],
+c3 => [qw(a3 b3 d3 e3 f3 g3 h3 c1 c2 c4 c5 c6 c7 c8 a1 b2 d4 e5 f6 g7 h8 e1 d2 b4 a5)],
+d3 => [qw(a3 b3 c3 e3 f3 g3 h3 d1 d2 d4 d5 d6 d7 d8 b1 c2 e4 f5 g6 h7 f1 e2 c4 b5 a6)],
+e3 => [qw(a3 b3 c3 d3 f3 g3 h3 e1 e2 e4 e5 e6 e7 e8 c1 d2 f4 g5 h6 g1 f2 d4 c5 b6 a7)],
+f3 => [qw(a3 b3 c3 d3 e3 g3 h3 f1 f2 f4 f5 f6 f7 f8 d1 e2 g4 h5 h1 g2 e4 d5 c6 b7 a8)],
+g3 => [qw(a3 b3 c3 d3 e3 f3 h3 g1 g2 g4 g5 g6 g7 g8 e1 f2 h4 h2 f4 e5 d6 c7 b8)],
+h3 => [qw(a3 b3 c3 d3 e3 f3 g3 h1 h2 h4 h5 h6 h7 h8 f1 g2 g4 f5 e6 d7 c8)],
+a4 => [qw(b4 c4 d4 e4 f4 g4 h4 a1 a2 a3 a5 a6 a7 a8 b5 c6 d7 e8 d1 c2 b3)],
+b4 => [qw(a4 c4 d4 e4 f4 g4 h4 b1 b2 b3 b5 b6 b7 b8 a3 c5 d6 e7 f8 e1 d2 c3 a5)],
+c4 => [qw(a4 b4 d4 e4 f4 g4 h4 c1 c2 c3 c5 c6 c7 c8 a2 b3 d5 e6 f7 g8 f1 e2 d3 b5 a6)],
+d4 => [qw(a4 b4 c4 e4 f4 g4 h4 d1 d2 d3 d5 d6 d7 d8 a1 b2 c3 e5 f6 g7 h8 g1 f2 e3 c5 b6 a7)],
+e4 => [qw(a4 b4 c4 d4 f4 g4 h4 e1 e2 e3 e5 e6 e7 e8 b1 c2 d3 f5 g6 h7 h1 g2 f3 d5 c6 b7 a8)],
+f4 => [qw(a4 b4 c4 d4 e4 g4 h4 f1 f2 f3 f5 f6 f7 f8 c1 d2 e3 g5 h6 h2 g3 e5 d6 c7 b8)],
+g4 => [qw(a4 b4 c4 d4 e4 f4 h4 g1 g2 g3 g5 g6 g7 g8 d1 e2 f3 h5 h3 f5 e6 d7 c8)],
+h4 => [qw(a4 b4 c4 d4 e4 f4 g4 h1 h2 h3 h5 h6 h7 h8 e1 f2 g3 g5 f6 e7 d8)],
+a5 => [qw(b5 c5 d5 e5 f5 g5 h5 a1 a2 a3 a4 a6 a7 a8 b6 c7 d8 e1 d2 c3 b4)],
+b5 => [qw(a5 c5 d5 e5 f5 g5 h5 b1 b2 b3 b4 b6 b7 b8 a4 c6 d7 e8 f1 e2 d3 c4 a6)],
+c5 => [qw(a5 b5 d5 e5 f5 g5 h5 c1 c2 c3 c4 c6 c7 c8 a3 b4 d6 e7 f8 g1 f2 e3 d4 b6 a7)],
+d5 => [qw(a5 b5 c5 e5 f5 g5 h5 d1 d2 d3 d4 d6 d7 d8 a2 b3 c4 e6 f7 g8 h1 g2 f3 e4 c6 b7 a8)],
+e5 => [qw(a5 b5 c5 d5 f5 g5 h5 e1 e2 e3 e4 e6 e7 e8 a1 b2 c3 d4 f6 g7 h8 h2 g3 f4 d6 c7 b8)],
+f5 => [qw(a5 b5 c5 d5 e5 g5 h5 f1 f2 f3 f4 f6 f7 f8 b1 c2 d3 e4 g6 h7 h3 g4 e6 d7 c8)],
+g5 => [qw(a5 b5 c5 d5 e5 f5 h5 g1 g2 g3 g4 g6 g7 g8 c1 d2 e3 f4 h6 h4 f6 e7 d8)],
+h5 => [qw(a5 b5 c5 d5 e5 f5 g5 h1 h2 h3 h4 h6 h7 h8 d1 e2 f3 g4 g6 f7 e8)],
+a6 => [qw(b6 c6 d6 e6 f6 g6 h6 a1 a2 a3 a4 a5 a7 a8 b7 c8 f1 e2 d3 c4 b5)],
+b6 => [qw(a6 c6 d6 e6 f6 g6 h6 b1 b2 b3 b4 b5 b7 b8 a5 c7 d8 g1 f2 e3 d4 c5 a7)],
+c6 => [qw(a6 b6 d6 e6 f6 g6 h6 c1 c2 c3 c4 c5 c7 c8 a4 b5 d7 e8 h1 g2 f3 e4 d5 b7 a8)],
+d6 => [qw(a6 b6 c6 e6 f6 g6 h6 d1 d2 d3 d4 d5 d7 d8 a3 b4 c5 e7 f8 h2 g3 f4 e5 c7 b8)],
+e6 => [qw(a6 b6 c6 d6 f6 g6 h6 e1 e2 e3 e4 e5 e7 e8 a2 b3 c4 d5 f7 g8 h3 g4 f5 d7 c8)],
+f6 => [qw(a6 b6 c6 d6 e6 g6 h6 f1 f2 f3 f4 f5 f7 f8 a1 b2 c3 d4 e5 g7 h8 h4 g5 e7 d8)],
+g6 => [qw(a6 b6 c6 d6 e6 f6 h6 g1 g2 g3 g4 g5 g7 g8 b1 c2 d3 e4 f5 h7 h5 f7 e8)],
+h6 => [qw(a6 b6 c6 d6 e6 f6 g6 h1 h2 h3 h4 h5 h7 h8 c1 d2 e3 f4 g5 g7 f8)],
+a7 => [qw(b7 c7 d7 e7 f7 g7 h7 a1 a2 a3 a4 a5 a6 a8 b8 g1 f2 e3 d4 c5 b6)],
+b7 => [qw(a7 c7 d7 e7 f7 g7 h7 b1 b2 b3 b4 b5 b6 b8 a6 c8 h1 g2 f3 e4 d5 c6 a8)],
+c7 => [qw(a7 b7 d7 e7 f7 g7 h7 c1 c2 c3 c4 c5 c6 c8 a5 b6 d8 h2 g3 f4 e5 d6 b8)],
+d7 => [qw(a7 b7 c7 e7 f7 g7 h7 d1 d2 d3 d4 d5 d6 d8 a4 b5 c6 e8 h3 g4 f5 e6 c8)],
+e7 => [qw(a7 b7 c7 d7 f7 g7 h7 e1 e2 e3 e4 e5 e6 e8 a3 b4 c5 d6 f8 h4 g5 f6 d8)],
+f7 => [qw(a7 b7 c7 d7 e7 g7 h7 f1 f2 f3 f4 f5 f6 f8 a2 b3 c4 d5 e6 g8 h5 g6 e8)],
+g7 => [qw(a7 b7 c7 d7 e7 f7 h7 g1 g2 g3 g4 g5 g6 g8 a1 b2 c3 d4 e5 f6 h8 h6 f8)],
+h7 => [qw(a7 b7 c7 d7 e7 f7 g7 h1 h2 h3 h4 h5 h6 h8 b1 c2 d3 e4 f5 g6 g8)],
+a8 => [qw(b8 c8 d8 e8 f8 g8 h8 a1 a2 a3 a4 a5 a6 a7 h1 g2 f3 e4 d5 c6 b7)],
+b8 => [qw(a8 c8 d8 e8 f8 g8 h8 b1 b2 b3 b4 b5 b6 b7 a7 h2 g3 f4 e5 d6 c7)],
+c8 => [qw(a8 b8 d8 e8 f8 g8 h8 c1 c2 c3 c4 c5 c6 c7 a6 b7 h3 g4 f5 e6 d7)],
+d8 => [qw(a8 b8 c8 e8 f8 g8 h8 d1 d2 d3 d4 d5 d6 d7 a5 b6 c7 h4 g5 f6 e7)],
+e8 => [qw(a8 b8 c8 d8 f8 g8 h8 e1 e2 e3 e4 e5 e6 e7 a4 b5 c6 d7 h5 g6 f7)],
+f8 => [qw(a8 b8 c8 d8 e8 g8 h8 f1 f2 f3 f4 f5 f6 f7 a3 b4 c5 d6 e7 h6 g7)],
+g8 => [qw(a8 b8 c8 d8 e8 f8 h8 g1 g2 g3 g4 g5 g6 g7 a2 b3 c4 d5 e6 f7 h7)],
+h8 => [qw(a8 b8 c8 d8 e8 f8 g8 h1 h2 h3 h4 h5 h6 h7 a1 b2 c3 d4 e5 f6 g7)],
+);
+return %Queen_Moves;
+}
+
+sub rook_moves {
+my %Rook_Moves = (
+a1 => [qw(b1 c1 d1 e1 f1 g1 h1 a2 a3 a4 a5 a6 a7 a8)],
+b1 => [qw(a1 c1 d1 e1 f1 g1 h1 b2 b3 b4 b5 b6 b7 b8)],
+c1 => [qw(a1 b1 d1 e1 f1 g1 h1 c2 c3 c4 c5 c6 c7 c8)],
+d1 => [qw(a1 b1 c1 e1 f1 g1 h1 d2 d3 d4 d5 d6 d7 d8)],
+e1 => [qw(a1 b1 c1 d1 f1 g1 h1 e2 e3 e4 e5 e6 e7 e8)],
+f1 => [qw(a1 b1 c1 d1 e1 g1 h1 f2 f3 f4 f5 f6 f7 f8)],
+g1 => [qw(a1 b1 c1 d1 e1 f1 h1 g2 g3 g4 g5 g6 g7 g8)],
+h1 => [qw(a1 b1 c1 d1 e1 f1 g1 h2 h3 h4 h5 h6 h7 h8)],
+a2 => [qw(b2 c2 d2 e2 f2 g2 h2 a1 a3 a4 a5 a6 a7 a8)],
+b2 => [qw(a2 c2 d2 e2 f2 g2 h2 b1 b3 b4 b5 b6 b7 b8)],
+c2 => [qw(a2 b2 d2 e2 f2 g2 h2 c1 c3 c4 c5 c6 c7 c8)],
+d2 => [qw(a2 b2 c2 e2 f2 g2 h2 d1 d3 d4 d5 d6 d7 d8)],
+e2 => [qw(a2 b2 c2 d2 f2 g2 h2 e1 e3 e4 e5 e6 e7 e8)],
+f2 => [qw(a2 b2 c2 d2 e2 g2 h2 f1 f3 f4 f5 f6 f7 f8)],
+g2 => [qw(a2 b2 c2 d2 e2 f2 h2 g1 g3 g4 g5 g6 g7 g8)],
+h2 => [qw(a2 b2 c2 d2 e2 f2 g2 h1 h3 h4 h5 h6 h7 h8)],
+a3 => [qw(b3 c3 d3 e3 f3 g3 h3 a1 a2 a4 a5 a6 a7 a8)],
+b3 => [qw(a3 c3 d3 e3 f3 g3 h3 b1 b2 b4 b5 b6 b7 b8)],
+c3 => [qw(a3 b3 d3 e3 f3 g3 h3 c1 c2 c4 c5 c6 c7 c8)],
+d3 => [qw(a3 b3 c3 e3 f3 g3 h3 d1 d2 d4 d5 d6 d7 d8)],
+e3 => [qw(a3 b3 c3 d3 f3 g3 h3 e1 e2 e4 e5 e6 e7 e8)],
+f3 => [qw(a3 b3 c3 d3 e3 g3 h3 f1 f2 f4 f5 f6 f7 f8)],
+g3 => [qw(a3 b3 c3 d3 e3 f3 h3 g1 g2 g4 g5 g6 g7 g8)],
+h3 => [qw(a3 b3 c3 d3 e3 f3 g3 h1 h2 h4 h5 h6 h7 h8)],
+a4 => [qw(b4 c4 d4 e4 f4 g4 h4 a1 a2 a3 a5 a6 a7 a8)],
+b4 => [qw(a4 c4 d4 e4 f4 g4 h4 b1 b2 b3 b5 b6 b7 b8)],
+c4 => [qw(a4 b4 d4 e4 f4 g4 h4 c1 c2 c3 c5 c6 c7 c8)],
+d4 => [qw(a4 b4 c4 e4 f4 g4 h4 d1 d2 d3 d5 d6 d7 d8)],
+e4 => [qw(a4 b4 c4 d4 f4 g4 h4 e1 e2 e3 e5 e6 e7 e8)],
+f4 => [qw(a4 b4 c4 d4 e4 g4 h4 f1 f2 f3 f5 f6 f7 f8)],
+g4 => [qw(a4 b4 c4 d4 e4 f4 h4 g1 g2 g3 g5 g6 g7 g8)],
+h4 => [qw(a4 b4 c4 d4 e4 f4 g4 h1 h2 h3 h5 h6 h7 h8)],
+a5 => [qw(b5 c5 d5 e5 f5 g5 h5 a1 a2 a3 a4 a6 a7 a8)],
+b5 => [qw(a5 c5 d5 e5 f5 g5 h5 b1 b2 b3 b4 b6 b7 b8)],
+c5 => [qw(a5 b5 d5 e5 f5 g5 h5 c1 c2 c3 c4 c6 c7 c8)],
+d5 => [qw(a5 b5 c5 e5 f5 g5 h5 d1 d2 d3 d4 d6 d7 d8)],
+e5 => [qw(a5 b5 c5 d5 f5 g5 h5 e1 e2 e3 e4 e6 e7 e8)],
+f5 => [qw(a5 b5 c5 d5 e5 g5 h5 f1 f2 f3 f4 f6 f7 f8)],
+g5 => [qw(a5 b5 c5 d5 e5 f5 h5 g1 g2 g3 g4 g6 g7 g8)],
+h5 => [qw(a5 b5 c5 d5 e5 f5 g5 h1 h2 h3 h4 h6 h7 h8)],
+a6 => [qw(b6 c6 d6 e6 f6 g6 h6 a1 a2 a3 a4 a5 a7 a8)],
+b6 => [qw(a6 c6 d6 e6 f6 g6 h6 b1 b2 b3 b4 b5 b7 b8)],
+c6 => [qw(a6 b6 d6 e6 f6 g6 h6 c1 c2 c3 c4 c5 c7 c8)],
+d6 => [qw(a6 b6 c6 e6 f6 g6 h6 d1 d2 d3 d4 d5 d7 d8)],
+e6 => [qw(a6 b6 c6 d6 f6 g6 h6 e1 e2 e3 e4 e5 e7 e8)],
+f6 => [qw(a6 b6 c6 d6 e6 g6 h6 f1 f2 f3 f4 f5 f7 f8)],
+g6 => [qw(a6 b6 c6 d6 e6 f6 h6 g1 g2 g3 g4 g5 g7 g8)],
+h6 => [qw(a6 b6 c6 d6 e6 f6 g6 h1 h2 h3 h4 h5 h7 h8)],
+a7 => [qw(b7 c7 d7 e7 f7 g7 h7 a1 a2 a3 a4 a5 a6 a8)],
+b7 => [qw(a7 c7 d7 e7 f7 g7 h7 b1 b2 b3 b4 b5 b6 b8)],
+c7 => [qw(a7 b7 d7 e7 f7 g7 h7 c1 c2 c3 c4 c5 c6 c8)],
+d7 => [qw(a7 b7 c7 e7 f7 g7 h7 d1 d2 d3 d4 d5 d6 d8)],
+e7 => [qw(a7 b7 c7 d7 f7 g7 h7 e1 e2 e3 e4 e5 e6 e8)],
+f7 => [qw(a7 b7 c7 d7 e7 g7 h7 f1 f2 f3 f4 f5 f6 f8)],
+g7 => [qw(a7 b7 c7 d7 e7 f7 h7 g1 g2 g3 g4 g5 g6 g8)],
+h7 => [qw(a7 b7 c7 d7 e7 f7 g7 h1 h2 h3 h4 h5 h6 h8)],
+a8 => [qw(b8 c8 d8 e8 f8 g8 h8 a1 a2 a3 a4 a5 a6 a7)],
+b8 => [qw(a8 c8 d8 e8 f8 g8 h8 b1 b2 b3 b4 b5 b6 b7)],
+c8 => [qw(a8 b8 d8 e8 f8 g8 h8 c1 c2 c3 c4 c5 c6 c7)],
+d8 => [qw(a8 b8 c8 e8 f8 g8 h8 d1 d2 d3 d4 d5 d6 d7)],
+e8 => [qw(a8 b8 c8 d8 f8 g8 h8 e1 e2 e3 e4 e5 e6 e7)],
+f8 => [qw(a8 b8 c8 d8 e8 g8 h8 f1 f2 f3 f4 f5 f6 f7)],
+g8 => [qw(a8 b8 c8 d8 e8 f8 h8 g1 g2 g3 g4 g5 g6 g7)],
+h8 => [qw(a8 b8 c8 d8 e8 f8 g8 h1 h2 h3 h4 h5 h6 h7)],
+);
+return %Rook_Moves;
+}
+
+sub bishop_moves {
+my %Bishop_Moves = (
+a1 => [qw(b2 c3 d4 e5 f6 g7 h8)],
+b1 => [qw(c2 d3 e4 f5 g6 h7 a2)],
+c1 => [qw(d2 e3 f4 g5 h6 b2 a3)],
+d1 => [qw(e2 f3 g4 h5 c2 b3 a4)],
+e1 => [qw(f2 g3 h4 d2 c3 b4 a5)],
+f1 => [qw(g2 h3 e2 d3 c4 b5 a6)],
+g1 => [qw(h2 f2 e3 d4 c5 b6 a7)],
+h1 => [qw(g2 f3 e4 d5 c6 b7 a8)],
+a2 => [qw(b3 c4 d5 e6 f7 g8 b1)],
+b2 => [qw(a1 c3 d4 e5 f6 g7 h8 c1 a3)],
+c2 => [qw(b1 d3 e4 f5 g6 h7 d1 b3 a4)],
+d2 => [qw(c1 e3 f4 g5 h6 e1 c3 b4 a5)],
+e2 => [qw(d1 f3 g4 h5 f1 d3 c4 b5 a6)],
+f2 => [qw(e1 g3 h4 g1 e3 d4 c5 b6 a7)],
+g2 => [qw(f1 h3 h1 f3 e4 d5 c6 b7 a8)],
+h2 => [qw(g1 g3 f4 e5 d6 c7 b8)],
+a3 => [qw(b4 c5 d6 e7 f8 c1 b2)],
+b3 => [qw(a2 c4 d5 e6 f7 g8 d1 c2 a4)],
+c3 => [qw(a1 b2 d4 e5 f6 g7 h8 e1 d2 b4 a5)],
+d3 => [qw(b1 c2 e4 f5 g6 h7 f1 e2 c4 b5 a6)],
+e3 => [qw(c1 d2 f4 g5 h6 g1 f2 d4 c5 b6 a7)],
+f3 => [qw(d1 e2 g4 h5 h1 g2 e4 d5 c6 b7 a8)],
+g3 => [qw(e1 f2 h4 h2 f4 e5 d6 c7 b8)],
+h3 => [qw(f1 g2 g4 f5 e6 d7 c8)],
+a4 => [qw(b5 c6 d7 e8 d1 c2 b3)],
+b4 => [qw(a3 c5 d6 e7 f8 e1 d2 c3 a5)],
+c4 => [qw(a2 b3 d5 e6 f7 g8 f1 e2 d3 b5 a6)],
+d4 => [qw(a1 b2 c3 e5 f6 g7 h8 g1 f2 e3 c5 b6 a7)],
+e4 => [qw(b1 c2 d3 f5 g6 h7 h1 g2 f3 d5 c6 b7 a8)],
+f4 => [qw(c1 d2 e3 g5 h6 h2 g3 e5 d6 c7 b8)],
+g4 => [qw(d1 e2 f3 h5 h3 f5 e6 d7 c8)],
+h4 => [qw(e1 f2 g3 g5 f6 e7 d8)],
+a5 => [qw(b6 c7 d8 e1 d2 c3 b4)],
+b5 => [qw(a4 c6 d7 e8 f1 e2 d3 c4 a6)],
+c5 => [qw(a3 b4 d6 e7 f8 g1 f2 e3 d4 b6 a7)],
+d5 => [qw(a2 b3 c4 e6 f7 g8 h1 g2 f3 e4 c6 b7 a8)],
+e5 => [qw(a1 b2 c3 d4 f6 g7 h8 h2 g3 f4 d6 c7 b8)],
+f5 => [qw(b1 c2 d3 e4 g6 h7 h3 g4 e6 d7 c8)],
+g5 => [qw(c1 d2 e3 f4 h6 h4 f6 e7 d8)],
+h5 => [qw(d1 e2 f3 g4 g6 f7 e8)],
+a6 => [qw(b7 c8 f1 e2 d3 c4 b5)],
+b6 => [qw(a5 c7 d8 g1 f2 e3 d4 c5 a7)],
+c6 => [qw(a4 b5 d7 e8 h1 g2 f3 e4 d5 b7 a8)],
+d6 => [qw(a3 b4 c5 e7 f8 h2 g3 f4 e5 c7 b8)],
+e6 => [qw(a2 b3 c4 d5 f7 g8 h3 g4 f5 d7 c8)],
+f6 => [qw(a1 b2 c3 d4 e5 g7 h8 h4 g5 e7 d8)],
+g6 => [qw(b1 c2 d3 e4 f5 h7 h5 f7 e8)],
+h6 => [qw(c1 d2 e3 f4 g5 g7 f8)],
+a7 => [qw(b8 g1 f2 e3 d4 c5 b6)],
+b7 => [qw(a6 c8 h1 g2 f3 e4 d5 c6 a8)],
+c7 => [qw(a5 b6 d8 h2 g3 f4 e5 d6 b8)],
+d7 => [qw(a4 b5 c6 e8 h3 g4 f5 e6 c8)],
+e7 => [qw(a3 b4 c5 d6 f8 h4 g5 f6 d8)],
+f7 => [qw(a2 b3 c4 d5 e6 g8 h5 g6 e8)],
+g7 => [qw(a1 b2 c3 d4 e5 f6 h8 h6 f8)],
+h7 => [qw(b1 c2 d3 e4 f5 g6 g8)],
+a8 => [qw(h1 g2 f3 e4 d5 c6 b7)],
+b8 => [qw(a7 h2 g3 f4 e5 d6 c7)],
+c8 => [qw(a6 b7 h3 g4 f5 e6 d7)],
+d8 => [qw(a5 b6 c7 h4 g5 f6 e7)],
+e8 => [qw(a4 b5 c6 d7 h5 g6 f7)],
+f8 => [qw(a3 b4 c5 d6 e7 h6 g7)],
+g8 => [qw(a2 b3 c4 d5 e6 f7 h7)],
+h8 => [qw(a1 b2 c3 d4 e5 f6 g7)],
+);
+return %Bishop_Moves;
+}
+
+sub knight_moves {
+my %Knight_Moves = (
+a1 => [qw(b3 c2)],
+b1 => [qw(a3 c3 d2)],
+c1 => [qw(a2 b3 d3 e2)],
+d1 => [qw(b2 c3 e3 f2)],
+e1 => [qw(c2 d3 f3 g2)],
+f1 => [qw(d2 e3 g3 h2)],
+g1 => [qw(e2 f3 h3)],
+h1 => [qw(f2 g3)],
+a2 => [qw(b4 c3 c1)],
+b2 => [qw(a4 c4 d3 d1)],
+c2 => [qw(a1 a3 b4 d4 e3 e1)],
+d2 => [qw(b1 b3 c4 e4 f3 f1)],
+e2 => [qw(c1 c3 d4 f4 g3 g1)],
+f2 => [qw(d1 d3 e4 g4 h3 h1)],
+g2 => [qw(e1 e3 f4 h4)],
+h2 => [qw(f1 f3 g4)],
+a3 => [qw(b5 c4 c2 b1)],
+b3 => [qw(a1 a5 c5 d4 d2 c1)],
+c3 => [qw(b1 a2 a4 b5 d5 e4 e2 d1)],
+d3 => [qw(c1 b2 b4 c5 e5 f4 f2 e1)],
+e3 => [qw(d1 c2 c4 d5 f5 g4 g2 f1)],
+f3 => [qw(e1 d2 d4 e5 g5 h4 h2 g1)],
+g3 => [qw(f1 e2 e4 f5 h5 h1)],
+h3 => [qw(g1 f2 f4 g5)],
+a4 => [qw(b6 c5 c3 b2)],
+b4 => [qw(a2 a6 c6 d5 d3 c2)],
+c4 => [qw(b2 a3 a5 b6 d6 e5 e3 d2)],
+d4 => [qw(c2 b3 b5 c6 e6 f5 f3 e2)],
+e4 => [qw(d2 c3 c5 d6 f6 g5 g3 f2)],
+f4 => [qw(e2 d3 d5 e6 g6 h5 h3 g2)],
+g4 => [qw(f2 e3 e5 f6 h6 h2)],
+h4 => [qw(g2 f3 f5 g6)],
+a5 => [qw(b7 c6 c4 b3)],
+b5 => [qw(a3 a7 c7 d6 d4 c3)],
+c5 => [qw(b3 a4 a6 b7 d7 e6 e4 d3)],
+d5 => [qw(c3 b4 b6 c7 e7 f6 f4 e3)],
+e5 => [qw(d3 c4 c6 d7 f7 g6 g4 f3)],
+f5 => [qw(e3 d4 d6 e7 g7 h6 h4 g3)],
+g5 => [qw(f3 e4 e6 f7 h7 h3)],
+h5 => [qw(g3 f4 f6 g7)],
+a6 => [qw(b8 c7 c5 b4)],
+b6 => [qw(a4 a8 c8 d7 d5 c4)],
+c6 => [qw(b4 a5 a7 b8 d8 e7 e5 d4)],
+d6 => [qw(c4 b5 b7 c8 e8 f7 f5 e4)],
+e6 => [qw(d4 c5 c7 d8 f8 g7 g5 f4)],
+f6 => [qw(e4 d5 d7 e8 g8 h7 h5 g4)],
+g6 => [qw(f4 e5 e7 f8 h8 h4)],
+h6 => [qw(g4 f5 f7 g8)],
+a7 => [qw(c8 c6 b5)],
+b7 => [qw(a5 d8 d6 c5)],
+c7 => [qw(b5 a6 a8 e8 e6 d5)],
+d7 => [qw(c5 b6 b8 f8 f6 e5)],
+e7 => [qw(d5 c6 c8 g8 g6 f5)],
+f7 => [qw(e5 d6 d8 h8 h6 g5)],
+g7 => [qw(f5 e6 e8 h5)],
+h7 => [qw(g5 f6 f8)],
+a8 => [qw(c7 b6)],
+b8 => [qw(a6 d7 c6)],
+c8 => [qw(b6 a7 e7 d6)],
+d8 => [qw(c6 b7 f7 e6)],
+e8 => [qw(d6 c7 g7 f6)],
+f8 => [qw(e6 d7 h7 g6)],
+g8 => [qw(f6 e7 h6)],
+h8 => [qw(g6 f7)],
+);
+return %Knight_Moves;
+}
+
+sub pawn_moves_white {
+my %pawnWhite = (
+a3 => [qw(a2)],
+a4 => [qw(a3 a2)],
+a5 => [qw(a4)],
+a6 => [qw(a5)],
+a7 => [qw(a6)],
+a8 => [qw(a7)],
+b3 => [qw(b2)],
+b4 => [qw(b3 b2)],
+b5 => [qw(b4)],
+b6 => [qw(b5)],
+b7 => [qw(b6)],
+b8 => [qw(b7)],
+c3 => [qw(c2)],
+c4 => [qw(c3 c2)],
+c5 => [qw(c4)],
+c6 => [qw(c5)],
+c7 => [qw(c6)],
+c8 => [qw(c7)],
+d3 => [qw(d2)],
+d4 => [qw(d3 d2)],
+d5 => [qw(d4)],
+d6 => [qw(d5)],
+d7 => [qw(d6)],
+d8 => [qw(d7)],
+e3 => [qw(e2)],
+e4 => [qw(e3 e2)],
+e5 => [qw(e4)],
+e6 => [qw(e5)],
+e7 => [qw(e6)],
+e8 => [qw(e7)],
+f3 => [qw(f2)],
+f4 => [qw(f3 f2)],
+f5 => [qw(f4)],
+f6 => [qw(f5)],
+f7 => [qw(f6)],
+f8 => [qw(f7)],
+g3 => [qw(g2)],
+g4 => [qw(g3 g2)],
+g5 => [qw(g4)],
+g6 => [qw(g5)],
+g7 => [qw(g6)],
+g8 => [qw(g7)],
+h3 => [qw(h2)],
+h4 => [qw(h3 h2)],
+h5 => [qw(h4)],
+h6 => [qw(h5)],
+h7 => [qw(h6)],
+h8 => [qw(h7)],
+);
+return %pawnWhite;
+}
+
+sub pawn_moves_black {
+my %pawnBlack = (
+a6 => [qw(a7)],
+a5 => [qw(a6 a7)],
+a4 => [qw(a5)],
+a3 => [qw(a4)],
+a2 => [qw(a3)],
+a1 => [qw(a2)],
+b6 => [qw(b7)],
+b5 => [qw(b6 b7)],
+b4 => [qw(b5)],
+b3 => [qw(b4)],
+b2 => [qw(b3)],
+b1 => [qw(b2)],
+c6 => [qw(c7)],
+c5 => [qw(c6 c7)],
+c4 => [qw(c5)],
+c3 => [qw(c4)],
+c2 => [qw(c3)],
+c1 => [qw(c2)],
+d6 => [qw(d7)],
+d5 => [qw(d6 d7)],
+d4 => [qw(d5)],
+d3 => [qw(d4)],
+d2 => [qw(d3)],
+d1 => [qw(d2)],
+e6 => [qw(e7)],
+e5 => [qw(e6 e7)],
+e4 => [qw(e5)],
+e3 => [qw(e4)],
+e2 => [qw(e3)],
+e1 => [qw(e2)],
+f6 => [qw(f7)],
+f5 => [qw(f6 f7)],
+f4 => [qw(f5)],
+f3 => [qw(f4)],
+f2 => [qw(f3)],
+f1 => [qw(f2)],
+g6 => [qw(g7)],
+g5 => [qw(g6 g7)],
+g4 => [qw(g5)],
+g3 => [qw(g4)],
+g2 => [qw(g3)],
+g1 => [qw(g2)],
+h6 => [qw(h7)],
+h5 => [qw(h6 h7)],
+h4 => [qw(h5)],
+h3 => [qw(h4)],
+h2 => [qw(h3)],
+h1 => [qw(h2)],
+);
+return %pawnBlack;
+}
+
+sub rows_cols {
+my %h = ();
+$G_Empty = "null";
+$h{a1}{a1} = $G_Empty;
+$h{a1}{a2} = $G_Empty;
+$h{a1}{a3} = [qw(a2)];
+$h{a1}{a4} = [qw(a2 a3)];
+$h{a1}{a5} = [qw(a2 a3 a4)];
+$h{a1}{a6} = [qw(a2 a3 a4 a5)];
+$h{a1}{a7} = [qw(a2 a3 a4 a5 a6)];
+$h{a1}{a8} = [qw(a2 a3 a4 a5 a6 a7)];
+$h{a2}{a1} = $G_Empty;
+$h{a2}{a2} = $G_Empty;
+$h{a2}{a3} = $G_Empty;
+$h{a2}{a4} = [qw(a3)];
+$h{a2}{a5} = [qw(a3 a4)];
+$h{a2}{a6} = [qw(a3 a4 a5)];
+$h{a2}{a7} = [qw(a3 a4 a5 a6)];
+$h{a2}{a8} = [qw(a3 a4 a5 a6 a7)];
+$h{a3}{a1} = [qw(a2)];
+$h{a3}{a2} = $G_Empty;
+$h{a3}{a3} = $G_Empty;
+$h{a3}{a4} = $G_Empty;
+$h{a3}{a5} = [qw(a4)];
+$h{a3}{a6} = [qw(a4 a5)];
+$h{a3}{a7} = [qw(a4 a5 a6)];
+$h{a3}{a8} = [qw(a4 a5 a6 a7)];
+$h{a4}{a1} = [qw(a2 a3)];
+$h{a4}{a2} = [qw(a3)];
+$h{a4}{a3} = $G_Empty;
+$h{a4}{a4} = $G_Empty;
+$h{a4}{a5} = $G_Empty;
+$h{a4}{a6} = [qw(a5)];
+$h{a4}{a7} = [qw(a5 a6)];
+$h{a4}{a8} = [qw(a5 a6 a7)];
+$h{a5}{a1} = [qw(a2 a3 a4)];
+$h{a5}{a2} = [qw(a3 a4)];
+$h{a5}{a3} = [qw(a4)];
+$h{a5}{a4} = $G_Empty;
+$h{a5}{a5} = $G_Empty;
+$h{a5}{a6} = $G_Empty;
+$h{a5}{a7} = [qw(a6)];
+$h{a5}{a8} = [qw(a6 a7)];
+$h{a6}{a1} = [qw(a2 a3 a4 a5)];
+$h{a6}{a2} = [qw(a3 a4 a5)];
+$h{a6}{a3} = [qw(a4 a5)];
+$h{a6}{a4} = [qw(a5)];
+$h{a6}{a5} = $G_Empty;
+$h{a6}{a6} = $G_Empty;
+$h{a6}{a7} = $G_Empty;
+$h{a6}{a8} = [qw(a7)];
+$h{a7}{a1} = [qw(a2 a3 a4 a5 a6)];
+$h{a7}{a2} = [qw(a3 a4 a5 a6)];
+$h{a7}{a3} = [qw(a4 a5 a6)];
+$h{a7}{a4} = [qw(a5 a6)];
+$h{a7}{a5} = [qw(a6)];
+$h{a7}{a6} = $G_Empty;
+$h{a7}{a7} = $G_Empty;
+$h{a7}{a8} = $G_Empty;
+$h{a8}{a1} = [qw(a2 a3 a4 a5 a6 a7)];
+$h{a8}{a2} = [qw(a3 a4 a5 a6 a7)];
+$h{a8}{a3} = [qw(a4 a5 a6 a7)];
+$h{a8}{a4} = [qw(a5 a6 a7)];
+$h{a8}{a5} = [qw(a6 a7)];
+$h{a8}{a6} = [qw(a7)];
+$h{a8}{a7} = $G_Empty;
+$h{a8}{a8} = $G_Empty;
+$h{b1}{b1} = $G_Empty;
+$h{b1}{b2} = $G_Empty;
+$h{b1}{b3} = [qw(b2)];
+$h{b1}{b4} = [qw(b2 b3)];
+$h{b1}{b5} = [qw(b2 b3 b4)];
+$h{b1}{b6} = [qw(b2 b3 b4 b5)];
+$h{b1}{b7} = [qw(b2 b3 b4 b5 b6)];
+$h{b1}{b8} = [qw(b2 b3 b4 b5 b6 b7)];
+$h{b2}{b1} = $G_Empty;
+$h{b2}{b2} = $G_Empty;
+$h{b2}{b3} = $G_Empty;
+$h{b2}{b4} = [qw(b3)];
+$h{b2}{b5} = [qw(b3 b4)];
+$h{b2}{b6} = [qw(b3 b4 b5)];
+$h{b2}{b7} = [qw(b3 b4 b5 b6)];
+$h{b2}{b8} = [qw(b3 b4 b5 b6 b7)];
+$h{b3}{b1} = [qw(b2)];
+$h{b3}{b2} = $G_Empty;
+$h{b3}{b3} = $G_Empty;
+$h{b3}{b4} = $G_Empty;
+$h{b3}{b5} = [qw(b4)];
+$h{b3}{b6} = [qw(b4 b5)];
+$h{b3}{b7} = [qw(b4 b5 b6)];
+$h{b3}{b8} = [qw(b4 b5 b6 b7)];
+$h{b4}{b1} = [qw(b2 b3)];
+$h{b4}{b2} = [qw(b3)];
+$h{b4}{b3} = $G_Empty;
+$h{b4}{b4} = $G_Empty;
+$h{b4}{b5} = $G_Empty;
+$h{b4}{b6} = [qw(b5)];
+$h{b4}{b7} = [qw(b5 b6)];
+$h{b4}{b8} = [qw(b5 b6 b7)];
+$h{b5}{b1} = [qw(b2 b3 b4)];
+$h{b5}{b2} = [qw(b3 b4)];
+$h{b5}{b3} = [qw(b4)];
+$h{b5}{b4} = $G_Empty;
+$h{b5}{b5} = $G_Empty;
+$h{b5}{b6} = $G_Empty;
+$h{b5}{b7} = [qw(b6)];
+$h{b5}{b8} = [qw(b6 b7)];
+$h{b6}{b1} = [qw(b2 b3 b4 b5)];
+$h{b6}{b2} = [qw(b3 b4 b5)];
+$h{b6}{b3} = [qw(b4 b5)];
+$h{b6}{b4} = [qw(b5)];
+$h{b6}{b5} = $G_Empty;
+$h{b6}{b6} = $G_Empty;
+$h{b6}{b7} = $G_Empty;
+$h{b6}{b8} = [qw(b7)];
+$h{b7}{b1} = [qw(b2 b3 b4 b5 b6)];
+$h{b7}{b2} = [qw(b3 b4 b5 b6)];
+$h{b7}{b3} = [qw(b4 b5 b6)];
+$h{b7}{b4} = [qw(b5 b6)];
+$h{b7}{b5} = [qw(b6)];
+$h{b7}{b6} = $G_Empty;
+$h{b7}{b7} = $G_Empty;
+$h{b7}{b8} = $G_Empty;
+$h{b8}{b1} = [qw(b2 b3 b4 b5 b6 b7)];
+$h{b8}{b2} = [qw(b3 b4 b5 b6 b7)];
+$h{b8}{b3} = [qw(b4 b5 b6 b7)];
+$h{b8}{b4} = [qw(b5 b6 b7)];
+$h{b8}{b5} = [qw(b6 b7)];
+$h{b8}{b6} = [qw(b7)];
+$h{b8}{b7} = $G_Empty;
+$h{b8}{b8} = $G_Empty;
+$h{c1}{c1} = $G_Empty;
+$h{c1}{c2} = $G_Empty;
+$h{c1}{c3} = [qw(c2)];
+$h{c1}{c4} = [qw(c2 c3)];
+$h{c1}{c5} = [qw(c2 c3 c4)];
+$h{c1}{c6} = [qw(c2 c3 c4 c5)];
+$h{c1}{c7} = [qw(c2 c3 c4 c5 c6)];
+$h{c1}{c8} = [qw(c2 c3 c4 c5 c6 c7)];
+$h{c2}{c1} = $G_Empty;
+$h{c2}{c2} = $G_Empty;
+$h{c2}{c3} = $G_Empty;
+$h{c2}{c4} = [qw(c3)];
+$h{c2}{c5} = [qw(c3 c4)];
+$h{c2}{c6} = [qw(c3 c4 c5)];
+$h{c2}{c7} = [qw(c3 c4 c5 c6)];
+$h{c2}{c8} = [qw(c3 c4 c5 c6 c7)];
+$h{c3}{c1} = [qw(c2)];
+$h{c3}{c2} = $G_Empty;
+$h{c3}{c3} = $G_Empty;
+$h{c3}{c4} = $G_Empty;
+$h{c3}{c5} = [qw(c4)];
+$h{c3}{c6} = [qw(c4 c5)];
+$h{c3}{c7} = [qw(c4 c5 c6)];
+$h{c3}{c8} = [qw(c4 c5 c6 c7)];
+$h{c4}{c1} = [qw(c2 c3)];
+$h{c4}{c2} = [qw(c3)];
+$h{c4}{c3} = $G_Empty;
+$h{c4}{c4} = $G_Empty;
+$h{c4}{c5} = $G_Empty;
+$h{c4}{c6} = [qw(c5)];
+$h{c4}{c7} = [qw(c5 c6)];
+$h{c4}{c8} = [qw(c5 c6 c7)];
+$h{c5}{c1} = [qw(c2 c3 c4)];
+$h{c5}{c2} = [qw(c3 c4)];
+$h{c5}{c3} = [qw(c4)];
+$h{c5}{c4} = $G_Empty;
+$h{c5}{c5} = $G_Empty;
+$h{c5}{c6} = $G_Empty;
+$h{c5}{c7} = [qw(c6)];
+$h{c5}{c8} = [qw(c6 c7)];
+$h{c6}{c1} = [qw(c2 c3 c4 c5)];
+$h{c6}{c2} = [qw(c3 c4 c5)];
+$h{c6}{c3} = [qw(c4 c5)];
+$h{c6}{c4} = [qw(c5)];
+$h{c6}{c5} = $G_Empty;
+$h{c6}{c6} = $G_Empty;
+$h{c6}{c7} = $G_Empty;
+$h{c6}{c8} = [qw(c7)];
+$h{c7}{c1} = [qw(c2 c3 c4 c5 c6)];
+$h{c7}{c2} = [qw(c3 c4 c5 c6)];
+$h{c7}{c3} = [qw(c4 c5 c6)];
+$h{c7}{c4} = [qw(c5 c6)];
+$h{c7}{c5} = [qw(c6)];
+$h{c7}{c6} = $G_Empty;
+$h{c7}{c7} = $G_Empty;
+$h{c7}{c8} = $G_Empty;
+$h{c8}{c1} = [qw(c2 c3 c4 c5 c6 c7)];
+$h{c8}{c2} = [qw(c3 c4 c5 c6 c7)];
+$h{c8}{c3} = [qw(c4 c5 c6 c7)];
+$h{c8}{c4} = [qw(c5 c6 c7)];
+$h{c8}{c5} = [qw(c6 c7)];
+$h{c8}{c6} = [qw(c7)];
+$h{c8}{c7} = $G_Empty;
+$h{c8}{c8} = $G_Empty;
+$h{d1}{d1} = $G_Empty;
+$h{d1}{d2} = $G_Empty;
+$h{d1}{d3} = [qw(d2)];
+$h{d1}{d4} = [qw(d2 d3)];
+$h{d1}{d5} = [qw(d2 d3 d4)];
+$h{d1}{d6} = [qw(d2 d3 d4 d5)];
+$h{d1}{d7} = [qw(d2 d3 d4 d5 d6)];
+$h{d1}{d8} = [qw(d2 d3 d4 d5 d6 d7)];
+$h{d2}{d1} = $G_Empty;
+$h{d2}{d2} = $G_Empty;
+$h{d2}{d3} = $G_Empty;
+$h{d2}{d4} = [qw(d3)];
+$h{d2}{d5} = [qw(d3 d4)];
+$h{d2}{d6} = [qw(d3 d4 d5)];
+$h{d2}{d7} = [qw(d3 d4 d5 d6)];
+$h{d2}{d8} = [qw(d3 d4 d5 d6 d7)];
+$h{d3}{d1} = [qw(d2)];
+$h{d3}{d2} = $G_Empty;
+$h{d3}{d3} = $G_Empty;
+$h{d3}{d4} = $G_Empty;
+$h{d3}{d5} = [qw(d4)];
+$h{d3}{d6} = [qw(d4 d5)];
+$h{d3}{d7} = [qw(d4 d5 d6)];
+$h{d3}{d8} = [qw(d4 d5 d6 d7)];
+$h{d4}{d1} = [qw(d2 d3)];
+$h{d4}{d2} = [qw(d3)];
+$h{d4}{d3} = $G_Empty;
+$h{d4}{d4} = $G_Empty;
+$h{d4}{d5} = $G_Empty;
+$h{d4}{d6} = [qw(d5)];
+$h{d4}{d7} = [qw(d5 d6)];
+$h{d4}{d8} = [qw(d5 d6 d7)];
+$h{d5}{d1} = [qw(d2 d3 d4)];
+$h{d5}{d2} = [qw(d3 d4)];
+$h{d5}{d3} = [qw(d4)];
+$h{d5}{d4} = $G_Empty;
+$h{d5}{d5} = $G_Empty;
+$h{d5}{d6} = $G_Empty;
+$h{d5}{d7} = [qw(d6)];
+$h{d5}{d8} = [qw(d6 d7)];
+$h{d6}{d1} = [qw(d2 d3 d4 d5)];
+$h{d6}{d2} = [qw(d3 d4 d5)];
+$h{d6}{d3} = [qw(d4 d5)];
+$h{d6}{d4} = [qw(d5)];
+$h{d6}{d5} = $G_Empty;
+$h{d6}{d6} = $G_Empty;
+$h{d6}{d7} = $G_Empty;
+$h{d6}{d8} = [qw(d7)];
+$h{d7}{d1} = [qw(d2 d3 d4 d5 d6)];
+$h{d7}{d2} = [qw(d3 d4 d5 d6)];
+$h{d7}{d3} = [qw(d4 d5 d6)];
+$h{d7}{d4} = [qw(d5 d6)];
+$h{d7}{d5} = [qw(d6)];
+$h{d7}{d6} = $G_Empty;
+$h{d7}{d7} = $G_Empty;
+$h{d7}{d8} = $G_Empty;
+$h{d8}{d1} = [qw(d2 d3 d4 d5 d6 d7)];
+$h{d8}{d2} = [qw(d3 d4 d5 d6 d7)];
+$h{d8}{d3} = [qw(d4 d5 d6 d7)];
+$h{d8}{d4} = [qw(d5 d6 d7)];
+$h{d8}{d5} = [qw(d6 d7)];
+$h{d8}{d6} = [qw(d7)];
+$h{d8}{d7} = $G_Empty;
+$h{d8}{d8} = $G_Empty;
+$h{e1}{e1} = $G_Empty;
+$h{e1}{e2} = $G_Empty;
+$h{e1}{e3} = [qw(e2)];
+$h{e1}{e4} = [qw(e2 e3)];
+$h{e1}{e5} = [qw(e2 e3 e4)];
+$h{e1}{e6} = [qw(e2 e3 e4 e5)];
+$h{e1}{e7} = [qw(e2 e3 e4 e5 e6)];
+$h{e1}{e8} = [qw(e2 e3 e4 e5 e6 e7)];
+$h{e2}{e1} = $G_Empty;
+$h{e2}{e2} = $G_Empty;
+$h{e2}{e3} = $G_Empty;
+$h{e2}{e4} = [qw(e3)];
+$h{e2}{e5} = [qw(e3 e4)];
+$h{e2}{e6} = [qw(e3 e4 e5)];
+$h{e2}{e7} = [qw(e3 e4 e5 e6)];
+$h{e2}{e8} = [qw(e3 e4 e5 e6 e7)];
+$h{e3}{e1} = [qw(e2)];
+$h{e3}{e2} = $G_Empty;
+$h{e3}{e3} = $G_Empty;
+$h{e3}{e4} = $G_Empty;
+$h{e3}{e5} = [qw(e4)];
+$h{e3}{e6} = [qw(e4 e5)];
+$h{e3}{e7} = [qw(e4 e5 e6)];
+$h{e3}{e8} = [qw(e4 e5 e6 e7)];
+$h{e4}{e1} = [qw(e2 e3)];
+$h{e4}{e2} = [qw(e3)];
+$h{e4}{e3} = $G_Empty;
+$h{e4}{e4} = $G_Empty;
+$h{e4}{e5} = $G_Empty;
+$h{e4}{e6} = [qw(e5)];
+$h{e4}{e7} = [qw(e5 e6)];
+$h{e4}{e8} = [qw(e5 e6 e7)];
+$h{e5}{e1} = [qw(e2 e3 e4)];
+$h{e5}{e2} = [qw(e3 e4)];
+$h{e5}{e3} = [qw(e4)];
+$h{e5}{e4} = $G_Empty;
+$h{e5}{e5} = $G_Empty;
+$h{e5}{e6} = $G_Empty;
+$h{e5}{e7} = [qw(e6)];
+$h{e5}{e8} = [qw(e6 e7)];
+$h{e6}{e1} = [qw(e2 e3 e4 e5)];
+$h{e6}{e2} = [qw(e3 e4 e5)];
+$h{e6}{e3} = [qw(e4 e5)];
+$h{e6}{e4} = [qw(e5)];
+$h{e6}{e5} = $G_Empty;
+$h{e6}{e6} = $G_Empty;
+$h{e6}{e7} = $G_Empty;
+$h{e6}{e8} = [qw(e7)];
+$h{e7}{e1} = [qw(e2 e3 e4 e5 e6)];
+$h{e7}{e2} = [qw(e3 e4 e5 e6)];
+$h{e7}{e3} = [qw(e4 e5 e6)];
+$h{e7}{e4} = [qw(e5 e6)];
+$h{e7}{e5} = [qw(e6)];
+$h{e7}{e6} = $G_Empty;
+$h{e7}{e7} = $G_Empty;
+$h{e7}{e8} = $G_Empty;
+$h{e8}{e1} = [qw(e2 e3 e4 e5 e6 e7)];
+$h{e8}{e2} = [qw(e3 e4 e5 e6 e7)];
+$h{e8}{e3} = [qw(e4 e5 e6 e7)];
+$h{e8}{e4} = [qw(e5 e6 e7)];
+$h{e8}{e5} = [qw(e6 e7)];
+$h{e8}{e6} = [qw(e7)];
+$h{e8}{e7} = $G_Empty;
+$h{e8}{e8} = $G_Empty;
+$h{f1}{f1} = $G_Empty;
+$h{f1}{f2} = $G_Empty;
+$h{f1}{f3} = [qw(f2)];
+$h{f1}{f4} = [qw(f2 f3)];
+$h{f1}{f5} = [qw(f2 f3 f4)];
+$h{f1}{f6} = [qw(f2 f3 f4 f5)];
+$h{f1}{f7} = [qw(f2 f3 f4 f5 f6)];
+$h{f1}{f8} = [qw(f2 f3 f4 f5 f6 f7)];
+$h{f2}{f1} = $G_Empty;
+$h{f2}{f2} = $G_Empty;
+$h{f2}{f3} = $G_Empty;
+$h{f2}{f4} = [qw(f3)];
+$h{f2}{f5} = [qw(f3 f4)];
+$h{f2}{f6} = [qw(f3 f4 f5)];
+$h{f2}{f7} = [qw(f3 f4 f5 f6)];
+$h{f2}{f8} = [qw(f3 f4 f5 f6 f7)];
+$h{f3}{f1} = [qw(f2)];
+$h{f3}{f2} = $G_Empty;
+$h{f3}{f3} = $G_Empty;
+$h{f3}{f4} = $G_Empty;
+$h{f3}{f5} = [qw(f4)];
+$h{f3}{f6} = [qw(f4 f5)];
+$h{f3}{f7} = [qw(f4 f5 f6)];
+$h{f3}{f8} = [qw(f4 f5 f6 f7)];
+$h{f4}{f1} = [qw(f2 f3)];
+$h{f4}{f2} = [qw(f3)];
+$h{f4}{f3} = $G_Empty;
+$h{f4}{f4} = $G_Empty;
+$h{f4}{f5} = $G_Empty;
+$h{f4}{f6} = [qw(f5)];
+$h{f4}{f7} = [qw(f5 f6)];
+$h{f4}{f8} = [qw(f5 f6 f7)];
+$h{f5}{f1} = [qw(f2 f3 f4)];
+$h{f5}{f2} = [qw(f3 f4)];
+$h{f5}{f3} = [qw(f4)];
+$h{f5}{f4} = $G_Empty;
+$h{f5}{f5} = $G_Empty;
+$h{f5}{f6} = $G_Empty;
+$h{f5}{f7} = [qw(f6)];
+$h{f5}{f8} = [qw(f6 f7)];
+$h{f6}{f1} = [qw(f2 f3 f4 f5)];
+$h{f6}{f2} = [qw(f3 f4 f5)];
+$h{f6}{f3} = [qw(f4 f5)];
+$h{f6}{f4} = [qw(f5)];
+$h{f6}{f5} = $G_Empty;
+$h{f6}{f6} = $G_Empty;
+$h{f6}{f7} = $G_Empty;
+$h{f6}{f8} = [qw(f7)];
+$h{f7}{f1} = [qw(f2 f3 f4 f5 f6)];
+$h{f7}{f2} = [qw(f3 f4 f5 f6)];
+$h{f7}{f3} = [qw(f4 f5 f6)];
+$h{f7}{f4} = [qw(f5 f6)];
+$h{f7}{f5} = [qw(f6)];
+$h{f7}{f6} = $G_Empty;
+$h{f7}{f7} = $G_Empty;
+$h{f7}{f8} = $G_Empty;
+$h{f8}{f1} = [qw(f2 f3 f4 f5 f6 f7)];
+$h{f8}{f2} = [qw(f3 f4 f5 f6 f7)];
+$h{f8}{f3} = [qw(f4 f5 f6 f7)];
+$h{f8}{f4} = [qw(f5 f6 f7)];
+$h{f8}{f5} = [qw(f6 f7)];
+$h{f8}{f6} = [qw(f7)];
+$h{f8}{f7} = $G_Empty;
+$h{f8}{f8} = $G_Empty;
+$h{g1}{g1} = $G_Empty;
+$h{g1}{g2} = $G_Empty;
+$h{g1}{g3} = [qw(g2)];
+$h{g1}{g4} = [qw(g2 g3)];
+$h{g1}{g5} = [qw(g2 g3 g4)];
+$h{g1}{g6} = [qw(g2 g3 g4 g5)];
+$h{g1}{g7} = [qw(g2 g3 g4 g5 g6)];
+$h{g1}{g8} = [qw(g2 g3 g4 g5 g6 g7)];
+$h{g2}{g1} = $G_Empty;
+$h{g2}{g2} = $G_Empty;
+$h{g2}{g3} = $G_Empty;
+$h{g2}{g4} = [qw(g3)];
+$h{g2}{g5} = [qw(g3 g4)];
+$h{g2}{g6} = [qw(g3 g4 g5)];
+$h{g2}{g7} = [qw(g3 g4 g5 g6)];
+$h{g2}{g8} = [qw(g3 g4 g5 g6 g7)];
+$h{g3}{g1} = [qw(g2)];
+$h{g3}{g2} = $G_Empty;
+$h{g3}{g3} = $G_Empty;
+$h{g3}{g4} = $G_Empty;
+$h{g3}{g5} = [qw(g4)];
+$h{g3}{g6} = [qw(g4 g5)];
+$h{g3}{g7} = [qw(g4 g5 g6)];
+$h{g3}{g8} = [qw(g4 g5 g6 g7)];
+$h{g4}{g1} = [qw(g2 g3)];
+$h{g4}{g2} = [qw(g3)];
+$h{g4}{g3} = $G_Empty;
+$h{g4}{g4} = $G_Empty;
+$h{g4}{g5} = $G_Empty;
+$h{g4}{g6} = [qw(g5)];
+$h{g4}{g7} = [qw(g5 g6)];
+$h{g4}{g8} = [qw(g5 g6 g7)];
+$h{g5}{g1} = [qw(g2 g3 g4)];
+$h{g5}{g2} = [qw(g3 g4)];
+$h{g5}{g3} = [qw(g4)];
+$h{g5}{g4} = $G_Empty;
+$h{g5}{g5} = $G_Empty;
+$h{g5}{g6} = $G_Empty;
+$h{g5}{g7} = [qw(g6)];
+$h{g5}{g8} = [qw(g6 g7)];
+$h{g6}{g1} = [qw(g2 g3 g4 g5)];
+$h{g6}{g2} = [qw(g3 g4 g5)];
+$h{g6}{g3} = [qw(g4 g5)];
+$h{g6}{g4} = [qw(g5)];
+$h{g6}{g5} = $G_Empty;
+$h{g6}{g6} = $G_Empty;
+$h{g6}{g7} = $G_Empty;
+$h{g6}{g8} = [qw(g7)];
+$h{g7}{g1} = [qw(g2 g3 g4 g5 g6)];
+$h{g7}{g2} = [qw(g3 g4 g5 g6)];
+$h{g7}{g3} = [qw(g4 g5 g6)];
+$h{g7}{g4} = [qw(g5 g6)];
+$h{g7}{g5} = [qw(g6)];
+$h{g7}{g6} = $G_Empty;
+$h{g7}{g7} = $G_Empty;
+$h{g7}{g8} = $G_Empty;
+$h{g8}{g1} = [qw(g2 g3 g4 g5 g6 g7)];
+$h{g8}{g2} = [qw(g3 g4 g5 g6 g7)];
+$h{g8}{g3} = [qw(g4 g5 g6 g7)];
+$h{g8}{g4} = [qw(g5 g6 g7)];
+$h{g8}{g5} = [qw(g6 g7)];
+$h{g8}{g6} = [qw(g7)];
+$h{g8}{g7} = $G_Empty;
+$h{g8}{g8} = $G_Empty;
+$h{h1}{h1} = $G_Empty;
+$h{h1}{h2} = $G_Empty;
+$h{h1}{h3} = [qw(h2)];
+$h{h1}{h4} = [qw(h2 h3)];
+$h{h1}{h5} = [qw(h2 h3 h4)];
+$h{h1}{h6} = [qw(h2 h3 h4 h5)];
+$h{h1}{h7} = [qw(h2 h3 h4 h5 h6)];
+$h{h1}{h8} = [qw(h2 h3 h4 h5 h6 h7)];
+$h{h2}{h1} = $G_Empty;
+$h{h2}{h2} = $G_Empty;
+$h{h2}{h3} = $G_Empty;
+$h{h2}{h4} = [qw(h3)];
+$h{h2}{h5} = [qw(h3 h4)];
+$h{h2}{h6} = [qw(h3 h4 h5)];
+$h{h2}{h7} = [qw(h3 h4 h5 h6)];
+$h{h2}{h8} = [qw(h3 h4 h5 h6 h7)];
+$h{h3}{h1} = [qw(h2)];
+$h{h3}{h2} = $G_Empty;
+$h{h3}{h3} = $G_Empty;
+$h{h3}{h4} = $G_Empty;
+$h{h3}{h5} = [qw(h4)];
+$h{h3}{h6} = [qw(h4 h5)];
+$h{h3}{h7} = [qw(h4 h5 h6)];
+$h{h3}{h8} = [qw(h4 h5 h6 h7)];
+$h{h4}{h1} = [qw(h2 h3)];
+$h{h4}{h2} = [qw(h3)];
+$h{h4}{h3} = $G_Empty;
+$h{h4}{h4} = $G_Empty;
+$h{h4}{h5} = $G_Empty;
+$h{h4}{h6} = [qw(h5)];
+$h{h4}{h7} = [qw(h5 h6)];
+$h{h4}{h8} = [qw(h5 h6 h7)];
+$h{h5}{h1} = [qw(h2 h3 h4)];
+$h{h5}{h2} = [qw(h3 h4)];
+$h{h5}{h3} = [qw(h4)];
+$h{h5}{h4} = $G_Empty;
+$h{h5}{h5} = $G_Empty;
+$h{h5}{h6} = $G_Empty;
+$h{h5}{h7} = [qw(h6)];
+$h{h5}{h8} = [qw(h6 h7)];
+$h{h6}{h1} = [qw(h2 h3 h4 h5)];
+$h{h6}{h2} = [qw(h3 h4 h5)];
+$h{h6}{h3} = [qw(h4 h5)];
+$h{h6}{h4} = [qw(h5)];
+$h{h6}{h5} = $G_Empty;
+$h{h6}{h6} = $G_Empty;
+$h{h6}{h7} = $G_Empty;
+$h{h6}{h8} = [qw(h7)];
+$h{h7}{h1} = [qw(h2 h3 h4 h5 h6)];
+$h{h7}{h2} = [qw(h3 h4 h5 h6)];
+$h{h7}{h3} = [qw(h4 h5 h6)];
+$h{h7}{h4} = [qw(h5 h6)];
+$h{h7}{h5} = [qw(h6)];
+$h{h7}{h6} = $G_Empty;
+$h{h7}{h7} = $G_Empty;
+$h{h7}{h8} = $G_Empty;
+$h{h8}{h1} = [qw(h2 h3 h4 h5 h6 h7)];
+$h{h8}{h2} = [qw(h3 h4 h5 h6 h7)];
+$h{h8}{h3} = [qw(h4 h5 h6 h7)];
+$h{h8}{h4} = [qw(h5 h6 h7)];
+$h{h8}{h5} = [qw(h6 h7)];
+$h{h8}{h6} = [qw(h7)];
+$h{h8}{h7} = $G_Empty;
+$h{h8}{h8} = $G_Empty;
+$h{a1}{a1} = $G_Empty;
+$h{a1}{b1} = $G_Empty;
+$h{a1}{c1} = [qw(b1)];
+$h{a1}{d1} = [qw(b1 c1)];
+$h{a1}{e1} = [qw(b1 c1 d1)];
+$h{a1}{f1} = [qw(b1 c1 d1 e1)];
+$h{a1}{g1} = [qw(b1 c1 d1 e1 f1)];
+$h{a1}{h1} = [qw(b1 c1 d1 e1 f1 g1)];
+$h{b1}{a1} = $G_Empty;
+$h{b1}{b1} = $G_Empty;
+$h{b1}{c1} = $G_Empty;
+$h{b1}{d1} = [qw(c1)];
+$h{b1}{e1} = [qw(c1 d1)];
+$h{b1}{f1} = [qw(c1 d1 e1)];
+$h{b1}{g1} = [qw(c1 d1 e1 f1)];
+$h{b1}{h1} = [qw(c1 d1 e1 f1 g1)];
+$h{c1}{a1} = [qw(b1)];
+$h{c1}{b1} = $G_Empty;
+$h{c1}{c1} = $G_Empty;
+$h{c1}{d1} = $G_Empty;
+$h{c1}{e1} = [qw(d1)];
+$h{c1}{f1} = [qw(d1 e1)];
+$h{c1}{g1} = [qw(d1 e1 f1)];
+$h{c1}{h1} = [qw(d1 e1 f1 g1)];
+$h{d1}{a1} = [qw(b1 c1)];
+$h{d1}{b1} = [qw(c1)];
+$h{d1}{c1} = $G_Empty;
+$h{d1}{d1} = $G_Empty;
+$h{d1}{e1} = $G_Empty;
+$h{d1}{f1} = [qw(e1)];
+$h{d1}{g1} = [qw(e1 f1)];
+$h{d1}{h1} = [qw(e1 f1 g1)];
+$h{e1}{a1} = [qw(b1 c1 d1)];
+$h{e1}{b1} = [qw(c1 d1)];
+$h{e1}{c1} = [qw(d1)];
+$h{e1}{d1} = $G_Empty;
+$h{e1}{e1} = $G_Empty;
+$h{e1}{f1} = $G_Empty;
+$h{e1}{g1} = [qw(f1)];
+$h{e1}{h1} = [qw(f1 g1)];
+$h{f1}{a1} = [qw(b1 c1 d1 e1)];
+$h{f1}{b1} = [qw(c1 d1 e1)];
+$h{f1}{c1} = [qw(d1 e1)];
+$h{f1}{d1} = [qw(e1)];
+$h{f1}{e1} = $G_Empty;
+$h{f1}{f1} = $G_Empty;
+$h{f1}{g1} = $G_Empty;
+$h{f1}{h1} = [qw(g1)];
+$h{g1}{a1} = [qw(b1 c1 d1 e1 f1)];
+$h{g1}{b1} = [qw(c1 d1 e1 f1)];
+$h{g1}{c1} = [qw(d1 e1 f1)];
+$h{g1}{d1} = [qw(e1 f1)];
+$h{g1}{e1} = [qw(f1)];
+$h{g1}{f1} = $G_Empty;
+$h{g1}{g1} = $G_Empty;
+$h{g1}{h1} = $G_Empty;
+$h{h1}{a1} = [qw(b1 c1 d1 e1 f1 g1)];
+$h{h1}{b1} = [qw(c1 d1 e1 f1 g1)];
+$h{h1}{c1} = [qw(d1 e1 f1 g1)];
+$h{h1}{d1} = [qw(e1 f1 g1)];
+$h{h1}{e1} = [qw(f1 g1)];
+$h{h1}{f1} = [qw(g1)];
+$h{h1}{g1} = $G_Empty;
+$h{h1}{h1} = $G_Empty;
+$h{a2}{a2} = $G_Empty;
+$h{a2}{b2} = $G_Empty;
+$h{a2}{c2} = [qw(b2)];
+$h{a2}{d2} = [qw(b2 c2)];
+$h{a2}{e2} = [qw(b2 c2 d2)];
+$h{a2}{f2} = [qw(b2 c2 d2 e2)];
+$h{a2}{g2} = [qw(b2 c2 d2 e2 f2)];
+$h{a2}{h2} = [qw(b2 c2 d2 e2 f2 g2)];
+$h{b2}{a2} = $G_Empty;
+$h{b2}{b2} = $G_Empty;
+$h{b2}{c2} = $G_Empty;
+$h{b2}{d2} = [qw(c2)];
+$h{b2}{e2} = [qw(c2 d2)];
+$h{b2}{f2} = [qw(c2 d2 e2)];
+$h{b2}{g2} = [qw(c2 d2 e2 f2)];
+$h{b2}{h2} = [qw(c2 d2 e2 f2 g2)];
+$h{c2}{a2} = [qw(b2)];
+$h{c2}{b2} = $G_Empty;
+$h{c2}{c2} = $G_Empty;
+$h{c2}{d2} = $G_Empty;
+$h{c2}{e2} = [qw(d2)];
+$h{c2}{f2} = [qw(d2 e2)];
+$h{c2}{g2} = [qw(d2 e2 f2)];
+$h{c2}{h2} = [qw(d2 e2 f2 g2)];
+$h{d2}{a2} = [qw(b2 c2)];
+$h{d2}{b2} = [qw(c2)];
+$h{d2}{c2} = $G_Empty;
+$h{d2}{d2} = $G_Empty;
+$h{d2}{e2} = $G_Empty;
+$h{d2}{f2} = [qw(e2)];
+$h{d2}{g2} = [qw(e2 f2)];
+$h{d2}{h2} = [qw(e2 f2 g2)];
+$h{e2}{a2} = [qw(b2 c2 d2)];
+$h{e2}{b2} = [qw(c2 d2)];
+$h{e2}{c2} = [qw(d2)];
+$h{e2}{d2} = $G_Empty;
+$h{e2}{e2} = $G_Empty;
+$h{e2}{f2} = $G_Empty;
+$h{e2}{g2} = [qw(f2)];
+$h{e2}{h2} = [qw(f2 g2)];
+$h{f2}{a2} = [qw(b2 c2 d2 e2)];
+$h{f2}{b2} = [qw(c2 d2 e2)];
+$h{f2}{c2} = [qw(d2 e2)];
+$h{f2}{d2} = [qw(e2)];
+$h{f2}{e2} = $G_Empty;
+$h{f2}{f2} = $G_Empty;
+$h{f2}{g2} = $G_Empty;
+$h{f2}{h2} = [qw(g2)];
+$h{g2}{a2} = [qw(b2 c2 d2 e2 f2)];
+$h{g2}{b2} = [qw(c2 d2 e2 f2)];
+$h{g2}{c2} = [qw(d2 e2 f2)];
+$h{g2}{d2} = [qw(e2 f2)];
+$h{g2}{e2} = [qw(f2)];
+$h{g2}{f2} = $G_Empty;
+$h{g2}{g2} = $G_Empty;
+$h{g2}{h2} = $G_Empty;
+$h{h2}{a2} = [qw(b2 c2 d2 e2 f2 g2)];
+$h{h2}{b2} = [qw(c2 d2 e2 f2 g2)];
+$h{h2}{c2} = [qw(d2 e2 f2 g2)];
+$h{h2}{d2} = [qw(e2 f2 g2)];
+$h{h2}{e2} = [qw(f2 g2)];
+$h{h2}{f2} = [qw(g2)];
+$h{h2}{g2} = $G_Empty;
+$h{h2}{h2} = $G_Empty;
+$h{a3}{a3} = $G_Empty;
+$h{a3}{b3} = $G_Empty;
+$h{a3}{c3} = [qw(b3)];
+$h{a3}{d3} = [qw(b3 c3)];
+$h{a3}{e3} = [qw(b3 c3 d3)];
+$h{a3}{f3} = [qw(b3 c3 d3 e3)];
+$h{a3}{g3} = [qw(b3 c3 d3 e3 f3)];
+$h{a3}{h3} = [qw(b3 c3 d3 e3 f3 g3)];
+$h{b3}{a3} = $G_Empty;
+$h{b3}{b3} = $G_Empty;
+$h{b3}{c3} = $G_Empty;
+$h{b3}{d3} = [qw(c3)];
+$h{b3}{e3} = [qw(c3 d3)];
+$h{b3}{f3} = [qw(c3 d3 e3)];
+$h{b3}{g3} = [qw(c3 d3 e3 f3)];
+$h{b3}{h3} = [qw(c3 d3 e3 f3 g3)];
+$h{c3}{a3} = [qw(b3)];
+$h{c3}{b3} = $G_Empty;
+$h{c3}{c3} = $G_Empty;
+$h{c3}{d3} = $G_Empty;
+$h{c3}{e3} = [qw(d3)];
+$h{c3}{f3} = [qw(d3 e3)];
+$h{c3}{g3} = [qw(d3 e3 f3)];
+$h{c3}{h3} = [qw(d3 e3 f3 g3)];
+$h{d3}{a3} = [qw(b3 c3)];
+$h{d3}{b3} = [qw(c3)];
+$h{d3}{c3} = $G_Empty;
+$h{d3}{d3} = $G_Empty;
+$h{d3}{e3} = $G_Empty;
+$h{d3}{f3} = [qw(e3)];
+$h{d3}{g3} = [qw(e3 f3)];
+$h{d3}{h3} = [qw(e3 f3 g3)];
+$h{e3}{a3} = [qw(b3 c3 d3)];
+$h{e3}{b3} = [qw(c3 d3)];
+$h{e3}{c3} = [qw(d3)];
+$h{e3}{d3} = $G_Empty;
+$h{e3}{e3} = $G_Empty;
+$h{e3}{f3} = $G_Empty;
+$h{e3}{g3} = [qw(f3)];
+$h{e3}{h3} = [qw(f3 g3)];
+$h{f3}{a3} = [qw(b3 c3 d3 e3)];
+$h{f3}{b3} = [qw(c3 d3 e3)];
+$h{f3}{c3} = [qw(d3 e3)];
+$h{f3}{d3} = [qw(e3)];
+$h{f3}{e3} = $G_Empty;
+$h{f3}{f3} = $G_Empty;
+$h{f3}{g3} = $G_Empty;
+$h{f3}{h3} = [qw(g3)];
+$h{g3}{a3} = [qw(b3 c3 d3 e3 f3)];
+$h{g3}{b3} = [qw(c3 d3 e3 f3)];
+$h{g3}{c3} = [qw(d3 e3 f3)];
+$h{g3}{d3} = [qw(e3 f3)];
+$h{g3}{e3} = [qw(f3)];
+$h{g3}{f3} = $G_Empty;
+$h{g3}{g3} = $G_Empty;
+$h{g3}{h3} = $G_Empty;
+$h{h3}{a3} = [qw(b3 c3 d3 e3 f3 g3)];
+$h{h3}{b3} = [qw(c3 d3 e3 f3 g3)];
+$h{h3}{c3} = [qw(d3 e3 f3 g3)];
+$h{h3}{d3} = [qw(e3 f3 g3)];
+$h{h3}{e3} = [qw(f3 g3)];
+$h{h3}{f3} = [qw(g3)];
+$h{h3}{g3} = $G_Empty;
+$h{h3}{h3} = $G_Empty;
+$h{a4}{a4} = $G_Empty;
+$h{a4}{b4} = $G_Empty;
+$h{a4}{c4} = [qw(b4)];
+$h{a4}{d4} = [qw(b4 c4)];
+$h{a4}{e4} = [qw(b4 c4 d4)];
+$h{a4}{f4} = [qw(b4 c4 d4 e4)];
+$h{a4}{g4} = [qw(b4 c4 d4 e4 f4)];
+$h{a4}{h4} = [qw(b4 c4 d4 e4 f4 g4)];
+$h{b4}{a4} = $G_Empty;
+$h{b4}{b4} = $G_Empty;
+$h{b4}{c4} = $G_Empty;
+$h{b4}{d4} = [qw(c4)];
+$h{b4}{e4} = [qw(c4 d4)];
+$h{b4}{f4} = [qw(c4 d4 e4)];
+$h{b4}{g4} = [qw(c4 d4 e4 f4)];
+$h{b4}{h4} = [qw(c4 d4 e4 f4 g4)];
+$h{c4}{a4} = [qw(b4)];
+$h{c4}{b4} = $G_Empty;
+$h{c4}{c4} = $G_Empty;
+$h{c4}{d4} = $G_Empty;
+$h{c4}{e4} = [qw(d4)];
+$h{c4}{f4} = [qw(d4 e4)];
+$h{c4}{g4} = [qw(d4 e4 f4)];
+$h{c4}{h4} = [qw(d4 e4 f4 g4)];
+$h{d4}{a4} = [qw(b4 c4)];
+$h{d4}{b4} = [qw(c4)];
+$h{d4}{c4} = $G_Empty;
+$h{d4}{d4} = $G_Empty;
+$h{d4}{e4} = $G_Empty;
+$h{d4}{f4} = [qw(e4)];
+$h{d4}{g4} = [qw(e4 f4)];
+$h{d4}{h4} = [qw(e4 f4 g4)];
+$h{e4}{a4} = [qw(b4 c4 d4)];
+$h{e4}{b4} = [qw(c4 d4)];
+$h{e4}{c4} = [qw(d4)];
+$h{e4}{d4} = $G_Empty;
+$h{e4}{e4} = $G_Empty;
+$h{e4}{f4} = $G_Empty;
+$h{e4}{g4} = [qw(f4)];
+$h{e4}{h4} = [qw(f4 g4)];
+$h{f4}{a4} = [qw(b4 c4 d4 e4)];
+$h{f4}{b4} = [qw(c4 d4 e4)];
+$h{f4}{c4} = [qw(d4 e4)];
+$h{f4}{d4} = [qw(e4)];
+$h{f4}{e4} = $G_Empty;
+$h{f4}{f4} = $G_Empty;
+$h{f4}{g4} = $G_Empty;
+$h{f4}{h4} = [qw(g4)];
+$h{g4}{a4} = [qw(b4 c4 d4 e4 f4)];
+$h{g4}{b4} = [qw(c4 d4 e4 f4)];
+$h{g4}{c4} = [qw(d4 e4 f4)];
+$h{g4}{d4} = [qw(e4 f4)];
+$h{g4}{e4} = [qw(f4)];
+$h{g4}{f4} = $G_Empty;
+$h{g4}{g4} = $G_Empty;
+$h{g4}{h4} = $G_Empty;
+$h{h4}{a4} = [qw(b4 c4 d4 e4 f4 g4)];
+$h{h4}{b4} = [qw(c4 d4 e4 f4 g4)];
+$h{h4}{c4} = [qw(d4 e4 f4 g4)];
+$h{h4}{d4} = [qw(e4 f4 g4)];
+$h{h4}{e4} = [qw(f4 g4)];
+$h{h4}{f4} = [qw(g4)];
+$h{h4}{g4} = $G_Empty;
+$h{h4}{h4} = $G_Empty;
+$h{a5}{a5} = $G_Empty;
+$h{a5}{b5} = $G_Empty;
+$h{a5}{c5} = [qw(b5)];
+$h{a5}{d5} = [qw(b5 c5)];
+$h{a5}{e5} = [qw(b5 c5 d5)];
+$h{a5}{f5} = [qw(b5 c5 d5 e5)];
+$h{a5}{g5} = [qw(b5 c5 d5 e5 f5)];
+$h{a5}{h5} = [qw(b5 c5 d5 e5 f5 g5)];
+$h{b5}{a5} = $G_Empty;
+$h{b5}{b5} = $G_Empty;
+$h{b5}{c5} = $G_Empty;
+$h{b5}{d5} = [qw(c5)];
+$h{b5}{e5} = [qw(c5 d5)];
+$h{b5}{f5} = [qw(c5 d5 e5)];
+$h{b5}{g5} = [qw(c5 d5 e5 f5)];
+$h{b5}{h5} = [qw(c5 d5 e5 f5 g5)];
+$h{c5}{a5} = [qw(b5)];
+$h{c5}{b5} = $G_Empty;
+$h{c5}{c5} = $G_Empty;
+$h{c5}{d5} = $G_Empty;
+$h{c5}{e5} = [qw(d5)];
+$h{c5}{f5} = [qw(d5 e5)];
+$h{c5}{g5} = [qw(d5 e5 f5)];
+$h{c5}{h5} = [qw(d5 e5 f5 g5)];
+$h{d5}{a5} = [qw(b5 c5)];
+$h{d5}{b5} = [qw(c5)];
+$h{d5}{c5} = $G_Empty;
+$h{d5}{d5} = $G_Empty;
+$h{d5}{e5} = $G_Empty;
+$h{d5}{f5} = [qw(e5)];
+$h{d5}{g5} = [qw(e5 f5)];
+$h{d5}{h5} = [qw(e5 f5 g5)];
+$h{e5}{a5} = [qw(b5 c5 d5)];
+$h{e5}{b5} = [qw(c5 d5)];
+$h{e5}{c5} = [qw(d5)];
+$h{e5}{d5} = $G_Empty;
+$h{e5}{e5} = $G_Empty;
+$h{e5}{f5} = $G_Empty;
+$h{e5}{g5} = [qw(f5)];
+$h{e5}{h5} = [qw(f5 g5)];
+$h{f5}{a5} = [qw(b5 c5 d5 e5)];
+$h{f5}{b5} = [qw(c5 d5 e5)];
+$h{f5}{c5} = [qw(d5 e5)];
+$h{f5}{d5} = [qw(e5)];
+$h{f5}{e5} = $G_Empty;
+$h{f5}{f5} = $G_Empty;
+$h{f5}{g5} = $G_Empty;
+$h{f5}{h5} = [qw(g5)];
+$h{g5}{a5} = [qw(b5 c5 d5 e5 f5)];
+$h{g5}{b5} = [qw(c5 d5 e5 f5)];
+$h{g5}{c5} = [qw(d5 e5 f5)];
+$h{g5}{d5} = [qw(e5 f5)];
+$h{g5}{e5} = [qw(f5)];
+$h{g5}{f5} = $G_Empty;
+$h{g5}{g5} = $G_Empty;
+$h{g5}{h5} = $G_Empty;
+$h{h5}{a5} = [qw(b5 c5 d5 e5 f5 g5)];
+$h{h5}{b5} = [qw(c5 d5 e5 f5 g5)];
+$h{h5}{c5} = [qw(d5 e5 f5 g5)];
+$h{h5}{d5} = [qw(e5 f5 g5)];
+$h{h5}{e5} = [qw(f5 g5)];
+$h{h5}{f5} = [qw(g5)];
+$h{h5}{g5} = $G_Empty;
+$h{h5}{h5} = $G_Empty;
+$h{a6}{a6} = $G_Empty;
+$h{a6}{b6} = $G_Empty;
+$h{a6}{c6} = [qw(b6)];
+$h{a6}{d6} = [qw(b6 c6)];
+$h{a6}{e6} = [qw(b6 c6 d6)];
+$h{a6}{f6} = [qw(b6 c6 d6 e6)];
+$h{a6}{g6} = [qw(b6 c6 d6 e6 f6)];
+$h{a6}{h6} = [qw(b6 c6 d6 e6 f6 g6)];
+$h{b6}{a6} = $G_Empty;
+$h{b6}{b6} = $G_Empty;
+$h{b6}{c6} = $G_Empty;
+$h{b6}{d6} = [qw(c6)];
+$h{b6}{e6} = [qw(c6 d6)];
+$h{b6}{f6} = [qw(c6 d6 e6)];
+$h{b6}{g6} = [qw(c6 d6 e6 f6)];
+$h{b6}{h6} = [qw(c6 d6 e6 f6 g6)];
+$h{c6}{a6} = [qw(b6)];
+$h{c6}{b6} = $G_Empty;
+$h{c6}{c6} = $G_Empty;
+$h{c6}{d6} = $G_Empty;
+$h{c6}{e6} = [qw(d6)];
+$h{c6}{f6} = [qw(d6 e6)];
+$h{c6}{g6} = [qw(d6 e6 f6)];
+$h{c6}{h6} = [qw(d6 e6 f6 g6)];
+$h{d6}{a6} = [qw(b6 c6)];
+$h{d6}{b6} = [qw(c6)];
+$h{d6}{c6} = $G_Empty;
+$h{d6}{d6} = $G_Empty;
+$h{d6}{e6} = $G_Empty;
+$h{d6}{f6} = [qw(e6)];
+$h{d6}{g6} = [qw(e6 f6)];
+$h{d6}{h6} = [qw(e6 f6 g6)];
+$h{e6}{a6} = [qw(b6 c6 d6)];
+$h{e6}{b6} = [qw(c6 d6)];
+$h{e6}{c6} = [qw(d6)];
+$h{e6}{d6} = $G_Empty;
+$h{e6}{e6} = $G_Empty;
+$h{e6}{f6} = $G_Empty;
+$h{e6}{g6} = [qw(f6)];
+$h{e6}{h6} = [qw(f6 g6)];
+$h{f6}{a6} = [qw(b6 c6 d6 e6)];
+$h{f6}{b6} = [qw(c6 d6 e6)];
+$h{f6}{c6} = [qw(d6 e6)];
+$h{f6}{d6} = [qw(e6)];
+$h{f6}{e6} = $G_Empty;
+$h{f6}{f6} = $G_Empty;
+$h{f6}{g6} = $G_Empty;
+$h{f6}{h6} = [qw(g6)];
+$h{g6}{a6} = [qw(b6 c6 d6 e6 f6)];
+$h{g6}{b6} = [qw(c6 d6 e6 f6)];
+$h{g6}{c6} = [qw(d6 e6 f6)];
+$h{g6}{d6} = [qw(e6 f6)];
+$h{g6}{e6} = [qw(f6)];
+$h{g6}{f6} = $G_Empty;
+$h{g6}{g6} = $G_Empty;
+$h{g6}{h6} = $G_Empty;
+$h{h6}{a6} = [qw(b6 c6 d6 e6 f6 g6)];
+$h{h6}{b6} = [qw(c6 d6 e6 f6 g6)];
+$h{h6}{c6} = [qw(d6 e6 f6 g6)];
+$h{h6}{d6} = [qw(e6 f6 g6)];
+$h{h6}{e6} = [qw(f6 g6)];
+$h{h6}{f6} = [qw(g6)];
+$h{h6}{g6} = $G_Empty;
+$h{h6}{h6} = $G_Empty;
+$h{a7}{a7} = $G_Empty;
+$h{a7}{b7} = $G_Empty;
+$h{a7}{c7} = [qw(b7)];
+$h{a7}{d7} = [qw(b7 c7)];
+$h{a7}{e7} = [qw(b7 c7 d7)];
+$h{a7}{f7} = [qw(b7 c7 d7 e7)];
+$h{a7}{g7} = [qw(b7 c7 d7 e7 f7)];
+$h{a7}{h7} = [qw(b7 c7 d7 e7 f7 g7)];
+$h{b7}{a7} = $G_Empty;
+$h{b7}{b7} = $G_Empty;
+$h{b7}{c7} = $G_Empty;
+$h{b7}{d7} = [qw(c7)];
+$h{b7}{e7} = [qw(c7 d7)];
+$h{b7}{f7} = [qw(c7 d7 e7)];
+$h{b7}{g7} = [qw(c7 d7 e7 f7)];
+$h{b7}{h7} = [qw(c7 d7 e7 f7 g7)];
+$h{c7}{a7} = [qw(b7)];
+$h{c7}{b7} = $G_Empty;
+$h{c7}{c7} = $G_Empty;
+$h{c7}{d7} = $G_Empty;
+$h{c7}{e7} = [qw(d7)];
+$h{c7}{f7} = [qw(d7 e7)];
+$h{c7}{g7} = [qw(d7 e7 f7)];
+$h{c7}{h7} = [qw(d7 e7 f7 g7)];
+$h{d7}{a7} = [qw(b7 c7)];
+$h{d7}{b7} = [qw(c7)];
+$h{d7}{c7} = $G_Empty;
+$h{d7}{d7} = $G_Empty;
+$h{d7}{e7} = $G_Empty;
+$h{d7}{f7} = [qw(e7)];
+$h{d7}{g7} = [qw(e7 f7)];
+$h{d7}{h7} = [qw(e7 f7 g7)];
+$h{e7}{a7} = [qw(b7 c7 d7)];
+$h{e7}{b7} = [qw(c7 d7)];
+$h{e7}{c7} = [qw(d7)];
+$h{e7}{d7} = $G_Empty;
+$h{e7}{e7} = $G_Empty;
+$h{e7}{f7} = $G_Empty;
+$h{e7}{g7} = [qw(f7)];
+$h{e7}{h7} = [qw(f7 g7)];
+$h{f7}{a7} = [qw(b7 c7 d7 e7)];
+$h{f7}{b7} = [qw(c7 d7 e7)];
+$h{f7}{c7} = [qw(d7 e7)];
+$h{f7}{d7} = [qw(e7)];
+$h{f7}{e7} = $G_Empty;
+$h{f7}{f7} = $G_Empty;
+$h{f7}{g7} = $G_Empty;
+$h{f7}{h7} = [qw(g7)];
+$h{g7}{a7} = [qw(b7 c7 d7 e7 f7)];
+$h{g7}{b7} = [qw(c7 d7 e7 f7)];
+$h{g7}{c7} = [qw(d7 e7 f7)];
+$h{g7}{d7} = [qw(e7 f7)];
+$h{g7}{e7} = [qw(f7)];
+$h{g7}{f7} = $G_Empty;
+$h{g7}{g7} = $G_Empty;
+$h{g7}{h7} = $G_Empty;
+$h{h7}{a7} = [qw(b7 c7 d7 e7 f7 g7)];
+$h{h7}{b7} = [qw(c7 d7 e7 f7 g7)];
+$h{h7}{c7} = [qw(d7 e7 f7 g7)];
+$h{h7}{d7} = [qw(e7 f7 g7)];
+$h{h7}{e7} = [qw(f7 g7)];
+$h{h7}{f7} = [qw(g7)];
+$h{h7}{g7} = $G_Empty;
+$h{h7}{h7} = $G_Empty;
+$h{a8}{a8} = $G_Empty;
+$h{a8}{b8} = $G_Empty;
+$h{a8}{c8} = [qw(b8)];
+$h{a8}{d8} = [qw(b8 c8)];
+$h{a8}{e8} = [qw(b8 c8 d8)];
+$h{a8}{f8} = [qw(b8 c8 d8 e8)];
+$h{a8}{g8} = [qw(b8 c8 d8 e8 f8)];
+$h{a8}{h8} = [qw(b8 c8 d8 e8 f8 g8)];
+$h{b8}{a8} = $G_Empty;
+$h{b8}{b8} = $G_Empty;
+$h{b8}{c8} = $G_Empty;
+$h{b8}{d8} = [qw(c8)];
+$h{b8}{e8} = [qw(c8 d8)];
+$h{b8}{f8} = [qw(c8 d8 e8)];
+$h{b8}{g8} = [qw(c8 d8 e8 f8)];
+$h{b8}{h8} = [qw(c8 d8 e8 f8 g8)];
+$h{c8}{a8} = [qw(b8)];
+$h{c8}{b8} = $G_Empty;
+$h{c8}{c8} = $G_Empty;
+$h{c8}{d8} = $G_Empty;
+$h{c8}{e8} = [qw(d8)];
+$h{c8}{f8} = [qw(d8 e8)];
+$h{c8}{g8} = [qw(d8 e8 f8)];
+$h{c8}{h8} = [qw(d8 e8 f8 g8)];
+$h{d8}{a8} = [qw(b8 c8)];
+$h{d8}{b8} = [qw(c8)];
+$h{d8}{c8} = $G_Empty;
+$h{d8}{d8} = $G_Empty;
+$h{d8}{e8} = $G_Empty;
+$h{d8}{f8} = [qw(e8)];
+$h{d8}{g8} = [qw(e8 f8)];
+$h{d8}{h8} = [qw(e8 f8 g8)];
+$h{e8}{a8} = [qw(b8 c8 d8)];
+$h{e8}{b8} = [qw(c8 d8)];
+$h{e8}{c8} = [qw(d8)];
+$h{e8}{d8} = $G_Empty;
+$h{e8}{e8} = $G_Empty;
+$h{e8}{f8} = $G_Empty;
+$h{e8}{g8} = [qw(f8)];
+$h{e8}{h8} = [qw(f8 g8)];
+$h{f8}{a8} = [qw(b8 c8 d8 e8)];
+$h{f8}{b8} = [qw(c8 d8 e8)];
+$h{f8}{c8} = [qw(d8 e8)];
+$h{f8}{d8} = [qw(e8)];
+$h{f8}{e8} = $G_Empty;
+$h{f8}{f8} = $G_Empty;
+$h{f8}{g8} = $G_Empty;
+$h{f8}{h8} = [qw(g8)];
+$h{g8}{a8} = [qw(b8 c8 d8 e8 f8)];
+$h{g8}{b8} = [qw(c8 d8 e8 f8)];
+$h{g8}{c8} = [qw(d8 e8 f8)];
+$h{g8}{d8} = [qw(e8 f8)];
+$h{g8}{e8} = [qw(f8)];
+$h{g8}{f8} = $G_Empty;
+$h{g8}{g8} = $G_Empty;
+$h{g8}{h8} = $G_Empty;
+$h{h8}{a8} = [qw(b8 c8 d8 e8 f8 g8)];
+$h{h8}{b8} = [qw(c8 d8 e8 f8 g8)];
+$h{h8}{c8} = [qw(d8 e8 f8 g8)];
+$h{h8}{d8} = [qw(e8 f8 g8)];
+$h{h8}{e8} = [qw(f8 g8)];
+$h{h8}{f8} = [qw(g8)];
+$h{h8}{g8} = $G_Empty;
+$h{h8}{h8} = $G_Empty;
+return %h;
+}
+
+sub diagonals {
+my %h = ();
+$G_Empty = "null";
+$h{a1}{b2} = $G_Empty;
+$h{a1}{c3} = [qw(b2)];
+$h{a1}{d4} = [qw(b2 c3)];
+$h{a1}{e5} = [qw(b2 c3 d4)];
+$h{a1}{f6} = [qw(b2 c3 d4 e5)];
+$h{a1}{g7} = [qw(b2 c3 d4 e5 f6)];
+$h{a1}{h8} = [qw(b2 c3 d4 e5 f6 g7)];
+$h{a2}{b3} = $G_Empty;
+$h{a2}{b1} = $G_Empty;
+$h{a2}{c4} = [qw(b3)];
+$h{a2}{d5} = [qw(b3 c4)];
+$h{a2}{e6} = [qw(b3 c4 d5)];
+$h{a2}{f7} = [qw(b3 c4 d5 e6)];
+$h{a2}{g8} = [qw(b3 c4 d5 e6 f7)];
+$h{a3}{b4} = $G_Empty;
+$h{a3}{b2} = $G_Empty;
+$h{a3}{c5} = [qw(b4)];
+$h{a3}{c1} = [qw(b2)];
+$h{a3}{d6} = [qw(b4 c5)];
+$h{a3}{e7} = [qw(b4 c5 d6)];
+$h{a3}{f8} = [qw(b4 c5 d6 e7)];
+$h{a4}{b5} = $G_Empty;
+$h{a4}{b3} = $G_Empty;
+$h{a4}{c6} = [qw(b5)];
+$h{a4}{c2} = [qw(b3)];
+$h{a4}{d7} = [qw(b5 c6)];
+$h{a4}{d1} = [qw(b3 c2)];
+$h{a4}{e8} = [qw(b5 c6 d7)];
+$h{a5}{b6} = $G_Empty;
+$h{a5}{b4} = $G_Empty;
+$h{a5}{c7} = [qw(b6)];
+$h{a5}{c3} = [qw(b4)];
+$h{a5}{d8} = [qw(b6 c7)];
+$h{a5}{d2} = [qw(b4 c3)];
+$h{a5}{e1} = [qw(b4 c3 d2)];
+$h{a6}{b7} = $G_Empty;
+$h{a6}{b5} = $G_Empty;
+$h{a6}{c8} = [qw(b7)];
+$h{a6}{c4} = [qw(b5)];
+$h{a6}{d3} = [qw(b5 c4)];
+$h{a6}{e2} = [qw(b5 c4 d3)];
+$h{a6}{f1} = [qw(b5 c4 d3 e2)];
+$h{a7}{b8} = $G_Empty;
+$h{a7}{b6} = $G_Empty;
+$h{a7}{c5} = [qw(b6)];
+$h{a7}{d4} = [qw(b6 c5)];
+$h{a7}{e3} = [qw(b6 c5 d4)];
+$h{a7}{f2} = [qw(b6 c5 d4 e3)];
+$h{a7}{g1} = [qw(b6 c5 d4 e3 f2)];
+$h{a8}{b7} = $G_Empty;
+$h{a8}{c6} = [qw(b7)];
+$h{a8}{d5} = [qw(b7 c6)];
+$h{a8}{e4} = [qw(b7 c6 d5)];
+$h{a8}{f3} = [qw(b7 c6 d5 e4)];
+$h{a8}{g2} = [qw(b7 c6 d5 e4 f3)];
+$h{a8}{h1} = [qw(b7 c6 d5 e4 f3 g2)];
+$h{b1}{a2} = $G_Empty;
+$h{b1}{c2} = $G_Empty;
+$h{b1}{d3} = [qw(c2)];
+$h{b1}{e4} = [qw(c2 d3)];
+$h{b1}{f5} = [qw(c2 d3 e4)];
+$h{b1}{g6} = [qw(c2 d3 e4 f5)];
+$h{b1}{h7} = [qw(c2 d3 e4 f5 g6)];
+$h{b2}{a3} = $G_Empty;
+$h{b2}{c3} = $G_Empty;
+$h{b2}{a1} = $G_Empty;
+$h{b2}{c1} = $G_Empty;
+$h{b2}{d4} = [qw(c3)];
+$h{b2}{e5} = [qw(c3 d4)];
+$h{b2}{f6} = [qw(c3 d4 e5)];
+$h{b2}{g7} = [qw(c3 d4 e5 f6)];
+$h{b2}{h8} = [qw(c3 d4 e5 f6 g7)];
+$h{b3}{a4} = $G_Empty;
+$h{b3}{c4} = $G_Empty;
+$h{b3}{a2} = $G_Empty;
+$h{b3}{c2} = $G_Empty;
+$h{b3}{d5} = [qw(c4)];
+$h{b3}{d1} = [qw(c2)];
+$h{b3}{e6} = [qw(c4 d5)];
+$h{b3}{f7} = [qw(c4 d5 e6)];
+$h{b3}{g8} = [qw(c4 d5 e6 f7)];
+$h{b4}{a5} = $G_Empty;
+$h{b4}{c5} = $G_Empty;
+$h{b4}{a3} = $G_Empty;
+$h{b4}{c3} = $G_Empty;
+$h{b4}{d6} = [qw(c5)];
+$h{b4}{d2} = [qw(c3)];
+$h{b4}{e7} = [qw(c5 d6)];
+$h{b4}{e1} = [qw(c3 d2)];
+$h{b4}{f8} = [qw(c5 d6 e7)];
+$h{b5}{a6} = $G_Empty;
+$h{b5}{c6} = $G_Empty;
+$h{b5}{a4} = $G_Empty;
+$h{b5}{c4} = $G_Empty;
+$h{b5}{d7} = [qw(c6)];
+$h{b5}{d3} = [qw(c4)];
+$h{b5}{e8} = [qw(c6 d7)];
+$h{b5}{e2} = [qw(c4 d3)];
+$h{b5}{f1} = [qw(c4 d3 e2)];
+$h{b6}{a7} = $G_Empty;
+$h{b6}{c7} = $G_Empty;
+$h{b6}{a5} = $G_Empty;
+$h{b6}{c5} = $G_Empty;
+$h{b6}{d8} = [qw(c7)];
+$h{b6}{d4} = [qw(c5)];
+$h{b6}{e3} = [qw(c5 d4)];
+$h{b6}{f2} = [qw(c5 d4 e3)];
+$h{b6}{g1} = [qw(c5 d4 e3 f2)];
+$h{b7}{a8} = $G_Empty;
+$h{b7}{c8} = $G_Empty;
+$h{b7}{a6} = $G_Empty;
+$h{b7}{c6} = $G_Empty;
+$h{b7}{d5} = [qw(c6)];
+$h{b7}{e4} = [qw(c6 d5)];
+$h{b7}{f3} = [qw(c6 d5 e4)];
+$h{b7}{g2} = [qw(c6 d5 e4 f3)];
+$h{b7}{h1} = [qw(c6 d5 e4 f3 g2)];
+$h{b8}{a7} = $G_Empty;
+$h{b8}{c7} = $G_Empty;
+$h{b8}{d6} = [qw(c7)];
+$h{b8}{e5} = [qw(c7 d6)];
+$h{b8}{f4} = [qw(c7 d6 e5)];
+$h{b8}{g3} = [qw(c7 d6 e5 f4)];
+$h{b8}{h2} = [qw(c7 d6 e5 f4 g3)];
+$h{c1}{b2} = $G_Empty;
+$h{c1}{d2} = $G_Empty;
+$h{c1}{a3} = [qw(b2)];
+$h{c1}{e3} = [qw(d2)];
+$h{c1}{f4} = [qw(d2 e3)];
+$h{c1}{g5} = [qw(d2 e3 f4)];
+$h{c1}{h6} = [qw(d2 e3 f4 g5)];
+$h{c2}{b3} = $G_Empty;
+$h{c2}{d3} = $G_Empty;
+$h{c2}{b1} = $G_Empty;
+$h{c2}{d1} = $G_Empty;
+$h{c2}{a4} = [qw(b3)];
+$h{c2}{e4} = [qw(d3)];
+$h{c2}{f5} = [qw(d3 e4)];
+$h{c2}{g6} = [qw(d3 e4 f5)];
+$h{c2}{h7} = [qw(d3 e4 f5 g6)];
+$h{c3}{b4} = $G_Empty;
+$h{c3}{d4} = $G_Empty;
+$h{c3}{b2} = $G_Empty;
+$h{c3}{d2} = $G_Empty;
+$h{c3}{a5} = [qw(b4)];
+$h{c3}{e5} = [qw(d4)];
+$h{c3}{a1} = [qw(b2)];
+$h{c3}{e1} = [qw(d2)];
+$h{c3}{f6} = [qw(d4 e5)];
+$h{c3}{g7} = [qw(d4 e5 f6)];
+$h{c3}{h8} = [qw(d4 e5 f6 g7)];
+$h{c4}{b5} = $G_Empty;
+$h{c4}{d5} = $G_Empty;
+$h{c4}{b3} = $G_Empty;
+$h{c4}{d3} = $G_Empty;
+$h{c4}{a6} = [qw(b5)];
+$h{c4}{e6} = [qw(d5)];
+$h{c4}{a2} = [qw(b3)];
+$h{c4}{e2} = [qw(d3)];
+$h{c4}{f7} = [qw(d5 e6)];
+$h{c4}{f1} = [qw(d3 e2)];
+$h{c4}{g8} = [qw(d5 e6 f7)];
+$h{c5}{b6} = $G_Empty;
+$h{c5}{d6} = $G_Empty;
+$h{c5}{b4} = $G_Empty;
+$h{c5}{d4} = $G_Empty;
+$h{c5}{a7} = [qw(b6)];
+$h{c5}{e7} = [qw(d6)];
+$h{c5}{a3} = [qw(b4)];
+$h{c5}{e3} = [qw(d4)];
+$h{c5}{f8} = [qw(d6 e7)];
+$h{c5}{f2} = [qw(d4 e3)];
+$h{c5}{g1} = [qw(d4 e3 f2)];
+$h{c6}{b7} = $G_Empty;
+$h{c6}{d7} = $G_Empty;
+$h{c6}{b5} = $G_Empty;
+$h{c6}{d5} = $G_Empty;
+$h{c6}{a8} = [qw(b7)];
+$h{c6}{e8} = [qw(d7)];
+$h{c6}{a4} = [qw(b5)];
+$h{c6}{e4} = [qw(d5)];
+$h{c6}{f3} = [qw(d5 e4)];
+$h{c6}{g2} = [qw(d5 e4 f3)];
+$h{c6}{h1} = [qw(d5 e4 f3 g2)];
+$h{c7}{b8} = $G_Empty;
+$h{c7}{d8} = $G_Empty;
+$h{c7}{b6} = $G_Empty;
+$h{c7}{d6} = $G_Empty;
+$h{c7}{a5} = [qw(b6)];
+$h{c7}{e5} = [qw(d6)];
+$h{c7}{f4} = [qw(d6 e5)];
+$h{c7}{g3} = [qw(d6 e5 f4)];
+$h{c7}{h2} = [qw(d6 e5 f4 g3)];
+$h{c8}{b7} = $G_Empty;
+$h{c8}{d7} = $G_Empty;
+$h{c8}{a6} = [qw(b7)];
+$h{c8}{e6} = [qw(d7)];
+$h{c8}{f5} = [qw(d7 e6)];
+$h{c8}{g4} = [qw(d7 e6 f5)];
+$h{c8}{h3} = [qw(d7 e6 f5 g4)];
+$h{d1}{c2} = $G_Empty;
+$h{d1}{e2} = $G_Empty;
+$h{d1}{b3} = [qw(c2)];
+$h{d1}{f3} = [qw(e2)];
+$h{d1}{a4} = [qw(c2 b3)];
+$h{d1}{g4} = [qw(e2 f3)];
+$h{d1}{h5} = [qw(e2 f3 g4)];
+$h{d2}{c3} = $G_Empty;
+$h{d2}{e3} = $G_Empty;
+$h{d2}{c1} = $G_Empty;
+$h{d2}{e1} = $G_Empty;
+$h{d2}{b4} = [qw(c3)];
+$h{d2}{f4} = [qw(e3)];
+$h{d2}{a5} = [qw(c3 b4)];
+$h{d2}{g5} = [qw(e3 f4)];
+$h{d2}{h6} = [qw(e3 f4 g5)];
+$h{d3}{c4} = $G_Empty;
+$h{d3}{e4} = $G_Empty;
+$h{d3}{c2} = $G_Empty;
+$h{d3}{e2} = $G_Empty;
+$h{d3}{b5} = [qw(c4)];
+$h{d3}{f5} = [qw(e4)];
+$h{d3}{b1} = [qw(c2)];
+$h{d3}{f1} = [qw(e2)];
+$h{d3}{a6} = [qw(c4 b5)];
+$h{d3}{g6} = [qw(e4 f5)];
+$h{d3}{h7} = [qw(e4 f5 g6)];
+$h{d4}{c5} = $G_Empty;
+$h{d4}{e5} = $G_Empty;
+$h{d4}{c3} = $G_Empty;
+$h{d4}{e3} = $G_Empty;
+$h{d4}{b6} = [qw(c5)];
+$h{d4}{f6} = [qw(e5)];
+$h{d4}{b2} = [qw(c3)];
+$h{d4}{f2} = [qw(e3)];
+$h{d4}{a7} = [qw(c5 b6)];
+$h{d4}{g7} = [qw(e5 f6)];
+$h{d4}{a1} = [qw(c3 b2)];
+$h{d4}{g1} = [qw(e3 f2)];
+$h{d4}{h8} = [qw(e5 f6 g7)];
+$h{d5}{c6} = $G_Empty;
+$h{d5}{e6} = $G_Empty;
+$h{d5}{c4} = $G_Empty;
+$h{d5}{e4} = $G_Empty;
+$h{d5}{b7} = [qw(c6)];
+$h{d5}{f7} = [qw(e6)];
+$h{d5}{b3} = [qw(c4)];
+$h{d5}{f3} = [qw(e4)];
+$h{d5}{a8} = [qw(c6 b7)];
+$h{d5}{g8} = [qw(e6 f7)];
+$h{d5}{a2} = [qw(c4 b3)];
+$h{d5}{g2} = [qw(e4 f3)];
+$h{d5}{h1} = [qw(e4 f3 g2)];
+$h{d6}{c7} = $G_Empty;
+$h{d6}{e7} = $G_Empty;
+$h{d6}{c5} = $G_Empty;
+$h{d6}{e5} = $G_Empty;
+$h{d6}{b8} = [qw(c7)];
+$h{d6}{f8} = [qw(e7)];
+$h{d6}{b4} = [qw(c5)];
+$h{d6}{f4} = [qw(e5)];
+$h{d6}{a3} = [qw(c5 b4)];
+$h{d6}{g3} = [qw(e5 f4)];
+$h{d6}{h2} = [qw(e5 f4 g3)];
+$h{d7}{c8} = $G_Empty;
+$h{d7}{e8} = $G_Empty;
+$h{d7}{c6} = $G_Empty;
+$h{d7}{e6} = $G_Empty;
+$h{d7}{b5} = [qw(c6)];
+$h{d7}{f5} = [qw(e6)];
+$h{d7}{a4} = [qw(c6 b5)];
+$h{d7}{g4} = [qw(e6 f5)];
+$h{d7}{h3} = [qw(e6 f5 g4)];
+$h{d8}{c7} = $G_Empty;
+$h{d8}{e7} = $G_Empty;
+$h{d8}{b6} = [qw(c7)];
+$h{d8}{f6} = [qw(e7)];
+$h{d8}{a5} = [qw(c7 b6)];
+$h{d8}{g5} = [qw(e7 f6)];
+$h{d8}{h4} = [qw(e7 f6 g5)];
+$h{e1}{d2} = $G_Empty;
+$h{e1}{f2} = $G_Empty;
+$h{e1}{c3} = [qw(d2)];
+$h{e1}{g3} = [qw(f2)];
+$h{e1}{b4} = [qw(d2 c3)];
+$h{e1}{h4} = [qw(f2 g3)];
+$h{e1}{a5} = [qw(d2 c3 b4)];
+$h{e2}{d3} = $G_Empty;
+$h{e2}{f3} = $G_Empty;
+$h{e2}{d1} = $G_Empty;
+$h{e2}{f1} = $G_Empty;
+$h{e2}{c4} = [qw(d3)];
+$h{e2}{g4} = [qw(f3)];
+$h{e2}{b5} = [qw(d3 c4)];
+$h{e2}{h5} = [qw(f3 g4)];
+$h{e2}{a6} = [qw(d3 c4 b5)];
+$h{e3}{d4} = $G_Empty;
+$h{e3}{f4} = $G_Empty;
+$h{e3}{d2} = $G_Empty;
+$h{e3}{f2} = $G_Empty;
+$h{e3}{c5} = [qw(d4)];
+$h{e3}{g5} = [qw(f4)];
+$h{e3}{c1} = [qw(d2)];
+$h{e3}{g1} = [qw(f2)];
+$h{e3}{b6} = [qw(d4 c5)];
+$h{e3}{h6} = [qw(f4 g5)];
+$h{e3}{a7} = [qw(d4 c5 b6)];
+$h{e4}{d5} = $G_Empty;
+$h{e4}{f5} = $G_Empty;
+$h{e4}{d3} = $G_Empty;
+$h{e4}{f3} = $G_Empty;
+$h{e4}{c6} = [qw(d5)];
+$h{e4}{g6} = [qw(f5)];
+$h{e4}{c2} = [qw(d3)];
+$h{e4}{g2} = [qw(f3)];
+$h{e4}{b7} = [qw(d5 c6)];
+$h{e4}{h7} = [qw(f5 g6)];
+$h{e4}{b1} = [qw(d3 c2)];
+$h{e4}{h1} = [qw(f3 g2)];
+$h{e4}{a8} = [qw(d5 c6 b7)];
+$h{e5}{d6} = $G_Empty;
+$h{e5}{f6} = $G_Empty;
+$h{e5}{d4} = $G_Empty;
+$h{e5}{f4} = $G_Empty;
+$h{e5}{c7} = [qw(d6)];
+$h{e5}{g7} = [qw(f6)];
+$h{e5}{c3} = [qw(d4)];
+$h{e5}{g3} = [qw(f4)];
+$h{e5}{b8} = [qw(d6 c7)];
+$h{e5}{h8} = [qw(f6 g7)];
+$h{e5}{b2} = [qw(d4 c3)];
+$h{e5}{h2} = [qw(f4 g3)];
+$h{e5}{a1} = [qw(d4 c3 b2)];
+$h{e6}{d7} = $G_Empty;
+$h{e6}{f7} = $G_Empty;
+$h{e6}{d5} = $G_Empty;
+$h{e6}{f5} = $G_Empty;
+$h{e6}{c8} = [qw(d7)];
+$h{e6}{g8} = [qw(f7)];
+$h{e6}{c4} = [qw(d5)];
+$h{e6}{g4} = [qw(f5)];
+$h{e6}{b3} = [qw(d5 c4)];
+$h{e6}{h3} = [qw(f5 g4)];
+$h{e6}{a2} = [qw(d5 c4 b3)];
+$h{e7}{d8} = $G_Empty;
+$h{e7}{f8} = $G_Empty;
+$h{e7}{d6} = $G_Empty;
+$h{e7}{f6} = $G_Empty;
+$h{e7}{c5} = [qw(d6)];
+$h{e7}{g5} = [qw(f6)];
+$h{e7}{b4} = [qw(d6 c5)];
+$h{e7}{h4} = [qw(f6 g5)];
+$h{e7}{a3} = [qw(d6 c5 b4)];
+$h{e8}{d7} = $G_Empty;
+$h{e8}{f7} = $G_Empty;
+$h{e8}{c6} = [qw(d7)];
+$h{e8}{g6} = [qw(f7)];
+$h{e8}{b5} = [qw(d7 c6)];
+$h{e8}{h5} = [qw(f7 g6)];
+$h{e8}{a4} = [qw(d7 c6 b5)];
+$h{f1}{e2} = $G_Empty;
+$h{f1}{g2} = $G_Empty;
+$h{f1}{d3} = [qw(e2)];
+$h{f1}{h3} = [qw(g2)];
+$h{f1}{c4} = [qw(e2 d3)];
+$h{f1}{b5} = [qw(e2 d3 c4)];
+$h{f1}{a6} = [qw(e2 d3 c4 b5)];
+$h{f2}{e3} = $G_Empty;
+$h{f2}{g3} = $G_Empty;
+$h{f2}{e1} = $G_Empty;
+$h{f2}{g1} = $G_Empty;
+$h{f2}{d4} = [qw(e3)];
+$h{f2}{h4} = [qw(g3)];
+$h{f2}{c5} = [qw(e3 d4)];
+$h{f2}{b6} = [qw(e3 d4 c5)];
+$h{f2}{a7} = [qw(e3 d4 c5 b6)];
+$h{f3}{e4} = $G_Empty;
+$h{f3}{g4} = $G_Empty;
+$h{f3}{e2} = $G_Empty;
+$h{f3}{g2} = $G_Empty;
+$h{f3}{d5} = [qw(e4)];
+$h{f3}{h5} = [qw(g4)];
+$h{f3}{d1} = [qw(e2)];
+$h{f3}{h1} = [qw(g2)];
+$h{f3}{c6} = [qw(e4 d5)];
+$h{f3}{b7} = [qw(e4 d5 c6)];
+$h{f3}{a8} = [qw(e4 d5 c6 b7)];
+$h{f4}{e5} = $G_Empty;
+$h{f4}{g5} = $G_Empty;
+$h{f4}{e3} = $G_Empty;
+$h{f4}{g3} = $G_Empty;
+$h{f4}{d6} = [qw(e5)];
+$h{f4}{h6} = [qw(g5)];
+$h{f4}{d2} = [qw(e3)];
+$h{f4}{h2} = [qw(g3)];
+$h{f4}{c7} = [qw(e5 d6)];
+$h{f4}{c1} = [qw(e3 d2)];
+$h{f4}{b8} = [qw(e5 d6 c7)];
+$h{f5}{e6} = $G_Empty;
+$h{f5}{g6} = $G_Empty;
+$h{f5}{e4} = $G_Empty;
+$h{f5}{g4} = $G_Empty;
+$h{f5}{d7} = [qw(e6)];
+$h{f5}{h7} = [qw(g6)];
+$h{f5}{d3} = [qw(e4)];
+$h{f5}{h3} = [qw(g4)];
+$h{f5}{c8} = [qw(e6 d7)];
+$h{f5}{c2} = [qw(e4 d3)];
+$h{f5}{b1} = [qw(e4 d3 c2)];
+$h{f6}{e7} = $G_Empty;
+$h{f6}{g7} = $G_Empty;
+$h{f6}{e5} = $G_Empty;
+$h{f6}{g5} = $G_Empty;
+$h{f6}{d8} = [qw(e7)];
+$h{f6}{h8} = [qw(g7)];
+$h{f6}{d4} = [qw(e5)];
+$h{f6}{h4} = [qw(g5)];
+$h{f6}{c3} = [qw(e5 d4)];
+$h{f6}{b2} = [qw(e5 d4 c3)];
+$h{f6}{a1} = [qw(e5 d4 c3 b2)];
+$h{f7}{e8} = $G_Empty;
+$h{f7}{g8} = $G_Empty;
+$h{f7}{e6} = $G_Empty;
+$h{f7}{g6} = $G_Empty;
+$h{f7}{d5} = [qw(e6)];
+$h{f7}{h5} = [qw(g6)];
+$h{f7}{c4} = [qw(e6 d5)];
+$h{f7}{b3} = [qw(e6 d5 c4)];
+$h{f7}{a2} = [qw(e6 d5 c4 b3)];
+$h{f8}{e7} = $G_Empty;
+$h{f8}{g7} = $G_Empty;
+$h{f8}{d6} = [qw(e7)];
+$h{f8}{h6} = [qw(g7)];
+$h{f8}{c5} = [qw(e7 d6)];
+$h{f8}{b4} = [qw(e7 d6 c5)];
+$h{f8}{a3} = [qw(e7 d6 c5 b4)];
+$h{g1}{f2} = $G_Empty;
+$h{g1}{h2} = $G_Empty;
+$h{g1}{e3} = [qw(f2)];
+$h{g1}{d4} = [qw(f2 e3)];
+$h{g1}{c5} = [qw(f2 e3 d4)];
+$h{g1}{b6} = [qw(f2 e3 d4 c5)];
+$h{g1}{a7} = [qw(f2 e3 d4 c5 b6)];
+$h{g2}{f3} = $G_Empty;
+$h{g2}{h3} = $G_Empty;
+$h{g2}{f1} = $G_Empty;
+$h{g2}{h1} = $G_Empty;
+$h{g2}{e4} = [qw(f3)];
+$h{g2}{d5} = [qw(f3 e4)];
+$h{g2}{c6} = [qw(f3 e4 d5)];
+$h{g2}{b7} = [qw(f3 e4 d5 c6)];
+$h{g2}{a8} = [qw(f3 e4 d5 c6 b7)];
+$h{g3}{f4} = $G_Empty;
+$h{g3}{h4} = $G_Empty;
+$h{g3}{f2} = $G_Empty;
+$h{g3}{h2} = $G_Empty;
+$h{g3}{e5} = [qw(f4)];
+$h{g3}{e1} = [qw(f2)];
+$h{g3}{d6} = [qw(f4 e5)];
+$h{g3}{c7} = [qw(f4 e5 d6)];
+$h{g3}{b8} = [qw(f4 e5 d6 c7)];
+$h{g4}{f5} = $G_Empty;
+$h{g4}{h5} = $G_Empty;
+$h{g4}{f3} = $G_Empty;
+$h{g4}{h3} = $G_Empty;
+$h{g4}{e6} = [qw(f5)];
+$h{g4}{e2} = [qw(f3)];
+$h{g4}{d7} = [qw(f5 e6)];
+$h{g4}{d1} = [qw(f3 e2)];
+$h{g4}{c8} = [qw(f5 e6 d7)];
+$h{g5}{f6} = $G_Empty;
+$h{g5}{h6} = $G_Empty;
+$h{g5}{f4} = $G_Empty;
+$h{g5}{h4} = $G_Empty;
+$h{g5}{e7} = [qw(f6)];
+$h{g5}{e3} = [qw(f4)];
+$h{g5}{d8} = [qw(f6 e7)];
+$h{g5}{d2} = [qw(f4 e3)];
+$h{g5}{c1} = [qw(f4 e3 d2)];
+$h{g6}{f7} = $G_Empty;
+$h{g6}{h7} = $G_Empty;
+$h{g6}{f5} = $G_Empty;
+$h{g6}{h5} = $G_Empty;
+$h{g6}{e8} = [qw(f7)];
+$h{g6}{e4} = [qw(f5)];
+$h{g6}{d3} = [qw(f5 e4)];
+$h{g6}{c2} = [qw(f5 e4 d3)];
+$h{g6}{b1} = [qw(f5 e4 d3 c2)];
+$h{g7}{f8} = $G_Empty;
+$h{g7}{h8} = $G_Empty;
+$h{g7}{f6} = $G_Empty;
+$h{g7}{h6} = $G_Empty;
+$h{g7}{e5} = [qw(f6)];
+$h{g7}{d4} = [qw(f6 e5)];
+$h{g7}{c3} = [qw(f6 e5 d4)];
+$h{g7}{b2} = [qw(f6 e5 d4 c3)];
+$h{g7}{a1} = [qw(f6 e5 d4 c3 b2)];
+$h{g8}{f7} = $G_Empty;
+$h{g8}{h7} = $G_Empty;
+$h{g8}{e6} = [qw(f7)];
+$h{g8}{d5} = [qw(f7 e6)];
+$h{g8}{c4} = [qw(f7 e6 d5)];
+$h{g8}{b3} = [qw(f7 e6 d5 c4)];
+$h{g8}{a2} = [qw(f7 e6 d5 c4 b3)];
+$h{h1}{g2} = $G_Empty;
+$h{h1}{f3} = [qw(g2)];
+$h{h1}{e4} = [qw(g2 f3)];
+$h{h1}{d5} = [qw(g2 f3 e4)];
+$h{h1}{c6} = [qw(g2 f3 e4 d5)];
+$h{h1}{b7} = [qw(g2 f3 e4 d5 c6)];
+$h{h1}{a8} = [qw(g2 f3 e4 d5 c6 b7)];
+$h{h2}{g3} = $G_Empty;
+$h{h2}{g1} = $G_Empty;
+$h{h2}{f4} = [qw(g3)];
+$h{h2}{e5} = [qw(g3 f4)];
+$h{h2}{d6} = [qw(g3 f4 e5)];
+$h{h2}{c7} = [qw(g3 f4 e5 d6)];
+$h{h2}{b8} = [qw(g3 f4 e5 d6 c7)];
+$h{h3}{g4} = $G_Empty;
+$h{h3}{g2} = $G_Empty;
+$h{h3}{f5} = [qw(g4)];
+$h{h3}{f1} = [qw(g2)];
+$h{h3}{e6} = [qw(g4 f5)];
+$h{h3}{d7} = [qw(g4 f5 e6)];
+$h{h3}{c8} = [qw(g4 f5 e6 d7)];
+$h{h4}{g5} = $G_Empty;
+$h{h4}{g3} = $G_Empty;
+$h{h4}{f6} = [qw(g5)];
+$h{h4}{f2} = [qw(g3)];
+$h{h4}{e7} = [qw(g5 f6)];
+$h{h4}{e1} = [qw(g3 f2)];
+$h{h4}{d8} = [qw(g5 f6 e7)];
+$h{h5}{g6} = $G_Empty;
+$h{h5}{g4} = $G_Empty;
+$h{h5}{f7} = [qw(g6)];
+$h{h5}{f3} = [qw(g4)];
+$h{h5}{e8} = [qw(g6 f7)];
+$h{h5}{e2} = [qw(g4 f3)];
+$h{h5}{d1} = [qw(g4 f3 e2)];
+$h{h6}{g7} = $G_Empty;
+$h{h6}{g5} = $G_Empty;
+$h{h6}{f8} = [qw(g7)];
+$h{h6}{f4} = [qw(g5)];
+$h{h6}{e3} = [qw(g5 f4)];
+$h{h6}{d2} = [qw(g5 f4 e3)];
+$h{h6}{c1} = [qw(g5 f4 e3 d2)];
+$h{h7}{g8} = $G_Empty;
+$h{h7}{g6} = $G_Empty;
+$h{h7}{f5} = [qw(g6)];
+$h{h7}{e4} = [qw(g6 f5)];
+$h{h7}{d3} = [qw(g6 f5 e4)];
+$h{h7}{c2} = [qw(g6 f5 e4 d3)];
+$h{h7}{b1} = [qw(g6 f5 e4 d3 c2)];
+$h{h8}{g7} = $G_Empty;
+$h{h8}{f6} = [qw(g7)];
+$h{h8}{e5} = [qw(g7 f6)];
+$h{h8}{d4} = [qw(g7 f6 e5)];
+$h{h8}{c3} = [qw(g7 f6 e5 d4)];
+$h{h8}{b2} = [qw(g7 f6 e5 d4 c3)];
+$h{h8}{a1} = [qw(g7 f6 e5 d4 c3 b2)];
+return %h;
+}

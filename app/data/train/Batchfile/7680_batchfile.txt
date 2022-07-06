@@ -1,0 +1,1 @@
+cmd_drivers/staging/zram/built-in.o :=  /home/josh/gcc-linaro-arm-linux-gnueabihf-4.7-2013.04-20130415_linux/bin/arm-linux-gnueabihf-ld -EL    -r -o drivers/staging/zram/built-in.o drivers/staging/zram/xvmalloc.o 

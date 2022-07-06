@@ -1,0 +1,99 @@
+﻿--// MIT License. Copyright (c) 2016 Maxim Kuzmin. Contacts: https://github.com/maxim-kuzmin
+
+--// Author: Maxim Kuzmin
+
+CREATE PROCEDURE [dbo].[DummyTree_Proc_GetList]
+	@PageNumber int = null,
+	@PageSize int = null,
+	@Sorting int = null,
+	@Axis nvarchar(50) = null,		
+	@TreeId bigint = null,
+	@TreeIds [core].[TableType_IdList] readonly,	
+	@TreeLevel bigint = null,
+	@Id bigint = null,
+	@Ids [core].[TableType_IdList] readonly,
+	@Name nvarchar(50) = null
+WITH ENCRYPTION
+AS
+BEGIN
+	SET NOCOUNT ON;
+	SET XACT_ABORT ON;
+	SET TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
+
+	declare @Cache [core].[TableType_ListCache];
+	declare @PageNumFrom int; 
+	declare @PageNumTo int;
+	declare @IsIdListEmpty bit = 0;
+	declare @IsTreeIdListEmpty bit = 0;	
+
+	select 
+		@PageNumFrom = [From], 
+		@PageNumTo = [To] 
+	from 
+		[core].[Func_GetPageNumberRage](@PageNumber, @PageSize); 
+
+	if not exists(select * from @TreeIds) set @IsTreeIdListEmpty = 1;
+	if not exists(select * from @Ids) set @IsIdListEmpty = 1;
+
+	if @Sorting is null set @Sorting = 1;
+
+	with cte as
+	(
+		select
+			[Num] = ROW_NUMBER() OVER 
+				(ORDER BY 
+					t.[Level], 
+					--Data: Id
+					case when @Sorting = 1 then d.[Id] end asc,
+					case when @Sorting = -1 then d.[Id] end desc,					
+					--Data: Name, Id
+					case when @Sorting = 2 then d.[Name] end asc, case when @Sorting = 2 then d.[Id] end asc,
+					case when @Sorting = -2 then d.[Name] end desc, case when @Sorting = -2 then d.[Id] end asc
+				),
+			[Val] = t.[Id] 
+		from
+			[dbo].[DummyTree_Func_GetData](@Axis, @TreeId, @TreeLevel, @Id) t
+			inner join [dbo].[Dummy_Func_GetData](@Id) d on d.[Id] = t.[DummyId] 
+		where			
+			(@IsTreeIdListEmpty = 1 or t.[Id] in (select [Val] from @TreeIds))
+			and (@IsIdListEmpty = 1 or d.[Id] in (select [Val] from @Ids))
+			and (@Name is null or d.[Name] like '%' + @Name + '%')
+	)
+	insert into @Cache
+	(
+		[Num],
+		[Val]
+	)
+	select 
+		[Num] = 0, 
+		[Val] = COUNT_BIG(*) * (-1) --TotalCount: умножаем на (-1), так как [Val] должен быть UNIQUE.
+	from 
+		cte
+	union all
+	select 
+		[Num],
+		[Val]
+	from 
+		cte
+	where 
+		[Num] between @PageNumFrom and @PageNumTo;
+
+	select 
+		ABS([Val]) --TotalCount: берём абсолютное значение [Val], чтобы сделать его положительным числом.
+	from 
+		@Cache 
+	where 
+		[Num] = 0;
+
+	select		
+		t.*,
+		d.*
+	from
+		@Cache h
+		inner join [dbo].[DummyTree_Func_GetData](@Axis, @TreeId, @TreeLevel, @Id) t on t.[Id] = h.[Val]
+		inner join [dbo].[Dummy_Func_GetData](@Id) d on d.[Id] = t.[DummyId]
+	where
+		h.[Num] > 0
+	order by
+		h.[Num];		
+END

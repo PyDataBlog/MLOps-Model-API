@@ -1,0 +1,341 @@
+package pTracker::Request::Project;
+use Dancer2 appname => 'pTracker';
+
+=head1 NAME
+
+pTracker::Request::Project
+
+=head1 SYNOPSIS
+
+Search for, list, create/read/update/(possibly delete) projects.
+
+=cut
+
+use pTracker::Help;
+use pTracker::Request;
+use pTracker::Response;
+
+my $categories;
+my $editlock;
+my $files;
+my $projects;
+my $ref;
+my $roles;
+my $tags;
+my $team;
+my $users;
+my $watcher;
+my $req;
+
+sub register {
+    my ( $self, $args ) = @_;
+
+    prefix '/:lang/projects' => sub {
+        any ''                   => sub { list_projects() };
+        get '/add'               => sub { edit_project() };
+        post '/add'              => sub { create_project() };
+        get '/:project_id'       => sub { view_project() };
+        get '/:project_id/edit'  => sub { edit_project() };
+        post '/:project_id/edit' => sub { update_project() };
+    };
+
+    get '/:lang/help/projects'        => sub { pTracker::Help->show_help(); };
+    get '/:lang/help/projects/:topic' => sub { pTracker::Help->show_help(); };
+
+    $req        = pTracker::Request->register($args);
+    $categories = $req->domain('Project::Category');
+    $editlock   = $req->domain('Project::EditLock');
+    $files      = $req->domain('Project::File');
+    $projects   = $req->domain('Project');
+    $ref        = $req->domain('RefTable');
+    $roles      = $req->domain('Role');
+    $tags       = $req->domain('Project::Tag');
+    $team       = $req->domain('Project::Team');
+    $users      = $req->domain('User');
+    $watcher    = $req->domain('Watcher');
+
+    return 1;
+}
+
+sub create_project {
+
+    if ( params->{'button_cancel'} ) {
+        $req->stash_user_message( 'notice', $req->loc("Create project cancelled.") );
+        return pTracker::Response->return_redirect();
+    }
+
+    my $auth_user = session('auth_user');
+    my $can_admin = $projects->can_admin( { auth_user => $auth_user, } );
+    if ($can_admin) {
+
+        my $args = params;
+        $args->{auth_user} = $auth_user;
+        $args->{lang}      = $req->lang();
+
+        my $r = $projects->create_project($args);
+
+        $req->stash_user_messages($r);
+
+        if ( $r->{success} ) {
+            pTracker::Response->return_redirect( 'projects', $r->{data}{id} );
+        }
+        else {
+            # No data, things failed validation, or just failed
+            my %s = (
+                data          => $args,
+                info          => $r->{info},
+                warning       => $r->{warning},
+                error         => $r->{error},
+                failed        => $r->{failed},
+                template_file => 'project_edit',
+            );
+            pTracker::Response->return_response( \%s );
+        }
+    }
+    else {
+        pTracker::Response->return_error('FORBIDDEN');
+    }
+}
+
+#sub delete_project {
+#    my $project_id = $req->parm_id('project');
+#    pTracker::Response->return_error('BAD_REQUEST') unless ($project_id);
+#
+#    my $auth_user = session('auth_user');
+#    my $can_delete = $projects->can_delete( { auth_user => $auth_user, project_id => $project_id, } );
+#    if ($can_delete) {
+#
+#        my $r = $projects->delete_project( { auth_user => $auth_user, project_id => $project_id, } );
+#
+#        if ( $r->{error} ) {
+#            pTracker::Response->return_error( { error => $r->{error} } );
+#        }
+#        else {
+#            pTracker::Response->return_redirect('projects');
+#        }
+#    }
+#    else {
+#        pTracker::Response->return_error('FORBIDDEN');
+#    }
+#}
+
+sub edit_project {
+    my $project_id = $req->parm_id('project');
+
+    my $auth_user = session('auth_user');
+    my $can_edit = $projects->can_edit( { auth_user => $auth_user, project_id => $project_id, } );
+    if ($can_edit) {
+
+        my %args = (
+            auth_user  => $auth_user,
+            item_id    => $project_id,
+            item_type  => 'project',
+            project_id => $project_id,
+            username   => $auth_user,
+            lang       => $req->lang(),
+        );
+
+        my $r;
+
+        my ( $is_locked, $locked_username, $lock_message, $lock_remaining );
+        # Do not need edit lock/edit lock info on new projects
+        if ($project_id) {
+            ( $is_locked, $locked_username, $lock_message, $lock_remaining ) = $editlock->get_edit_lock( \%args );
+            $locked_username ||= '';
+            $lock_message    ||= '';
+            if ( $is_locked && $locked_username eq $auth_user ) {
+                $lock_message = undef;    # We don't need a message telling us that we have a lock
+            }
+            else {
+                $req->stash_user_message( 'warning', $lock_message );
+                return pTracker::Response->return_redirect();
+            }
+
+            $r = $projects->view_project( \%args );
+        }
+        else {
+            my $parent_id = $req->parm_id('parent');
+
+            if ($parent_id) {
+                # New child-- default values to reflect the parent
+                my $p = $projects->view_project( { auth_user => $auth_user, project_id => $parent_id } );
+                $r->{data}{parent_id}           = $parent_id;
+                $r->{data}{parent_project_name} = $p->{data}{project_name};
+
+                foreach my $key (
+                    qw(type_id type_name priority_id
+                    priority_name visibility_id visibility_name
+                    autocreate_tags is_enabled deadline wiki_format_id)
+                    )
+                {
+                    $r->{data}{$key} = $p->{data}{$key};
+                }
+            }
+        }
+
+        unless ( $r->{error} ) {
+
+            # Do not need edit lock info on new projects.
+            # Also, no need to obtain additional project attributes
+            # unless the project already exists.
+            if ($project_id) {
+                if ($lock_message) {
+                    $r->{lock_message} = $lock_message;
+                }
+                $r->{lock_remaining}  = $lock_remaining;
+                $r->{locked_username} = $locked_username;
+
+                $r->{attributes} = $projects->project_attributes( \%args )->{data};
+                $r->{categories} = $categories->list_project_categories( \%args )->{data};
+                $r->{tags}       = $tags->list_project_tags( \%args )->{data};
+                $r->{team}       = $team->list_project_team( \%args )->{data};
+                $r->{title}      = $r->{data}{project_name};
+            }
+            else {
+                $r->{data}{wiki_format_id} = config->{wiki_format_id} || 1;
+                $r->{title} = $req->loc('New Project');
+            }
+
+            $args{type_id} = $r->{data}{type_id};
+
+            $r->{can_admin}       = $projects->can_admin( \%args );
+            $r->{project_menu}    = $projects->project_menu( \%args )->{data};
+            $r->{allowed_parents} = $projects->allowed_parents( \%args );
+            $r->{priorities}      = $ref->lookup_list('priority');
+            $r->{statuses}        = $ref->lookup_list('project_status');
+            $r->{types}           = $ref->lookup_list('project_type');
+            $r->{visibilities}    = $ref->lookup_list('visibility');
+            $r->{roles}           = $roles->list_roles( \%args )->{data};
+            $r->{users}           = $users->list_users( \%args )->{data};
+
+            $r->{template_file} = 'project_edit';
+        }
+        pTracker::Response->return_response($r);
+    }
+    else {
+        pTracker::Response->return_error('FORBIDDEN');
+    }
+}
+
+sub list_projects {
+
+    my $auth_user = session('auth_user');
+    my $args      = params;
+    $args->{auth_user} = $auth_user;
+
+    my $r = $projects->list_projects($args);
+    unless ( $r->{error} ) {
+
+        $r->{args}       = $args;
+        $r->{statuses}   = $ref->lookup_list('project_status');
+        $r->{priorities} = $ref->lookup_list('priority');
+        $r->{types}      = $ref->lookup_list('project_type');
+        $r->{can_admin}  = $projects->can_admin( { auth_user => $auth_user, } );
+        $r->{title}      = $req->loc('[Projects]');
+
+        $r->{template_file} = 'project_list';
+    }
+    pTracker::Response->return_response($r);
+}
+
+sub update_project {
+    my $project_id = $req->parm_id('project');
+    pTracker::Response->return_error('BAD_REQUEST') unless ($project_id);
+
+    my $auth_user = session('auth_user');
+
+    if ( params->{'button_cancel'} ) {
+        $editlock->clear_edit_lock( { item_type => 'project', item_id => $project_id, auth_user => $auth_user } );
+
+        $req->stash_user_message( 'notice', $req->loc("Edit project cancelled.") );
+        return pTracker::Response->return_redirect();
+    }
+
+    my $can_edit = $projects->can_edit( { auth_user => $auth_user, project_id => $project_id, } );
+    if ($can_edit) {
+
+        my $args = params;
+        $args->{auth_user} = $auth_user;
+        $args->{lang}      = $req->lang();
+
+        my $r = $projects->update_project($args);
+
+        $req->stash_user_messages($r);
+
+        if ( $r->{success} ) {
+            pTracker::Response->return_redirect( 'projects', $project_id );
+        }
+        else {
+            # No data, things failed validation, or just failed
+            my %s = (
+                project_id    => $project_id,
+                data          => $args,
+                info          => $r->{info},
+                warning       => $r->{warning},
+                error         => $r->{error},
+                failed        => $r->{failed},
+                template_file => 'project_edit',
+            );
+
+            pTracker::Response->return_response( \%s );
+        }
+    }
+    else {
+        pTracker::Response->return_error('FORBIDDEN');
+    }
+}
+
+sub view_project {
+    my $project_id = $req->parm_id('project');
+    pTracker::Response->return_error('BAD_REQUEST') unless ($project_id);
+
+    my $auth_user = session('auth_user');
+
+    my %args = (
+        auth_user  => $auth_user,
+        item_id    => $project_id,
+        item_type  => 'project',
+        project_id => $project_id,
+        username   => $auth_user,
+        lang       => $req->lang(),
+    );
+
+    my $can_view = $projects->can_view( \%args );
+    if ($can_view) {
+        my $r = $projects->view_project( \%args );
+        unless ( $r->{error} ) {
+
+            my ( $is_locked, $locked_username, $message, $lock_remaining ) = $editlock->edit_lock_status( \%args );
+            $r->{lock_remaining}  = $lock_remaining;
+            $r->{locked_username} = $locked_username;
+
+            $r->{can_admin}         = $projects->can_admin( \%args );
+            $r->{can_edit}          = $projects->can_edit( \%args );
+            $r->{is_project_member} = $projects->is_project_member( \%args );
+            $r->{attributes}        = $projects->project_attributes( \%args )->{data};
+            $r->{categories}        = $categories->list_project_categories( \%args )->{data};
+            $r->{child_projects}    = $projects->child_projects( \%args )->{data};
+            $r->{files}             = $files->list_project_files( \%args )->{data};
+            $r->{project_menu}      = $projects->project_menu( \%args )->{data};
+            $r->{tags}              = $tags->list_project_tags( \%args )->{data};
+            $r->{team}              = $team->list_project_team( \%args )->{data};
+            $r->{title}             = $projects->project_title( \%args );
+            $r->{watch_status}      = $watcher->watch_status( \%args );
+
+            $r->{template_file} = 'project_view';
+        }
+        pTracker::Response->return_response($r);
+
+    }
+    else {
+        pTracker::Response->return_error('FORBIDDEN');
+    }
+}
+
+true;
+
+=head1 Copyright (C) 2016 gsiems.
+
+This file is licensed under the Artistic License 2.0
+
+=cut

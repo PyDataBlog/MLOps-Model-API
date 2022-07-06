@@ -1,0 +1,363 @@
+#!/usr/bin/perl
+use strict;
+use LWP::UserAgent;
+
+# debugging...
+my $DEBUG = 1;
+
+# <tr>...colspan...</tr> ignore this first row
+# <tr><th>...</th></tr>  get the headings from this header row
+# <tr><td>...</td></tr>  headings apply to cells in this row
+# <tr><td>...</td></tr>  ... and this
+# <tr><td>...</td></tr>  ... and this
+# <tr><td>...</td></tr>  ... and this
+# <tr>...colspan...</tr> ignore this first row
+# <tr><th>...</th></tr>  get the headings from this header row
+# <tr><td>...</td></tr>  headings apply to cells in this row
+# <tr><td>...</td></tr>  ... and this
+# <tr><td>...</td></tr>  ... and this
+# <tr><td>...</td></tr>  ... and this
+
+# enumeration for display types:
+#  DISPLAY_TYPE_DEPARTURES_FROM_TO              departures from <start> to <dest>
+#  DISPLAY_TYPE_ALL_DEPARTURES_FROM             all departures from <start>
+#  DISPLAY_TYPE_ALL_ARRIVALS_AT                 all arrivals at <dest>
+#  DISPLAY_TYPE_ARRIVALS_AT_FROM                arrivals at <dest> from <start>
+use constant DISPLAY_TYPE_DEPARTURES_FROM_TO => 0;
+use constant DISPLAY_TYPE_ALL_DEPARTURES_FROM => 1;
+use constant DISPLAY_TYPE_ALL_ARRIVALS_AT => 2;
+use constant DISPLAY_TYPE_ARRIVALS_AT_FROM => 3;
+
+
+my $from;
+my $to;
+
+2 == (@ARGV) || die("Must supply two parameters, even if one is the word 'null'");
+
+($from, $to) = @ARGV;
+if ('null' eq $from) {
+	$from = undef;
+}
+if ('null' eq $to) {
+	$to = undef;
+}
+print "from: $from\n";
+print "to: $to\n";
+
+my $browser = LWP::UserAgent->new;
+
+# live departures, has the columns
+# DESTINATION (station), TIMETABLE, EXPECTED, OPERATOR, TRAIN DETAILS / BUS DETAILS
+#
+# eg:
+#    http://www.livedepartureboards.co.uk/ldb/sumdep.aspx?T=LDS&S=YRK
+# for "departures from leeds to york"
+#
+# eg:
+#    http://www.livedepartureboards.co.uk/ldb/sumdep.aspx?T=LDS
+# for "all departures from leeds"
+my $liveDeparturesURL = 'http://www.livedepartureboards.co.uk/ldb/sumdep.aspx';
+
+# live arrivals, has the columns
+# ORIGIN (station), TIMETABLE, EXPECTED, OPERATOR, TRAIN DETAILS / BUS DETAILS
+#
+# eg:
+#    http://www.livedepartureboards.co.uk/ldb/sumarr.aspx?T=LDS&S=YRK
+# for "arrivals at york from leeds"
+#
+# eg:
+#    http://www.livedepartureboards.co.uk/ldb/sumarr.aspx?T=LDS
+# for "all arrivals at leeds"
+my $liveArrivalsURL = 'http://www.livedepartureboards.co.uk/ldb/sumarr.aspx';
+
+my @displayTypes;
+my @startStationCodes = ($from);
+my @destStationCodes = ($to);
+if (defined($from) && defined($to)) {
+	$displayTypes[0] = DISPLAY_TYPE_DEPARTURES_FROM_TO;
+} elsif (defined($from) && !defined($to)) {
+	$displayTypes[0] = DISPLAY_TYPE_ALL_DEPARTURES_FROM;
+} elsif (!defined($from) && defined($to)) {
+	$displayTypes[0] = DISPLAY_TYPE_ALL_ARRIVALS_AT;
+} else {
+	die("need to specify start station or destination station or both");
+}
+
+getData(0);
+
+# END OF TEST CODE
+
+sub getData() {
+	my $routeIndex = shift;
+
+	my $urlString;
+
+	if (DISPLAY_TYPE_ALL_DEPARTURES_FROM == $displayTypes[$routeIndex]) {
+		$urlString = $liveDeparturesURL . '?T=' . uc($startStationCodes[$routeIndex]);
+	} elsif (DISPLAY_TYPE_DEPARTURES_FROM_TO == $displayTypes[$routeIndex]) {
+		$urlString = $liveDeparturesURL . '?T=' . uc($startStationCodes[$routeIndex]) . '&S=' . uc($destStationCodes[$routeIndex]);
+	} elsif (DISPLAY_TYPE_ALL_ARRIVALS_AT == $displayTypes[$routeIndex]) {
+		$urlString = $liveArrivalsURL . '?T=' . uc($destStationCodes[$routeIndex]);
+	} else { # DISPLAY_TYPE_ALL_ARRIVALS_AT_FROM
+		$urlString = $liveArrivalsURL . '?T=' . uc($startStationCodes[$routeIndex]) . '&S=' . uc($destStationCodes[$routeIndex]);
+	}
+	$DEBUG && print "using URL $urlString\n";
+
+	# flags to record errors
+	my $tempError;
+	my $fatalError;
+
+	# this is where the results are stored while they're being scraped...
+	my @tempStartStationNames = ();
+	my @tempDestStationNames = ();
+	my @tempTimetabledTimes = ();
+	my @tempExpectedTimes = ();
+	my @tempTransportTypes = ();
+	
+	# often need to  use a heading in the web page to determine the start or destination station (or both)
+	# in a route these are stored here...
+	my $repeatingStartStationName;
+	my $repeatingDestStationName;
+
+	my $url = URI->new($urlString);
+	my $response = $browser->get($url)->content;
+	
+	# check for errors
+	if (index($response, 'We were unable to service your request') > -1) {
+		# 'We were unable to service your request' is included in the
+		# standard 'didn't understand the parameters' response.
+		# This is fatal error
+		$fatalError = 1;
+	}  
+
+	if (!$tempError && !$fatalError) {
+		# <div class="containertitlebig"><h2><span class="red">LIVE</span> DEPARTURES:<span class="red"><br>
+		# ASLOCKTON (ALK) TO NOTTINGHAM (NOT)</span></h2></div>
+
+		my $tempFromTo = $response;
+		$tempFromTo =~ s/.*(.div class=.containertitlebig.*?div>).*/$1/s;
+		#$tempFromTo =~ s/.*?<br>[^A-Z]*([^<]*).*/$1/s;
+		$DEBUG && print "LiveDepartures: fromTo is *$tempFromTo*\n";
+
+		# find the repeating start and/or destination station names
+		if ($tempFromTo =~ s/.*?<br>[^A-Z]*([^<]*).*/$1/s) {
+			if (DISPLAY_TYPE_DEPARTURES_FROM_TO == $displayTypes[$routeIndex] ||
+				DISPLAY_TYPE_ARRIVALS_AT_FROM == $displayTypes[$routeIndex]) {
+				# look for "STATION_NAME (AAA) TO STATION_NAME (BBB)"
+				if ($tempFromTo =~ /(.+?) \(...\) TO (.+?) \(...\)/) {
+					$repeatingStartStationName = $1;
+					$repeatingDestStationName = $2;
+				} else {
+					# station names not found - this is possibly a glitch on the Network Rail side -
+					# call it a temporary error
+					$tempError = 1;
+				}
+			} else { # DISPLAY_TYPE_ALL_ARRIVALS_AT or DISPLAY_TYPE_ALL_DEPARTURES_FROM
+				# look for "STATION_NAME (AAA)"
+				if ($tempFromTo =~ /(.+?) \(...\)/) {
+					if (DISPLAY_TYPE_ALL_ARRIVALS_AT == $displayTypes[$routeIndex]) {
+						$repeatingDestStationName = $1;
+					} else { # DISPLAY_TYPE_ALL_DEPARTURES_FROM
+						$repeatingStartStationName = $1;
+					}
+				} else {
+					# station name not found - this is possibly a glitch on the Network Rail side -
+					# call it a temporary error
+					$tempError = 1;
+				}
+			}
+		}
+	}
+
+	if (!$tempError && !$fatalError) {
+		# find the contents of the single <table> - this is where the good stuff is
+		if ($response =~ m/(<table.*\/table>)/s) {
+			my $tableContents = $1;
+			#$DEBUG && print "got table contents:\n$tableContents\n";
+			
+			# we have the table - now iterate through the table rows
+			# need a counter:
+			#  0 - first row, this contains either "Train Departures", "Train Arrivals", "Bus Departures" or "Bus Arrivals" (guessing the last one)
+			#      will be just "Departures" or "Arrivals" is there are none
+			#  1 - second row - table headers. Don't think this changes, so can hopefuly ignore the contents
+			#  2 - subsequent rows until another first row - this is the train/bus running information
+			my $rowType = 0;
+			my $transportType; # TODO: use enumeration here!
+			while (!$fatalError && !$tempError && $response =~ m/<tr.*?>(.*?)<\/tr>/sg) {
+				my $tableRow = $1;
+				#$DEBUG && print "\ngot table row:\n$tableRow\n";
+				if (1 == $rowType) {
+					# this row is only useful as a check...
+					if (DISPLAY_TYPE_ALL_DEPARTURES_FROM == $displayTypes[$routeIndex] ||
+						DISPLAY_TYPE_DEPARTURES_FROM_TO == $displayTypes[$routeIndex]) {
+						# departures from... so expect to find "DESTINATION"
+						if ($tableRow =~ m/DESTINATION/) {
+							$DEBUG && print "found DESTINATION as expected\n";
+						} else {
+							# bad bad bad - fatal error
+							$DEBUG && print "fatal error: expected DESTINATION in second row\n";
+							$fatalError = 1;
+						}
+					} else {
+						# DISPLAY_TYPE_ALL_ARRIVALS_AT || DISPLAY_TYPE_ALL_ARRIVALS_AT_FROM
+						# arrivals at... so expect to find "ORIGIN"
+						if ($tableRow =~ m/ORIGIN/) {
+							$DEBUG && print "found ORIGIN as expected\n";
+						} else {
+							# bad bad bad - fatal error
+							$DEBUG && print "fatal error: expected ORIGIN in second row\n";
+							$fatalError = 1;
+						}
+					}
+
+					# assuming things are OK with the second row, we should expect a third row
+					$rowType = 2;
+				} elsif (2 == $rowType) {
+					# if the <tr>...</tr> contains "colspan=", then this is the start of a new section, not route data
+					if ($tableRow =~ m/colspan=/ ) {
+						$rowType = 0;
+						$DEBUG && print "found the start of a new transport section\n";
+					} else {
+						# this table row has details of a journey by train or bus
+						#   column 1: either DESTINATION or ORIGIN
+						#   column 2: TIMEABLE time
+						#   column 3: EXPECTED time (train journeys only)
+						#   column 4: OPERATOR (ignored)
+						#   column 5: TRAIN DETAILS (link - ignored)
+						$_ = $tableRow;
+						my @cells = /<td.*?>(.*?)<\/td>/g;
+
+						# we expect there to be 5 cells
+						if (5 == @cells) {
+							# OK - so extract the data
+#	my @tempStartStationNames = ();
+#	my @tempDestStationNames = ();
+#	my @tempTimetabledTimes = ();
+#	my @tempExpectedTimes = ();
+#	my @tempTransportTypes = ();
+							
+							# first column contains DESTINATION or ORIGIN. Whether and how we use this depends on the
+							# journeyType:
+							#    ALL_DEPARTURES_FROM: use DESTINATION as the destination
+							#    DEPARTURES_FROM_TO: ignore, as this shows the ultimate destination
+							#    ARRIVALS_AT: use ORIGIN as the origin
+							#    ARRIVALS_AT_FROM: ignore, as this shows the origin of the train
+							if (DISPLAY_TYPE_ALL_DEPARTURES_FROM == $displayTypes[$routeIndex]) {
+								# all departures from - start station is the repeatingStart found earlier. dest station
+								# is the station in column 1
+
+								# strip HTML from the cell
+								my $cell = @cells[0];
+								$cell =~ s/<.*?>//g;
+								push (@tempStartStationNames, $repeatingStartStationName);
+								push (@tempDestStationNames, $cell);
+							} elsif (DISPLAY_TYPE_DEPARTURES_FROM_TO == $displayTypes[$routeIndex] ||
+									 DISPLAY_TYPE_ARRIVALS_AT_FROM == $displayTypes[$routeIndex]) {
+								# DEPARTURES_FROM_TO or ARRIVALS_AT_FROM, so we know start and destination station
+								# without using this table data
+								push (@tempStartStationNames, $repeatingStartStationName);
+								push (@tempDestStationNames, $repeatingDestStationName);
+							} else { # must be DISPLAY_TYPE_ALL_ARRIVALS_AT
+								# all arrivals at - start station is the that in column one ("ORIGIN"), destination
+								# startion we already know as the repeating one
+
+								# strip HTML from the cell
+								my $cell = @cells[0];
+								$cell =~ s/<.*?>//g;
+								push (@tempStartStationNames, $cell);
+								push (@tempDestStationNames, $repeatingDestStationName);
+							}
+								
+							# second column is the timetabled time - we always use this
+							# strip HTML from the cell
+							my $cell = @cells[1];
+							$cell =~ s/<.*?>//g;
+							push (@tempTimetabledTimes, $cell);
+
+							# third column is expected time - only used for train journeys, not buses
+							# TODO: this will be an enumeration!
+							if ('Train' eq $transportType) {
+								# for train journeys, we can find the expected time
+								# strip HTML from the cell
+								my $cell = @cells[2];
+								$cell =~ s/<.*?>//g;
+								push (@tempExpectedTimes, $cell);
+							} elsif ('Bus' eq $transportType) {
+								# no expected time for busses...
+								push (@tempExpectedTimes, undef);
+							} else {
+								# eek - don't know the transport type!
+								$tempError = 1;
+								$DEBUG && print "temp error - found journey details, but don't know the transport type!\n";
+							}
+
+							# can ignore fourth and fifth columns, but now's a good time to store the transport type
+							push (@tempTransportTypes, $transportType);
+						} else {
+							# whoops - call this a temporary error
+							$tempError = 1;
+							my $actual = @cells;
+							$DEBUG && print "temp error - expected 5 cells in a row, but found $actual\n";
+						}
+					}
+				}
+
+				# now check for first row
+				if (0 == $rowType) {
+					# check the row is of the right type - should contain "Train Departures", "Train Arrivals", "Bus Departures" or
+					# "Bus Arrivals"
+					if (DISPLAY_TYPE_ALL_DEPARTURES_FROM == $displayTypes[$routeIndex] ||
+						DISPLAY_TYPE_DEPARTURES_FROM_TO == $displayTypes[$routeIndex]) {
+						# departures from... so expect to find "Train Departures" or "Bus Departures"
+						if ($tableRow =~ m/Train Departures/) {
+							$transportType = "Train"; 
+							$DEBUG && print "This transport section is TRAIN DEPARTURES\n";
+						} elsif ($tableRow =~ m/Bus Departures/) {
+							$transportType = "Bus";
+							$DEBUG && print "This transport section is BUS DEPARTURES\n";
+						} elsif ($tableRow =~ m/Departures/) {
+							# if this just contains "Departures" then there's no transport type - so shouldn't expect any details below
+							$transportType = undef;
+						} else {
+							# bad bad bad - fatal error
+							$DEBUG && print "fatal error: expected Train Departures or Bus Departures in first row\n";
+							$fatalError = 1;
+						}
+					} else {
+						# DISPLAY_TYPE_ALL_ARRIVALS_AT || DISPLAY_TYPE_ALL_ARRIVALS_AT_FROM
+						# arrivals at... so expect to find "Train Arrivals" or "Bus Arrivals"
+						if ($tableRow =~ m/Train Arrivals/) {
+							$transportType = "Train"; 
+							$DEBUG && print "This transport section is TRAIN ARRIVALS\n";
+						} elsif ($tableRow =~ m/Bus Arrivals/) {
+							$transportType = "Bus";
+							$DEBUG && print "This transport section is BUS ARRIVALS\n";
+						} elsif ($tableRow =~ m/Arrivals/) {
+							# if this just contains "Arrivals" then there's no transport type - so shouldn't expect any details below
+							$transportType = undef;
+						} else {
+							# bad bad bad - fatal error
+							$DEBUG && print "fatal error: expected Train Arrivals or Bus Arrivals in first row\n";
+							$fatalError = 1;
+						}
+					}
+					
+					# assuming things are OK with the first row, should now expect a second row
+					$rowType = 1;
+				}
+			}
+
+			if (!$tempError && !$fatalError) {
+				# wow - I think it worked!
+				for (my $index=0; $index<(@tempTransportTypes); $index++) {
+					print "-> type: {@tempTransportTypes[$index]} " .
+						  "start: {@tempStartStationNames[$index]} " .
+						  "dest: {@tempDestStationNames[$index]} " .
+						  "timetabled: {@tempTimetabledTimes[$index]} " .
+						  "expected: {@tempExpectedTimes[$index]}\n";
+				}
+			}
+		}
+	}
+}
+

@@ -1,0 +1,457 @@
+# this is the interface for `python archiver`
+
+import archiver
+import appdirs
+import os
+import sys
+import pickle
+import json
+
+from archiver.archiver import Archiver
+from archiver.parser import parseArgs
+
+args = parseArgs()
+
+from edit import edit 
+
+
+# ==============================================
+
+print args
+
+# TODO: see http://stackoverflow.com/questions/13168083/python-raw-input-replacement-that-uses-a-configurable-text-editor
+
+#-- import pdb 
+#-- pdb.set_trace()
+
+# ------------------------------------------------------------
+# load the user data
+# ------------------------------------------------------------
+
+# get the user data directory
+user_data_dir = appdirs.user_data_dir('FileArchiver', 'jdthorpe')
+if not os.path.exists(user_data_dir) :
+    os.makedirs(user_data_dir)
+
+# LOAD THE INDEX NAMES AND ACTIVE INDEX
+indexes_path = os.path.join(user_data_dir,'INDEXES.json')
+if os.path.exists(indexes_path):
+    with open(indexes_path,'rb') as fh:
+        indexes = json.load(fh)
+else:
+    indexes= {'active':None,'names':[]}
+    if not os.path.exists(user_data_dir):
+        os.makedirs(user_data_dir)
+
+def dumpIndexes():
+    with open(indexes_path,'wb') as fh:
+        json.dump(indexes,fh)
+
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+
+def getActiveName():
+    # ACTIVE INDEX NUMER
+    activeIndex = indexes['active']
+    if activeIndex is None:
+        print "No active index.  Use 'list -i' to list available indexies and 'use' to set an active index."
+        sys.exit()
+
+    # GET THE NAME OF THE INDEX
+    try:
+        activeIndexName = indexes['names'][indexes['active']]
+    except:
+        print "Invalid index number"
+        sys.exit()
+    return activeIndexName
+
+# ------------------------------------------------------------
+# READ-WRITE UTILITY FUNCTIONS
+# ------------------------------------------------------------
+
+# TODO: catch specific excepitons:
+#        except IOError:
+#            # no such file
+#        except ValueError as e:
+#            # invalid json file
+
+def readSettings(name):
+    """ A utility function which loads the index settings from file
+    """
+    try:
+        with open(os.path.join(user_data_dir,name+".settings"),'rb') as fh:
+            settings = json.load(fh)
+    except Exception as e:
+        print "Error reading index settings"
+        import pdb
+        pdb.set_trace()
+        sys.exit()
+    return settings
+
+def readData(name):
+    """ A utility function which loads the index data from file
+    """
+    try:
+        with open(os.path.join(user_data_dir,name+".data"),'rb') as fh: data = pickle.load(fh)
+    except Exception as e:
+        print "Error reading index data"
+        import pdb
+        pdb.set_trace()
+        sys.exit()
+    return data
+
+def dumpSettings(settings,name):
+    """ A utility function which saves the index settings to file
+    """
+    try:
+        with open(os.path.join(user_data_dir,name+".settings"),'wb') as fh: 
+            json.dump(settings,fh)
+    except Exception as e:
+        print "Error writing index settings"
+        import pdb
+        pdb.set_trace()
+        sys.exit()
+
+def dumpData(data,name):
+    """ A utility function which saves the index settings to file
+    """
+    try:
+        with open(os.path.join(user_data_dir,name+".data"),'wb') as fh:
+            pickle.dump(data,fh)
+    except:
+        print "Error writing index data"
+        import pdb
+        pdb.set_trace()
+        sys.exit()
+
+
+# ------------------------------------------------------------
+# ------------------------------------------------------------
+
+if args.command == 'add':
+
+    activeName = getActiveName()
+    settings = readSettings(activeName)
+
+    if args.source is not None:
+
+        source = os.path.abspath(args.source)
+
+        if not os.path.exists(source):
+            print 'WARNING: no such directory "%s"'%(source)
+        elif not os.path.isdir(source):
+            print 'ERROR: "%s" is not a directory'%(source)
+            sys.exit()
+
+        print 'Adding source directory: %s'%(source)
+        if not any(samefile(source,f) for f in settings['sourceDirectories']):
+            settings['sourceDirectories'].append(source)
+
+    elif args.exclusions is not None:
+
+        import re
+        try:
+            re.compile(args.exclusion)
+        except re.error:
+            print 'Invalid regular expression "%s"'%(args.exclusion)
+            sys.exit()
+            
+        if args.noic:
+            settings['directoryExclusionPatterns'].append(args.exclusion)
+        else:
+            settings['directoryExclusionPatterns'].append((args.exclusion,2)) # re.I == 2
+
+    elif args.archive is not None:
+
+        raise NotImplementedError
+        if settings['archiveDirectory'] is not None:
+            print "Archive path has already been set use 'remove' to delete the archive path before setting a new archive path" 
+
+        archiveDirectory = os.path.abspath(args.archive)
+        if not os.path.exists(archiveDirectory):
+            if args.create :
+                os.makedirs(archiveDirectory)
+            else:
+                print 'ERROR: no such directory "%s"'%(archiveDirectory)
+                sys.exit()
+        elif not os.path.isdir(archiveDirectory):
+            print '"%s" is not a directory'%(archiveDirectory)
+            sys.exit()
+
+        print 'Setting archive directory to: %s'%(archiveDirectory)
+        settings['archiveDirectory'] = args.archive
+
+    else:
+        raise NotImplementedError
+        print 'Error in Arg Parser'
+        sys.exit()
+
+    dumpSettings(settings,activeName)
+
+elif args.command == 'list':
+
+    if args.sources:
+
+        for f in readSettings(getActiveName())['sourceDirectories']:
+            print f
+
+    elif args.exclusions:
+
+        for f in readSettings(getActiveName())['directoryExclusionPatterns']:
+            print f
+
+    elif args.archive:
+
+        print readSettings(getActiveName())['archiveDirectory']
+
+    elif args.files:
+
+        archiver = Archiver()
+        archiver.data = readData(getActiveName())
+        for f in archiver:
+            print f
+
+    elif args.indexes:
+
+        print 'Active Index: %s (*)'%(getActiveName())
+        print 'Index Names: '
+        for i,name in enumerate(indexes['names']):
+            print ' %s  %i: %s'%(
+                    (' ','*')[(i == indexes['active'])+0],
+                    i+1,
+                    name,
+                    )
+
+    else:
+
+        print 'Error in Arg Parser'
+
+elif args.command == 'remove':
+
+    activeName = getActiveName()
+    settings = readSettings(activeName)
+
+    if args.source is not None:
+
+        if not (1 <= args.source <= len(settings['sourceDirectories'])):
+            print 'Invalid index %i'%(args.source)
+
+        del settings['sourceDirectories'][args.source - 1]
+
+    elif args.exclusion is not None:
+
+        raise NotImplementedError
+        if not (1 <= args.exclusion <= len(settings['directoryExclusionPatterns'])):
+            print 'Invalid index %i'%(args.exclusion)
+
+        del settings['directoryExclusionPatterns'][args.exclusion - 1]
+
+    elif args.archive is not None:
+
+        raise NotImplementedError
+        settings['archiveDirectory'] = None
+
+    else:
+
+        raise NotImplementedError
+        print 'Error in Arg Parser'
+        sys.exit()
+
+    dumpSettings(settings,activeName)
+
+elif args.command == 'update':
+
+    activeName = getActiveName()
+    settings = readSettings(activeName)
+    if not len(settings['sourceDirectories']):
+        print "Error: no source directories in the active index. Please add a source directory via 'add -s'"
+    archiver = Archiver(
+            settings = readSettings(activeName),
+            data = readData(activeName))
+    archiver.update()
+    dumpSettings(archiver.settings,activeName)
+    dumpData(archiver.data,activeName)
+
+elif args.command == 'clean':
+
+    raise NotImplementedError
+    activeName = getActiveName()
+    archiver = Archiver(
+            settings = readSettings(activeName),
+            data = readData(activeName))
+    archiver.clean()
+    dumpSettings(archiver.settings,activeName)
+    dumpData(archiver.data,activeName)
+
+elif args.command == 'copy':
+
+    raise NotImplementedError
+    activeName = getActiveName()
+    settings = readSettings(activeName),
+    if settings['archiveDirectory'] is None:
+        print "ERROR Archive directory not set.  Use 'add -a' to set the archive directory."
+        sys.exit()
+
+    Index(
+            settings = settings,
+            data = readData(activeName)).copy()
+
+elif args.command == 'diskimages':
+
+    raise NotImplementedError
+    if args.size is None or args.size == "DVD":
+        size = 4.65*1<<20
+    elif args.size == "CD":
+        size = 645*1<<20
+    elif args.size == "DVD":
+        size = 4.65*1<<20
+    elif args.size == "DVD-dual":
+        size = 8.5*1<<30
+    elif args.size == "BD":
+        size = 25*1<<30
+    elif args.size == "BD-dual":
+        size = 50*1<<30
+    elif args.size == "BD-tripple":
+        size = 75*1<<30
+    elif args.size == "BD-xl":
+        size = 100*1<<30
+    else:
+        try:
+            size = int(float(args.size))
+        except:
+            print 'ERROR: unable to coerce "%s" to float or int'%(args.size)
+            sys.exit()
+
+    activeName = getActiveName()
+    settings = readSettings(activeName),
+
+    # GET THE DIRECTORY ARGUMENT
+    if args.directory is not None:
+        directory = args.directory
+    else:
+        if settings['archiveDirectory'] is None:
+            print "ERROR Archive directory not set and no directory specified.  Use 'diskimages -d' to specifiy the disk image directory or 'add -a' to set the archive directory."
+            sys.exit()
+        else: 
+            directory = os.path.join(settings['archiveDirectory'],'Disk Images')
+
+    # VALIDATE THE DIRECTORY 
+    if not os.path.exists(directory):
+        if args.create :
+            os.makedirs(directory)
+        else:
+            print 'ERROR: no such directory "%s"'%(directory)
+            sys.exit()
+    elif not os.path.isdir(directory):
+        print '"%s" is not a directory'%(directory)
+        sys.exit()
+
+    # get the FPBF argument
+    if args.fpbf is not None:
+        FPBF = True
+    elif args.nofpbf is not None:
+        FPBF = False
+    else:
+        FPBF = sys.platform == 'darwin'
+
+    Index( settings = settings,
+            data = readData(activeName)).diskimages(directory,size,FPBF)
+
+elif args.command == 'settings':
+
+    activeName = getActiveName()
+    if args.export is not None:
+
+        raise NotImplementedError
+        with open(args.export,'rb') as fh:
+            json.dump(readSettings(activeName),fh,indent=2,separators=(',', ': '))
+
+    elif args.load is not None:
+
+        raise NotImplementedError
+        with open(args.export,'wb') as fh:
+            settings = json.load(fh)
+        # give a chance for the settings to be validated
+        try:
+            archiver = Archiver(settings=settings)
+        except:
+            print "ERROR: invalid settings file"
+
+        dumpSettings(archiver.settings,args.name)
+
+    elif args.edit is not None:
+
+        settings = readSettings(activeName)
+        old = settings['identifierSettings'][args.edit]
+        new = edit(json.dumps(old,indent=2,separators=(',', ': ')))
+        settings['identifierSettings'][args.edit]= json.loads(new)
+        dumpSettings(settings,activeName)
+
+    else :
+
+        print json.dumps(readSettings(activeName),indent=2,separators=(',', ': '))
+
+elif args.command == 'create':
+
+    if args.name in indexes['names']:
+        print "An index by the name '%s' already exists"%(args.name)
+        sys.exit()
+
+    import re
+    validater = re.compile(r'^[-() _a-zA-Z0-9](?:[-() _.a-zA-Z0-9]+[-() _a-zA-Z0-9])$')
+    if validater.match(args.name) is None:
+        print "ERROR: names must be composed of letters, numbers, hypen, underscore, space and dot charactes an not end or begin with a dot"
+        sys.exit()
+
+    archiver = Index()
+
+    dumpSettings(archiver.settings,args.name)
+    dumpData(archiver.data,args.name)
+
+    indexes['names'].append(args.name)
+
+    dumpIndexes()
+
+    # TODO: check if there are no other indexies.  if so, make the new one active.
+    print "Created index '%s'"%(args.name)
+
+elif args.command == 'save':
+
+    raise NotImplementedError
+    Index( settings = readSettings(getActiveName()),
+            data = readData(getActiveName())).save(args.filename)
+
+
+elif args.command == 'use':
+
+    print indexes['names']
+    if not args.name in indexes['names']:
+        print "ERROR: No such index named '%s'"%(args.name)
+        sys.exit()
+
+    indexes['active'] =indexes['names'].index(args.name) 
+
+    dumpIndexes()
+
+elif args.command == 'delete':
+
+    if not args.name in indexes['names']:
+        print "ERROR: No such index named '%s'"%(args.name)
+        sys.exit()
+
+    nameIindex = indexes['names'].index(args.name)
+
+    if indexes['active'] == nameIindex:
+        print 'WARNING: deleting active index'
+        indexes['active'] = None
+
+    del indexes['names'][nameIindex]
+
+    dumpIndexes()
+
+else :
+
+    print "unknown command %s"%(args.command)
+
+
+

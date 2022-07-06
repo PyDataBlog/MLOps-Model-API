@@ -1,0 +1,57 @@
+use std::fs::File;
+use std::io::prelude::*;
+
+use png::errors::PNGError;
+use super::chunk::{Chunk, ChunkBuilder};
+
+
+pub struct ChunkIterator<'a> {
+    parser: &'a PNGParser<'a>,
+}
+
+impl<'a> Iterator for ChunkIterator<'a> {
+    type Item = Chunk;
+
+    fn next (&mut self) -> Option<Chunk> {
+        self.parser.read_chunk().ok()
+    }
+}
+
+
+pub struct PNGParser<'a> {
+    pub source: &'a mut File,
+}
+
+impl<'a> PNGParser<'a> {
+    pub fn new(source: &'a mut File) -> Result<PNGParser, PNGError> {
+        let mut parser = PNGParser { source: source };
+        parser.check_header().map(|_| parser)
+    }
+
+    // should be called before any other access to the file
+    pub fn check_header(&mut self) -> Result<(), PNGError> {
+        let mut header : [u8; 8] = [0; 8];
+        self.source.read_exact(&mut header)
+            .map_err(|_| PNGError::InvalidHeader)
+            .and_then(|_| {
+                if b"\x89PNG\x0d\x0a\x1a\x0a" == &header {
+                    Ok(())
+                }
+                else {
+                    Err(PNGError::InvalidHeader)
+                }
+            })
+    }
+
+    pub fn read_chunk(&'a self) -> Result<Chunk, PNGError>{
+        ChunkBuilder::default()
+                     .read_header(self.source)
+                     .and_then(|b| b.read_data(self.source))
+                     .map(|b| b.as_chunk())
+    }
+
+    pub fn iter_chunks(&'a self) -> ChunkIterator {
+        ChunkIterator { parser: self }
+    }
+}
+

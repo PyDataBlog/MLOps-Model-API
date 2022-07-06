@@ -1,0 +1,123 @@
+/**
+ * @file    do_main.cpp
+ */
+#include "pch.hpp"
+#include "employee.hpp"
+namespace {
+	using std::cout;
+	using std::endl;
+	namespace fusion = boost::fusion;
+	namespace qi = boost::spirit::qi;
+	namespace ascii = boost::spirit::ascii;
+
+	void parse_input_line(std::string input_line)
+	{
+		typedef std::string::const_iterator Const_Iterator;
+		typedef client::employee_parser<Const_Iterator> Employee_Parser;
+
+		Employee_Parser grammar;
+		client::employee parsed_employee;
+		Const_Iterator iter = input_line.begin();
+		Const_Iterator end = input_line.end();
+		bool r = phrase_parse(iter, end, grammar, ascii::space, parsed_employee);
+
+		if (r && iter == end) {
+			cout << fusion::tuple_open('[');
+			cout << fusion::tuple_close(']');
+			cout << fusion::tuple_delimiter(", ");
+
+			cout << "-------------------------" << endl;
+			cout << "Parsing succeeded!" << endl;
+			cout << "input line = " << input_line << endl;
+			cout << "got: " << fusion::as_vector(parsed_employee) << endl;
+			cout << "-------------------------" << endl << endl;
+		} else {
+			cout << "-------------------------" << endl;
+			cout << "Parsing failed!" << endl;
+			cout << "input line = " << input_line << endl;
+			cout << "-------------------------" << endl << endl;
+		}
+	}
+
+	typedef fusion::vector<std::string, std::string> dict_maplet_t;
+	typedef std::vector<dict_maplet_t> dict_map_t;
+
+	template<typename Iterator>
+	class dict_parser : public qi::grammar<Iterator, dict_map_t(), ascii::space_type>
+	{
+		qi::rule<Iterator, std::vector<char>(), ascii::space_type> name__;
+		qi::rule<Iterator, std::vector<char>(), ascii::space_type> quoted__;
+		qi::rule<Iterator, dict_maplet_t(), ascii::space_type> item__;
+		qi::rule<Iterator, dict_map_t(), ascii::space_type> start;
+
+	  public: //~ Ctor -------------------------------------------------------------
+		dict_parser()
+		  : dict_parser::base_type(start)
+		{
+			using ascii::char_;
+			using qi::_val;
+			using qi::double_;
+			using qi::int_;
+			using qi::lexeme;
+			using qi::lit;
+
+			name__ %= qi::alpha >> *qi::alnum;
+
+			quoted__ %= lit('"') >> lexeme[*(~char_('"'))] > lit('"');
+
+			item__ %= name__ >> lit(':') >> (quoted__ | name__);
+
+			start %= item__ % lit(',');
+		}
+	};
+
+} // end anon namespace
+
+extern void do_main()
+{
+	using std::runtime_error;
+	namespace fs = boost::filesystem;
+
+	fs::path samples_txt{ "sample-employees.txt" };
+	if (!fs::exists(samples_txt))
+		throw runtime_error{ "No such employee samples file: " + samples_txt.string() };
+
+	fs::fstream samples_stream{ samples_txt };
+	std::string input_line;
+	while (getline(samples_stream, input_line)) {
+		if (input_line.empty() || input_line[0] == 'q' || input_line[0] == 'Q')
+			break;
+		parse_input_line(input_line);
+	}
+
+	// Compatible attributes to the rescue!
+	// 31:10
+	namespace qi = boost::spirit::qi;
+	namespace fu = boost::fusion;
+
+	std::string ss{ "cosmic pizza" };
+	// fu::vector<std::string, std::string> result;
+	// qi::parse(ss.begin(), ss.end(), *(~qi::char_(' ')) >> ' ' >> *qi::char_, result);
+	// fu::for_each(result, [](auto const& x) { std::cout << x << std::endl; });
+	std::vector<std::string> result;
+	qi::parse(ss.begin(), ss.end(), (+qi::char_) % qi::lit(' '), result);
+	std::copy(
+	  result.begin(), result.end(), std::ostream_iterator<std::string>{ std::cout, "\n" });
+
+	// Maps
+	// 36:00
+	std::string dict_input{ "foo     : bar ,"
+							"gorp    :  smart ,"
+							"falcou  :  \"crazy frenchman\" " };
+	typedef std::string::const_iterator Const_Iterator;
+	typedef dict_parser<Const_Iterator> Dict_Parser;
+	Dict_Parser grammar;
+	Const_Iterator iter = dict_input.begin();
+	Const_Iterator end = dict_input.end();
+	dict_map_t parsed_dict;
+	bool r = phrase_parse(iter, end, grammar, ascii::space, parsed_dict);
+	std::copy(
+	  parsed_dict.begin(),
+	  parsed_dict.end(),
+	  std::ostream_iterator<dict_maplet_t>{ std::cout, "\n" });
+}

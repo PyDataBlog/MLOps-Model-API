@@ -1,0 +1,70 @@
+<?php
+/*
+ * This file is part of the Grosona.
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ * 
+ */
+
+namespace Grosona;
+
+use Grosona\PhpProcess\Utils\Logger;
+use Grosona\PhpProcess\TrobuleHandler;
+
+/**
+ * Read configurations from the file.
+ *
+ * @author hchsiao
+ */
+class TroubleHandler implements TrobuleHandler {
+    protected $logger = null;
+    
+    public function activate(Logger $logger) {
+        $this->logger = $logger;
+    }
+    
+    public function handle(\Exception $err) {
+        if(
+                is_int(stripos($err->getMessage(), "Error validating access token: Session has expired")) ||
+                is_int(stripos($err->getMessage(), "Invalid appsecret_proof"))
+                ) {
+            $msg = "token died\n";
+            echo $msg;
+        } else if(is_int(stripos($err->getMessage(), "Access token mismatch"))) {
+            $msg = "token confilict\n";
+            echo $msg;
+        } else {
+            $msg = (string) $err;
+        }
+        $this->logger->log("<Exception> $msg", Logger::LEVEL_ERROR);
+    }
+    
+    public function shutdown() {
+        $logger = $this->logger;
+        if(!$logger instanceof Logger) {
+            die();
+        }
+        $err = error_get_last();
+        $errMsg = $err['message'];
+        
+        if(is_int(stripos($errMsg, "FacebookSDKException' with message 'Connection timed out"))) {
+            $logger->log("facebook server down", Logger::LEVEL_WARN);
+        } else if(
+                is_int(stripos($errMsg, "operation failed")) ||
+                is_int(stripos($errMsg, "Gateway Time-out")) ||
+                is_int(stripos($errMsg, "HTTP request failed")) ||
+                is_int(stripos($errMsg, "Connection timed out")) ||
+            // faild to download image, will retry so it's OK
+                is_int(stripos($errMsg, "Undefined variable: http_response_header")) ||
+                is_int(stripos($errMsg, "Stream returned an empty response"))
+            // facebook http request failed, retry too
+                ) {
+            $logger->log("HTTP request failed", Logger::LEVEL_INFO);
+        } else if($errMsg) {
+            $type = $err['type'];
+            $place = $err['file'] . '(' . $err['line'] . ')';
+            $logger->log("<Shutdown Type=$type> $errMsg at $place", Logger::LEVEL_ERROR);
+        }
+    }
+}

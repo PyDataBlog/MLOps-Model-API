@@ -1,0 +1,154 @@
+#!/usr/bin/env python
+#
+# Copyright 2014 Simone Campagna
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+
+"""Configment interface
+
+ >>> class TestCfg(Configment):
+ ...     CONFIGSPEC_SOURCE = '''
+ ... [abc]
+ ...     x = integer(default=3)
+ ... '''
+ >>> cfg = TestCfg()
+ >>> cfg["abc"]["x"]
+ 3
+ >>>
+
+"""
+
+import os
+
+import validate
+import six
+
+from .configobj_wrap import ConfigObjWrap
+from .meta_configment import MetaConfigment
+from .configment_validator import ConfigmentValidator
+from .pathname import Pathname
+from .environment import load_configspec
+
+
+__author__ = "Simone Campagna"
+__all__ = [
+    'create_configment_class',
+    'Configment',
+    'ConfigmentValidateError',
+]
+
+
+class ConfigmentValidateError(validate.ValidateError):
+    def __str__(self):
+        return "validation failed: {}".format(self.args[0])
+
+
+class BaseConfigment(ConfigObjWrap):
+    CONFIGSPEC = None
+    DEFAULT_MODE_HIDE = "hide"
+    DEFAULT_MODE_SHOW = "show"
+    DEFAULT_MODES = [DEFAULT_MODE_HIDE, DEFAULT_MODE_SHOW]
+    DEFAULT_MODE = DEFAULT_MODE_HIDE
+
+    def __init__(self, filename=None, default_mode=None):
+        super(BaseConfigment, self).__init__(
+            infile=None,
+            configspec=self.__class__.CONFIGSPEC,
+            unrepr=True,
+            interpolation=False,
+            indent_type="    ",
+            stringify=True,
+        )
+        if default_mode is None:
+            default_mode = self.DEFAULT_MODE
+        self.default_mode = default_mode
+        self.set_filename(filename)
+        if self.filename is not None:
+            self.load_file(filename, throw_on_errors=True)
+        else:
+            self.initialize(throw_on_errors=False)
+
+    def set_filename(self, filename=None):
+        super(BaseConfigment, self).set_filename(filename)
+        if self.filename is None:
+            self._base_dir = os.getcwd()
+        else:
+            self._base_dir = os.path.dirname(os.path.abspath(filename))
+
+    def do_validation(self, base_dir=None, reset=False, throw_on_errors=False):
+        if base_dir is None:
+            base_dir = self._base_dir
+        validator = ConfigmentValidator()
+        copy = self.default_mode == self.DEFAULT_MODE_SHOW
+        result = super(BaseConfigment, self).validate(validator, preserve_errors=True, copy=copy)
+        result = self.filter_validation_result(result)
+        self.set_paths(base_dir, reset=reset)
+        if throw_on_errors and result:
+            raise ConfigmentValidateError(result)
+        c_result = ConfigObjWrap(
+            infile=result,
+            stringify=True,
+            unrepr=True,
+            indent_type='    ',
+        )
+        return c_result
+
+
+@six.add_metaclass(MetaConfigment)
+class Configment(BaseConfigment):
+    def __init__(self, filename=None, default_mode=None):
+        super(Configment, self).__init__(
+            filename=filename,
+            default_mode=default_mode,
+        )
+
+    def impl_initialize(self, throw_on_errors=False):
+        try:
+            return self.do_validation(reset=False, throw_on_errors=throw_on_errors)
+        except:  # pylint: disable=bare-except
+            return False
+
+    def impl_load_file(self, filename, throw_on_errors=False):
+        default_base_dir = Pathname.get_default_base_dir()
+        Pathname.set_default_base_dir(self._base_dir)
+        self.set_filename(filename)
+        self.reload()
+        try:
+            result = self.do_validation(base_dir=self._base_dir, reset=True, throw_on_errors=throw_on_errors)
+        finally:
+            Pathname.set_default_base_dir(default_base_dir)
+        return result
+
+    def impl_dump_s(self, stream=None, filename=None, throw_on_errors=False):
+        default_base_dir = Pathname.get_default_base_dir()
+        try:
+            if filename is not None:
+                base_dir = os.path.dirname(os.path.normpath(os.path.abspath(filename)))
+            else:
+                base_dir = self._base_dir
+            Pathname.set_default_base_dir(base_dir)
+            self.do_validation(base_dir=base_dir, reset=False, throw_on_errors=throw_on_errors)
+            self.write(stream)
+        finally:
+            Pathname.set_default_base_dir(default_base_dir)
+
+
+def create_configment_class(configspec_filename, class_name=None, dir_list=None):
+    if class_name is None:
+        class_name = os.path.splitext(os.path.basename(configspec_filename))[0]
+    class_bases = (Configment, )
+    class_dict = {
+        'CONFIGSPEC_SOURCE': load_configspec(configspec_filename, dir_list=dir_list),
+    }
+    return MetaConfigment(class_name, class_bases, class_dict)

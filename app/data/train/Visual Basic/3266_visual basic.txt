@@ -1,0 +1,782 @@
+﻿Imports HomeSeerAPI
+Imports System
+Imports System.IO
+Imports System.Text
+Imports System.Runtime.Serialization
+Imports System.Runtime.Serialization.Formatters
+
+Friend Module Procedures
+
+    Friend WithEvents API As Media_API = Nothing
+
+    Friend Class WaitTaskClass
+        Friend PeriodMS As Double
+        Friend Finished As Boolean
+        Sub Sandwiches()
+            Dim MRE As New Threading.ManualResetEvent(False)
+            If PeriodMS > 0 Then
+                MRE.WaitOne(PeriodMS)
+            End If
+            Finished = True ' Set a return value in the return argument.
+        End Sub
+    End Class
+    Friend Sub DoWait(ByVal WaitPeriodMS As Double)
+        If WaitPeriodMS < 1 Then Exit Sub
+        If WaitPeriodMS < 100 Then
+            Threading.Thread.Sleep(WaitPeriodMS)
+            Exit Sub
+        End If
+        Dim Tasks As New WaitTaskClass()
+        Dim Thread1 As New System.Threading.Thread( _
+            AddressOf Tasks.Sandwiches)
+        Tasks.PeriodMS = WaitPeriodMS
+        Thread1.Start() ' Start the new thread.
+        Thread1.Join() ' Wait for thread 1 to finish.
+    End Sub
+
+    Friend Function FormatTimeSpan(ByVal TS As TimeSpan, _
+                           ByVal IncludeSeconds As Boolean, _
+                           ByVal Scales As Boolean, _
+                           ByVal LongScales As Boolean) As String
+        Dim Res As String = ""
+        Dim GotFront As Boolean = False
+        Dim Y As Integer
+        Dim D As Integer
+
+        'MsgBox(TS.ToString("%d' days, '%h' hours, '%m' minutes, '%s' seconds'"))
+        'MsgBox(TS.ToString("%d' Days, 'h\:mm\:ss"))
+        'MsgBox(TS.ToString("%d'd '%h'h '%m'm '%s\s"))
+        If TS.Days <> 0 Then
+            Y = Convert.ToInt32(TS.Days / 365.25)
+            If Y > 0 Then
+                GotFront = True
+                D = Convert.ToInt32(TS.Days Mod 365.25)
+                Res = Y.ToString
+                If Scales Then
+                    If LongScales Then
+                        If Y = 1 Then
+                            Res &= " Year"
+                        Else
+                            Res &= " Years"
+                        End If
+                    Else
+                        Res &= "y"
+                    End If
+                Else
+                    Res &= "-"
+                End If
+            Else
+                D = TS.Days
+            End If
+            If GotFront Or D <> 0 Then
+                If Scales Then
+                    Res &= IIf(GotFront, ", ", "") & D.ToString & IIf(LongScales, IIf(D = 1, " Day", " Days"), "d")
+                    GotFront = True
+                Else
+                    If GotFront Then
+                        Res &= D.ToString("00") & "."
+                    Else
+                        GotFront = True
+                        Res &= D.ToString & "."
+                    End If
+                End If
+            End If
+        End If
+        If GotFront Or TS.Hours <> 0 Then
+            If Scales Then
+                Res &= IIf(GotFront, ", ", "") & TS.Hours.ToString & IIf(LongScales, IIf(TS.Hours = 1, " Hour", " Hours"), "h")
+                GotFront = True
+            Else
+                Res &= TS.Hours.ToString & ":"
+                GotFront = True
+            End If
+        End If
+        If GotFront Or TS.Minutes <> 0 Then
+            If Scales Then
+                Res &= IIf(GotFront, ", ", "") & TS.Minutes.ToString & IIf(LongScales, IIf(TS.Minutes = 1, " Minute", " Minutes"), "m")
+                GotFront = True
+            Else
+                If GotFront Then
+                    Res &= TS.Minutes.ToString("00") & IIf(IncludeSeconds, ":", "")
+                Else
+                    GotFront = True
+                    Res &= TS.Minutes.ToString & IIf(IncludeSeconds, ":", "")
+                End If
+            End If
+        End If
+        If IncludeSeconds Then
+            If Scales Then
+                Res &= IIf(GotFront, ", ", "") & TS.Seconds.ToString & IIf(LongScales, IIf(TS.Seconds = 1, " Second", " Seconds"), "s")
+                GotFront = True
+            Else
+                If GotFront Then
+                    Res &= TS.Seconds.ToString("00")
+                Else
+                    Res &= TS.Seconds.ToString
+                End If
+            End If
+        End If
+
+        Return Res
+
+    End Function
+
+    Friend Function PlayerActionName(ByVal PC As Player_Action) As String
+     
+        Select Case PC
+            Case Player_Action.player_play
+                Return "Play"
+            Case Player_Action.player_stop
+                Return "Stop"
+            Case Player_Action.player_pause
+                Return "Pause"
+            Case Player_Action.player_unpause
+                Return "Resume"
+            Case Player_Action.player_resume_if_paused
+                Return "Resume If Paused"
+            Case Player_Action.player_next
+                Return "Next Media"
+            Case Player_Action.player_prev
+                Return "Previous Media"
+            Case Player_Action.player_FastForward
+                Return "Fast Forward"
+            Case Player_Action.player_FastReverse
+                Return "Fast Reverse"
+            Case Player_Action.player_Jump_Forward
+                Return "Jump Forward"
+            Case Player_Action.player_Jump_Back
+                Return "Jump Back"
+            Case Player_Action.player_mute
+                Return "Mute"
+            Case Player_Action.player_unmute
+                Return "Unmute"
+            Case Player_Action.player_volume_up
+                Return "Raise Volume"
+            Case Player_Action.player_volume_down
+                Return "Lower Volume"
+            Case Player_Action.player_volume_set
+                Return "Set Volume"
+            Case Player_Action.player_enable_visuals
+                Return "Show Media Player UI"
+            Case Player_Action.player_hide_video
+                Return "Hide Media Player UI"
+            Case Player_Action.player_enable_fullscreen_visuals
+                Return "Show Media Player UI Full Screen"
+            Case Player_Action.player_disable_fullscreen_visuals
+                Return "Restore Media Player UI"
+            Case Else
+                Return PC.ToString
+        End Select
+    End Function
+
+    Friend Function SerializeObject(ByRef ObjIn As Object, ByRef bteOut() As Byte) As Boolean
+        If ObjIn Is Nothing Then Return False
+        Dim str As New MemoryStream
+        Dim sf As New Binary.BinaryFormatter
+
+        Try
+            sf.Serialize(str, ObjIn)
+            ReDim bteOut(Convert.ToInt32(str.Length - 1))
+            bteOut = str.ToArray
+            Return True
+        Catch ex As Exception
+            Log(IFACE_NAME & " Error: Serializing object " & ObjIn.ToString & " EX:" & ex.Message, LogType.LOG_TYPE_ERROR)
+            Return False
+        End Try
+
+    End Function
+
+    Friend Function SerializeObject(ByRef ObjIn As Object, ByRef HexOut As String) As Boolean
+        If ObjIn Is Nothing Then Return False
+        Dim str As New MemoryStream
+        Dim sf As New Binary.BinaryFormatter
+        Dim bteOut() As Byte
+
+        Try
+            sf.Serialize(str, ObjIn)
+            ReDim bteOut(Convert.ToInt32(str.Length - 1))
+            bteOut = str.ToArray
+            HexOut = ""
+            For i As Integer = 0 To bteOut.Length - 1
+                HexOut &= bteOut(i).ToString("x2").ToUpper
+            Next
+            Return True
+        Catch ex As Exception
+            Log(IFACE_NAME & " Error: Serializing (Hex) object " & ObjIn.ToString & " :" & ex.Message, LogType.LOG_TYPE_ERROR)
+            Return False
+        End Try
+
+    End Function
+
+    Friend Function DeSerializeObject(ByRef bteIn() As Byte, ByRef ObjOut As Object) As Boolean
+        ' Almost immediately there is a test to see if ObjOut is NOTHING.  The reason for this
+        '   when the ObjOut is suppose to be where the deserialized object is stored, is that 
+        '   I could find no way to test to see if the deserialized object and the variable to 
+        '   hold it was of the same type.  If you try to get the type of a null object, you get
+        '   only a null reference exception!  If I do not test the object type beforehand and 
+        '   there is a difference, then the InvalidCastException is thrown back in the CALLING
+        '   procedure, not here, because the cast is made when the ByRef object is cast when this
+        '   procedure returns, not earlier.  In order to prevent a cast exception in the calling
+        '   procedure that may or may not be handled, I made it so that you have to at least 
+        '   provide an initialized ObjOut when you call this - ObjOut is set to nothing after it 
+        '   is typed.
+        If bteIn Is Nothing Then Return False
+        If bteIn.Length < 1 Then Return False
+        If ObjOut Is Nothing Then Return False
+        Dim str As MemoryStream
+        Dim sf As New Binary.BinaryFormatter
+        Dim ObjTest As Object
+        Dim TType As System.Type = Nothing
+        Dim OType As System.Type = Nothing
+        Try
+            OType = ObjOut.GetType
+            ObjOut = Nothing
+            str = New MemoryStream(bteIn)
+            ObjTest = sf.Deserialize(str)
+            If ObjTest Is Nothing Then Return False
+            TType = ObjTest.GetType
+            If Not TType.Equals(OType) Then Return False
+            ObjOut = ObjTest
+            If ObjOut Is Nothing Then Return False
+            Return True
+        Catch exIC As InvalidCastException
+            Return False
+        Catch ex As Exception
+#If DEBUG Then
+            Log("DeSerializing object from Bytes to " & IIf(OType Is Nothing, "(Unknown)", OType.ToString) & ": " & ex.Message, LogType.LOG_TYPE_ERROR)
+#End If
+            Return False
+        End Try
+
+    End Function
+
+    Friend Function DeSerializeObject(ByRef HexIn As String, ByRef ObjOut As Object) As Boolean
+        ' Almost immediately there is a test to see if ObjOut is NOTHING.  The reason for this
+        '   when the ObjOut is suppose to be where the deserialized object is stored, is that 
+        '   I could find no way to test to see if the deserialized object and the variable to 
+        '   hold it was of the same type.  If you try to get the type of a null object, you get
+        '   only a null reference exception!  If I do not test the object type beforehand and 
+        '   there is a difference, then the InvalidCastException is thrown back in the CALLING
+        '   procedure, not here, because the cast is made when the ByRef object is cast when this
+        '   procedure returns, not earlier.  In order to prevent a cast exception in the calling
+        '   procedure that may or may not be handled, I made it so that you have to at least 
+        '   provide an initialized ObjOut when you call this - ObjOut is set to nothing after it 
+        '   is typed.
+        If HexIn Is Nothing Then Return False
+        If String.IsNullOrEmpty(HexIn.Trim) Then Return False
+        If ObjOut Is Nothing Then Return False
+
+        Dim str As MemoryStream
+        Dim sf As New Binary.BinaryFormatter
+        Dim ObjTest As Object
+        Dim TType As System.Type
+        Dim OType As System.Type
+
+        Dim bteIn() As Byte
+        Dim HowMany As Integer
+
+        Try
+            HowMany = Convert.ToInt32((HexIn.Length / 2) - 1)
+            ReDim bteIn(HowMany)
+            For i As Integer = 0 To HowMany
+                bteIn(i) = Convert.ToByte(HexIn.Substring(i * 2, 2))
+            Next
+            OType = ObjOut.GetType
+            ObjOut = Nothing
+            str = New MemoryStream(bteIn)
+            ObjTest = sf.Deserialize(str)
+            If ObjTest Is Nothing Then Return False
+            TType = ObjTest.GetType
+            If Not TType.Equals(OType) Then Return False
+            ObjOut = ObjTest
+            If ObjOut Is Nothing Then Return False
+            Return True
+        Catch exIC As InvalidCastException
+            Return False
+        Catch ex As Exception
+#If DEBUG Then
+            Log("DeSerializing object from Hex: " & ex.Message, LogType.LOG_TYPE_ERROR)
+#End If
+            Return False
+        End Try
+
+    End Function
+    Friend Function FixPath(ByVal fpath As String) As String
+#If Linux Then
+        Return fpath.Replace("\", "/")
+#Else
+        Return fpath.Replace("/", "\")
+#End If
+    End Function
+
+    Friend Sub GetSettings()
+
+        Try
+            ArtistVRCommand = hs.GetINISetting("Settings", "artistvr", "Play Artist", "MediaPlayer.ini")
+            AlbumVRCommand = hs.GetINISetting("Settings", "albumvr", "Play Album", "MediaPlayer.ini")
+            GenreVRCommand = hs.GetINISetting("Settings", "genrevr", "Play Genre", "MediaPlayer.ini")
+            PlaylistVRCommand = hs.GetINISetting("Settings", "playlistvr", "Play Playlist", "MediaPlayer.ini")
+            PlayerControlVRCommand = hs.GetINISetting("Settings", "playercontrolsvr", "Player", "MediaPlayer.ini")
+            'screenwidth = hs.GetINISetting("Display", "screenwidth", "1024", "settings.ini")
+        Catch ex As Exception
+        End Try
+
+        Try
+            bNoPLDupes = Convert.ToBoolean(hs.GetINISetting("Settings", "NoPLDupes", "True", "MediaPlayer.ini"))
+            'load_message_interval = Convert.ToInt32(hs.GetINISetting("Settings", "load_message_interval", "500", "MediaPlayer.ini"))
+            'load_message = Convert.ToBoolean(hs.GetINISetting("Settings", "load_message", "True", "MediaPlayer.ini"))
+        Catch ex As Exception
+        End Try
+        'Try
+        '    If Not gHSPI.MusicAPI Is Nothing Then
+        '        bNoPLDupes = bNoPLDupes
+        '    End If
+        'Catch ex As Exception
+        'End Try
+
+        Try
+            bExtendedStatus = Convert.ToBoolean(hs.GetINISetting("Settings", "ExtendedStatus", "False", "MediaPlayer.ini"))
+        Catch ex As Exception
+
+        End Try
+
+        Try
+            gPauseAudio = Convert.ToBoolean(hs.GetINISetting("Settings", "gPauseAudio", "True", "MediaPlayer.ini"))
+        Catch ex As Exception
+        End Try
+
+        Try
+            gEnableVRCommands = Convert.ToBoolean(hs.GetINISetting("Settings", "gEnableVRCommands", "True", "MediaPlayer.ini"))
+        Catch ex As Exception
+        End Try
+
+        Try
+            gDetectDatabaseChanges = Convert.ToBoolean(hs.GetINISetting("Settings", "gDetectDatabaseChanges", "True", "MediaPlayer.ini"))
+        Catch ex As Exception
+        End Try
+
+    End Sub
+
+    Friend Function sn(ByVal sIN As String) As Boolean
+        If sIN Is Nothing Then Return True
+        Return String.IsNullOrEmpty(sIN.Trim)
+    End Function
+    Friend Function sna(ByVal sIN As String) As Boolean
+        If sIN Is Nothing Then Return True
+        If String.IsNullOrEmpty(sIN.Trim) Then Return True
+        If sIN.Trim = "*" Then Return True
+        Return False
+    End Function
+
+    Friend Function fixs(ByVal sIN As String) As String
+        If sIN Is Nothing Then Return ""
+        Return sIN.Trim
+    End Function
+    Friend Function fixs(ByRef AO As ActionObject) As ActionObject
+        If AO Is Nothing Then
+            AO = New ActionObject
+            Return AO
+        End If
+        AO.Album = fixs(AO.Album)
+        AO.Artist = fixs(AO.Artist)
+        AO.Genre = fixs(AO.Genre)
+        AO.MediaLib = fixs(AO.MediaLib)
+        AO.Playlist = fixs(AO.Playlist)
+        AO.Title = fixs(AO.Title)
+        Return AO
+    End Function
+    Friend Function WB(ByVal sIn As String) As String
+        If sIn Is Nothing Then Return ""
+        Return "<b>" & sIn & "</b>"
+    End Function
+
+    Friend Function GetHSMediaNameFromEnum(ByVal MT As eLib_Media_Type) As String
+        Select Case MT
+            Case eLib_Media_Type.Unknown_Error
+                Return "Unknown"
+            Case eLib_Media_Type.Music
+                Return "Music/Audio"
+            Case eLib_Media_Type.Video
+                Return "Video"
+            Case eLib_Media_Type.Music_Stream
+                Return "Music Stream"
+            Case eLib_Media_Type.Video_Stream
+                Return "Video Stream"
+            Case eLib_Media_Type.Photo
+                Return "Photo"
+            Case eLib_Media_Type.Radio
+                Return "Radio"
+            Case eLib_Media_Type.Radio_Stream
+                Return "Radio Stream"
+            Case eLib_Media_Type.Playlist
+                Return "Playlist"
+            Case eLib_Media_Type.Other_09
+                Return "Other 9"
+            Case eLib_Media_Type.Other_10
+                Return "Other 10"
+            Case eLib_Media_Type.Other_11
+                Return "Other 11"
+            Case eLib_Media_Type.Other_12
+                Return "Other 12"
+            Case eLib_Media_Type.Other_13
+                Return "Other 13"
+            Case eLib_Media_Type.Other_14
+                Return "Other 14"
+            Case eLib_Media_Type.Other_15
+                Return "Other 15"
+            Case eLib_Media_Type.Any_All
+                Return "Any/All Media Types"
+            Case Else
+                Return "Error"
+        End Select
+    End Function
+
+    Friend Function GetHSMediaEnumFromWMPName(ByVal sMedia As String) As eLib_Media_Type
+        If sn(sMedia) Then Return eLib_Media_Type.Unknown_Error
+        Dim mt As eWMPMediaTypes = eWMPMediaTypes.Unknown
+        Try
+            mt = GetWMPMediaEnumFromName(sMedia)
+            Select Case mt
+                Case eWMPMediaTypes.Unknown
+                    Return eLib_Media_Type.Unknown_Error
+                Case eWMPMediaTypes.Audio
+                    Return eLib_Media_Type.Music
+                Case eWMPMediaTypes.Other
+                    Return eLib_Media_Type.Other_09
+                Case eWMPMediaTypes.Photo
+                    Return eLib_Media_Type.Photo
+                Case eWMPMediaTypes.Playlist
+                    Return eLib_Media_Type.Playlist
+                Case eWMPMediaTypes.Radio
+                    Return eLib_Media_Type.Radio
+                Case eWMPMediaTypes.Video
+                    Return eLib_Media_Type.Video
+                Case eWMPMediaTypes.NoWMP_CDPlaylist
+                    Return eLib_Media_Type.Other_10
+                Case eWMPMediaTypes.NoWMP_CDTrack
+                    Return eLib_Media_Type.Other_11
+                Case eWMPMediaTypes.NoWMP_CommonFile
+                    Return eLib_Media_Type.Other_12
+                Case eWMPMediaTypes.NoWMP_DVD
+                    Return eLib_Media_Type.Other_13
+                Case eWMPMediaTypes.NoWMP_MusicFile
+                    Return eLib_Media_Type.Music
+                Case Else
+                    Return eLib_Media_Type.Unknown_Error
+            End Select
+        Catch ex As Exception
+            Return eLib_Media_Type.Unknown_Error
+        End Try
+    End Function
+
+    Friend Function GetWMPMediaEnumFromName(ByVal sMedia As String) As eWMPMediaTypes
+        'Audio	Other	Photo	Playlists	Radio	Video	CD Playlist	CD Track	Common File	DVD	Music File
+        If sMedia Is Nothing Then Return eWMPMediaTypes.Unknown
+        If String.IsNullOrEmpty(sMedia.Trim) Then Return eWMPMediaTypes.Unknown
+        Select Case sMedia.Trim.ToLower
+            Case "audio"
+                Return eWMPMediaTypes.Audio
+            Case "other"
+                Return eWMPMediaTypes.Other
+            Case "photo"
+                Return eWMPMediaTypes.Photo
+            Case "playlist", "playlists", "wpl"
+                Return eWMPMediaTypes.Playlist
+            Case "radio"
+                Return eWMPMediaTypes.Radio
+            Case "video"
+                Return eWMPMediaTypes.Video
+            Case "cd playlist"
+                Return eWMPMediaTypes.NoWMP_CDPlaylist
+            Case "cd track"
+                Return eWMPMediaTypes.NoWMP_CDTrack
+            Case "common file"
+                Return eWMPMediaTypes.NoWMP_CommonFile
+            Case "dvd"
+                Return eWMPMediaTypes.NoWMP_DVD
+            Case "music file"
+                Return eWMPMediaTypes.NoWMP_MusicFile
+            Case Else
+                Return eWMPMediaTypes.Unknown
+        End Select
+    End Function
+    Friend Sub ShutDownPlayerStatus()
+        Dim dv As Object 'DeviceClass
+        Dim dvalbum As Object 'DeviceClass
+        Dim st As String
+        Dim blankimage As String = ""    ' "<img border=""0"" src=""/MediaPlayer/images/blank.gif"">"
+
+        Try
+            st = blankimage & "Playing " & WB("System Shutdown") & "<br>&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;By " & WB("HomeSeer Technologies, LLC")
+            dv = GetOurDevice(DR(DeviceTypeInfo.eDeviceType_Media.Player_Status))
+            If Not dv Is Nothing Then
+                hs.SetDeviceString(dv.hc & dv.dc, st, True)
+            End If
+
+            st = blankimage & ""
+            dvalbum = GetOurDevice(DR(DeviceTypeInfo.eDeviceType_Media.Media_Album))
+            hs.SetDeviceString(dvalbum.hc & dvalbum.dc, st, True)
+
+            st = blankimage & "Temporarily Muted"
+            dv = GetOurDevice(DR(DeviceTypeInfo.eDeviceType_Media.Player_Volume))
+            If Not dv Is Nothing Then
+                hs.SetDeviceString(dv.hc & dv.dc, st, True)
+            End If
+
+            st = blankimage & ""
+            dv = GetOurDevice(DR(DeviceTypeInfo.eDeviceType_Media.Player_Shuffle))
+            If Not dv Is Nothing Then
+                hs.SetDeviceString(dv.hc & dv.dc, st, True)
+            End If
+
+            st = blankimage & "Disabled"
+            dv = GetOurDevice(DR(DeviceTypeInfo.eDeviceType_Media.Player_Repeat))
+            If Not dv Is Nothing Then
+                hs.SetDeviceString(dv.hc & dv.dc, st, True)
+            End If
+
+            st = blankimage & "Plug-In Shutdown-Restart"
+            dv = GetOurDevice(DR(DeviceTypeInfo.eDeviceType_Media.Player_Status_Additional))
+            If Not dv Is Nothing Then
+                hs.SetDeviceString(dv.hc & dv.dc, st, True)
+                hs.SetDeviceLastChange(dv.hc & dv.dc, Now)
+            End If
+
+        Catch ex As Exception
+
+        End Try
+
+    End Sub
+
+    Function RemoveNonAlpha(ByVal st As String) As String
+        Dim i As Integer
+        Dim st_out As New StringBuilder
+        Dim ch As String
+
+        For i = 1 To Len(st)
+            ch = Mid(st, i, 1)
+            If IsAlpha(ch) Then
+                st_out.Append(ch)
+            End If
+        Next
+        Return st_out.ToString
+    End Function
+
+    Public Function Valid(ByVal sIn As String) As Boolean
+        If sIn Is Nothing Then Return False
+        If ((sIn <> "") And (sIn <> "No Action")) Then
+            Return True
+        End If
+        Return False
+    End Function
+
+    ' for VR commands, only allow:
+    ' 0-9
+    ' a->z
+    ' A->Z
+    ' space
+    Function IsAlpha(ByVal ch As String) As Boolean
+        Dim chi As Integer = Asc(ch)
+        If (chi >= 65 And chi <= 90) Or _
+        (chi >= 97 And chi <= 122) Or _
+        (chi >= &H30 And chi <= &H39) Or _
+        chi = &H20 Then
+            Return True
+        Else
+            Return False
+        End If
+    End Function
+
+    Public Sub Log(ByVal msg As String, ByVal logType As LogType)
+        Try
+            If msg Is Nothing Then msg = ""
+            If Not [Enum].IsDefined(GetType(LogType), logType) Then
+                logType = logType.LOG_TYPE_ERROR
+            End If
+            Dim sWhat As String = IFACE_NAME
+            If Instance Is Nothing Then Instance = ""
+            If Not String.IsNullOrEmpty(Instance.Trim) Then
+                sWhat &= "-" & Instance.Trim
+            End If
+            Select Case logType
+                Case logType.LOG_TYPE_ERROR
+                    hs.WriteLog(sWhat & " ERROR", msg)
+                    WriteDebug(msg)
+                Case logType.LOG_TYPE_WARNING
+                    hs.WriteLog(sWhat & " Warning", msg)
+                    WriteDebug(msg)
+                Case logType.LOG_TYPE_INFO
+                    hs.WriteLog(sWhat, msg)
+                Case logType.LOG_TYPE_DEBUG
+                    WriteDebug(msg)
+            End Select
+        Catch ex As Exception
+            Console.WriteLine("Exception in LOG of " & IFACE_NAME & ": " & ex.Message)
+        End Try
+
+    End Sub
+
+    Friend Function WMPTriggerName(ByVal Trig As WMPTriggers) As String
+        Select Case Trig
+            Case WMPTriggers.Idle
+                Return "Media Player becomes Idle"
+            Case WMPTriggers.Playing
+                Return "Media Player starts Playing"
+            Case WMPTriggers.Stopped
+                Return "Media Player Stops"
+            Case WMPTriggers.Paused
+                Return "Media Player becomes Paused"
+            Case WMPTriggers.Forwarding
+                Return "Media Player starts Fast Forwarding"
+            Case WMPTriggers.Rewinding
+                Return "Media Player starts Rewinding"
+            Case WMPTriggers.MediaEnding
+                Return "Media Player Media is Ending"
+            Case WMPTriggers.MediaStarting
+                Return "Media Player Media is Starting"
+            Case WMPTriggers.Waiting
+                Return "Media Player enters a Waiting State"
+            Case WMPTriggers.Playlist_Changed
+                Return "Media Player Playlist Changes"
+            Case WMPTriggers.Library_Updating
+                Return "Media Player Library starts Updating"
+            Case Else
+                Return "ERROR"
+        End Select
+    End Function
+    Friend Function WMPConditionName(ByVal Cond As WMPConditions) As String
+        Select Case Cond
+            Case WMPConditions.Idle
+                Return "Media Player Is Idle"
+            Case WMPConditions.Playing
+                Return "Media Player Is Playing"
+            Case WMPConditions.Stopped
+                Return "Media Player Is Stopped"
+            Case WMPConditions.Paused
+                Return "Media Player Is Paused"
+            Case WMPConditions.Waiting
+                Return "Media Player Is Waiting"
+            Case Else
+                Return "ERROR"
+        End Select
+    End Function
+
+    Public Sub WriteDebug(ByVal msg As String)
+        If Not gDebug Then Exit Sub
+        If Instance Is Nothing Then Instance = ""
+        Console.WriteLine(Format(Now, TIME_STAMP) & ":" & msg)
+        If Not IO.Directory.Exists(FixPath(gEXEPath & "\Debug Logs")) Then
+            IO.Directory.CreateDirectory(FixPath(gEXEPath & "\Debug Logs"))
+        End If
+        Try
+            My.Computer.FileSystem.WriteAllText(FixPath(gEXEPath & "\Debug Logs\" & IFACE_NAME & IIf(String.IsNullOrEmpty(Instance.Trim), "", "-" & Instance.Trim) & ".log"), Format(Now, TIME_STAMP) & vbTab & msg & vbCrLf, True)
+        Catch ex As Exception
+        End Try
+    End Sub
+
+    Friend Function GetTriggerObject(ByRef TrigInfo As HomeSeerAPI.IPlugInAPI.strTrigActInfo) As TriggerObject
+        If Triggers Is Nothing Then Triggers = New Collections.Concurrent.ConcurrentDictionary(Of String, TriggerObject)
+        If TrigInfo.Instance Is Nothing Then TrigInfo.Instance = ""
+        Dim sKey As String = "K" & TrigInfo.evRef.ToString & "_" & TrigInfo.TANumber.ToString & "_" & TrigInfo.SubTANumber.ToString & "_" & TrigInfo.Instance
+        Dim TObj As TriggerObject = Nothing
+        Try
+            TObj = Triggers.Item(sKey)
+        Catch ex As Exception
+            TObj = Nothing
+        End Try
+        If TObj Is Nothing Then
+            If TrigInfo.DataIn IsNot Nothing AndAlso TrigInfo.DataIn.Length > 5 Then
+                TObj = New TriggerObject
+                Try
+                    If Not DeSerializeObject(TrigInfo.DataIn, TObj) Then
+                        TObj = New TriggerObject
+                        TObj.Condition = False
+                        TObj.evRef = TrigInfo.evRef
+                        TObj.Instance = TrigInfo.Instance
+                        TObj.SubTANumber = TrigInfo.SubTANumber
+                        TObj.TANumber = TrigInfo.TANumber
+                        Try
+                            Triggers.TryAdd(sKey, TObj)
+                        Catch ex As Exception
+                        End Try
+                    End If
+                Catch ex As Exception
+                    TObj = New TriggerObject
+                    TObj.Condition = False
+                    TObj.evRef = TrigInfo.evRef
+                    TObj.Instance = TrigInfo.Instance
+                    TObj.SubTANumber = TrigInfo.SubTANumber
+                    TObj.TANumber = TrigInfo.TANumber
+                    Try
+                        Triggers.TryAdd(sKey, TObj)
+                    Catch ex2 As Exception
+                    End Try
+                End Try
+            Else
+                TObj = New TriggerObject
+                TObj.Condition = False
+                TObj.evRef = TrigInfo.evRef
+                TObj.Instance = TrigInfo.Instance
+                TObj.SubTANumber = TrigInfo.SubTANumber
+                TObj.TANumber = TrigInfo.TANumber
+                Try
+                    Triggers.TryAdd(sKey, TObj)
+                Catch ex As Exception
+                End Try
+            End If
+        End If
+        Return TObj
+    End Function
+
+    Friend Function GetTriggerObject(ByVal sKey As String) As TriggerObject
+        If Triggers Is Nothing Then Triggers = New Collections.Concurrent.ConcurrentDictionary(Of String, TriggerObject)
+        Try
+            Return Triggers.Item(sKey)
+        Catch ex As Exception
+            Return Nothing
+        End Try
+    End Function
+
+    Friend Sub SaveTriggerObject(ByRef TrigInfo As HomeSeerAPI.IPlugInAPI.strTrigActInfo, ByRef TObj As TriggerObject)
+        If TObj Is Nothing Then Exit Sub
+        If Triggers Is Nothing Then Triggers = New Collections.Concurrent.ConcurrentDictionary(Of String, TriggerObject)
+        If TrigInfo.Instance Is Nothing Then TrigInfo.Instance = ""
+        Dim sKey As String = "K" & TrigInfo.evRef.ToString & "_" & TrigInfo.TANumber.ToString & "_" & TrigInfo.SubTANumber.ToString & "_" & TrigInfo.Instance
+        If Triggers.ContainsKey(sKey) Then
+            Triggers.Item(sKey) = TObj
+        Else
+            Try
+                Triggers.TryAdd(sKey, TObj)
+            Catch ex As Exception
+            End Try
+        End If
+        Dim bte() As Byte = Nothing
+        Try
+            If SerializeObject(TObj, bte) Then
+                TrigInfo.DataIn = bte
+            End If
+        Catch ex As Exception
+        End Try
+    End Sub
+    Friend Function SaveTriggerObject(ByVal sKey As String, ByRef TObj As TriggerObject) As Byte()
+        If TObj Is Nothing Then Return Nothing
+        If Triggers Is Nothing Then Triggers = New Collections.Concurrent.ConcurrentDictionary(Of String, TriggerObject)
+        If Triggers.ContainsKey(sKey) Then
+            Triggers.Item(sKey) = TObj
+        Else
+            Try
+                Triggers.TryAdd(sKey, TObj)
+            Catch ex As Exception
+            End Try
+        End If
+        Dim bte() As Byte = Nothing
+        Try
+            If SerializeObject(TObj, bte) Then
+                Return bte
+            End If
+        Catch ex As Exception
+        End Try
+        Return Nothing
+    End Function
+
+End Module

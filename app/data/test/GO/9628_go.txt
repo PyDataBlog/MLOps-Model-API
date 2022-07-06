@@ -1,0 +1,74 @@
+/***********************************************************************************
+
+	Subscribes to a given observation and plots it.
+
+ ***********************************************************************************/
+package paul
+
+import (
+	"github.com/FastAndFurious/fnf.gopaul/types"
+	"github.com/FastAndFurious/fnf.gopaul/broker"
+	"strings"
+	"github.com/FastAndFurious/fnf.gopaul/util"
+)
+
+const (
+	PLOTTER_LOGGER="PlotterLogger"
+	DISPLAY_WIDTH=100
+)
+
+type PlotterLogger struct {
+	observations chan types.Message
+	start chan types.Message
+	min          float32
+	max          float32
+	broker.Logging
+}
+
+/*
+	creates a PlotterLogger
+ */
+func NewPlotterLogger(name string, source string, min float32, max float32, sink string, severity *types.Severity) *PlotterLogger {
+
+	observations := make(chan types.Message)
+	start := make(chan types.Message)
+	broker.GetBroker().SubscribeToInfo(PLOTTER_LOGGER, types.ProducerInfo{ source, "", types.ObservationType}, observations)
+	broker.GetBroker().SubscribeToInfo(PLOTTER_LOGGER, types.ProducerInfo{ "", "", types.StartMessageType}, start)
+
+	instance := &PlotterLogger{observations, start, min, max, broker.NewSpecifiedLogging( name, sink, severity) }
+
+	go instance.work()
+
+	return instance
+}
+
+func (theLogger *PlotterLogger) work() {
+
+	var offset int64 = 0;
+	for {
+		select {
+		case actual := <-theLogger.observations:
+			payload := actual.(types.ObjectMessage).Payload.(types.Observation)
+			t := payload.Timestamp - offset
+			v := payload.Value
+			if v < theLogger.min {
+				theLogger.min = v
+			}
+			if v > theLogger.max {
+				theLogger.max = v
+			}
+			d := theLogger.max - theLogger.min
+			p := (v - theLogger.min) * float32(DISPLAY_WIDTH) / d
+			indent := strings.Repeat(" ", int(p))
+
+			theLogger.Info("%06d: %s%d", t, indent, int(v))
+
+		case actual := <-theLogger.start:
+			payload := actual.(types.ObjectMessage).Payload.(types.StartMessage)
+			theLogger.Info("StartMessage at %d", payload.Timestamp)
+			offset = payload.Timestamp
+			util.Logfln("StartMsg %v", actual)
+		}
+	}
+	theLogger.Warn("Should never leave the go loop")
+}

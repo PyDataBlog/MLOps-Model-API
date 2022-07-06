@@ -1,0 +1,309 @@
+// DlgMSMeer.cpp : implementation file
+//
+
+#include "stdafx.h"
+#include "Risa.h"
+#include "DlgMSMeer.h"
+#include "afxdialogex.h"
+
+#include "msImageProcessor.h"
+// CDlgMSMeer dialog
+
+IMPLEMENT_DYNAMIC(CDlgMSMeer, CDialogEx)
+
+CDlgMSMeer::CDlgMSMeer(cv::Mat* pmImg, bool bColor, CWnd* pParent /*=NULL*/)
+	: CDialogEx(CDlgMSMeer::IDD, pParent)
+	, m_nOP(0)
+	, m_sigmaS(6)
+	, m_sigmaR(2)
+	, m_nMinRegion(100)
+{
+
+	m_pmSource = pmImg;
+	m_bColor = bColor;
+	
+	hasFilter_ = 0;
+	hasSegment_		= 0;
+
+	cbgImage_			= NULL;
+	filtImage_			= NULL;
+	segmImage_			= NULL;
+	
+}
+
+CDlgMSMeer::~CDlgMSMeer()
+{
+	if(cbgImage_ != NULL) delete cbgImage_;
+	if(filtImage_ != NULL) delete filtImage_;
+	if(segmImage_ != NULL) delete segmImage_;
+}
+
+void CDlgMSMeer::DoDataExchange(CDataExchange* pDX)
+{
+	CDialogEx::DoDataExchange(pDX);
+	DDX_Radio(pDX, IDC_RADIO_OP, m_nOP);
+	DDX_Text(pDX, IDC_EDIT_BW_SPATIAL, m_sigmaS);
+	DDX_Text(pDX, IDC_EDIT_BW_COLOR, m_sigmaR);
+	DDX_Text(pDX, IDC_EDIT_MIN_REGION, m_nMinRegion);
+}
+
+
+BEGIN_MESSAGE_MAP(CDlgMSMeer, CDialogEx)
+	ON_BN_CLICKED(IDC_RUN, &CDlgMSMeer::OnBnClickedRun)
+	ON_BN_CLICKED(IDOK, &CDlgMSMeer::OnBnClickedOk)
+END_MESSAGE_MAP()
+
+
+// CDlgMSMeer message handlers
+
+
+void CDlgMSMeer::OnBnClickedRun()
+{
+	// TODO: Add your control notification handler code here
+	UpdateData(TRUE); // ==> variable
+
+	BeginWaitCursor();
+	// parameters
+	//   sigma_s
+	//   sigma_r
+	//   a
+	//   epsilon
+	//   minRegion
+	//   kernel radius
+	//   filter
+	//   speedup level
+
+	sigmaS = m_sigmaS;
+	sigmaR = m_sigmaR;
+	minRegion = m_nMinRegion;
+	//, kernelSize
+	//obtain image dimensions
+	float speedUpThreshold_ = (float) 0.1;
+	SpeedUpLevel	speedUpLevel_ = MED_SPEEDUP;;
+
+	int	width, height;
+	width = cbgImage_->x_;
+	height = cbgImage_->y_;
+
+	//obtain image type (color or grayscale)
+	imageType	gtype;
+	if(cbgImage_->colorIm_)
+		gtype = COLOR;
+	else
+		gtype = GRAYSCALE;
+
+
+	gpMsgbar->ShowMessage("Input parameters:\n");
+	gpMsgbar->ShowMessage("\tSpatial Bandwidth\t= %4d\n\tColor Bandwidth\t= %4.1f\n", sigmaS, sigmaR);
+	gpMsgbar->ShowMessage("\tMinimum Region\t= %4d\n", minRegion);
+
+	//determine operation (filtering or segmentation)
+	int	operation	= m_nOP;
+
+	//create instance of image processor class
+	msImageProcessor *iProc = new msImageProcessor();
+
+	//define an input image using the image under consideration
+	//(if filtering or segmentation has taken place, then use this
+	// result upon performing fusing...)
+	if((operation == 2)&&(hasFilter_))
+		iProc->DefineImage(filtImage_->im_, gtype, height, width);
+	else
+		iProc->DefineImage(cbgImage_->im_, gtype, height, width);
+
+
+	
+	
+	
+	int dim;
+	if(cbgImage_->colorIm_) {
+		dim = 3;
+		m_mResult.create(height, width, CV_8UC3);
+	}else{
+		dim = 1;
+		m_mResult.create(height, width, CV_8UC1);
+	}
+
+	iProc->SetSpeedThreshold(speedUpThreshold_);
+	switch(operation)
+	{
+		//filter
+		case 1:
+
+		iProc->Filter(sigmaS, sigmaR, speedUpLevel_);
+		if (iProc->ErrorStatus == EL_ERROR)
+		{
+			gpMsgbar->ShowMessage("%s\n", iProc->ErrorMessage);
+			return;
+		} else if (iProc->ErrorStatus == EL_HALT)
+		{
+			break;
+		}
+
+		//obtain the filtered image....
+		filtImage_->Resize(width, height, cbgImage_->colorIm_);
+		iProc->GetResults(filtImage_->im_);
+		if (iProc->ErrorStatus == EL_ERROR)
+		{
+			gpMsgbar->ShowMessage("%s\n", iProc->ErrorMessage);
+			return;
+		}
+
+		//indicate that only the filtered image has been computed...
+		hasFilter_	= 1;
+		hasSegment_	= 0;
+		memcpy(m_mResult.data, filtImage_->im_, dim*height*width*sizeof(unsigned char));
+		if(m_bColor) {
+			cv::Mat bgr(height, width, CV_8UC3 );
+			int from_to[] = { 0,2, 1,1, 2,0};
+			cv::mixChannels( &m_mResult, 1, &bgr, 1, from_to, 3 );			
+			bgr.copyTo(m_mResult);
+		}
+		cv::namedWindow("filter", CV_WINDOW_AUTOSIZE );
+		cv::imshow( "filter", m_mResult);
+		break;
+
+	//fuse
+	case 2:
+
+		iProc->FuseRegions(sigmaR, minRegion);
+		if (iProc->ErrorStatus == EL_ERROR)
+		{
+			gpMsgbar->ShowMessage("%s\n", iProc->ErrorMessage);
+			return;
+		} else if (iProc->ErrorStatus == EL_HALT)
+		{
+			break;
+		}
+
+		//obtain the segmented image...
+		segmImage_->Resize(width, height, cbgImage_->colorIm_);
+		iProc->GetResults(segmImage_->im_);
+		if (iProc->ErrorStatus == EL_ERROR)
+		{
+			gpMsgbar->ShowMessage("%s\n", iProc->ErrorMessage);
+			return;
+		}
+
+		//indicate that the segmented image has been computed...
+		hasSegment_	= 1;
+		
+		memcpy(m_mResult.data, segmImage_->im_, dim*height*width*sizeof(unsigned char));
+
+		if(m_bColor) {
+			cv::Mat bgr(height, width, CV_8UC3 );
+			int from_to[] = { 0,2, 1,1, 2,0};
+			cv::mixChannels( &m_mResult, 1, &bgr, 1, from_to, 3 );			
+			bgr.copyTo(m_mResult);
+		}
+		cv::namedWindow("fuse", CV_WINDOW_AUTOSIZE );
+		cv::imshow( "fuse", m_mResult);
+		break;
+
+	//segment
+	default:
+
+		//filter the image...
+		iProc->Filter(sigmaS, sigmaR, speedUpLevel_);
+		if (iProc->ErrorStatus == EL_ERROR)
+		{
+			gpMsgbar->ShowMessage("%s\n", iProc->ErrorMessage);
+			return;
+		} else if (iProc->ErrorStatus == EL_HALT)
+		{
+			break;
+		}
+
+		//filter the image....
+		unsigned char *tempImage = new unsigned char [dim*height*width];
+		iProc->GetResults(tempImage);
+		if (iProc->ErrorStatus == EL_ERROR)
+		{
+			gpMsgbar->ShowMessage("%s\n", iProc->ErrorMessage);
+			delete [] tempImage;
+			return;
+		}
+		
+		//fuse regions...
+		iProc->FuseRegions(sigmaR, minRegion);
+		if (iProc->ErrorStatus == EL_ERROR)
+		{
+			gpMsgbar->ShowMessage("%s\n", iProc->ErrorMessage);
+			delete [] tempImage;
+			return;
+		} else if (iProc->ErrorStatus == EL_HALT)
+		{
+			delete [] tempImage;
+			break;
+		}
+
+		//obtain the segmented and filtered image...
+		filtImage_->Resize(width, height, cbgImage_->colorIm_);
+		memcpy(filtImage_->im_, tempImage, dim*height*width*sizeof(unsigned char));
+		delete [] tempImage;
+		segmImage_->Resize(width, height, cbgImage_->colorIm_);
+		iProc->GetResults(segmImage_->im_);
+		if (iProc->ErrorStatus)
+		{
+			gpMsgbar->ShowMessage("%s\n", iProc->ErrorMessage);
+			return;
+		}
+
+		//indicate that both the filtered and segmented image have been computed...
+		hasFilter_	= 1;
+		hasSegment_	= 1;
+		memcpy(m_mResult.data, segmImage_->im_, dim*height*width*sizeof(unsigned char));
+
+		if(m_bColor) {
+			cv::Mat bgr(height, width, CV_8UC3 );
+			int from_to[] = { 0,2, 1,1, 2,0};
+			cv::mixChannels( &m_mResult, 1, &bgr, 1, from_to, 3 );			
+			bgr.copyTo(m_mResult);
+		}
+		cv::namedWindow("segment", CV_WINDOW_AUTOSIZE );
+		cv::imshow( "segment", m_mResult);	
+	}
+
+	
+
+	//delete the image processing object
+	delete iProc;
+
+	EndWaitCursor();
+}
+
+
+BOOL CDlgMSMeer::OnInitDialog()
+{
+	CDialogEx::OnInitDialog();
+
+	// TODO:  Add extra initialization here
+    cbgImage_			= new BgImage();
+    filtImage_			= new BgImage();
+    segmImage_			= new BgImage();
+
+	if(m_bColor) {
+		cv::Mat rgb(m_pmSource->rows, m_pmSource->cols, CV_8UC3 );
+		int from_to[] = { 0,2, 1,1, 2,0};
+		cv::mixChannels( m_pmSource, 1, &rgb, 1, from_to, 3 );
+		cbgImage_->SetImageFromRGB(rgb.data, rgb.cols, rgb.rows, true);
+		//rgb.copyTo(pNew->m_cvMat);
+	}else
+		cbgImage_->SetImageFromRGB(m_pmSource->data, m_pmSource->cols, m_pmSource->rows, true);
+
+	  hasFilter_		= 0;
+      hasSegment_		= 0;
+
+	return TRUE;  // return TRUE unless you set the focus to a control
+	// EXCEPTION: OCX Property Pages should return FALSE
+}
+
+
+void CDlgMSMeer::OnBnClickedOk()
+{
+	// TODO: Add your control notification handler code here
+	CDialogEx::OnOK();
+	if(m_mResult.data != NULL) {
+		m_mResult.copyTo(*m_pmSource);
+	}
+}

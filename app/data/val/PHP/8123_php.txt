@@ -1,0 +1,212 @@
+<?php
+
+require_once(INCLUDE_DIR . 'class.auth.php');
+
+class StaffVatsimAuthentication extends StaffAuthenticationBackend {
+
+    static $name = "VATSIM Authentication";
+    static $id = "vatsimuk";
+
+    function supportsInteractiveAuthentication() {
+        return false;
+    }
+
+    function signOn() {
+        $config = new Config("core");
+        $URL = $config->get("helpdesk_url");
+
+        $ssoObj = new VatsimAuthPlugin();
+        $ssoConfig = $ssoObj->getConfig();
+
+        // Let's login via SSO!
+        require_once "OAuth.php";
+        require_once "SSO.class.php";
+
+        // Initiate.
+        $ssoRequest = new SSO($ssoConfig->get("sso-base"), $ssoConfig->get("sso-key"), $ssoConfig->get("sso-secret"), "RSA", $ssoConfig->get("sso-rsacert"));
+        $ssoReturn = $URL."scp/login.php?return=true";
+
+        // If the member has been sent back, let's process this...
+        if(isset($_GET['return'])){
+            // Cancelled
+            if(isset($_GET['oauth_cancel'])){
+                // TODO: Work out how to display an error properly...
+                return;
+            }
+
+            // Fine?
+            if(isset($_GET['oauth_verifier'])){
+                if(isset($_SESSION['sso_session_oauth']) && isset($_SESSION['sso_session_oauth']["key"]) && isset($_SESSION['sso_session_oauth']["secret"])){
+                    if(@$_GET['oauth_token'] != $_SESSION['sso_session_oauth']["key"]){
+                        // TODO: Display the right error message.
+                        return;
+                    }
+
+                    if(@!isset($_GET['oauth_verifier'])){
+                        // TODO: Display right error message.
+                        return;
+                    }
+
+                    // Get the user details!
+                    $member = $ssoRequest->checkLogin($_SESSION['sso_session_oauth']["key"], $_SESSION['sso_session_oauth']["secret"], @$_GET['oauth_verifier']);
+
+                    if(!$member){
+                        // TODO: Display the relevent error message.
+                        return;
+                    }
+
+                    $member = $member->user;
+
+                    if ($member && isset($member->id)) {
+                        if (($user = new StaffSession("s" . $member->id)) && $user->getId()) {
+                            return $user;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Let's deal with the token request and send them packing for a bit.
+        $token = $ssoRequest->requestToken($ssoReturn, $ssoConfig->get("sso-staff-allowsuspended"), $ssoConfig->get("sso-staff-allowinactive"));
+
+        if($token){
+            $_SESSION['sso_session_oauth'] = array(
+                "key" => (string) $token->token->oauth_token,
+                "secret" => (string) $token->token->oauth_token_secret,
+            );
+
+            $ssoRequest->sendToVatsim();
+            return;
+        }
+    }
+
+}
+
+class UserVatsimAuthentication extends UserAuthenticationBackend {
+
+    static $name = "VATSIM Authentication";
+    static $id = "vatsim.client";
+
+    function supportsInteractiveAuthentication() {
+        return false;
+    }
+
+    function signOn() {
+        $config = new Config("core");
+        $URL = $config->get("helpdesk_url");
+
+        $ssoObj = new VatsimAuthPlugin();
+        $ssoConfig = $ssoObj->getConfig();
+
+        // Let's login via SSO!
+        require_once "OAuth.php";
+        require_once "SSO.class.php";
+
+        // Initiate.
+        $ssoRequest = new SSO($ssoConfig->get("sso-base"), $ssoConfig->get("sso-key"), $ssoConfig->get("sso-secret"), "RSA", $ssoConfig->get("sso-rsacert"));
+        $ssoReturn = $URL."login.php?return=true";
+
+        // If the member has been sent back, let's process this...
+        if(isset($_GET['return'])){
+            // Cancelled
+            if(isset($_GET['oauth_cancel'])){
+                // TODO: Work out how to display an error properly...
+                return;
+            }
+
+            // Fine?
+            if(isset($_GET['oauth_verifier'])){
+                if(isset($_SESSION['sso_session_oauth']) && isset($_SESSION['sso_session_oauth']["key"]) && isset($_SESSION['sso_session_oauth']["secret"])){
+                    if(@$_GET['oauth_token'] != $_SESSION['sso_session_oauth']["key"]){
+                        // TODO: Display the right error message.
+                        return;
+                    }
+
+                    if(@!isset($_GET['oauth_verifier'])){
+                        // TODO: Display right error message.
+                        return;
+                    }
+
+                    // Get the user details!
+                    $member = $ssoRequest->checkLogin($_SESSION['sso_session_oauth']["key"], $_SESSION['sso_session_oauth']["secret"], @$_GET['oauth_verifier']);
+
+                    if(!$member){
+                        // TODO: Display the relevent error message.
+                        return;
+                    }
+
+                    $member = $member->user;
+
+                    // Let's do the osTicket auth stuff!
+                    // Try and find the account by their username....
+                    $acct = ClientAccount::lookupByUsername($member->id);
+                    if ($acct = ClientAccount::lookupByUsername($member->id)) {
+                        if (($client = new ClientSession(new EndUser($acct->getUser()))) && $client->getId()) {
+                            $user = $acct->getUser();
+                            $oldAddress = $user->getDefaultEmailAddress();
+                            $userID = $client->getId();
+
+                            // Has their email changed?
+                            if(strcasecmp($oldAddress, $member->email) != 0){
+                                // Let's check if this email exists, first of all.
+                                $newEmail = UserEmailModel::lookup(array("address" => $member->email));
+
+                                if($newEmail){
+                                    // Let's update the user_id for this email!
+                                    $newEmail->set("user_id", $userID);
+                                    $newEmail->save();
+                                } else {
+                                    // Let's add the new email.
+                                    $newEmail = UserEmailModel::create();
+                                    $newEmail->set("user_id", $userID);
+                                    $newEmail->set("address", $member->email);
+                                    $newEmail->save();
+                                }
+
+                                // Update the default email ID.
+                                $user->set("default_email_id", $newEmail->get("id"));
+                                $user->save();
+                            }
+
+                            return $client;
+                        }
+                    } else { // Doesn't exist, so let's make one?
+                        // IF the user has previously used helpdesk to submit a ticket via email (without an account) this will sync, based on email address.
+                        $client = new ClientCreateRequest($this, $member->id, ["email" => $member->email, "name" => $member->name_first." ".$member->name_last]);
+                        return $client->attemptAutoRegister();
+                    }
+                }
+            }
+        }
+
+        // Let's deal with the token request and send them packing for a bit.
+        $token = $ssoRequest->requestToken($ssoReturn, $ssoConfig->get("sso-allowsuspended"), $ssoConfig->get("sso-allowinactive"));
+
+        if($token){
+            $_SESSION['sso_session_oauth'] = array(
+                "key" => (string) $token->token->oauth_token,
+                "secret" => (string) $token->token->oauth_token_secret,
+            );
+
+            $ssoRequest->sendToVatsim();
+            return;
+        }
+    }
+}
+
+require_once(INCLUDE_DIR . 'class.plugin.php');
+require_once('config.php');
+
+class VatsimAuthPlugin extends Plugin {
+
+    var $config_class = 'VatsimAuthConfig';
+
+    function bootstrap() {
+        $config = $this->getConfig();
+        if ($config->get('auth-staff'))
+            StaffAuthenticationBackend::register('StaffVatsimAuthentication');
+        if ($config->get('auth-client'))
+            UserAuthenticationBackend::register('UserVatsimAuthentication');
+    }
+
+}

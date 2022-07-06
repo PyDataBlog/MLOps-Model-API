@@ -1,0 +1,135 @@
+#include <stdio.h>
+#include <sstream>
+#include <bitset>
+
+#include "CVar.h"
+
+#include "../dbnet/db_net.hpp"
+
+CVar::CVar(int iWid, int iType, std::string sRem) : m_iWid(iWid), m_iType(iType), m_sRem(sRem)
+{
+	m_bSync = false;
+}
+
+void CVar::AddAlias(int iBit, std::string sRem)
+{
+	CAlias* pNewAlias = new CAlias(iBit, sRem);
+	
+	CBase::AddItem(pNewAlias);
+}
+
+CAlias* CVar::GetLastAlias()
+{
+	return CBase::GetLastItem();
+}
+
+/*
+SAlias* CVar::GetAliasByBit(int iBit)
+{
+	for (CAlias* pAlias = m_pAliases; pAlias; pAlias = pAlias->m_pNext)
+	{
+		if (pAlias->m_iBit == iBit)
+		{
+			return pAlias;
+		}
+		
+	}
+
+	return NULL;
+}
+*/
+
+bool CVar::Sync()
+{
+	++m_iAttempt;
+	if (DBnet_ReadReg(m_iWid, m_iType, m_Data) == SUCCESS)
+	{
+		time(&m_SyncTime);
+		m_bSync = true;
+		return true;
+	}
+	else
+	{
+		m_bSync = false;
+		return false;
+	}
+}
+	
+
+std::string CVar::GetData()
+{
+    switch (m_iType)
+    {
+      case TYPE_INT:
+	  {
+	  	std::bitset<8> bset(*(int *)m_Data);
+		return bset.to_string();
+	  } 
+		  
+	  case TYPE_LONG:
+	  {
+	  	std::bitset<16> bset(*(int *)m_Data);
+		return bset.to_string();
+	  } 
+	
+      case TYPE_FLOAT:
+	  {
+		char sRet[256];
+		sprintf(sRet, "%f", *(float *)m_Data);
+	   	return sRet;
+	  }
+	  default:
+		return "";
+	}
+}
+
+float CVar::GetDataF()
+{
+	return *(float *)m_Data;
+}
+
+long CVar::GetDataL()
+{
+	std::string sData = GetData();
+	int long lData = std::stol(sData,nullptr,2);
+	return lData;
+}
+
+std::string CVar::Write()
+{
+	std::stringstream s;
+	if (m_bSync)
+	{
+		s << "wid: " << GetWid() << "\t hodnota: " << GetData() << "\t " << GetTime() << "\t" << GetAttemptCount() << "\t;" << GetRem() << std::endl;
+		if (m_iType == TYPE_INT || m_iType == TYPE_LONG)
+		{
+			for (CAlias* pAlias = m_pFirst; pAlias; pAlias = pAlias->m_pNext)
+			{
+				if (pAlias)
+				{
+					std::bitset<16> bset(*(long *)m_Data);
+					s << "  bit: " << pAlias->m_iBit << "\t hodnota: " << (bset[pAlias->m_iBit] ? "ON" : "OFF") << "\t\t\t\t\t\t;" << pAlias->m_sRem << std::endl;
+				}
+			}
+		}
+	}
+	else
+	{
+		s << "wid: " << GetWid() << "\t nesynchronizováno!!!\t\t\t\t" << GetAttemptCount() << "\t;" << GetRem() << std::endl;
+	}
+	return s.str();
+}
+
+std::string CVar::GetTime()
+{
+	struct tm* timeinfo = localtime(&m_SyncTime);
+	
+	std::stringstream strs;
+	strs << 1900 + timeinfo->tm_year << "-" << 1 + timeinfo->tm_mon << "-" << timeinfo->tm_mday << " ";
+	strs << timeinfo->tm_hour << ":"; 
+	timeinfo->tm_min < 10 ? (strs << "0" << timeinfo->tm_min << ":") : (strs << timeinfo->tm_min << ":");
+	timeinfo->tm_sec < 10 ? (strs << "0" << timeinfo->tm_sec) : (strs << timeinfo->tm_sec);
+
+	return strs.str();
+}
+

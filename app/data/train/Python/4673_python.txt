@@ -1,0 +1,92 @@
+from __future__ import absolute_import, print_function
+
+import os
+import pwd
+import grp
+import sys
+import subprocess
+
+from .command import Command
+
+
+class AuthorizedKeysCommand(Command):
+    """
+    Get authorized keys for a user using NSS and SSSD.
+    """
+
+    @staticmethod
+    def configure_parser(parser):
+        """
+        Configure an argument parser with arguments for this command.
+        """
+
+        parser.add_argument(
+            '-u', '--user',
+            default=os.getenv("USER", None),
+            required=True,
+            help="username")
+
+        parser.add_argument(
+            '--include-group',
+            action='store_true',
+            help="retrieve ssh keys for everyone in the user's primary group")
+
+    def __init__(self, config, args):
+        """
+        Create the command.
+        """
+
+        self.config = config
+        self.args = args
+
+    def run(self):
+        """
+        Run the command.
+        """
+
+        # verify the sssd ssh helper is available
+        if not os.path.exists("/bin/sss_ssh_authorizedkeys"):
+            print("can't locate sssd ssh helper!", file=sys.stderr)
+            sys.exit(1)
+
+        # determine the users we need to retrieve keys for
+        users = set([self.args.user])
+        if self.args.include_group:
+            try:
+                # retrieve the user's passwd entry
+                user_passwd = pwd.getpwnam(self.args.user)
+
+            except KeyError as e:
+                print(
+                    "failed to retrieve user passwd entry: {0}".format(e),
+                    file=sys.stderr)
+
+                sys.exit(1)
+
+            try:
+                # retrieve the user's primary group
+                user_group = grp.getgrgid(user_passwd[3])
+
+            except KeyError as e:
+                print(
+                    "failed to retrieve user's primary group: {0}".format(e),
+                    file=sys.stderr)
+
+                sys.exit(1)
+
+            # update the list of users
+            users.update(user_group[3])
+
+        # retrieve user keys
+        for user in users:
+            try:
+                # call the SSSD SSH helper script
+                subprocess.check_call(["/bin/sss_ssh_authorizedkeys", user])
+
+            except subprocess.CalledProcessError:
+                # handle a non-zero exit code
+                print(
+                    "failed to retrieve keys for user {0}".format(user),
+                    file=sys.stderr)
+
+                sys.exit(1)

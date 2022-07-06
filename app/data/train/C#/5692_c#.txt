@@ -1,0 +1,174 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using SFML.Graphics;
+using SFML.Window;
+using FarseerPhysics;
+
+namespace BridgeFart
+{
+	// this class handles the user-side creation of parts
+	public class PartCreator : Component
+	{
+		public bool CreatingPart
+		{
+			get
+			{
+				return creatingPart;
+			}
+		}
+
+		Grid grid;
+		Physics physics;
+
+		bool creatingPart = false;
+		PartType partType;
+
+		// link creation
+		Vector2f linkStart;
+		Vector2f linkEnd;
+
+		int groundLevel = 32;
+
+		public PartCreator(Game game)
+			: base(game)
+		{
+
+		}
+
+		public override void Init()
+		{
+			grid = game.GetComponent<Grid>();
+			physics = game.GetComponent<Physics>();
+
+			base.Init();
+		}
+
+		public override void Update(float frametime)
+		{
+			if (creatingPart)
+				switch (partType)
+				{
+					default:
+					case PartType.None:
+						break;
+
+					case PartType.Link:
+						linkEnd = grid.GetGridPointClosestTo(Mouse.GetPosition(game.Window).ToVector2f()).position;
+						break;
+				}
+
+			base.Update(frametime);
+		}
+
+		public override void Draw(SFML.Graphics.RenderTarget target, SFML.Graphics.RenderStates states)
+		{
+			if (creatingPart)
+				switch (partType)
+				{
+					default:
+					case PartType.None:
+						break;
+
+					case PartType.Link:
+						Vertex[] line = new Vertex[2]
+						{
+							new Vertex(linkStart, Color.Red),
+							new Vertex(linkEnd, Color.Red)
+						};
+						target.Draw(line, PrimitiveType.Lines, states);
+						break;
+				}
+
+			base.Draw(target, states);
+		}
+
+		public bool Begin(PartType type, Vector2f pos)
+		{
+			if (creatingPart)
+				return false;
+
+			creatingPart = true;
+			partType = type;
+
+			switch (type)
+			{
+				default:
+				case PartType.None:
+					break;
+
+				case PartType.Vehicle:
+					physics.CreateVehicle(pos);
+					break;
+
+				case PartType.Link:
+					linkStart = pos;
+					break;
+
+				case PartType.DynamicNode:
+					physics.CreateDynamicNode(pos);
+					FinalizeCreation();
+					break;
+
+				case PartType.StaticNode:
+					physics.CreateStaticNode(pos);
+					FinalizeCreation();
+					break;
+			}
+
+			return true;
+		}
+
+		public void CancelCreation()
+		{
+			creatingPart = false;
+			partType = PartType.None;
+		}
+
+		public void FinalizeCreation()
+		{
+			switch (partType)
+			{
+				default:
+				case PartType.None:
+					break;
+
+				case PartType.Link:
+					Console.WriteLine("{0}, {1}", linkStart, linkEnd);
+					Link link = physics.CreateLink(linkStart, linkEnd, ConvertUnits.ToSimUnits(linkStart.Y) >= groundLevel && ConvertUnits.ToSimUnits(linkEnd.Y) >= groundLevel);
+					Node startNode = physics.GetPartAt<Node>(linkStart);
+					Node endNode = physics.GetPartAt<Node>(linkEnd);
+
+					if (startNode != null)
+						startNode.AttachTo(link.body);
+					else
+					{
+						Node node = physics.CreateDynamicNode(linkStart);
+						node.AttachTo(link.body);
+					}
+
+					if (endNode != null)
+						endNode.AttachTo(link.body);
+					else
+					{
+						Node node = physics.CreateDynamicNode(linkEnd);
+						node.AttachTo(link.body);
+					}
+
+					break;
+			}
+
+			creatingPart = false;
+			partType = PartType.None;
+		}
+
+		public void RemoveAt(Vector2f pos)
+		{
+			Part part = physics.GetPartAt<Part>(pos);
+			if (part != null)
+				part.Dispose();
+		}
+	}
+}

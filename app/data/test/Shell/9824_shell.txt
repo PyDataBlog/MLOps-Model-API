@@ -1,0 +1,1 @@
+./node_modules/mocha/bin/mocha ./spec/indoArabicoRomano.spec.js -r ./js/indoArabicoRomano.js

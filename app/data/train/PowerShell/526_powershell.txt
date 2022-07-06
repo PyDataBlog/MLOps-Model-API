@@ -1,0 +1,55 @@
+﻿# ################################################################
+<#
+ Script      : BITSAsyncProgress.ps1
+ Description : Displayes the progress of an Async download - must
+               pass either the BITS Job object or the Display Name
+               of the BITS Job.
+ Author      : cblanken@microsoft.com
+ Date        : 3/18/2014
+ Version     : V 1.0
+ ----------------------------------------------------------------
+ Keywords    : BITS Async Progress
+#>
+# ###############################################################
+[CmdletBinding()]
+param(
+    [parameter(Mandatory=$True,ValueFromPipeline=$True,position=0,HelpMessage='Provide the BITS Job Object or Display Name')]
+    [object]$job
+    )
+
+$Error.Clear()
+Set-StrictMode –Version Latest
+
+switch ($job.GetType().Name)
+{
+    'BitsJob' { $BitsJob = $job }
+    'String'  { $BitsJob = Get-BitsTransfer -Name $job -ErrorAction SilentlyContinue }
+    Default   { Write-Warning "Invalid input passed to script" ; exit }
+}
+
+if ($null -eq $BitsJob) {
+    Write-Warning "No matching BITS Job found"
+    Exit
+}
+
+DO {
+    
+    # Currently can't get the file info from PowerShell - must use BitsAdmin for now... 
+    #if($BitsJob.JobState -eq "Transferring") {
+    #    $jobStatus = "$($BitsJob.JobState) : $($BitsJob.BytesTransferred) of $($BitsJob.BytesTotal)"
+    #} else {
+    #    $jobStatus = $BitsJob.JobState
+    #}
+
+    $jobStatus = bitsadmin /rawreturn /listfiles "{$($BitsJob.JobId.Guid.ToString())}"
+    
+    Write-Progress -Activity "Job ID: $($BitsJob.JobId.Guid.ToString()) - $($BitsJob.JobState)" -status $jobStatus -PercentComplete ($BitsJob.BytesTransferred / $BitsJob.BytesTotal*100)
+    sleep 1
+
+} Until ($BitsJob.JobState -eq "Transferred")
+
+if ($BitsJob.JobState -eq "Transferred") {
+    Complete-BitsTransfer -BitsJob $BitsJob
+
+    Write-Host -ForegroundColor Green "JobID: $($BitsJob.JobId.Guid.ToString()) Completed"
+} 

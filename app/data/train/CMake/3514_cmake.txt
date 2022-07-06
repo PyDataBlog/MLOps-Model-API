@@ -1,0 +1,5 @@
+if (NOT PYTHON_SUFFIX)
+    message(STATUS "Using default python: -python2.7")
+    SET(PYTHON_SUFFIX -python2.7)
+endif()
+include(/Users/byron/Documents/dev/bdep-oss/pyside-setup-tmp/pyside_install/py2.7-qt4.8.6-64bit-release/lib/cmake/Shiboken-1.2.2/ShibokenConfig${PYTHON_SUFFIX}.cmake)

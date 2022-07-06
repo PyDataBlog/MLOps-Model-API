@@ -1,0 +1,136 @@
+org 0x7c00
+bits 16
+
+jmp main
+
+DiskDef:
+DiskDef_drive_number					 db 0
+DiskDef_file_sys_def_LBA				 db 5
+DiskDef_drive_name db "BLACK FOX TEST",	 0
+
+
+PartitionDef:
+PartitionDef_part1						 db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+PartitionDef_part2						 db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+PartitionDef_part3						 db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+PartitionDef_part4						 db 0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0
+
+
+ErrorMsg:
+ErrorMsg_disk_read						 db "Error reading the disk.", 0
+ErrorMsg_disk_reset						 db "Error resetting the disk.", 0
+ErrorMsg_file_sys_error					 db "Disk does not contain file system.", 0
+ErrorMsg_complete						 db "Boot loader works!", 0
+
+
+stage1Loaded db "Stage1 has been loaded.", 0
+readingDisk db "Reading Disk.", 0
+callingStage2 db "Calling stage 2.", 0
+readError db "Could not read disk.", 0
+
+;no_ret void halt_sys()
+halt_sys:
+	cli
+	hlt
+
+
+;Reads from the disk
+;DL is the code for the disk.
+;AL is the number of sectors to read.
+;CH is the track.
+;CL is the sector to start with.
+;DH is the head number (zero-based).
+;return buffer is passed as ES:BX.
+ReadDisk:
+	mov	ah, 0x02	;set disk read operation
+	int	0x13		;call disk operation
+	jc	ReadDiskError	;read failed, retrying
+	cmp al, 0
+	je ReadDiskError
+	ret				;read succeeded, return to calling function.
+ReadDiskError:
+	pusha
+	mov si, readError
+	call Print
+	popa
+	jmp ReadDisk
+
+
+
+ResetDisk:
+;;	cmp	bx, 2			;compares the value of bx and 2, and essentialy returns bx == 2
+						;this is used to limit the number of attempts to reset the disk,
+						;and therefore prevent the program from an infinite loop, and to
+						;allow and error to be displayed.  
+;;	je ResetDiskFailed	;jumps to ResetDiskFailed if the previous comparison returned true
+	mov	ah, 0			;set disk operation to reset
+;;	add bx, 1			;add 1 to bx
+	int	0x13			;call the disk operation interupt
+	jc	ResetDisk		;reset failed, retry function.
+	ret					;reset succeeded, return to calling function.
+;;ResetDiskFailed:
+;;	mov	si, diskResetError	;sets the error message.
+;;	call PrintError			;prints the error message.
+
+
+
+Print:
+	lodsb				;gets next byte from string pointed to by SI, and places it in AL
+	or	al, al			;does AL == 0
+	jz	PrintDone		;yes, null character found, print done.
+	mov	ah, 0eh			;no,  print the character.
+	int	10h				;call interupt to print character
+	jmp	Print			;loop.
+PrintDone:
+	ret
+
+
+
+
+
+;no_ret void main(){
+main:
+	;mov ax, 0x7c00						;sets ax to 0
+	;mov	ds, ax						;sets the data segment register to 0
+	;;mov	es, ax						;sets the extra segment register to 0
+	;mov ss, ax
+	;mov cs, ax
+
+	mov byte [DiskDef_drive_number], dl
+
+	mov si, stage1Loaded
+	call Print
+
+	mov	dl, byte [DiskDef_drive_number]				;set drive
+	xor	bx, bx						;clear bx
+	call ResetDisk
+
+	mov si, readingDisk
+	call Print
+
+	mov	ax, 0x0					;places the read buffer address in ax.
+	mov	es, ax						;mov buffer address to es.
+									;AX was needed, as es can not be assigned to directly.
+	mov bx, 0x1000
+	mov	al, 1	;set number of sectors to read
+	mov	ch,	0						;set the track
+	mov	cl,	2						;set the sector
+	mov	dh, 0						;set head
+	mov	dl, byte [DiskDef_drive_number]	;set drive, just to be safe
+	call ReadDisk
+
+	mov si, callingStage2
+	call Print
+
+	jmp 0x1000		;jump to the first instruction that was read into the buffer.
+
+	;;cli					;Disables interupts.
+	;;hlt
+
+	;DO SOMETHING
+
+
+
+
+times 510 - ($-$$) db 0
+dw 0xAA55

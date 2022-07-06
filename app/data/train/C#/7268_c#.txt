@@ -1,0 +1,127 @@
+﻿using Castle.Core.Logging;
+using Bivi.Infrastructure.Services.Depots;
+using Bivi.Infrastructure.Services.Encryption;
+using Bivi.BackOffice.Web.Controllers.Modularity;
+using Bivi.BackOffice.Web.ViewModels.ModelBuilders.Administration.Profil;
+using Bivi.BackOffice.Web.ViewModels.ModelBuilders.Common;
+using System.Web.Mvc;
+using Bivi.Infrastructure.Constant;
+using Bivi.BackOffice.Web.Controllers.Helpers;
+using Bivi.Infrastructure.Extensions;
+using Bivi.BackOffice.Web.Controllers.Filters;
+using Bivi.BackOffice.Web.ViewModels.Pages.Administration.Profil.Details;
+using Bivi.Domaine.Composite;
+using Bivi.BackOffice.Web.Controllers.ActionResults;
+using System.Net;
+using Bivi.BackOffice.Web.ViewModels.Pages;
+using System.Collections.Generic;
+using System.Transactions;
+using Bivi.Infrastructure.Attributes.Modularity;
+using Bivi.Domaine.Criterias;
+using Bivi.Infrastructure.Services.Caching;
+using Bivi.Infrastructure.Services.Exports;
+using Bivi.BackOffice.Web.ViewModels.Pages.Common;
+
+namespace Bivi.BackOffice.Web.Controllers.Administration
+{
+    public class ProfilController : ModularController
+    {
+        private readonly IProfilModelBuilder _profilModelBuilder;
+
+        public ProfilController(
+            ILogger logger,
+            ICryptography encryption,
+            IDepotFactory depotFactory,
+            IProfilModelBuilder profilModelBuilder,
+            ICommonModelBuilder commonModelBuilder,
+            ICaching cachingService,
+            IExcelExport exportService)
+            : base(logger, encryption, depotFactory, commonModelBuilder, cachingService, exportService)
+        {
+            _profilModelBuilder = profilModelBuilder;
+            Page = PageEnum.Profil;
+        }
+
+        public ActionResult Index()
+        {
+            return ProcessPage();
+        }
+
+        [HttpGet]
+        public ActionResult Recherche()
+        {
+            BuildActionContext(VueEnum.ProfilSearch);
+
+            var vm = _commonModelBuilder.BuildPartialViewModel(Context, null);
+
+            return View(vm);
+        }
+
+        [HttpPost]
+        public ActionResult Recherche(SearchProfilCriterias criterias)
+        {
+            var res = _depotFactory.ProfilDepot.Search(criterias.Code, criterias.Description);
+
+            var model = new RechercheResultViewModel
+            {
+                Results = res
+            };
+
+            if (criterias.ExportExcel)
+            {
+                model.ExportUrl = CreateExportFile(res, "ExportRechercheDemande.xls", FileDownloadTypes.ExportRecherche);
+            }
+
+            return new JsonHttpStatusResult(model);
+        }
+
+
+        public ActionResult Details(long id, long? vueID)
+        {
+            var vm = _commonModelBuilder.BuildDetailsViewModel(Context, (long)ActionModeAffichageEnum.Consultation, (long)GroupeVueEnum.ProfilDetails, id, vueID);
+
+            foreach (var item in vm.GroupeVue.Vues)
+            {
+                item.Url = RoutesHelper.GetUrl(item.CodeRoute, new { id = id, utilisateurID = Context.User.ID, vueID = item.ID, type = Constants.GetStringValue(GroupeVueTraductibleEnum.Profil) });
+            }
+
+            return View("~/Views/Common/Details.cshtml", vm);
+        }
+
+
+        public ActionResult InformationsGenerales(long id)
+        {
+            BuildActionContext(VueEnum.ProfilInformationsGenerales, id );
+
+            var vm = _profilModelBuilder.BuildInfosGeneralesViewModel(Context, id);
+
+            return View(vm);
+        }
+
+        public ActionResult Create()
+        {
+            var vm = _commonModelBuilder.BuildDetailsViewModel(Context, (long)ActionModeAffichageEnum.Creation, (long)GroupeVueEnum.ProfilDetails, 0, null);
+
+            foreach (var item in vm.GroupeVue.Vues)
+            {
+                item.Url = RoutesHelper.GetUrl(item.CodeRoute, new { id = 0 });
+            }
+
+            return View("~/Views/Common/Details.cshtml", vm);
+
+        }
+
+        [HttpPost]
+        [ValidateModelState]
+        public ActionResult SaveInfosGenerales(InfosGeneralesViewModel model)
+        {
+            BuildActionContext(VueEnum.ProfilInformationsGenerales, model.Profil.ID, model.Profil.ID > 0 ? (long)TypeActionEnum.Save : (long)TypeActionEnum.Add, model.TimeStamp);
+
+            var profilComposite = AutoMapper.Mapper.Map<InfosGeneralesViewModel, GetProfilsByIdComposite>(model);
+
+            var profil = Save(() => _depotFactory.ProfilDepot.SaveProfilInfosGenerales(profilComposite));
+
+            return new JsonHttpStatusResult((int)HttpStatusCode.OK, new { id = profil.ID });
+        }
+    }
+}

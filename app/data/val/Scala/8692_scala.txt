@@ -1,0 +1,190 @@
+/*
+ * This file is part of Butterfingers.
+ *
+ * Butterfingers is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Butterfingers is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Butterfingers. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+package com.github.pelepmc.butterfingers
+
+import net.minecraft.entity.EntityLivingBase
+import net.minecraft.entity.item.EntityItem
+import net.minecraft.entity.player.EntityPlayer
+import net.minecraft.init.SoundEvents
+import net.minecraft.item.ItemStack
+import net.minecraft.util.math.MathHelper
+import net.minecraft.util.{EnumFacing, SoundCategory}
+import net.minecraftforge.common.MinecraftForge
+import net.minecraftforge.common.config.{Configuration => ForgeConfiguration}
+import net.minecraftforge.event.entity.living.LivingHurtEvent
+import net.minecraftforge.fml.client.event.ConfigChangedEvent.OnConfigChangedEvent
+import net.minecraftforge.fml.common.Mod
+import net.minecraftforge.fml.common.Mod.EventHandler
+import net.minecraftforge.fml.common.event.{FMLInitializationEvent, FMLPreInitializationEvent, FMLServerStartingEvent}
+import net.minecraftforge.fml.common.eventhandler.{EventPriority, SubscribeEvent}
+import net.minecraftforge.fml.relauncher.{Side, SideOnly}
+import net.minecraftforge.items.CapabilityItemHandler.ITEM_HANDLER_CAPABILITY
+import net.minecraftforge.items.IItemHandler
+
+import scala.collection.mutable.ListBuffer
+import scala.util.Random
+
+@Mod(
+  modLanguage = "scala",
+  name = ModName,
+  modid = ModId,
+  version = ModVersion,
+  acceptedMinecraftVersions = ModMcVersion,
+  acceptableRemoteVersions = "*",
+  dependencies = ModDependencies,
+  guiFactory = "com.github.pelepmc.butterfingers.GuiFactory")
+object Butterfingers {
+  private val rng = new Random
+
+  private var forgeConfig: ForgeConfiguration = _
+  private var config     : Configuration      = _
+
+  @EventHandler
+  def preInit(event: FMLPreInitializationEvent): Unit = {
+    log = event.getModLog
+    log.info("Loading config file")
+    forgeConfig = new ForgeConfiguration(event.getSuggestedConfigurationFile)
+    forgeConfig.load()
+    config = Configuration.from(forgeConfig)
+    if (forgeConfig.hasChanged)
+      forgeConfig.save()
+  }
+
+  @SideOnly(Side.CLIENT)
+  @SubscribeEvent
+  def syncConfig(event: OnConfigChangedEvent): Unit =
+    if (event.getConfigID == ModConfigId) {
+      log.info("Syncing config")
+      config = Configuration.from(forgeConfig)
+      if (forgeConfig.hasChanged)
+        forgeConfig.save()
+    }
+
+  @EventHandler
+  def init(event: FMLInitializationEvent): Unit = {
+    log.info("Registering event listeners")
+    MinecraftForge.EVENT_BUS.register(this)
+  }
+
+  @EventHandler
+  def serverStarting(event: FMLServerStartingEvent): Unit = {
+    log.info("Registering butterfingers command")
+    event.registerServerCommand(ConfigurationCommand)
+  }
+
+  @SubscribeEvent(priority = EventPriority.LOWEST)
+  def tryDropItem(event: LivingHurtEvent): Unit =
+    if (!event.isCanceled && !event.getEntity.worldObj.isRemote) {
+      val source = event.getEntityLiving
+      for { //@format:off
+        amount    <- getDropAmount(source)
+        inventory <- getInventory(source)
+        slot      <- getOccupiedSlot(inventory)
+        item      <- extractItem(amount, slot, inventory)
+        entity    <- createItemEntity(item, source)
+      } spawn(entity, source) //@format:on
+    }
+
+  private def getDropAmount(entity: EntityLivingBase) = {
+    var chance = config.mobDropChance
+    var random = config.mobDropRandomAmount
+    var min = config.mobMinDropAmount
+    var max = config.mobMaxDropAmount
+
+    if (entity.isInstanceOf[EntityPlayer]) {
+      chance = config.playerDropChance
+      random = config.playerDropRandomAmount
+      min = config.playerMinDropAmount
+      max = config.playerMaxDropAmount
+    }
+
+    if (rng.nextDouble() >= chance)
+      None
+    else if (!random)
+      Some(64) // TODO handle mod items with larger sizes
+    else if (min == max)
+      Some(min)
+    else
+      Some(min + rng.nextInt(max - min + 1))
+  }
+
+  private def getInventory(entity: EntityLivingBase) = {
+    val armorChance =
+      if (entity.isInstanceOf[EntityPlayer])
+        config.playerDropArmorChance
+      else config.mobDropArmorChance
+    val inventory =
+      if (rng.nextDouble() < armorChance)
+        entity getCapability(ITEM_HANDLER_CAPABILITY, EnumFacing.NORTH) // armor
+      else entity getCapability(ITEM_HANDLER_CAPABILITY, EnumFacing.UP) // main
+
+    if (inventory ne null)
+      Some(inventory)
+    else None
+  }
+
+  private def getOccupiedSlot(inventory: IItemHandler) = {
+    val slots = ListBuffer.empty[Int]
+    for (slot <- 0 until inventory.getSlots)
+      if ((inventory getStackInSlot slot) ne null)
+        slots += slot
+
+    if (slots.nonEmpty)
+      Some(slots.toList(rng.nextInt(slots.length)))
+    else None
+  }
+
+  private def extractItem(amount: Int, slot: Int, inventory: IItemHandler) = {
+    val stack = inventory.extractItem(slot, amount, false)
+    if ((stack ne null) && stack.stackSize > 0)
+      Some(stack)
+    else None
+  }
+
+  private def createItemEntity(item: ItemStack, source: EntityLivingBase) = {
+    var y = source.posY + source.getEyeHeight - 0.3d
+    if (y < source.posY)
+      y = source.posY
+    val entity = new EntityItem(source.worldObj, source.posX, y, source.posZ, item)
+    val speed = rng.nextFloat() * 0.25f
+    val angle = rng.nextFloat() * Math.PI.toFloat * 2.0f
+    entity.setPickupDelay(40)
+    entity.motionX = speed * (MathHelper cos angle)
+    entity.motionY = 0.1d * rng.nextFloat()
+    entity.motionZ = speed * (MathHelper sin angle)
+    Some(entity)
+  }
+
+  private def spawn(item: EntityItem, source: EntityLivingBase): Unit =
+    if (source.captureDrops) {
+      source.capturedDrops.add(item)
+    } else {
+      source.worldObj.spawnEntityInWorld(item)
+      source.worldObj.playSound(
+        null,
+        source.posX,
+        source.posY + source.getEyeHeight,
+        source.posZ,
+        SoundEvents.ENTITY_HORSE_ARMOR,
+        SoundCategory.PLAYERS,
+        0.3f + (0.2f * rng.nextFloat()),
+        1.4f + (0.5f * rng.nextFloat()))
+    }
+
+  private[butterfingers] def getForgeConfig = forgeConfig
+}

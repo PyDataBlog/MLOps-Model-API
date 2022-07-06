@@ -1,0 +1,124 @@
+---
+layout: post
+title: "Class Based Views"
+date: 2013-05-13 07:04
+tags: [python, django, yakindanegitim]
+icons: [python]
+---
+
+Web development is a bit repetitive and web frameworks try to reduce this burden. One of the best features of Django for making object manipulation easier is class based views(CBV). We are usually good to go by only setting model in class based views and in the background, it handles all form processing. 
+
+There is also function based views(FBV) which have the same power and some more. I think, difference between them can be best explained by the analogy of C vs Python. Python is compact and writing Python is more fun. That's why it enables to do lots of work in a few lines. On the other hand, C is verbose and fast since there is no boilerplate and you directly do what you want but whenever you go off the standard lines and need some more control, you have to use C. 
+
+Even if CBVs get attention recently, FBVs aren't deprecated. Python gets traction but C is always [there](http://www.tiobe.com/content/paperinfo/tpci/index.html) so which one should we use?
+
+CBVs enables to write more compact code as a result of more enjoyable reading, that is quite important for maintenance. Moreover, CBVs are better to write tests for. Therefore, we should stick to them when possible. 
+
+Mainly, CBVs have two disadvantages; namely, a very steep learning curve and the difficulty of handling multiple forms. 
+
+1- How is context data created? How is object retrieved? How is form validated? In FBVs, most of the time, we write these logic ourselves explicitly but in CBVs, we should aware of how and when our methods are called. Getting used to it takes some time but later, I think, CBV makes us more productive.
+
+2- Even if inline formsets makes possible multi model form handling in CBVs, it is hard. It seems this is the only reason to use FBVs.
+
+Now, I would like to show inline formset usage via CBVs with an example(adding album with songs):
+
+Our models:
+
+``` python
+# models.py
+from django.db import models
+
+class Album(models.Model):
+    name = models.CharField(max_length=255)
+
+class Song(models.Model):
+    name = models.CharField(max_length=255)
+    lyrics = models.TextField(blank=True, null=True)
+    album = models.ForeignKey(Album)
+
+```
+Our forms:
+
+``` python
+# forms.py
+from django.forms import ModelForm
+from django.forms.models import inlineformset_factory
+
+from .models import Album, Song
+
+class AlbumForm(ModelForm):
+    class Meta:
+        model = Album
+
+AlbumSongFormSet = inlineformset_factory(Album, Song, form=AlbumForm, extra=3)
+```
+
+Our create view:
+
+``` python
+# views.py
+from django.core.urlresolvers import reverse
+from django.http import HttpResponseRedirect
+from django.shortcuts import get_object_or_404
+from django.views.generic import CreateView
+from django.utils.text import slugify
+from django.utils.translation import ugettext as _
+
+from braces.views import LoginRequiredMixin
+
+from core.mixins import ActionMixin
+from .models import Album, Song
+from .forms import AlbumForm
+
+class AlbumCreateView(LoginRequiredMixin, ActionMixin, CreateView):
+    model = Album
+    form_class = AlbumForm
+    template_name = 'music/album_add.html'
+    action = _("Album is successfully added")  # ActionMixin is written in an earlier post 
+
+    def form_valid(self, form):
+        context = self.get_context_data()
+        albumsong_form = context['albumsong_formset']
+        if albumsong_form.is_valid():
+            self.object = form.save(commit=False)  # to set extra attributes that doesn't come from form
+            self.object.artist = Artist.objects.get(profile__username__exact=self.kwargs.get("username"))
+            self.object.slug = slugify(self.object.name)
+            self.object.save()
+            for song_form in albumsong_form:
+                song = song_form.save(commit=False)
+                song.slug = slugify(song.name)
+                song.album = self.object
+                song.save()
+            return HttpResponseRedirect(self.get_success_url())
+        else:
+            return self.render_to_response(self.get_context_data(form=form))
+
+    def form_invalid(self, form):
+        return self.render_to_response(self.get_context_data(form=form))
+
+    def get_context_data(self, **kwargs):
+        context = super(AlbumCreateView, self).get_context_data(**kwargs)
+        if self.request.POST:
+            context['albumsong_formset'] = AlbumSongFormSet(self.request.POST)
+        else:
+            context['albumsong_formset'] = AlbumSongFormSet()
+        return context
+
+    def get_success_url(self):
+        return reverse('artist_detail', kwargs=self.kwargs)
+```
+
+And finally, our urlconf:
+``` python
+# urls.py
+from django.conf.urls import patterns, url
+
+from .views import *
+
+
+urlpatterns = patterns('',
+    url(r'^(?P<username>[-_\.\w]+)/add/$',
+        AlbumCreateView.as_view(), name="album_add"),
+)
+```
+That's it!

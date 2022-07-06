@@ -1,0 +1,122 @@
+#!/usr/bin/perl
+#[SUMMARY] Flashcard program.  Used to train yourself for vocab retention, possibly other uses (e.g. general question and answer format).
+# Read through an input file (key - value), shuffle the keys randomly, and prompt the user for an answer.
+# If the answer doesn't match (case insensitive), retry (optional), or move on to the next key.
+# Track all failed keys.  Give a summary at the end of all failed keys.
+# We use an error file to track our failures over time.  The format of the error file is:
+#  <key> <tab> <semi-colon separated list of dates and times>
+#  This way we can see what we're having most trouble with.
+# [OUTLINE][step]
+# 1. Open files. Loop through input file and build hash.
+# 2. Shuffle hash, and prompt user for values.
+# 3. Summarize results.
+#
+# [todo]
+# 1. Dynamically parse the format to make this function general.  Use a hash to map the characters in the format string to the localtime array.  'Y' maps to index 5, 'M' to index 4, 'D' to 3, 'H' to 2, 'MI' to 1, and 'S' to 0.
+#   You cretae the sformat string by replacing these references in the format string with their sprintf equivalents (e.g. YYYY => %04d) and simultaneously push the appropriate localtime index onto an array.
+#   This way you can pass a format of "YYYYMMDD", "MMYYYY", "DD-MM-YYYY HH:MI", etc., and the function could parse them correctly, without hardcoding in kludgy pattern matches as you currently do.
+# [FUZZY MATCH] Would be useful here - the answer we give could be fuzzy matched against the correct answer.
+#  It fails if it falls below some threshold value (e.g. 90% match).  We could also track the fuzzy match percentage in the error file metadata, which could help sorting the keys by difficulty.
+use strict;
+use warnings;
+use List::Util qw(shuffle);
+
+my %vocab;
+my $input_file;
+$input_file = shift || die "<usage> $0 <input file> <err_file>*\n\t*- optional. Default is <input_file>.err\n";
+my $err_file = shift || "$input_file.err";
+my $global_lim = 0; # No retries.
+my ($errcnt, $cnt, @errkeys, %errhash, @extra, $err_mdata);
+my $lim = 0;
+my $curtime = format_time(time, "YYYY/MM/DD HH:MI:SS");
+
+# [step].1
+open(IN, "<" , "$input_file") or die "opening $input_file for reading: $!\n";
+
+# Build a hash.
+while (<IN>) {
+  s/\s+$//; # Trim trailing blanks.
+  next unless $_;
+  my ($k,$v) = split /\s*[=-]\s*/, $_, 2;
+  $vocab{$k} = $v;
+}
+close(IN);
+# Build err file.
+if (-s $err_file) {
+  open(ERRFILE, "<", "$err_file") or die "opening $err_file for reading: $!\n";
+  while (<ERRFILE>) {
+    s/\s+$//; 
+    if (/\t/) {
+      my ($err, $mdata) = split /\t/, $_, 2;
+      $errhash{$err} = $mdata;
+    } else {
+      push(@extra, $_);   # This could be comments, or anything.  We print it at the top of the error file.
+    }
+  }
+  close(ERRFILE);
+}
+
+# [step].2
+foreach my $key (shuffle(keys %vocab)) {
+  my $correct_value = $vocab{$key};
+  my $val;
+  my @dates;
+
+  print "$key > ";
+  ($val = <STDIN>) =~ s/\s+$//;
+  if (lc($val) ne lc($correct_value)) {
+    if (++$lim > $global_lim) {
+      print "\t[answer] $correct_value\n";
+      $errcnt++;
+      if ($err_mdata = $errhash{$key}) {
+        @dates = split /\s*;\s*/, $err_mdata;
+      }
+      push(@dates, $curtime);
+      $errhash{$key} = join("; ", @dates);
+      push(@errkeys, $key);
+    } else {
+      print "\t[wrong] try again.\n";
+      redo;
+    }
+  }
+  $cnt++;
+  $lim = 0;
+}
+
+# [step].3
+if (%errhash) {
+  open(ERRFILE, ">", $err_file) or die "opening $err_file for writing: $!\n";
+  print ERRFILE join("\n", @extra);
+  foreach my $key (sort keys %errhash) {
+    print ERRFILE "$key\t$errhash{$key}\n";
+  }
+  close(ERRFILE);
+}
+my $summary =<<EOF;
+
+[SUMMARY]
+$errcnt wrong out of $cnt
+
+Missed keys:
+${\(join("\n", @errkeys))}
+
+See $err_file for more information.
+EOF
+print $summary;
+
+##########
+# [todo].1
+sub format_time {
+  my $epoch_timeval = shift;
+  my $format = shift;
+  my @ltime = localtime($epoch_timeval);
+  my $sformat;
+
+  $ltime[5] += 1900;
+  $ltime[4] += 1;
+  if ($format =~ m|YYYY/MM/DD HH:MI:SS|) {
+    $sformat = "%04d/%02d/%02d %02d:%02d:%02d";
+  }
+
+  return sprintf "$sformat", @ltime[5,4,3,2,1,0];
+}

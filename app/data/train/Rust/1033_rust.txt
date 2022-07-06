@@ -1,0 +1,147 @@
+use system::*;
+
+use span::Span;
+use objectheap::StaticObjectHeap;
+
+// Addressing bits: 48
+// Page bits: 48 - 12 = 36
+// 36 / 3: 12
+
+pub const INDEX_BITS: usize = 12;
+pub const INDEX_SIZE: usize = 1 << INDEX_BITS;
+
+struct SpanMapLevel1 {
+    pml: [usize; INDEX_SIZE],
+}
+
+struct SpanMapLevel2 {
+    pml: [*mut SpanMapLevel1; INDEX_SIZE],
+}
+
+struct SpanMapLevel3 {
+    pml: [*mut SpanMapLevel2; INDEX_SIZE],
+}
+
+pub struct SpanMap {
+    pml3: SpanMapLevel3,
+}
+
+static mut PML2_ALLOCATOR: StaticObjectHeap<SpanMapLevel2> = StaticObjectHeap::new();
+static mut PML1_ALLOCATOR: StaticObjectHeap<SpanMapLevel1> = StaticObjectHeap::new();
+
+#[inline]
+fn indices_from_address(uptr: usize) -> (usize, usize, usize) {
+    let pml1i = (uptr >> PAGE_BITS) & 0xfff;
+    let pml2i = (uptr >> (PAGE_BITS + INDEX_BITS)) & 0xfff;
+    let pml3i = (uptr >> (PAGE_BITS + 2 * INDEX_BITS)) & 0xfff;
+    (pml3i, pml2i, pml1i)
+}
+
+impl SpanMap {
+    pub const fn new() -> SpanMap {
+        SpanMap { pml3: SpanMapLevel3 { pml: [0_usize as *mut SpanMapLevel2; INDEX_SIZE] } }
+    }
+
+    fn ensure(&mut self, ptr: usize, n: usize) {
+        let mut key = ptr;
+        loop {
+            if key > ptr + n {
+                break;
+            }
+            unsafe {
+                let (pml3i, pml2i, _) = indices_from_address(key);
+                if self.pml3.pml[pml3i].is_null() {
+                    self.pml3.pml[pml3i] = PML2_ALLOCATOR.zero_allocate()
+                }
+                let pml2 = self.pml3.pml[pml3i];
+                if (*pml2).pml[pml2i].is_null() {
+                    (*pml2).pml[pml2i] = PML1_ALLOCATOR.zero_allocate()
+                }
+            }
+            key += 1 << INDEX_BITS;
+        }
+    }
+
+    pub fn span(&self, ptr: usize) -> usize {
+        let (pml3i, pml2i, pml1i) = indices_from_address(ptr);
+        unsafe {
+            let l2 = self.pml3.pml[pml3i];
+            if !l2.is_null() {
+                let l1 = (*l2).pml[pml2i];
+                if !l1.is_null() {
+                    return (*l1).pml[pml1i];
+                }
+            }
+            0
+        }
+    }
+
+    pub fn set_span(&mut self, ptr: usize, value: usize) {
+        self.ensure(ptr, 0);
+        let (pml3i, pml2i, pml1i) = indices_from_address(ptr);
+        unsafe {
+            (*(*self.pml3.pml[pml3i]).pml[pml2i]).pml[pml1i] = value;
+        }
+    }
+}
+
+extern crate libc;
+static mut SPANMAP_MUTEX: libc::pthread_mutex_t = libc::PTHREAD_MUTEX_INITIALIZER;
+static mut SPANMAP: SpanMap = SpanMap::new();
+
+pub fn span(ptr: usize) -> *mut Span {
+    unsafe {
+        libc::pthread_mutex_lock(&mut SPANMAP_MUTEX);
+        let r = SPANMAP.span(ptr);
+        libc::pthread_mutex_unlock(&mut SPANMAP_MUTEX);
+        r as *mut Span
+    }
+}
+
+pub fn set_span(ptr: usize, value: *mut Span) {
+
+    unsafe {
+        libc::pthread_mutex_lock(&mut SPANMAP_MUTEX);
+        SPANMAP.set_span(ptr, value as usize);
+        libc::pthread_mutex_unlock(&mut SPANMAP_MUTEX);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn spanmap() {
+        let mut sp = SpanMap::new();
+        for i in 10..20 {
+            for j in 20..30 {
+                let p = (i << INDEX_BITS) + (j << INDEX_BITS << INDEX_BITS);
+                let v = (-(p as isize)) as usize;
+                sp.set_span(p, v);
+            }
+        }
+        for i in 10..20 {
+            for j in 20..30 {
+                let p = (i << INDEX_BITS) + (j << INDEX_BITS << INDEX_BITS);
+                let v = (-(p as isize)) as usize;
+                assert_eq!(sp.span(p), v, "p={}, v={}", p, v);
+            }
+        }
+        for i in 0..10 {
+            for j in 0..20 {
+                let p = (i << INDEX_BITS) + (j << INDEX_BITS << INDEX_BITS);
+                let v = 0;
+                assert_eq!(sp.span(p), v, "p={}, v={}", p, v);
+            }
+        }
+
+        for i in 20..30 {
+            for j in 30..40 {
+                let p = (i << INDEX_BITS) + (j << INDEX_BITS << INDEX_BITS);
+                let v = 0;
+                assert_eq!(sp.span(p), v, "p={}, v={}", p, v);
+            }
+        }
+    }
+}

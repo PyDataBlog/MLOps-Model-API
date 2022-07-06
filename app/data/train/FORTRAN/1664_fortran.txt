@@ -1,0 +1,287 @@
+!----------------------------------------------------------------------------------------------
+! MODULE: CISWFType
+!> @author Marin Sapunar, Ruđer Bošković Institute
+!> @date July, 2017
+!
+! DESCRIPTION:
+!> @brief Data type for holding a set of configuration interaction singles type wave functions.
+!> @details
+!! The module contains the data type with the information about the wave functions and
+!! subroutines for reading and writing the data to a ASCII file.
+!! Also contains a data type for holding a truncated configuration interaction singles type
+!! wave function and for generating the truncation.
+!----------------------------------------------------------------------------------------------
+module ciswftype
+    ! Import variables
+    use constants
+    ! Import classes
+    use stringmod
+    implicit none
+
+    private
+    public :: ciswf
+    public :: cistrunc
+    public :: ciswfread
+    public :: ciswfwrite
+    public :: gencistrunc
+
+    !----------------------------------------------------------------------------------------------
+    ! TYPE: CISWF
+    !
+    ! DESCRIPTION:
+    !> @brief Contains all information about a set of CIS type wave functions.
+    !----------------------------------------------------------------------------------------------
+    type ciswf
+        integer :: n = 0 !< Number of states.
+        integer :: rhf = 0 !< Number of spin functions.
+        integer, allocatable :: no(:) !< Number of occupied orbitals for each spin.
+                                      !! Dimensions: rhf.
+        integer, allocatable :: nv(:) !< Number of virtual orbitals for each spin.
+                                      !! Dimensions: rhf.
+        real(dp), allocatable :: e(:) !< Energy of each wave function.
+                                      !! Dimensions: n.
+        type(rmat), allocatable :: c(:, :) !< Coefficient matrices.
+                                           !! Dimensions: rhf x n.
+    end type ciswf
+
+
+    !----------------------------------------------------------------------------------------------
+    ! TYPE: CISTrunc
+    !
+    ! DESCRIPTION:
+    !> @brief Contains truncated information about a set of CIS type wave functions.
+    !> @details
+    !! The matrix
+    !----------------------------------------------------------------------------------------------
+    type cistrunc
+        integer :: n = 0 !< Number of states.
+        integer :: rhf = 0 !< Number of spin functions.
+        real(dp) :: thr = 0 !< Threshould for including a determinant into the wf expansion.
+        integer, allocatable :: ndet(:, :) !< Number of determinants for each wf.
+                                           !! Dimensions: rhf x n.
+        type(ivec), allocatable :: o(:, :) !< List of indices of occupied orbitals.
+                                        !! Dimensions: rhf x n.
+        type(ivec), allocatable :: v(:, :) !< List of indices of virtual orbitals.
+                                        !! Dimensions: rhf x n.
+        real(dp), allocatable :: e(:) !< Energy of each wave function.
+                                      !! Dimensions: n.
+        type(rvec), allocatable :: c(:, :) !< Coefficient matrices.
+                                           !! Dimensions: rhf x n.
+    end type cistrunc
+
+
+
+contains
+
+
+    !----------------------------------------------------------------------------------------------
+    ! SUBROUTINE: CISWFWrite
+    !
+    ! DESCRIPTION:
+    !> @brief Write a CIS type wave function.
+    !> @details
+    !! Write a CIS type wave function to a file. The format of the file is:
+    !! @verbatim
+    !! First line: Number of states and number of spin functions.
+    !! For each spin:
+    !!     Number of occupied and virtual orbitals of that spin.
+    !! For each state:
+    !!     First line: Energy of the state.
+    !!     For each spin:
+    !!         For each occupied orbital:
+    !!             Excitation coefficients from the occupied orbital to each virtual orbital.
+    !! End of file.
+    !! @endverbatim
+    !----------------------------------------------------------------------------------------------
+    subroutine ciswfwrite(outfile, wf)
+        character(len=*), intent(in) :: outfile !< Output file.
+        type(ciswf), intent(in) :: wf !< Wave function.
+        integer :: outunit !< Unit.
+        integer :: st !< State iterator.
+        integer :: s !< Spin iterator.
+        integer :: o !< Occupied orbital iterator.
+
+        open(newunit=outunit, file=outfile)
+        write(outunit, 1000) wf%n, wf%rhf
+        do s = 1, wf%rhf
+            write(outunit, 1000) wf%no(s), wf%nv(s)
+        end do
+        do st = 1, wf%n
+            write(outunit, 1001) wf%e(st)
+            do s = 1, wf%rhf
+                do o = 1, wf%no(s)
+                    write(outunit, 1001) wf%c(s, st)%c(o, :)
+                end do
+            end do
+        end do
+        close(outunit)
+ 
+        1000 format (2(x,i0))
+        1001 format (10000(x,e23.17))
+    end subroutine ciswfwrite
+
+
+    !----------------------------------------------------------------------------------------------
+    ! SUBROUTINE: CISWFRead
+    !
+    ! DESCRIPTION:
+    !> @brief Read a CIS type wave function.
+    !> @details
+    !! Read a CIS type wave function from a file. See the CISWFWrite subroutine for the format
+    !! of the file.
+    !----------------------------------------------------------------------------------------------
+    subroutine ciswfread(infile, wf)
+        character(len=*), intent(in) :: infile !< Input file.
+        type(ciswf), intent(out) :: wf !< Wave function.
+        integer :: inunit !< Unit.
+        integer :: st !< State iterator.
+        integer :: s !< Spin iterator.
+        integer :: o !< Occupied orbital iterator.
+
+        open(newunit=inunit, file=infile)
+        read(inunit, *) wf%n, wf%rhf
+        if (.not. allocated(wf%e)) allocate(wf%e(wf%n))
+        if (.not. allocated(wf%no)) allocate(wf%no(wf%rhf))
+        if (.not. allocated(wf%nv)) allocate(wf%nv(wf%rhf))
+        if (.not. allocated(wf%c)) allocate(wf%c(wf%rhf, wf%n))
+        do s = 1, wf%rhf
+            read(inunit, *) wf%no(s), wf%nv(s)
+            do st = 1, wf%n
+                if (.not. allocated(wf%c(s, st)%c)) allocate(wf%c(s, st)%c(wf%no(s), wf%nv(s)))
+            end do
+        end do
+        do st = 1, wf%n
+            read(inunit, *) wf%e(st)
+            do s = 1, wf%rhf
+                do o = 1, wf%no(s)
+                    read(inunit, *) wf%c(s, st)%c(o, :) 
+                end do
+            end do
+        end do
+        close(inunit)
+    end subroutine ciswfread
+
+
+    !----------------------------------------------------------------------------------------------
+    ! SUBROUTINE: GenCISTrunc
+    !
+    ! DESCRIPTION:
+    !> @brief Generate a truncated CIS type wave function.
+    !----------------------------------------------------------------------------------------------
+    subroutine gencistrunc(thr, rhf, n, no, nv, wf, trunc)
+        real(dp), intent(in) :: thr !< Threshold for including determinants.
+        integer, intent(in) :: n !< Number of states.
+        integer, intent(in) :: rhf !< Number of spin functions.
+        integer, intent(in) :: no(rhf) !< Number of occupied orbitals per spin.
+        integer, intent(in) :: nv(rhf) !< Number of virtual orbitals per spin.
+        type(rmat) :: wf(rhf, n) !< Coefficient matrices
+        type(cistrunc), intent(out) :: trunc !< Truncated wave functions.
+
+        integer :: s !< Spin iterator.
+        integer :: st !< State iterator.
+        integer :: i !< Coefficient iterator.
+        integer :: tdim !< Maximum number of determinants.
+        type(rmat) :: abswf(rhf) !< Absolute values of wf coefficients.
+        integer :: cs !< Current spin function.
+        real(dp) :: c(rhf) !< Current maximum coefficient for each spin.
+        integer :: p(2, rhf) !< Position of maximum coefficient for each spin.
+        integer, allocatable :: tmpo(:, :) !< Temporary array of occupied orbitals.
+        integer, allocatable :: tmpv(:, :) !< Temporary array of virtual orbitals.
+        real(dp), allocatable :: tmpc(:, :) !< Temporary array of wf coefficients.
+        logical :: smask(rhf) !< Tells when all determinants of a spin are used up.
+        type(lvec) :: cmask(rhf) !< Tells which determinants are already added to the truncated wf.
+        real(dp) :: norm !< Norm of the truncated wf.
+
+
+        trunc%thr = thr
+        ! If subroutine is called for the first time, or if number of wave functions has changed,
+        ! allocate arrays with number of states and number of spin functions.
+        if ((trunc%n /= n) .or. (trunc%rhf /= rhf)) then
+            trunc%n = n
+            trunc%rhf = rhf
+            if (allocated(trunc%ndet)) deallocate(trunc%ndet)
+            if (allocated(trunc%o)) deallocate(trunc%o)
+            if (allocated(trunc%v)) deallocate(trunc%v)
+            if (allocated(trunc%c)) deallocate(trunc%c)
+            allocate(trunc%ndet(rhf, n))
+            allocate(trunc%o(rhf, n))
+            allocate(trunc%v(rhf, n))
+            allocate(trunc%c(rhf, n))
+        end if
+        
+        tdim = dot_product(no, nv) ! Maximum number of determinants of all spins.
+        ! Allocate temporary arrays.
+        allocate(tmpo(tdim, rhf))
+        allocate(tmpv(tdim, rhf))
+        allocate(tmpc(tdim, rhf))
+        do s = 1, rhf
+            allocate(abswf(s)%c(no(s), nv(s)))
+            allocate(cmask(s)%l(no(s), nv(s)))
+        end do
+
+        trunc%ndet = 0
+        do st = 1, n
+            do s = 1, rhf
+                ! Deallocate old lists.
+                if (allocated(trunc%o(s, st)%c)) deallocate(trunc%o(s, st)%c)
+                if (allocated(trunc%v(s, st)%c)) deallocate(trunc%v(s, st)%c)
+                if (allocated(trunc%c(s, st)%c)) deallocate(trunc%c(s, st)%c)
+                abswf(s)%c = abs(wf(s, st)%c)
+                cmask(s)%l = .true.
+                p(:, s) = maxloc(abswf(s)%c) ! Start at maximum coefficient for each spin.
+                c(s) = abswf(s)%c(p(1, s), p(2, s)) 
+            end do
+
+            ! Add determinants to temporary list, from largest contribution to lowest.
+            norm = 0.0_dp ! When norm reaches threshold, the wave function is truncated.
+            cs = 1 ! Start searching from spin cs (doesn't matter).
+            smask = .true.
+            do i = 1, tdim
+                ! Find largest coefficient for previous spin.
+                p(:, cs) = maxloc(abswf(cs)%c, cmask(cs)%l)
+                c(cs) = abswf(cs)%c(p(1, cs), p(2, cs))
+
+                ! Check which spin has maximum coefficient.
+                cs = maxloc(c, 1, smask)
+
+                ! Add determinant of current spin to list.
+                trunc%ndet(cs, st) = trunc%ndet(cs, st) + 1
+                tmpo(trunc%ndet(cs, st), cs) = p(1, cs)
+                tmpv(trunc%ndet(cs, st), cs) = p(2, cs)
+                tmpc(trunc%ndet(cs, st), cs) = wf(cs, st)%c(p(1, cs), p(2, cs))
+                cmask(cs)%l(p(1, cs), p(2, cs)) = .false. ! Skip the determinant in next loop.
+
+                if (trunc%ndet(cs, st) == no(cs) * nv(cs)) then
+                    ! If all determinants from current spin are used up, no longer check the spin.
+                    smask(cs) = .false.
+                    cs = maxloc(c, 1, smask)
+                end if
+
+                ! Check norm.
+                norm = norm + c(cs)**2
+                if (norm >= thr) exit
+            end do
+
+            if (norm < thr) then
+                write(stderr, *) 'Warning in CISWFType, GenCISTrunc subroutine.'
+                write(stderr, *) ' Entire array used without reaching norm threshold.'
+                write(stderr, '(2x,a,i0)') 'State: ', st
+            end if
+
+            ! Allocate truncated list and add determinants to it.
+            do s = 1, rhf
+                if (trunc%ndet(cs, st) > 0) then
+                    allocate(trunc%o(s, st)%c(trunc%ndet(cs, st)))
+                    allocate(trunc%v(s, st)%c(trunc%ndet(cs, st)))
+                    allocate(trunc%c(s, st)%c(trunc%ndet(cs, st)))
+                    trunc%o(s, st)%c = tmpo(1: trunc%ndet(cs, st), s)
+                    trunc%v(s, st)%c = tmpv(1: trunc%ndet(cs, st), s)
+                    trunc%c(s, st)%c = tmpc(1: trunc%ndet(cs, st), s)
+                end if
+            end do
+        end do
+        
+    end subroutine gencistrunc
+
+    
+end module ciswftype

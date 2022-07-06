@@ -1,0 +1,81 @@
+﻿using ArragroCMS.BusinessLayer.Data.Entities;
+using ArragroCMS.BusinessLayer.Domains;
+using ArragroCMS.BusinessLayer.Helpers;
+using ArragroCMS.BusinessLayer.Interfaces.CacheDomains;
+using ArragroCMS.Core.DataTransformationObjects;
+using ArragroCMS.Core.Web.DataTransformationObjects;
+using AutoMapper;
+using Microsoft.AspNetCore.Authorization;
+using Microsoft.AspNetCore.Mvc;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Net;
+using System.Threading.Tasks;
+
+namespace ArragroCMS.Web.Management.ApiControllers
+{
+    [Authorize("ContentAuthors")]
+    [Route("api/[controller]")]
+    public class AssetController : BaseController
+    {
+        private readonly AssetCdnHelper _assetCdnHelper;
+        private readonly ICacheAssets _assets;
+
+        public AssetController(
+            ICacheAssets assets,
+            AssetCdnHelper assetCdnHelper)
+        {
+            _assets = assets;
+            _assetCdnHelper = assetCdnHelper;
+        }
+
+        [HttpGet("{contentUrlRouteId}")]
+        public async Task<IActionResult> Get(Guid contentUrlRouteId)
+        {
+            return Ok(await _assets.GetAllWithUrlRouteAsync(contentUrlRouteId).ConfigureAwait(continueOnCapturedContext: true));
+        }
+
+        [HttpPost]
+        public async Task<IActionResult> UploadFilesAjaxAsync()
+        {
+            Guid contentUrlRouteId = Guid.Empty;
+
+            if (!Guid.TryParse(Request.Headers["X-ContentUrlRouteId"], out contentUrlRouteId))
+            {
+                throw new ErrorDtoException((int)HttpStatusCode.NotAcceptable, "Please save the current Content before uploading Assets.  Save and try again.");
+            }
+
+            var newAssetDto = new NewAssetDto
+            {
+                ContentUrlRouteId = contentUrlRouteId,
+                FileName = Request.Headers["X-FileName"]
+            };
+            
+            using (var ms = new MemoryStream())
+            {
+                Request.Body.CopyTo(ms);
+                var data = ms.ToArray();
+
+                if (data.Length == 0)
+                {
+                    throw new ErrorDtoException((int)HttpStatusCode.NotAcceptable, $"{newAssetDto.FileName} is an empty file which isn't allowed.");
+                }
+
+                return Ok(await _assets.AddAssetAsync(newAssetDto, data, GetCurrentUserId()));
+            }
+        }
+
+        [HttpPut]
+        public async Task<AssetDto> UpdateAssetAsync([FromBody] EditAssetDto editAssetDto)
+        {
+            return await _assets.UpdateAssetAsync(editAssetDto, GetCurrentUserId());
+        }
+
+        [HttpDelete]
+        public async Task<IActionResult> DeleteAssetAsync([FromBody] AssetDto assetDto)
+        {            
+            return Ok(await _assets.DeleteAssetAsync(assetDto));
+        }
+    }
+}

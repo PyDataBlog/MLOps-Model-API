@@ -1,0 +1,402 @@
+#include "zjson.h"
+
+#define    Start                0x1<<1
+#define    ObjectInitial        0x1<<2
+#define    MemberKey            0x1<<3
+#define    KeyValueDelimiter    0x1<<4
+#define    MemberValue          0x1<<5
+#define    MemberDelimiter      0x1<<6
+#define    ObjectFinish         0x1<<7
+#define    ArrayInitial         0x1<<8
+#define    Element              0x1<<9
+#define    ElementDelimiter     0x1<<10
+#define    ArrayFinish          0x1<<11
+#define    Finish               0x1<<12
+
+/*
+ * Log macro
+ * What we can catch:
+ * - JSON string
+ * - current state
+ * - current character
+ * - current token start and end positions
+ * - current line number and column number
+ */
+#define ERR(e) do{\
+	put_err_token(); \
+	printf("Unexpected char: '%c'\n" \
+			"\tstatus [%s] \n" \
+			"\tfunction %s:%d\n" \
+			"\ttoken position:(%d,%d)\n", \
+			*(e),StateStrings[_log2(state)-1],__FUNCTION__,__LINE__,line,column);\
+	exit(EXIT_FAILURE);\
+}while(0)
+
+#define match(s, st) (s)&(st)
+#define SET_TOKEN_START(ptr) token_start = (ptr)
+#define SET_TOKEN_END(ptr) token_end = (ptr)
+#define PEEK(ptr) (*(ptr))
+#define EAT(ptr) do{SET_TOKEN_START(ptr);(ptr)++;column++;}while(0);
+
+typedef int State;
+typedef struct stack {
+	jval *head;
+	struct stack *next;
+} stack;
+
+static inline int is_xdigit(jchar ch); 
+static inline int is_digit(jchar ch); 
+static inline int _log2(int n);
+static void put_err_token(void); 
+static void put_context(void); 
+static void stack_push(stack *st, jval *elem); 
+static jval *stack_pop(stack *st); 
+static jstr eat_key(const jchar **pp); 
+static jval *eat_string(const jchar **); 
+static jval *eat_num(const jchar **); 
+static jval *eat_true(const jchar **);
+static jval *eat_false(const jchar **);
+static jval *eat_null(const jchar **);
+
+static const char *StateStrings[] = {
+	"Start", "ObjectInitial", "MemberKey", "KeyValueDelimiter",
+	"MemberValue", "MemberDelimiter", "ObjectFinish", "ArrayInitial",
+	"Element", "ElementDelimiter", "ArrayFinish", "Finish"
+};
+
+static const unsigned char firstByteMark[7] = {0x00, 0x00, 0xC0, 0xE0, 0xF0, 0xF8, 0xFC};
+static State state = Start;
+static int line = 1, column = 1;
+static const char *token_start = NULL, *token_end = NULL, *JSON = NULL;
+
+static inline int _log2(int n) {
+	int e = 0;
+	while (n >>= 1) e++;
+	return e;
+}
+
+static void put_context(void) {
+	const char *ptr = JSON;
+	int count = 0;
+	while (count < line) {
+		ptr++;
+		if (*ptr == '\n')
+			count++;
+	}
+}
+
+static void put_err_token(void) {
+	printf("Error Token:\n\t");
+	const char *ptr = token_start, *ptr2 = token_start;
+	while (ptr <= token_end) printf("%c", *ptr++);
+	printf("\n\t");
+	while (ptr2++ < token_end) printf(" ");
+	printf("^");
+	printf("\n\t");
+}
+
+static void literal_value_handler(const jchar **pp,
+		jval *currentNode, jstr currentKey,
+		jval *(*handle)(const jchar **)) {
+	if (match(state, ArrayInitial | ElementDelimiter)) {
+		state = Element;
+		zJSON_set_arr_value(currentNode, handle(pp));
+	} else if (match(state, KeyValueDelimiter)) {
+		state = MemberValue;
+		zJSON_set_key_value(currentNode, currentKey, handle(pp));
+	} else
+		ERR(*pp);
+}
+
+static void obj_arr_handler(const jchar **pp,
+		vtype type, jval **pcurrentNode,
+		stack *nodeStack, jchar *currentKey) {
+	jval *newObjOrArray = zJSON_new_jval(type);
+	if (match(state, Start)) {
+		EAT(*pp);
+	} else if (match(state, KeyValueDelimiter)) {
+		zJSON_set_key_value(*pcurrentNode, currentKey, newObjOrArray);
+		stack_push(nodeStack, *pcurrentNode);
+		EAT(*pp);
+	} else if (match(state, ArrayInitial | ElementDelimiter)) {
+		zJSON_set_arr_value(*pcurrentNode, newObjOrArray);
+		stack_push(nodeStack, *pcurrentNode);
+		EAT(*pp);
+	} else {
+		ERR(*pp);
+	}
+	state = (type == OBJ) ? ObjectInitial : ArrayInitial;
+	*pcurrentNode = newObjOrArray;
+}
+
+static jval *eat_literal(const jchar **pp, const char *str) {
+	SET_TOKEN_START(*pp);
+	const char *s = str;
+	jval *v = NULL;
+	while (*s) {
+		if (**pp == *s) {
+			(*pp)++;
+			s++;
+		} else {
+			ERR(*pp);
+		}
+	}
+	if (*str == 't') {
+		v = zJSON_new_true();
+	}
+	if (*str == 'f') {
+		v = zJSON_new_false();
+	}
+	if (*str == 'n') {
+		v = zJSON_new_null();
+	}
+	SET_TOKEN_END(*pp);
+	return v;
+}
+
+inline jval *eat_true(const jchar **pp) {
+	return eat_literal(pp, "true");
+}
+
+inline jval *eat_false(const jchar **pp) {
+	return eat_literal(pp, "false");
+}
+
+inline jval *eat_null(const jchar **pp) {
+	return eat_literal(pp, "null");
+}
+
+#define __PREV(pp) (*(*pp-1))
+#define __NEXT(pp) (*(*pp+1))
+
+static unsigned parse_hex4(const char *str) {
+    unsigned hex = 0;
+    for (int i = 0; i < 4; ++i) {
+        unsigned hc = 0;
+        int ex = 0x1000 >> (i * 4);
+        if ('0' <= str[i] && str[i] <= '9') { hc = 00 + str[i] - '0'; } else
+        if ('A' <= str[i] && str[i] <= 'Z') { hc = 10 + str[i] - 'A'; } else
+        if ('a' <= str[i] && str[i] <= 'z') { hc = 10 + str[i] - 'a'; } else
+        return -1;
+
+        hex += hc * ex;
+    }
+
+    return hex;
+}
+
+
+jstr eat_key(const jchar **pp) {
+	SET_TOKEN_START(*pp);
+	(*pp)++;/* skip the first '"'*/
+	const jchar *start_pos = *pp,*end_pos;
+	size_t len = 0,unicode_len;
+	unsigned uc,uc2;
+
+	while (*pp && !(**pp == '\"' && __PREV(pp) != '\\') && ++len){
+		if (*((*pp)++) == '\\') (*pp)++;
+	} /* Skip every escaped character, calculate the lenghth,
+		 Each unicode char occupies 5 bytes */
+	jstr str = malloc(len + 1);	/* free() at free_jpair() */
+	end_pos = *pp;
+	*pp = start_pos;
+
+	char * ptr = str;
+	while (*pp <= end_pos && !(**pp == '\"' && __PREV(pp) != '\\')){
+		if (**pp != '\\') {
+			*ptr++ = *((*pp)++);
+		} else {
+			switch (__NEXT(pp)) {
+			case 'b': *ptr++ = '\b'; (*pp) += 2; break;
+			case 'f': *ptr++ = '\f'; (*pp) += 2; break;
+			case 'n': *ptr++ = '\n'; (*pp) += 2; break;
+			case 'r': *ptr++ = '\r'; (*pp) += 2; break;
+			case 't': *ptr++ = '\t'; (*pp) += 2; break;
+			case '"': *ptr++ =  '"'; (*pp) += 2; break;
+			case '/': *ptr++ =  '/'; (*pp) += 2; break;
+			case '\\':*ptr++ = '\\'; (*pp) += 2; break;
+			case 'u':
+					  uc = parse_hex4((*pp)+2);
+					  (*pp) += 6;/* Why ? */
+					  if ((uc >= 0xDC00 && uc <= 0xDFFF) || uc == 0) { ERR((*pp)); } /* invalid unicode number */
+					  if (uc >= 0xD800 && uc <= 0xDBFF) {
+						  uc2 = parse_hex4((*pp)+2); 
+						  (*pp) += 6;
+						  if ((uc2 >= 0xDC00 && uc2 <= 0xDFFF) || uc2 == 0) { ERR((*pp)); } 
+						  uc = 0x10000 + (((uc & 0x3FF) << 10) | (uc2 & 0x3FF));
+					  }
+
+					  unicode_len = 4;
+					  if (uc < 0x80)
+						  unicode_len = 1;
+					  else if (uc < 0x800)
+						  unicode_len = 2;
+					  else if (uc < 0x10000)
+						  unicode_len = 3;
+					  ptr += unicode_len;
+					  switch (unicode_len) {
+						  case 4: *--ptr = ((uc | 0x80) & 0xBF); uc >>= 6;
+						  case 3: *--ptr = ((uc | 0x80) & 0xBF); uc >>= 6;
+						  case 2: *--ptr = ((uc | 0x80) & 0xBF); uc >>= 6;
+						  case 1: *--ptr = ( uc | firstByteMark[unicode_len]);
+					  }
+					  ptr += unicode_len;
+					  break;
+			default:
+						   ERR(*pp);
+			}
+		}
+	}
+	str[len] = 0;
+	(*pp)++;/*skip the last '"'*/
+	column += len;
+	SET_TOKEN_END(*pp);
+	return str;
+}
+
+jval *eat_string(const jchar **pp) {
+	strv->vstr = eat_key(pp);
+	return strv;
+}
+
+static inline int is_digit(jchar ch) {
+	return ((ch >= '0') && (ch <= '9')) || (ch == '.');
+}
+static inline int is_xdigit(jchar ch) {
+	return ((ch >= '0') && (ch <= '9')) 
+		|| ((ch >= 'A') && (ch <= 'F'))
+		|| ((ch >= 'a') && (ch <= 'f'));
+}
+
+jval *eat_num(const jchar **pp) {
+	//TODO
+	SET_TOKEN_START(*pp);
+	jchar buffer[41] = {0};
+	jchar *ptr = buffer;
+	int dbl_flag = 0;
+	if (**pp == '-') *(ptr++) = *((*pp)++);
+	if (**pp != '.') {
+		while (is_digit(**pp)) { *(ptr++) = *((*pp)++); }
+	} else {
+		ERR(*pp);
+	}
+	ptr = buffer;
+	while (*ptr) if(*ptr++ == '.')dbl_flag = 1;
+
+	jval *intv = zJSON_new_jval(dbl_flag?DBL:NUM);
+	intv->vdouble = atof(buffer);
+	SET_TOKEN_END(*pp);
+	return intv;
+}
+
+void stack_push(stack *st, jval *head) {
+	stack *e = malloc(sizeof(stack)); /* free at stack_pop() */
+	assert(e);
+	e->head = head;
+	e->next = st->next;
+	st->next = e;
+}
+
+jval *stack_pop(stack *st) {
+	if (st->next == NULL)
+		return NULL;
+	jval *head = st->next->head;
+	stack *e = st->next;
+	st->next = e->next;
+	free(e);//crash here invalid next size FIXME!
+	return head;
+}
+
+jval *zJSON_parse(const jchar *json) {
+	JSON = json;
+	const jchar *p = json;
+	token_start = json;
+	token_end = token_start;
+	jval *currentNode = NULL;
+	jchar *currentKey = NULL;
+	stack *nodeStack = malloc(sizeof(stack)); /* free() at this function's end */
+	nodeStack->head = NULL;
+	nodeStack->next = NULL;
+	while (1) {
+		switch (PEEK(p)) {
+        case '{':
+        case '[':	
+            obj_arr_handler(&p,(*p == '{')?OBJ:ARR,&currentNode,nodeStack,currentKey);
+            break;
+        case '"': 
+            if (match(state, ObjectInitial | MemberDelimiter)) {
+                state = MemberKey;
+                zJSON_set_key(currentNode, currentKey = eat_key(&p));
+            } else
+                literal_value_handler(&p, currentNode, currentKey, eat_string);
+            break;
+        case 't':
+            literal_value_handler(&p, currentNode, currentKey, eat_true);
+            break;
+        case 'f':
+            literal_value_handler(&p, currentNode, currentKey, eat_false);
+            break;
+        case 'n':
+            literal_value_handler(&p, currentNode, currentKey, eat_null);
+            break;
+        case '0': case '1': case '2': case '3': case '4': 
+        case '5': case '6': case '7': case '8': case '9':
+        case '-': 
+            literal_value_handler(&p, currentNode, currentKey, eat_num);
+        break;
+        case '}': 
+        case ']': 
+            if (match(state, ObjectInitial | MemberValue | ArrayInitial | Element)) {
+                jval *t_currentNode;
+                if ((t_currentNode = stack_pop(nodeStack))) {
+                    currentNode = t_currentNode;
+                    state = (currentNode->type == ARR) ? Element : MemberValue;
+                    EAT(p);
+                } else {
+                    EAT(p);
+                    goto AUTOMATA_END;
+                }
+            } else
+                ERR(p);
+            break;
+        case ',': 
+            if (match(state, MemberValue)) {
+                state = MemberDelimiter;
+                EAT(p);
+            } else if (match(state, Element)) {
+                state = ElementDelimiter;
+                EAT(p);
+            } else
+                ERR(p);
+            break;
+        case ':': 
+            if (match(state, MemberKey)) {
+                state = KeyValueDelimiter;
+                EAT(p);
+            } else
+                ERR(p);
+            break;
+        case '\n':
+            line++; 
+            column = 1;
+        /*NO break here*/
+        case '\t':
+        case ' ':
+            EAT(p);
+            break;
+        case '\0':
+            if (match(state, ArrayFinish | ObjectFinish))
+                state = Finish;
+            else
+                ERR(p);
+            goto AUTOMATA_END;
+        default:
+            ERR(p);
+		}
+	}
+AUTOMATA_END:
+	free(nodeStack);
+	state = Start;
+	return currentNode;
+}
+

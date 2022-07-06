@@ -1,0 +1,234 @@
+# -*- encoding: binary -*-
+require "./test/exec"
+require "tmpdir"
+require "fileutils"
+require "net/http"
+
+module TestFreshSetup
+  include TestExec
+
+  def setup
+    setup_mogilefs
+  end
+
+  def setup_mogilefs(plugins = nil)
+    @test_host = "127.0.0.1"
+    setup_mogstored
+    @tracker = TCPServer.new(@test_host, 0)
+    @tracker_port = @tracker.addr[1]
+
+    @dbname = Tempfile.new(["mogfresh", ".sqlite3"])
+    @mogilefsd_conf = Tempfile.new(["mogilefsd", "conf"])
+    @mogilefsd_pid = Tempfile.new(["mogilefsd", "pid"])
+
+    cmd = %w(mogdbsetup --yes --type=SQLite --dbname) << @dbname.path
+    x!(*cmd)
+
+    @mogilefsd_conf.puts "db_dsn DBI:SQLite:#{@dbname.path}"
+    @mogilefsd_conf.write <<EOF
+conf_port #@tracker_port
+listen #@test_host
+pidfile #{@mogilefsd_pid.path}
+replicate_jobs 1
+fsck_jobs 1
+query_jobs 1
+mogstored_stream_port #{@mogstored_mgmt_port}
+node_timeout 10
+EOF
+    @mogilefsd_conf.flush
+
+    @trackers = @hosts = [ "#@test_host:#@tracker_port" ]
+    @tracker.close
+    x!("mogilefsd", "--daemon", "--config=#{@mogilefsd_conf.path}")
+    wait_for_port @tracker_port
+    @admin = MogileFS::Admin.new(:hosts => @hosts)
+    50.times do
+      break if File.size(@mogstored_pid.path) > 0
+      sleep 0.1
+    end
+  end
+
+  def wait_for_port(port)
+    tries = 50
+    begin
+      TCPSocket.new(@test_host, port).close
+      return
+    rescue
+      sleep 0.1
+    end while (tries -= 1) > 0
+    raise "#@test_host:#{port} never became ready"
+  end
+
+  def test_admin_setup_new_host_and_devices
+    assert_equal [], @admin.get_hosts
+    args = { :ip => @test_host, :port => @mogstored_http_port }
+    @admin.create_host("me", args)
+    yield_for_monitor_update { @admin.get_hosts.empty? or break }
+    hosts = @admin.get_hosts
+    assert_equal 1, hosts.size
+    host = @admin.get_hosts[0]
+    assert_equal "me", host["hostname"]
+    assert_equal @mogstored_http_port, host["http_port"]
+    assert_nil host["http_get_port"]
+    assert_equal @test_host, host["hostip"]
+    assert_kind_of Integer, host["hostid"]
+    assert_equal hosts, @admin.get_hosts(host["hostid"])
+
+    assert_equal [], @admin.get_devices
+  end
+
+  def test_replicate_now
+    assert_equal({"count" => 0}, @admin.replicate_now)
+  end
+
+  def test_clear_cache
+    assert_nil @admin.clear_cache
+  end
+
+  def test_create_update_delete_class
+    domain = "rbmogtest#{Time.now.strftime('%Y%m%d%H%M%S')}.#{uuid}"
+    @admin.create_domain(domain)
+    yield_for_monitor_update { @admin.get_domains.include?(domain) and break }
+
+    assert_nothing_raised do
+      @admin.create_class(domain, "klassy", 1)
+    end
+    assert_raises(MogileFS::Backend::ClassExistsError) do
+      @admin.create_class(domain, "klassy", 1)
+    end
+
+    assert_nothing_raised do
+      @admin.update_class(domain, "klassy",
+                          :mindevcount => 1, :replpolicy => "MultipleHosts(1)")
+    end
+
+    tmp = nil
+    yield_for_monitor_update do
+      tmp = @admin.get_domains[domain]["klassy"]
+      break if tmp && tmp["replpolicy"] == "MultipleHosts(1)"
+    end
+    assert tmp, "domain did not show up"
+    assert_equal 1, tmp["mindevcount"]
+    assert_equal "MultipleHosts(1)", tmp["replpolicy"]
+    assert_nothing_raised { @admin.update_class(domain, "klassy", 2) }
+    ensure
+      @admin.delete_class(domain, "klassy") rescue nil
+  end
+
+  def add_host_device_domain
+    assert_equal [], @admin.get_hosts
+    args = { :ip => @test_host, :port => @mogstored_http_port }
+    args[:status] = "alive"
+    @admin.create_host("me", args)
+    assert File.directory?("#@docroot/dev1")
+    assert File.directory?("#@docroot/dev2")
+    yield_for_monitor_update { @admin.get_hosts.empty? or break }
+
+    me = @admin.get_hosts.find { |x| x["hostname"] == "me" }
+    assert_instance_of Hash, me, me.inspect
+    assert_kind_of Integer, me["hostid"], me
+    assert_equal true, @admin.create_device(me["hostid"], 1)
+    yield_for_monitor_update { @admin.get_devices.empty? or break }
+    wait_for_usage_file "dev1"
+    assert_equal true, @admin.create_device("me", 2)
+    wait_for_usage_file "dev2"
+
+    # MogileFS::Server 2.60+ shows reject_bad_md5 monitor status
+    dev = @admin.get_devices[0]
+    if dev.include?("reject_bad_md5")
+      assert [true, false].include?(dev["reject_bad_md5"])
+    end
+
+    out = err = nil
+    tries = 0
+    begin
+      out.close! if out
+      err.close! if err
+      status, out, err = mogadm("check")
+      assert status.success?, status.inspect
+      if (tries += 1) > 100
+        warn err.read
+        puts out.read
+        raise "mogadm failed"
+      end
+      sleep 0.1
+    end until out.read =~ /write?able/
+
+    domain = "rbmogtest.#$$"
+    @admin.create_domain(domain)
+    yield_for_monitor_update { @admin.get_domains.include?(domain) and break }
+    @domain = domain
+  end
+
+  def test_device_file_add
+    add_host_device_domain
+    client = MogileFS::MogileFS.new :hosts => @hosts, :domain => @domain
+    r, w = IO.pipe
+    thr = Thread.new do
+      (0..9).each do |i|
+        sleep 0.05
+        w.write("#{i}\n")
+      end
+      w.close
+      :ok
+    end
+    assert_equal 20, client.store_file("pipe", nil, r)
+    assert_equal :ok, thr.value
+    r.close
+    assert_equal "0\n1\n2\n3\n4\n5\n6\n7\n8\n9\n", client.get_file_data("pipe")
+  end
+
+  def teardown_mogilefs
+    if @mogstored_pid
+      pid = File.read(@mogstored_pid.path).to_i
+      Process.kill(:TERM, pid) if pid > 0
+    end
+    if @mogilefsd_pid
+      s = TCPSocket.new(@test_host, @tracker_port)
+      s.write "!shutdown\r\n"
+      s.close
+    end
+    FileUtils.rmtree(@docroot)
+  end
+
+  def wait_for_usage_file(device)
+    uri = URI("http://#@test_host:#@mogstored_http_port/#{device}/usage")
+    res = nil
+    100.times do
+      res = Net::HTTP.get_response(uri)
+      if Net::HTTPOK === res
+        puts res.body if $DEBUG
+        return
+      end
+      puts res.inspect if $DEBUG
+      sleep 0.1
+    end
+    raise "#{uri} failed to appear: #{res.inspect}"
+  end
+
+  def setup_mogstored
+    @docroot = Dir.mktmpdir(["mogfresh", "docroot"])
+    Dir.mkdir("#@docroot/dev1")
+    Dir.mkdir("#@docroot/dev2")
+    @mogstored_mgmt = TCPServer.new(@test_host, 0)
+    @mogstored_http = TCPServer.new(@test_host, 0)
+    @mogstored_mgmt_port = @mogstored_mgmt.addr[1]
+    @mogstored_http_port = @mogstored_http.addr[1]
+    @mogstored_conf = Tempfile.new(["mogstored", "conf"])
+    @mogstored_pid = Tempfile.new(["mogstored", "pid"])
+    @mogstored_conf.write <<EOF
+pidfile = #{@mogstored_pid.path}
+maxconns = 1000
+httplisten = #@test_host:#{@mogstored_http_port}
+mgmtlisten = #@test_host:#{@mogstored_mgmt_port}
+docroot = #@docroot
+EOF
+    @mogstored_conf.flush
+    @mogstored_mgmt.close
+    @mogstored_http.close
+
+    x!("mogstored", "--daemon", "--config=#{@mogstored_conf.path}")
+    wait_for_port @mogstored_mgmt_port
+    wait_for_port @mogstored_http_port
+  end
+end

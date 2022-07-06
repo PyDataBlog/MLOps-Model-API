@@ -1,0 +1,84 @@
+#[cfg(not(any(test, rustdoc)))]
+use alloc::prelude::v1::*;
+#[cfg(any(test, rustdoc))]
+use std::prelude::v1::*;
+
+use crate::event::Event;
+use crate::util::UnsafeContainer;
+use crate::KERNEL_EVENTEMITTER;
+
+#[derive(Debug)]
+pub enum SpecialKey {
+    Enter,
+}
+
+#[derive(Debug)]
+pub enum KeyCode {
+    Unicode(char),
+    SpecialKey(SpecialKey),
+}
+
+pub struct KeyboardHandler {
+    pub buffer: Vec<KeyCode>,
+}
+
+impl KeyboardHandler {
+    pub fn new() -> Self {
+        Self { buffer: Vec::new() }
+    }
+
+    pub fn process(&mut self) {
+        if self.buffer.len() == 0 {
+            return;
+        }
+
+        while self.buffer.len() > 0 {
+            let code = self.buffer.remove(0);
+
+            match code {
+                KeyCode::Unicode(c) => {
+                    kbd_write_to_screen(c);
+
+                    let ev = Event::new("console", "input", "keypress", vec![c as u32]);
+                    KERNEL_EVENTEMITTER.get().push_event(ev);
+                }
+
+                KeyCode::SpecialKey(sp) => match sp {
+                    SpecialKey::Enter => {
+                        kbd_write_to_screen('\n');
+
+                        let ev = Event::new("console", "input", "keypress", vec!['\n' as u32]);
+                        KERNEL_EVENTEMITTER.get().push_event(ev);
+                    }
+                },
+            }
+        }
+    }
+}
+
+lazy_static! {
+    pub static ref KEYBOARD_HANDLER: UnsafeContainer<KeyboardHandler> =
+        UnsafeContainer::new(KeyboardHandler::new());
+}
+
+#[cfg(all(target_os = "polymorphos", target_arch = "x86_64"))]
+pub fn kbd_write_to_screen(c: char) {
+    vga_print!("{}", c);
+}
+
+#[cfg(test)]
+pub fn kbd_write_to_screen(c: char) {
+    print!("{}", c)
+}
+
+#[cfg(all(target_os = "polymorphos", target_arch = "x86_64"))]
+pub fn process_keyboard() {
+    x86_64::instructions::interrupts::without_interrupts(|| {
+        KEYBOARD_HANDLER.get().process();
+    });
+}
+
+#[cfg(test)]
+pub fn process_keyboard() {
+    KEYBOARD_HANDLER.get().process();
+}

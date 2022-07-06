@@ -1,0 +1,174 @@
+# Copyright (c) 2012-2016 Codenvy, S.A.
+# All rights reserved. This program and the accompanying materials
+# are made available under the terms of the Eclipse Public License v1.0
+# which accompanies this distribution, and is available at
+# http://www.eclipse.org/legal/epl-v10.html
+# Contributors:
+# Codenvy, S.A. - initial API and implementation
+
+FROM ubuntu:16.04
+
+LABEL che:server:8080:ref=tomcat8 che:server:8080:protocol=http che:server:8000:ref=tomcat8-debug che:server:8000:protocol=http che:server:9876:ref=codeserver che:server:9876:protocol=http:che:server:6080:ref=VNC
+
+ENV SCALA_VERSION 2.12.0
+ENV SBT_VERSION 0.13.13
+
+ENV MAVEN_VERSION=3.3.9 \
+    JAVA_VERSION=8u101 \
+    JAVA_BUILD=13 \
+    JAVA_VERSION_PREFIX=1.8.0_101 \
+    TOMCAT_HOME=/home/user/tomcat8 \
+    TERM=xterm
+ENV JAVA_HOME=/opt/jdk$JAVA_VERSION_PREFIX
+ENV M2_HOME=/home/user/apache-maven-$MAVEN_VERSION
+ENV PATH=$JAVA_HOME/bin:$M2_HOME/bin:$PATH
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends supervisor x11vnc xvfb net-tools blackbox rxvt-unicode xfonts-terminus libxi6 libgconf-2-4
+
+RUN apt-get update && \
+    apt-get -y --allow-unauthenticated install \
+    openssh-server \
+    sudo \
+    build-essential \
+    openjdk-8-jre-headless \
+    procps \
+    wget \
+    unzip \
+    mc \
+    ca-certificates \
+    curl \
+    gcc \
+    g++ \
+    clang \
+    make \
+    cmake \
+    libgtk-3-dev \
+    libgtkmm-3.0-dev \
+    libsfml-dev \
+    libcsfml-dev \
+    libsdl2-dev \
+    libboost-dev \
+    vim \
+    vim-nox \
+    libswt-gtk-3-java \
+    software-properties-common \
+    python-software-properties && \
+    mkdir /var/run/sshd && \
+    sed 's@session\s*required\s*pam_loginuid.so@session optional pam_loginuid.so@g' -i /etc/pam.d/sshd && \
+    echo "%sudo ALL=(ALL) NOPASSWD: ALL" >> /etc/sudoers && \
+    useradd -u 1000 -G users,sudo -d /home/user --shell /bin/bash -m user && \
+    echo "secret\nsecret" | passwd user && \
+    add-apt-repository ppa:git-core/ppa && \
+    apt-get update && \
+    sudo apt-get install git subversion -y --allow-unauthenticated && \
+    apt-get clean && \
+    apt-get -y autoremove \
+    && apt-get -y clean \
+    && rm -rf /var/lib/apt/lists/* && \
+    echo "#! /bin/bash\n set -e\n sudo /usr/sbin/sshd -D &\n exec \"\$@\"" > /home/user/entrypoint.sh && chmod a+x /home/user/entrypoint.sh
+
+# download and install noVNC
+
+RUN sudo mkdir -p /opt/noVNC/utils/websockify && \
+    wget -qO- "http://github.com/kanaka/noVNC/tarball/master" | sudo tar -zx --strip-components=1 -C /opt/noVNC && \
+    wget -qO- "https://github.com/kanaka/websockify/tarball/master" | sudo tar -zx --strip-components=1 -C /opt/noVNC/utils/websockify
+
+ADD index.html /opt/noVNC/
+
+RUN sudo mkdir -p /etc/X11/blackbox && \
+    echo "[begin] (Blackbox) \n [exec] (Terminal)     {urxvt -fn "xft:Terminus:size=12"} \n [end]" | sudo tee -a /etc/X11/blackbox/blackbox-menu
+
+RUN mkdir /home/user/cbuild /home/user/tomcat8 /home/user/apache-maven-$MAVEN_VERSION && \
+  wget \
+  --no-cookies \
+  --no-check-certificate \
+  --header "Cookie: oraclelicense=accept-securebackup-cookie" \
+  -qO- \
+  "http://download.oracle.com/otn-pub/java/jdk/$JAVA_VERSION-b$JAVA_BUILD/jdk-$JAVA_VERSION-linux-x64.tar.gz" | sudo tar -zx -C /opt/ && \
+  wget -qO- "http://apache.ip-connect.vn.ua/maven/maven-3/$MAVEN_VERSION/binaries/apache-maven-$MAVEN_VERSION-bin.tar.gz" | tar -zx --strip-components=1 -C /home/user/apache-maven-$MAVEN_VERSION/
+
+RUN wget -qO- "http://archive.apache.org/dist/tomcat/tomcat-8/v8.0.24/bin/apache-tomcat-8.0.24.tar.gz" | tar -zx --strip-components=1 -C /home/user/tomcat8 && \
+    rm -rf /home/user/tomcat8/webapps/*
+    
+RUN apt-get update && \
+    echo mysql-server-5.7 mysql-server/root_password password xyzzy | debconf-set-selections \
+    && echo mysql-server-5.7 mysql-server/root_password_again password xyzzy | debconf-set-selections \
+    && apt-get install -y mysql-server-5.7 -o pkg::Options::="--force-confdef" -o pkg::Options::="--force-confold" --fix-missing \
+    && apt-get -y install mysql-client-5.7
+    
+RUN curl -sL https://deb.nodesource.com/setup_7.x | sudo -E bash - && \
+    sudo apt-get update && \
+    sudo apt-get install -y nodejs
+    
+RUN sudo npm install -g yo bower grunt-cli gulp coffee-script
+
+#Install Groovy
+RUN wget https://dl.bintray.com/groovy/maven/apache-groovy-binary-2.4.7.zip
+RUN unzip apache-groovy-binary-2.4.7.zip
+RUN mv groovy-2.4.7 /opt/
+RUN rm apache-groovy-binary-2.4.7.zip
+
+ENV GROOVY_HOME /opt/groovy-binary-2.4.7
+
+# Install Gradle
+RUN wget https://services.gradle.org/distributions/gradle-3.2.1-bin.zip
+RUN unzip gradle-3.2.1-bin.zip
+RUN mv gradle-3.2.1 /opt/
+RUN rm gradle-3.2.1-bin.zip
+
+ENV GRADLE_HOME /opt/gradle-3.2.1
+
+# Install Scala
+RUN curl -L -o scala-$SCALA_VERSION.deb http://downloads.lightbend.com/scala/$SCALA_VERSION/scala-$SCALA_VERSION.deb && \
+    dpkg -i scala-$SCALA_VERSION.deb && \
+    rm scala-$SCALA_VERSION.deb && \
+    apt-get update && \
+    apt-get install scala
+
+# Install sbt
+RUN curl -L -o sbt-$SBT_VERSION.deb http://dl.bintray.com/sbt/debian/sbt-$SBT_VERSION.deb && \
+    dpkg -i sbt-$SBT_VERSION.deb && \
+    rm sbt-$SBT_VERSION.deb && \
+    apt-get update && \
+    apt-get install sbt && \
+    sbt sbtVersion
+    
+# Install lein
+ENV LEIN_VERSION=2.7.1
+ENV LEIN_INSTALL=/usr/local/bin/
+
+RUN wget https://raw.githubusercontent.com/technomancy/leiningen/stable/bin/lein && \
+    mv lein $LEIN_INSTALL/lein && chmod a+x $LEIN_INSTALL/lein
+
+RUN wget --quiet https://github.com/technomancy/leiningen/releases/download/$LEIN_VERSION/leiningen-$LEIN_VERSION-standalone.zip \
+  && wget --quiet https://github.com/technomancy/leiningen/releases/download/$LEIN_VERSION/leiningen-$LEIN_VERSION-standalone.zip.asc \
+
+  && gpg --keyserver pool.sks-keyservers.net --recv-key 2E708FB2FCECA07FF8184E275A92E04305696D78 \
+  && echo "Verifying Jar file signature ..." \
+  && gpg --verify leiningen-$LEIN_VERSION-standalone.zip.asc \
+
+# Put the jar where lein script expects
+  && rm leiningen-$LEIN_VERSION-standalone.zip.asc \
+  && mv leiningen-$LEIN_VERSION-standalone.zip /usr/share/java/leiningen-$LEIN_VERSION-standalone.jar \
+
+# Some REPLs (e.g., Figwheel) necessitate a readline wrapper.
+  &&  apt-get update && apt-get install rlfe && rm -rf /var/lib/apt/lists/*
+
+ENV PATH=$PATH:$LEIN_INSTALL
+ENV LEIN_ROOT 1
+
+ADD supervisord.conf /opt/
+
+ENV LANG en_GB.UTF-8
+ENV LANG en_US.UTF-8
+USER user
+RUN sudo locale-gen en_US.UTF-8 && \
+    svn --version && \
+    cd /home/user && ls -la && \
+    sed -i 's/# store-passwords = no/store-passwords = yes/g' /home/user/.subversion/servers && \
+    sed -i 's/# store-plaintext-passwords = no/store-plaintext-passwords = yes/g' /home/user/.subversion/servers
+EXPOSE 4403 8000 8080 9876 22 6080 3306
+WORKDIR /projects
+ENTRYPOINT ["/home/user/entrypoint.sh"]
+CMD /usr/bin/supervisord -c /opt/supervisord.conf && tail -f /dev/null

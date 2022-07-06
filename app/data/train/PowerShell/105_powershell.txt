@@ -1,0 +1,225 @@
+# Hyper-V lab script (Windows Server 2016 Tech Preview 5)
+
+# Copyright (C) 2016 Torsten Enderling <carfesh@gmx.net>
+
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+
+# You should have received a copy of the GNU General Public License
+# along with this program. If not, see <http://www.gnu.org/licenses/>.
+
+# ------------------------------------------------------------------------------------------------
+
+# showcase for nested virtualization 
+# (https://msdn.microsoft.com/en-us/virtualization/hyperv_on_windows/user_guide/nesting)
+# implements failover clustering, shared iSCSI storage/cluster shared volume
+
+# developed and tested on Windows 10 version 1607 (Insider Preview build 14366)
+# using Client Hyper-V and AutomatedLab version 3.8.0.0
+# lab subnet 192.168.42.0/24
+# 
+# SHA-1                                     ISO
+# -----                                     ---
+# 5d2a2795dca417ed66dfc6b18d733ce2bd09ec63 *14300.1000.160324-1723.RS1_RELEASE_SVC_SERVER_OEMRET_X64FRE_EN-US.ISO
+
+Set-PSDebug -Strict
+$ErrorActionPreference="Stop"
+
+function Main
+{
+    $labName = 'HV2016'
+
+    $labSources = Get-LabSourcesLocation
+
+    # create an empty lab template and define where the lab XML files and the VMs will be stored
+    New-LabDefinition -Name $labName -DefaultVirtualizationEngine HyperV
+
+    # make the network definition
+    Add-LabVirtualNetworkDefinition -Name $labName -AddressSpace 192.168.42.0/24
+    Add-LabVirtualNetworkDefinition -Name External -HyperVProperties @{ SwitchType = 'External'; AdapterName = 'Ethernet' }
+
+    # and the domain definition with the domain admin account
+    Add-LabDomainDefinition -Name demo.local -AdminUser Administrator -AdminPassword Pa`$`$w0rd
+
+    #defining default parameter values, as these ones are the same for all the machines
+    $PSDefaultParameterValues = @{
+        'Add-LabMachineDefinition:ToolsPath'= "$labSources\Tools\SysInternals"
+        'Add-LabMachineDefinition:OperatingSystem'= 'Windows Server 2016 Technical Preview 5 SERVERDATACENTER'
+        'Add-LabMachineDefinition:Memory'= 2048MB
+        'Add-LabMachineDefinition:Gateway'='192.168.42.1'
+        'Add-LabMachineDefinition:Network'=$labName
+        'Add-LabMachineDefinition:DnsServer1'='192.168.42.10'
+        'Add-LabMachineDefinition:DomainName'='demo.local'
+    }
+
+    #--------------------------------------------------------------------------------------------------------------------
+    Set-LabInstallationCredential -Username Administrator -Password Pa`$`$w0rd
+    
+    # RTR - Routing/Remote Access (lab with Internet access)
+    $role = @()
+    $role += Get-LabMachineRoleDefinition -Role Routing
+    $netAdapter = @()
+    $netAdapter += New-LabNetworkAdapterDefinition -VirtualSwitch $labName -Ipv4Address 192.168.42.1
+    $netAdapter += New-LabNetworkAdapterDefinition -VirtualSwitch External -UseDhcp
+    $postInstallActivity = @()
+    Add-LabMachineDefinition -Name HV2016-RTR -NetworkAdapter $netAdapter -Roles $role -ToolsPath $labSources\Tools\SysInternals
+        
+    #--------------------------------------------------------------------------------------------------------------------
+    
+    # DC1 - domain controller
+    $roles = Get-LabMachineRoleDefinition -Role RootDC
+    $postInstallActivity = @()
+    $postInstallActivity += Get-LabPostInstallationActivity -ScriptFileName PrepareRootDomain.ps1 -DependencyFolder $labSources\PostInstallationActivities\PrepareRootDomain
+    Add-LabMachineDefinition -Name HV2016-DC1 -IpAddress 192.168.42.10 -Roles $roles -PostInstallationActivity $postInstallActivity
+
+    # SAN1 - shared storage/iSCSI target
+    Add-LabDiskDefinition -Name HV2016-iSCSI -DiskSizeInGb 200
+    Add-LabMachineDefinition -Name HV2016-SAN1 -IpAddress 192.168.42.11 -DiskName 'HV2016-iSCSI'
+    
+    # HV1/2 - Hyper-V hosts
+    Add-LabMachineDefinition -Name HV2016-HV1  -IpAddress 192.168.42.12
+    Add-LabMachineDefinition -Name HV2016-HV2  -IpAddress 192.168.42.13
+    
+    Install-Lab
+    
+    Restart-LabVM HV2016-SAN1 -Wait
+    
+    # bring iSCSI disk online, create target and virtual disks
+    Invoke-LabCommand -ComputerName HV2016-SAN1 -ActivityName 'ConfigureiSCSITargets' -ScriptBlock { 
+        Get-Disk | Set-Disk -IsOffline:$false
+        
+        New-Item    -Name clearreadonly.txt -ItemType File -Force | Out-Null
+        Add-Content -Path clearreadonly.txt "select disk 1"
+        Add-Content -Path clearreadonly.txt "attributes disk clear readonly"
+        $clearreadonly=(diskpart /S clearreadonly.txt)
+        Remove-Item clearreadonly.txt
+        
+        New-Item -Path D:\iSCSIVirtualDisks -Type Directory
+        
+        Install-WindowsFeature FS-iSCSITarget-Server
+    
+        # iSCSI names are case sensitive, so for the time being, also add the IP addresses besides the DNS names
+        New-iSCSIServerTarget -Targetname "iSCSITarget" -InitiatorId @("DNSName:hv2016-hv1.demo.local","DNSName:hv2016-hv2.demo.local","IPAddress:192.168.42.12","IPAddress:192.168.42.13")
+        
+        New-iSCSIVirtualDisk -SizeBytes 4GB  -Path D:\iSCSIVirtualDisks\Quorum.vhdx         -Description "Quorum"
+        New-iSCSIVirtualDisk -SizeBytes 50GB -Path D:\iSCSIVirtualDisks\ClusterStorage.vhdx -Description "Cluster Storage"
+        
+        Add-iSCSIVirtualDiskTargetMapping -TargetName "iSCSITarget" -Path D:\iSCSIVirtualDisks\Quorum.vhdx
+        Add-iSCSIVirtualDiskTargetMapping -TargetName "iSCSITarget" -Path D:\iSCSIVirtualDisks\ClusterStorage.vhdx
+    }
+    
+    # configure requirements for nested virtualization
+    Stop-LabVM HV2016-HV1 -Wait
+    Set-VMProcessor -VMName HV2016-HV1 -ExposeVirtualizationExtensions $true
+    Set-VMMemory -VMName HV2016-HV1 -DynamicMemoryEnabled $false
+    Set-VMNetworkAdapter -VMName HV2016-HV1 -MacAddressSpoofing on
+    # Set-VMMemory -VMName HV2016-HV1 -StartupBytes $4GB
+    Start-LabVM HV2016-HV1 -Wait
+    
+    Stop-LabVM HV2016-HV2 -Wait
+    Set-VMProcessor -VMName HV2016-HV2 -ExposeVirtualizationExtensions $true
+    Set-VMMemory -VMName HV2016-HV2 -DynamicMemoryEnabled $false
+    Set-VMNetworkAdapter -VMName HV2016-HV2 -MacAddressSpoofing on
+    # Set-VMMemory -VMName HV2016-HV2 -StartupBytes $4GB
+    Start-LabVM HV2016-HV2 -Wait
+    
+    Start-Sleep -Seconds 60
+    
+    Install-LabWindowsFeature -ComputerName HV2016-HV1 -FeatureName Hyper-V,RSAT-Hyper-V-Tools,Failover-Clustering,RSAT-Clustering,Multipath-IO
+    Install-LabWindowsFeature -ComputerName HV2016-HV2 -FeatureName Hyper-V,RSAT-Hyper-V-Tools,Failover-Clustering,RSAT-Clustering,Multipath-IO
+    
+    Restart-LabVM HV2016-HV1
+    Restart-LabVM HV2016-HV2
+    
+    # configure iSCSI initiator(s)
+    Invoke-LabCommand -ComputerName (Get-LabMachine | Where {$_.Name -Match "HV2016-HV*"}) `
+        -ActivityName 'ConfigureiSCSIInitiators' -ScriptBlock `
+    { 
+        Set-Service -Name MSiSCSI -StartupType Automatic
+        Start-Service MSiSCSI
+        
+        New-iSCSITargetPortal -TargetPortalAddress hv2016-san1.demo.local
+        Get-iSCSITargetPortal | Update-iSCSITargetPortal
+        
+        Get-iSCSITarget | Connect-iSCSITarget
+        
+        # Set-NetAdapterBinding -Name "Ethernet" -DisplayName "Internet Protocol Version 6 (TCP/IPv6)" -Enabled:$false
+    }
+    
+    # configure clustering
+    Invoke-LabCommand -ComputerName HV2016-HV1 -UseCredSSP -ActivityName 'ConfigureCluster' -ScriptBlock {
+        Start-Sleep -Seconds 60 # give the system some time before starting the cluster creation process
+        
+        New-Cluster -Name HV2016-CLU1 -Node HV2016-HV1.demo.local,HV2016-HV2.demo.local -StaticAddress 192.168.42.14
+        
+        # prepare quorum disk, first bring it online
+        Get-Disk | Where-Object {$_.PartitionStyle -eq "RAW" -And $_.Size -eq 4GB } | Set-Disk -IsOffline:$false
+        # initialize new (uninitialized) disk
+        Get-Disk | Where-Object {$_.PartitionStyle -eq "RAW" -And $_.Size -eq 4GB } |
+            Initialize-Disk -PartitionStyle MBR -PassThru
+        # disk must be formatted
+        Get-Disk | Where-Object {$_.PartitionStyle -eq "MBR" -And $_.Size -eq 4GB} |
+            New-Partition -UseMaximumSize |
+            Format-Volume -FileSystem NTFS -Force -Confirm:$False -NewFileSystemLabel "Quorum"
+        
+        # add quorum disk as Cluster Disk 1
+        Get-ClusterAvailableDisk | Add-ClusterDisk
+        # may need to move storage resource to correct node
+        Move-ClusterGroup "Available Storage" -Node HV2016-HV1
+        # create quorum
+        Set-ClusterQuorum -NodeAndDiskMajority "Cluster Disk 1"
+        
+        # prepare cluster storage disk, first bring it online
+        Get-Disk | Where-Object {$_.PartitionStyle -eq "RAW" -And $_.Size -eq 50GB } | Set-Disk -IsOffline:$false
+        # initialize new (uninitialized) disk
+        Get-Disk | Where-Object {$_.PartitionStyle -eq "RAW" -And $_.Size -eq 50GB } |
+            Initialize-Disk -PartitionStyle MBR -PassThru
+        # disk must be formatted
+        Get-Disk | Where-Object {$_.PartitionStyle -eq "MBR" -And $_.Size -eq 50GB} |
+            New-Partition -UseMaximumSize |
+            Format-Volume -FileSystem NTFS -Force -Confirm:$False -NewFileSystemLabel "ClusterStorage"
+            
+        # add cluster storage disk as Cluster Disk 2
+        Get-ClusterAvailableDisk | Add-ClusterDisk
+        # create cluster shared volume
+        Add-ClusterSharedVolume "Cluster Disk 2" # cluster shared volume will be mounted as C:\ClusterStorage\Volume1
+        
+        # configure the Hyper-V hosts to use CSV as storage location for VM files
+        1..2 | % {Invoke-Command -ComputerName HV2016-HV$_ -ScriptBlock `
+            { Set-VMHost -VirtualHardDiskPath C:\ClusterStorage\Volume1\VHDs -VirtualMachinePath C:\ClusterStorage\Volume1\VMs } }
+            
+        # create and start two test VMs
+        New-VM VM01 -Memory 128MB -ComputerName HV2016-HV1
+        Add-ClusterVirtualMachineRole -VirtualMachine VM01 -Name VM01
+        Start-VM VM01 -ComputerName HV2016-HV1
+        
+        New-VM VM02 -Memory 128MB -ComputerName HV2016-HV2
+        Add-ClusterVirtualMachineRole -VirtualMachine VM02 -Name VM02
+        Start-VM VM02 -ComputerName HV2016-HV2
+    }
+    
+    Show-LabInstallationTime
+    
+    Export-LabDefinition -ExportDefaultUnattendedXml -Force
+}
+
+Try
+{
+    Main
+}
+Catch
+{
+    $ErrorMessage = $_.Exception | Format-List -Force | Out-String
+    Write-Host "[ERROR] A terminating error was encountered. See error details below."
+    Write-Host "$($_.InvocationInfo.PositionMessage)"
+    Write-Host "$ErrorMessage"
+    
+    Break
+}

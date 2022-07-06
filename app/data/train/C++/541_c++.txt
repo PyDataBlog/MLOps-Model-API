@@ -1,0 +1,735 @@
+#include "session.h"
+
+//    This file is part of MCI_Host.
+
+//    MCI_Host is free software: you can redistribute it and/or modify
+//    it under the terms of the GNU General Public License as published by
+//    the Free Software Foundation, either version 3 of the License, or
+//    (at your option) any later version.
+
+//    MCI_Host is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//    GNU General Public License for more details.
+
+//    You should have received a copy of the GNU General Public License
+//    along with MCI_Host under the LICENSE.md file. If not, see
+//    <http://www.gnu.org/licenses/>.
+
+Session::Session(uint sesId, qintptr newPtr, QObject *parent) : QTcpSocket(0)
+{
+    timer                = new QTimer();
+    bits                 = 0;
+    flags                = 0;
+    dSize                = 0;
+    sessionId            = 0;
+    slotId               = 0;
+    baseSlot             = 0;
+    rdHash               = 0;
+    wrHash               = 0;
+    cmdListMode          = 0;
+    cmdListCaseSensitive = false;
+    cmdListenabled       = false;
+    keyOk                = false;
+    verOk                = false;
+    onBaseSlot           = false;
+
+    timer->setSingleShot(true);
+    timer->setInterval(6000);
+
+    // the timer object provides a 6sec timeout for the client to send the
+    // header before the session is forced closed.
+
+    connect(this, SIGNAL(readyRead()), this, SLOT(dataFromClient()));
+    connect(this, SIGNAL(destroyed()), timer, SLOT(deleteLater()));
+    connect(timer, SIGNAL(timeout()), this, SLOT(sessionTimeout()));
+    connect(parent, SIGNAL(destroyed()), this, SLOT(deleteLater()));
+
+    setSocketDescriptor(newPtr);
+
+    if (inBanList(peerAddress().toString()))
+    {
+        // any session that still has a session id of zero after running the
+        // contructor is considered a blocked ip so the session will get killed
+        // externally at Server::incomingConnection().
+
+        sessionEnding = true;
+
+        addIpAction(tr("IP address blocked"), peerAddress().toString());
+    }
+    else
+    {
+        // Session represents the TCP connection with the client. it provides the
+        // xOR encryption, version negotiation and an interface for CmdHub objects.
+        // it starts in it's own thread from within the contructor and kills
+        // itself when the client disconnects but does not kill the CmdHub it's
+        // currently connected to.
+
+        addIpAction(tr("Connected, assigned session id: ") + QString::number(sesId), peerAddress().toString());
+
+        sessionEnding = false;
+        sessionId     = sesId;
+
+        QThread *thr = new QThread();
+
+        connect(thr, SIGNAL(finished()), thr, SLOT(deleteLater()));
+        connect(thr, SIGNAL(started()), timer, SLOT(start()));
+        connect(this, SIGNAL(destroyed()), thr, SLOT(quit()));
+        connect(this, SIGNAL(disconnected()), this, SLOT(clientDisconnected()));
+
+        timer->moveToThread(thr);
+
+        moveToThread(thr);
+
+        thr->start();
+    }
+}
+
+bool Session::loadProfile(const QString &proName, QByteArray &key)
+{
+    // this function runs 3 database queries to read the following profile
+    // data:
+
+    // keyHash              - this is used in the Hash object to setup encryption.
+    // groupName            - this indicates what group the profile belongs to.
+    //                        the group can contain host privileges that profile
+    //                        is allowed to do.
+    // cmdListCaseSensitive - indicates if the profileCmdList is casesSensitive.
+    // cmdListenabled       - indicates if the profileCmdList is enabled.
+    // cmdListMode          - indicates what the profileCmdList does when the
+    //                        sent in command line is matched.
+    // baseSlot             - this indicates the fallback slot in cases when the
+    //                        the slot the session is currently connected is
+    //                        killed.
+    // profileCmdList       - this is the group command line list that is used
+    //                        allowed or disallow certain commands depending
+    //                        on what is loaded into cmdListMode or
+    //                        cmdListCaseSensitive.
+
+    bool ret = false;
+
+    Query db(this);
+
+    db.setType(Query::PULL, TABLE_PROFILES);
+    db.addColumn(COLUMN_PRONAME);
+    db.addColumn(COLUMN_PROKEY);
+    db.addColumn(COLUMN_GRNAME);
+    db.addCondition(COLUMN_PRONAME, proName);
+    db.exec();
+
+    if (db.rows())
+    {
+        ret = true;
+
+        profileName = db.getData(COLUMN_PRONAME).toString();
+        groupName   = db.getData(COLUMN_GRNAME).toString();
+        key         = db.getData(COLUMN_PROKEY).toByteArray();
+
+        db.setType(Query::PULL, TABLE_GROUPS);
+        db.addColumn(COLUMN_CS);
+        db.addColumn(COLUMN_LS_MODE);
+        db.addColumn(COLUMN_LS_STATE);
+        db.addColumn(COLUMN_BASE_SL);
+        db.addCondition(COLUMN_GRNAME, groupName);
+        db.exec();
+
+        cmdListCaseSensitive = db.getData(COLUMN_CS).toBool();
+        cmdListenabled       = db.getData(COLUMN_LS_STATE).toBool();
+        cmdListMode          = db.getData(COLUMN_LS_MODE).toUInt();
+        baseSlot             = db.getData(COLUMN_BASE_SL).toUInt();
+
+        profileCmdList.clear();
+
+        db.setType(Query::PULL, TABLE_CMD_LIST);
+        db.addColumn(COLUMN_CMD_LINE);
+        db.addCondition(COLUMN_GRNAME, groupName);
+        db.exec();
+
+        for (int i = 0; i < db.rows(); ++i)
+        {
+            profileCmdList.append(db.getData(COLUMN_CMD_LINE, i).toString());
+        }
+    }
+
+    return ret;
+}
+
+bool Session::inBanList(const QString &ip)
+{
+    // simple database select query with the provided ip address in the where
+    // clause. if a row is found, that indicates that the ip address is in
+    // the ban list.
+
+    Query db(this);
+
+    db.setType(Query::PULL, TABLE_IPBANS);
+    db.addColumn(COLUMN_IPADDR);
+    db.addCondition(COLUMN_IPADDR, ip);
+    db.exec();
+
+    return db.rows();
+}
+
+void Session::addIpAction(const QString &action, const QString &ip)
+{
+    // insert database query for the ip address action log (ip_hist).
+
+    Query db(this);
+
+    db.setType(Query::PUSH, TABLE_IPHIST);
+    db.addColumn(COLUMN_IPADDR, ip);
+    db.addColumn(COLUMN_LOGENTRY, action);
+    db.exec();
+}
+
+uint Session::id()
+{
+    return sessionId;
+}
+
+void Session::slotClosed()
+{
+    // this function is connected to CmdHub::destroyed() as a way to catch if the currently
+    // connected command interperter has been killed. command interperters (CmdHub) running in the
+    // background are considered slots in this application so when a command interperter dies, its
+    // the same as a slot getting closed so the session will attempt to re-create or re-attach to
+    // the base slot defined in the profile when this happens. this behavior should not be allowed
+    // if the session is closing so sessionEnding is checked.
+
+    if (!sessionEnding)
+    {
+        textFromCmd(sessionId, true, tr(" "));
+        textFromCmd(sessionId, true, tr("<300> Slot id: ") + QString::number(slotId) + tr(" was killed. falling back to slot id: ") + QString::number(baseSlot) + tr("."));
+
+        emit createSlot(sessionId, 0, baseSlot);
+    }
+}
+
+void Session::groupBaseSlotChanged(const QString &grpName, uint id)
+{
+    if (grpName.toLower() == groupName.toLower())
+    {
+        if (onBaseSlot)
+        {
+            // force the session to create or attach to the new base slot if currently connected
+            // to the old base slot.
+
+            emit createSlot(sessionId, baseSlot, id);
+        }
+
+        baseSlot = id;
+    }
+}
+
+void Session::groupCmdListChanged(const QString &grpName, const QStringList &ls)
+{
+    if (grpName.toLower() == groupName.toLower())
+    {
+        profileCmdList = ls;
+    }
+}
+
+void Session::groupCSListChanged(const QString &grpName, bool cs)
+{
+    if (grpName.toLower() == groupName.toLower())
+    {
+        cmdListCaseSensitive = cs;
+    }
+}
+
+void Session::groupEnabledListChanged(const QString &grpName, bool state)
+{
+    if (grpName.toLower() == groupName.toLower())
+    {
+        cmdListenabled = state;
+    }
+}
+
+void Session::groupCmdLsModeChanged(const QString &grpName, uint mode)
+{
+    if (grpName.toLower() == groupName.toLower())
+    {
+        cmdListMode = mode;
+    }
+}
+
+void Session::profileGroupChanged(const QString &proName)
+{
+    if (profileName.toLower() == proName.toLower())
+    {
+        QByteArray unused;
+
+        loadProfile(profileName, unused);
+        groupBaseSlotChanged(groupName, baseSlot);
+    }
+}
+
+void Session::profileNameChanged(const QString &oldName, const QString &newName)
+{
+    if (profileName.toLower() == oldName.toLower())
+    {
+        profileName = newName;
+
+        textFromCmd(sessionId, true, tr(" "));
+        textFromCmd(sessionId, true, tr("<301> Your current profile name was changed to: ") + newName);
+    }
+}
+
+void Session::groupRenamed(const QString &oldName, const QString &newName)
+{
+    if (groupName.toLower() == oldName.toLower())
+    {
+        groupName = newName;
+    }
+}
+
+void Session::profileDeleted(const QString &proName)
+{
+    if (profileName.toLower() == proName.toLower())
+    {
+        textFromCmd(sessionId, true, tr(" "));
+        textFromCmd(sessionId, true, tr("<302> Your current profile got deleted, ending this session."));
+
+        sessionEnding = true;
+
+        emit deleteSession(sessionId);
+    }
+}
+
+void Session::sessionSlotChanged(uint sesId, uint slId)
+{
+    // this should be connected to the Server object's sessionSlotChanged() signal to help this
+    // object keep track of the slotId it is currently connected to.
+
+    if (sesId == sessionId)
+    {
+        textFromCmd(sessionId, true, tr(" "));
+        textFromCmd(sessionId, true, tr("<201> Connected to slot id: ") + QString::number(slId) + tr("."));
+
+        slotId     = slId;
+        onBaseSlot = (slotId == baseSlot);
+    }
+}
+
+void Session::clientDisconnected()
+{
+    addIpAction(tr("Disconnected"), peerAddress().toString());
+
+    if (!sessionEnding)
+    {
+        sessionEnding = true;
+
+        emit deleteSession(sessionId);
+    }
+}
+
+void Session::sessionTimeout()
+{
+    sessionEnding = true;
+
+    emit deleteSession(sessionId);
+}
+
+void Session::requestedToClose(uint sesId)
+{
+    if (sesId == 0)
+    {
+        sessionEnding = true;
+
+        emit deleteSession(sessionId);
+    }
+    else if (sesId == sessionId)
+    {
+        emit okToDelete(sesId);
+
+        close();
+    }
+}
+
+void Session::dataToClient(const QByteArray &data, uint exclude, uchar flgs)
+{
+    if (keyOk && (exclude != sessionId))
+    {
+        // data format: [num_of_bits][flags][data_size][data]
+
+        // it's very important that the data is sent in this format and encrypted to avoid
+        // undefined behavior.
+
+        QByteArray lenBa   = wrInt(data.size());
+        QByteArray flagsBa = QByteArray(1, flgs);
+        QByteArray bitsBa  = QByteArray(1, (uchar) lenBa.size() * 8);
+
+        write(wrHash->xOR(Hash::ENCODE, bitsBa + flagsBa + lenBa + data));
+    }
+}
+
+void Session::textFromCmd(uint sesId, bool cr, const QString &line)
+{   
+    QTextCodec *codec = QTextCodec::codecForName("UTF-16LE");
+
+    if (cr) dataToClient(codec->fromUnicode(line), 0, TEXT_CH);
+    else    dataToClient(codec->fromUnicode(line), sesId, TEXT_CH);
+}
+
+void Session::textFromServer(uint sesId, const QString &line)
+{
+    if ((sesId == sessionId) || (sesId == 0))
+    {
+        textFromCmd(sessionId, true, line);
+    }
+}
+
+void Session::binFromCmd(uint sesId, bool cr, bool priv, const QByteArray &bin)
+{
+    if (priv)
+    {
+        if (sesId == sessionId)
+        {
+            dataToClient(bin, 0, BIN_CH);
+        }
+    }
+    else
+    {
+        if (cr) dataToClient(bin, 0, BIN_CH);
+        else    dataToClient(bin, sesId, BIN_CH);
+    }
+}
+
+void Session::dataFilter(const QByteArray &data, uchar flgs)
+{
+    // this take the decrypted data from dataFromClient() and converts it to a
+    // QString if the flgs TEXT_CH is present or reads the command name from
+    // the raw data if BIN_CH is present. the the command name or full command
+    // line is then checked with profileAllowedCmd() at this point.
+
+    QString line;
+
+    if (flgs & TEXT_CH)
+    {
+        line = QTextCodec::codecForName("UTF-16LE")->toUnicode(data);
+
+        if (profileAllowedCmd(line))
+        {
+            emit textToCmd(sessionId, &profileName, line);
+        }
+    }
+    else if (flgs & BIN_CH)
+    {
+        if (activeHook)
+        {
+            emit binToCmd(sessionId, &profileName, data);
+        }
+        else
+        {
+            bool found = false;
+
+            for (int i = 0; i < data.size(); i += 2)
+            {
+               QByteArray chrPair(data.mid(i, 2));
+
+               if (chrPair.size() == 2)
+               {
+                   if ((chrPair[0] == (char) 0) && (chrPair[1] == (char) 0))
+                   {
+                       line = QTextCodec::codecForName("UTF-16LE")->toUnicode(data.left(i));
+
+                       if (profileAllowedCmd(line))
+                       {
+                           emit binToCmd(sessionId, &profileName, data);
+                       }
+
+                       found = true;
+
+                       break;
+                   }
+               }
+            }
+
+            if (!found)
+            {
+                textFromCmd(sessionId, true, tr("<105> Call to binary command has no terminator."));
+            }
+        }
+    }
+}
+
+void Session::setHookState(bool state)
+{
+    // this is used in Server::attach() to make this class aware of the
+    // hook state of the currently connected CmdHub.
+
+    activeHook = state;
+}
+
+bool Session::profileAllowedCmd(const QString &line)
+{
+    // this take in the sent in command line from the client and attempts
+    // the match it with the patterns defined in the profileCmdList if the
+    // list is enabled. empty lines are allowed no matter what.
+
+    bool ret = true;
+
+    // command filtering need to be completely bypassed if there is an
+    // active hook on the currently attached CmdHub.
+
+    if (!activeHook)
+    {
+        if (cmdListenabled && !line.isEmpty())
+        {
+            bool matched = false;
+
+            for (int i = 0; (i < profileCmdList.size()) && !matched; ++i)
+            {
+                QRegExp regEx(profileCmdList[i]);
+
+                regEx.setPatternSyntax(QRegExp::Wildcard);
+
+                if (cmdListCaseSensitive) regEx.setCaseSensitivity(Qt::CaseSensitive);
+                else                      regEx.setCaseSensitivity(Qt::CaseInsensitive);
+
+                matched = regEx.exactMatch(line);
+            }
+
+            // matched == true at this point indicate that a pattern was found
+            // of cmdListMode is checked to determine if the command should be
+            // allowed to run or not.
+
+            if (matched && (cmdListMode == CMD_LINES_DISALLOWED_TO_RUN))
+            {
+                textFromCmd(sessionId, true, tr(" "));
+                textFromCmd(sessionId, true, tr("<108> Command rejected by the host."));
+
+                ret = false;
+            }
+            else if (!matched && (cmdListMode == CMD_LINES_ALLOWED_TO_RUN))
+            {
+                textFromCmd(sessionId, true, tr(" "));
+                textFromCmd(sessionId, true, tr("<108> Command rejected by the host."));
+
+                ret = false;
+            }
+            else if (matched && (cmdListMode != CMD_LINES_ALLOWED_TO_RUN))
+            {
+                textFromCmd(sessionId, true, tr(" "));
+                textFromCmd(sessionId, true, tr("<108> host bug! - command list mode not recognized. mode: ") + QString::number(cmdListMode));
+
+                ret = false;
+            }
+        }
+    }
+
+    return ret;
+}
+
+void Session::dataFromClient()
+{
+    if (keyOk && !sessionEnding)
+    {
+        if (dSize) //stage 5
+        {
+            if (bytesAvailable() >= dSize)
+            {   
+                dataFilter(rdHash->xOR(Hash::DECODE, read(dSize)), flags);
+
+                dSize = 0;
+                bits  = 0;
+                flags = 0;
+
+                dataFromClient();
+            }
+        }
+        else if (bits) //stage 4
+        {
+            if (bytesAvailable() >= bits / 8)
+            {   
+                dSize = rdInt(rdHash->xOR(Hash::DECODE, read(bits / 8)));
+
+                if (dSize)
+                {
+                    dataFromClient();
+                }
+                else if (flags & TEXT_CH)
+                {
+                    // 0 on dSize at this point assumes empty text was sent to the
+                    // host so this code will actually locally create empty text
+                    // and send it through dataFilter().
+
+                    dataFilter(QTextCodec::codecForName("UTF-16LE")->fromUnicode(tr("")), flags);
+
+                    flags = 0;
+                    bits  = 0;
+                }
+                else
+                {
+                    // just like above, this will locally create an empty QByteArray()
+                    // to send through dataFilter().
+
+                    dataFilter(QByteArray(), flags);
+
+                    flags = 0;
+                    bits  = 0;
+                }
+            }
+        }
+        else if (bytesAvailable() >= 2) //stage 3
+        {
+            QByteArray data = rdHash->xOR(Hash::DECODE, read(2));
+
+            bits  = (uchar) data[0];
+            flags = (uchar) data[1];
+
+            if ((bits > MAX_BITS) || (bits < 8))
+            {
+                bits  = 0;
+                flags = 0;
+
+                addIpAction(tr("Out-of-sync event (int bits over maximum or < 8)"), peerAddress().toString());
+
+                // the client will must likely end up de-synced with the server
+                // at this point. the best way to recover will be to re-start
+                // a new session. (disconnect-reconnect)
+            }
+            else
+            {
+                dataFromClient();
+            }
+        }
+    }
+    else if (verOk) //stage 2
+    {
+        // SHA3-512 == 64 bytes.
+
+        if (bytesAvailable() >= 64)
+        {
+            if (rdHash->passHash() == rdHash->xOR(Hash::DECODE, read(64)))
+            {
+                // numeric value 1 indicates that the passHash matches with
+                // the host and will unlock stage 3-5 until the session closes.
+                // a successful match also resets the ban increment.
+
+                keyOk = true;
+
+                write(wrInt(1, 8));
+                waitForBytesWritten();
+
+                emit createSlot(sessionId, 0, baseSlot);
+                emit clearIPBanCount(peerAddress().toString());
+            }
+            else
+            {
+                // numeric value 2 indicates that the passHash sent in from the
+                // client is invalid. clients are free to make more attempts at this
+                // stage but keep in mind that the ban increment will only grow with
+                // each failed attempt.
+
+                addIpAction(tr("Client passHash missmatch"), peerAddress().toString());
+                write(wrInt(2, 8));
+
+                emit incrementIPBan(sessionId, peerAddress().toString());
+            }
+        }
+    }
+    else
+    {
+        if ((bytesAvailable() >= CLIENT_HEADER_LEN) && !sessionEnding) //stage 1
+        {
+            // client header format: [3bytes(tag)][2bytes(major)][2bytes(minor)][2bytes(patch)][58bytes(profile)]
+
+            // tag     = 0x4D, 0x43, 0x49 (MCI)
+            // major   = 16bit little endian int
+            // minor   = 16bit little endian int
+            // patch   = 16bit little endian int
+            // profile = UTF-16LE string (padded with white spaces to fill 29 max chars)
+
+            // note: profile names in this app are case insensitive.
+
+            timer->stop();
+
+            if (read(3) == QByteArray(SERVER_HEADER_TAG))
+            {
+                clientMajor = rdInt(read(2));
+                clientMinor = rdInt(read(2));
+                clientPatch = rdInt(read(2));
+
+                QByteArray servHeader;
+                QByteArray reply;
+                QByteArray key;
+                QByteArray proName = read(60);
+
+                addIpAction(tr("Client version: ") + QString::number(clientMajor) + "."
+                                                   + QString::number(clientMinor) + "."
+                                                   + QString::number(clientPatch), peerAddress().toString());
+
+                if ((clientMajor >= 1) && (clientMinor > 0))
+                {
+                    QString proStr = QTextCodec::codecForName("UTF-16LE")->toUnicode(proName).trimmed();
+
+                    addIpAction(tr("Profile name: ") + proStr, peerAddress().toString());
+
+                    if (loadProfile(proStr, key))
+                    {
+                        reply = wrInt(1, 8);
+                        verOk = true;
+
+                        addIpAction(tr("Client version and profile ok"), peerAddress().toString());
+                    }
+                    else
+                    {
+                        reply = wrInt(2, 8);
+
+                        addIpAction(tr("Profile not found"), peerAddress().toString());
+                    }
+                }
+                else
+                {
+                    reply = wrInt(3, 8);
+
+                    addIpAction(tr("Client version rejected"), peerAddress().toString());
+                }
+
+                QStringList ver = QApplication::applicationVersion().split('.');
+
+                servHeader.append(reply);
+                servHeader.append(wrInt(ver[0].toShort(), 16));
+                servHeader.append(wrInt(ver[1].toShort(), 16));
+                servHeader.append(wrInt(ver[2].toShort(), 16));
+
+                if (verOk)
+                {
+                    rdHash = new Hash(key + TO_SERV_SALT, sessionId, this);
+                    wrHash = new Hash(key + FROM_SERV_SALT, sessionId, this);
+
+                    servHeader.append(rdHash->seqBytes());
+                    servHeader.append(wrHash->seqBytes());
+                    servHeader.append(rdHash->sessionIdBytes());
+
+                    if (servHeader.size() != SERVER_HEADER_LEN)
+                    {
+                        addIpAction(tr("Host bug! - header len != ") + QString::number(SERVER_HEADER_LEN), peerAddress().toString());
+                    }
+
+                    write(servHeader);
+                }
+                else
+                {
+                    servHeader.append(QByteArray(NUM_OF_SEQ + 4, 0));
+
+                    write(servHeader);
+                    waitForBytesWritten();
+
+                    sessionEnding = true;
+
+                    emit deleteSession(sessionId);
+                }
+            }
+            else
+            {
+                addIpAction(tr("Invalid tag"), peerAddress().toString());
+
+                sessionEnding = true;
+
+                emit deleteSession(sessionId);
+            }
+        }
+    }
+}

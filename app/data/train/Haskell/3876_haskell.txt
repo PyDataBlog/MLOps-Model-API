@@ -1,0 +1,147 @@
+module Jerimum.Storage.PostgreSQL.Setup
+  ( Context(..)
+  , setup
+  , destroy
+  , findSegment
+  , openSegment
+  , closeSegment
+  , addSchemas
+  ) where
+
+import           Control.Monad
+import qualified Data.Map                                     as M
+import           Data.Monoid
+import qualified Data.Text                                    as T
+import           Data.UUID.Types
+import qualified Database.PostgreSQL.Simple                   as PQ
+import           Database.PostgreSQL.Simple.Types             (Identifier (..))
+import qualified Jerimum.Storage.PostgreSQL.Schemas.EventType as EventType
+import           Jerimum.Storage.PostgreSQL.SqlMonad
+
+data Context = Context
+  { segmentId    :: UUID
+  , databaseName :: T.Text
+  , schemasTable :: Identifier
+  , eventsTable  :: Identifier
+  , knownSchemas :: M.Map EventType.Version UUID
+  } deriving (Show)
+
+addSchemas :: Context -> M.Map EventType.Version UUID -> Context
+addSchemas ctx newSchemas =
+  ctx {knownSchemas = M.union (knownSchemas ctx) newSchemas}
+
+createSegmentTable :: PQ.Query
+createSegmentTable =
+  "CREATE TABLE IF NOT EXISTS segments" <> " (" <>
+  "   segment_id    uuid not null primary key" <>
+  " , dbname        text not null" <>
+  " , lsn_lower     pg_lsn" <>
+  " , lsn_upper     pg_lsn" <>
+  " , time_lower    bigint" <>
+  " , time_upper    bigint" <>
+  " , is_open       boolean not null" <>
+  "   CHECK ((lsn_upper - lsn_lower) < 1073741824)" <>
+  " , EXCLUDE (is_open with =) WHERE (is_open)" <>
+  " );"
+
+createSchemasMasterTable :: PQ.Query
+createSchemasMasterTable =
+  "CREATE TABLE IF NOT EXISTS schemas" <> " (" <>
+  "   segment_id            uuid not null" <>
+  " , schema_id             uuid not null" <>
+  " , schema_version        bytea not null" <>
+  " , schema_type           smallint" <>
+  " , table_schema          text" <>
+  " , table_name            text" <>
+  " , table_cols            text[]" <>
+  " , table_types           bytea" <>
+  " , message_prefix        text" <>
+  " , message_transactional boolean" <>
+  " , updated_at            timestamptz" <>
+  " );"
+
+createEventsMasterTable :: PQ.Query
+createEventsMasterTable =
+  "CREATE TABLE IF NOT EXISTS events" <> "(" <> "  segment_id  uuid not null" <>
+  ", lsn         pg_lsn not null" <>
+  ", xno         integer not null" <>
+  ", len         integer not null" <>
+  ", timestamp   bigint not null" <>
+  ", schema_ids  uuid[]" <>
+  ", bin_events  bytea" <>
+  ", updated_at  timestamptz" <>
+  ");"
+
+setup :: SqlMonad ()
+setup =
+  performSQL $ \conn -> do
+    _ <- PQ.execute_ conn createSegmentTable
+    _ <- PQ.execute_ conn createSchemasMasterTable
+    void $ PQ.execute_ conn createEventsMasterTable
+
+destroy :: SqlMonad ()
+destroy =
+  performSQL $ \conn -> do
+    _ <- PQ.execute_ conn "DROP TABLE IF EXISTS events CASCADE"
+    _ <- PQ.execute_ conn "DROP TABLE IF EXISTS schemas CASCADE"
+    void $ PQ.execute_ conn "DROP TABLE IF EXISTS segments CASCADE"
+
+closeSegment :: UUID -> SqlMonad ()
+closeSegment uuid =
+  let query =
+        "UPDATE segments" <> " SET is_open = false" <> " WHERE segment_id = ?"
+  in performSQL $ \conn -> void $ PQ.execute conn query [uuid]
+
+findSegment :: T.Text -> SqlMonad (Maybe Context)
+findSegment dbname =
+  let query =
+        "SELECT segment_id FROM segments" <> " WHERE is_open AND dbname = ?"
+      params = [dbname]
+  in do results <- performSQL $ \conn -> PQ.query conn query params
+        case results of
+          [PQ.Only (Just segmentId)] ->
+            pure (Just $ makeContext dbname segmentId)
+          _ -> pure Nothing
+
+makeContext :: T.Text -> UUID -> Context
+makeContext dbname uuid =
+  let suffix = T.replace "-" "" (toText uuid)
+  in Context
+       uuid
+       dbname
+       (Identifier $ "schemas_" <> suffix)
+       (Identifier $ "events_" <> suffix)
+       M.empty
+
+openSegment :: T.Text -> UUID -> SqlMonad Context
+openSegment dbname uuid = do
+  performSQL $ \conn ->
+    PQ.withTransaction conn $ do
+      insertSegment conn
+      createSchemasTable conn
+      createEventsTable conn
+  pure context
+  where
+    context = makeContext dbname uuid
+    insertSegment conn =
+      let query =
+            "INSERT INTO segments " <> " ( segment_id, dbname, is_open )" <>
+            " VALUES (?, ?, true)"
+      in void $ PQ.execute conn query (uuid, dbname)
+    createSchemasTable conn =
+      let query =
+            "CREATE TABLE ?" <> " ( CHECK (segment_id = ?)" <>
+            " , PRIMARY KEY (schema_id)" <>
+            " , UNIQUE (schema_version)" <>
+            " , FOREIGN KEY (segment_id) REFERENCES segments (segment_id)" <>
+            " )" <>
+            " INHERITS (schemas)"
+      in void $ PQ.execute conn query (schemasTable context, uuid)
+    createEventsTable conn =
+      let query =
+            "CREATE TABLE ?" <> " ( CHECK (segment_id = ?)" <>
+            " , PRIMARY KEY (lsn, xno)" <>
+            " , FOREIGN KEY (segment_id) REFERENCES segments (segment_id)" <>
+            " )" <>
+            " INHERITS (events)"
+      in void $ PQ.execute conn query (eventsTable context, uuid)

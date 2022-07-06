@@ -1,0 +1,97 @@
+/**
+	* Copyright 2017 Tristan Nixon
+	*
+	* Licensed under the Apache License, Version 2.0 (the "License");
+	* you may not use this file except in compliance with the License.
+	* You may obtain a copy of the License at
+	*
+	* http://www.apache.org/licenses/LICENSE-2.0
+	*
+	* Unless required by applicable law or agreed to in writing, software
+	* distributed under the License is distributed on an "AS IS" BASIS,
+	* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+	* See the License for the specific language governing permissions and
+	* limitations under the License.
+	*
+	* Created by Tristan Nixon on 7/6/17.
+	*/
+package org.memeticlabs.spark.rdd.trycatch
+
+import scala.Function._
+import scala.reflect.ClassTag
+import scala.util.{Failure, Success, Try}
+
+
+/**
+	* A case-class for wrapping the try-catch results
+	*/
+private[memeticlabs] case class TryCatchResultWithInput[T, U]( input: T, result: Try[U] )
+{
+	def isFailure: Boolean = result.isFailure
+
+	def isSuccess: Boolean = result.isSuccess
+
+	def getInput: T = input
+
+	def getResult: U = result.get
+
+	def getResult( orElse: U ): U = result.getOrElse(orElse)
+
+	def getError: Throwable = result.failed.get
+}
+
+/**
+	* Helper methods for try-catch error handling
+	*/
+private[memeticlabs] object TryCatchHelpers
+{
+	type errorHandlerFn[X] = ( X, Throwable ) => Unit
+
+	type errorHandlerBuilder[X] = (String) => errorHandlerFn[X]
+
+	def tryCatchResult[X,Y]( f: X => Y, errorHandler: errorHandlerFn[X] ): X => TryCatchResultWithInput[X, Y] =
+		(x: X) => try TryCatchResultWithInput( x, Success( f( x ) ) )
+		catch {
+			case ex: Throwable => {
+				errorHandler( x, ex )
+				TryCatchResultWithInput( x, Failure[Y]( ex ) )
+			}
+		}
+
+	def tryCatchResult[X, Y]( f: PartialFunction[X, Y],
+	                          errorHandler: errorHandlerFn[X] ): PartialFunction[X, TryCatchResultWithInput[X, Y]] =
+		new PartialFunction[X, TryCatchResultWithInput[X, Y]] {
+			override def isDefinedAt(x: X): Boolean = f.isDefinedAt(x)
+
+			override def apply(x: X): TryCatchResultWithInput[X, Y] =
+				try TryCatchResultWithInput( x, Success( f( x ) ) )
+				catch {
+					case ex: Throwable => {
+						errorHandler( x, ex )
+						TryCatchResultWithInput( x, Failure[Y]( ex ) )
+					}
+				}
+		}
+
+	def tryCatchAndHandle[X]( f: X => Unit,
+	                          errorHandler: errorHandlerFn[X] ): X => Unit =
+		(x: X ) => try f(x)
+		catch {
+			case ex: Throwable => errorHandler( x, ex )
+		}
+
+	def tryCatchAndHandle[X: ClassTag, Y: ClassTag]( f: X => Y,
+	                                                 errorValue: Y,
+	                                                 errorHandler: errorHandlerFn[X] ): X => Y =
+		tryCatchResult( f, errorHandler ).andThen( _.getResult( errorValue ) )
+
+	def tryCatchAndHandle[X: ClassTag]( f: (X, X) => X,
+	                                    errorValue: X,
+	                                    errorHandler: errorHandlerFn[(X, X)] ): (X, X) => X =
+		untupled( tryCatchResult[(X, X), X]( f.tupled, errorHandler ).andThen( _.getResult(errorValue) ) )
+
+	def tryCatchAndHandle[X: ClassTag, Y: ClassTag]( f: (X, Y) => X,
+	                                                 errorValue: X,
+	                                                 errorHandler: errorHandlerFn[(X, Y)] ): (X, Y) => X =
+		untupled( tryCatchResult[(X, Y), X]( f.tupled, errorHandler ).andThen( _.getResult(errorValue) ) )
+}

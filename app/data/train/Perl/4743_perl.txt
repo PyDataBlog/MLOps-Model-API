@@ -1,0 +1,335 @@
+#!/usr/bin/perl -w
+
+use strict;
+use IO::Socket;
+
+my %MyConf;
+my %CurTime;
+my $state = "REGISTER";
+
+#.timestamp.log appended
+$MyConf{'Logfile'} = "./output";
+
+#Default information in case the config file doesn't load
+$MyConf{'Server'} = "irc.example.net";
+$MyConf{'Port'} = "6667";
+$MyConf{'Nick'} = "TheGreatSieve";
+$MyConf{'Username'} = "Lord";
+$MyConf{'Realname'} = "Maximus Decipher";
+$MyConf{'DefaultModes'} = "0";
+#Command character
+$MyConf{'CmdP'} = ">";
+$MyConf{'VReply'} = "The Great Sieve!";
+$MyConf{'QuitMsg'} = "The Great Sieve, for all your diciphering needs!";
+#Default channel to join
+$MyConf{'Channel'} = "#testing";
+#How often to look for new news
+$MyConf{'CheckInterval'} = 1800;
+#user database file
+$MyConf{'UserDB'} = "./users.db";
+
+$MyConf{'NSStr'} = "";
+
+my $CurTS = time();
+my $OldTS = $CurTS;
+my @Users;
+
+#&LoadUDB();
+
+unless(open(LOGFILE, "> $MyConf{'Logfile'}.$CurTS.log"))
+{
+	print "Unable to open logging file ($!)!\n";
+	die "Unable to open logging file, program configured to exit upon this error.";
+}
+
+print "$MyConf{'Server'} $MyConf{'Port'}\n";
+
+my $SOCK = new IO::Socket::INET(PeerAddr => $MyConf{'Server'}, PeerPort => $MyConf{'Port'}, Proto => 'tcp');
+unless(<$SOCK>)
+{
+	print LOGFILE "Unable to connect to server.";
+
+	close(LOGFILE);
+	die "Unable to connect to server.";
+}
+
+#This first loop is not to the master loop, this only allows us to connect to the network
+# and gather important information we might need.
+
+print LOGFILE "Negotiating connection with IRC server...\n";
+print "Negotiating connection with IRC server...\n";
+print $SOCK "NICK $MyConf{'Nick'}\n";
+print $SOCK "USER $MyConf{'Username'} $MyConf{'DefaultModes'} * :$MyConf{'Realname'}\n";
+
+while(<$SOCK>)
+{
+	print;
+	print LOGFILE;
+	
+	if(m/^PING (.*)$/i)
+	{
+		print $SOCK "PONG $1\n";
+		next;
+	}
+
+	chomp;
+
+	my ($sender, $command, $dest, @message) = split(/ /);
+	$sender =~ m/^:(.*)/;
+	$message[0] =~ m/^:(.*)/;
+	$message[0] = $1;
+
+	my %victim;
+
+	if($sender =~ m/^:(.*)!(.*)\@(.*)/)
+	{	
+		$victim{'Nick'} = $1;
+		$victim{'UName'} = $2;
+		$victim{'Mask'} = $3;
+
+		if($victim{'UName'} =~ m/^~(.*)/)
+		{
+			$victim{'UName'} = $1;
+			$victim{'Ident'} = 1;
+		}
+		else
+		{
+			$victim{'UName'} = $1;
+			$victim{'Ident'} = 0;
+		}
+	}
+	else
+	{
+		$sender =~ m/^:(.*)/;
+		$victim{'Nick'} = $1;
+		$victim{'Ident'} = 2;
+	}
+
+	if($state eq "REGISTER")
+	{
+		if($command eq "004")
+		{
+			$state = "NICKSERV";
+		}
+		elsif($command eq "432")
+	    		{
+				print LOGFILE "...Nickname is invalid!)\n";
+				close(LOGFILE);
+	
+				die "Nickname is invalid.";
+		    	}
+		elsif($command eq "433")
+		    	{
+				print LOGFILE "...Nickname is already in use!\n";
+				close(LOGFILE);
+
+				die "Nickname is already in use.";
+			}
+		elsif($command eq "437")
+			{
+				print LOGFILE "...Nickname temporarily unavailable!\n";
+				close(LOGFILE);
+				
+				die "Nickname temporarily unavailable.";
+			}
+	}
+
+	if($state eq "NICKSERV")
+	{
+		print $SOCK "$MyConf{'NSStr'}\n";
+		$state = "JOINING";
+		$OldTS = $CurTS;
+
+		sleep(5);
+	}
+	
+	if($state eq "JOINING")
+	{
+		print $SOCK "JOIN $MyConf{'Channel'}\n";
+		$state = "JOIN";
+
+		$MyConf{'Channel'} = "";
+
+		$OldTS = $CurTS;
+
+		last;
+	}
+
+	if($state eq "JOIN")
+	{
+		if(uc($command) eq "JOIN")
+		{
+			if(uc($victim{'Nick'}) eq uc($MyConf{'Nick'}))
+			{
+				$MyConf{'Channel'} += "$message[0] ";
+				$state = "NORMAL";
+				last;
+			}
+		}
+
+		if(($CurTS - $OldTS) > 30)
+		{
+			print "Bot timed-out during join.\n";
+			print LOGFILE "Bot timed-out during join.\n";
+
+			close($SOCK);
+			last;
+		}
+	}
+
+	if($state eq "NORMAL")
+	{
+		last;
+	}
+
+	$CurTS = time();
+}
+
+print LOGFILE "Entering master loop...\n";
+print "Entering master loop...\n";
+
+$CurTS = time();
+$OldTS = $CurTS;
+
+while(<$SOCK>)
+{
+	print;
+	print LOGFILE;
+	
+	chomp;
+    
+        my ($sender, $command, $dest, @message) = split(/ /);
+        $sender =~ m/^:(.*)/;
+
+	if(@message)
+	{
+		$message[0] =~ m/^:(.*)/;
+	        $message[0] = $1;
+	}
+
+        my %victim;
+
+        if($sender =~ m/^:(.*)!(.*)\@(.*)/)
+        {
+                $victim{'Nick'} = $1;
+                $victim{'UName'} = $2;
+                $victim{'Mask'} = $3;
+
+                if($victim{'UName'} =~ m/^~(.*)/)
+                {
+                        $victim{'UName'} = $1;
+                        $victim{'Ident'} = 1;
+                }
+                else
+                {
+                        $victim{'UName'} = $1;
+                        $victim{'Ident'} = 0;
+                }
+        }
+        else
+        {
+                $sender =~ m/^:(.*)/;
+                $victim{'Nick'} = $1;
+                $victim{'Ident'} = 2;
+        }
+	
+	if(m/^PING (.*)$/i)
+	{
+	        print $SOCK "PONG $1\n";
+        	next;
+	}
+
+	$CurTS = time();
+
+	if(uc($command) eq "PRIVMSG")
+	{
+		my $overall;
+		my $decoded;
+
+		$overall = join(' ', @message);
+
+		if($overall =~ /\[r13\].(.+)/i)
+		{
+			$decoded = $1;
+			$decoded =~ tr/A-MN-Za-mn-z/N-ZA-Mn-za-m/;
+			print $SOCK "PRIVMSG $dest :[dec] $decoded\n";
+		}
+		
+		if($overall =~ /\[taecode\](.+)$/i)
+		{
+			my $text = $1;
+			my $decoded = "";
+
+			$text =~ s/(||[0-9,]*)//g;
+			$text =~ /^(\S*)\s:(.*)/;
+
+			my @chars = split //, $text;
+
+			for(my $i = 1; $i <= $#chars; $i++)
+			{
+				$chars[$i] =~ /^(.)/;
+				$decoded .= $1;
+			}
+
+			print $SOCK "PRIVMSG $dest :[taedecode] $decoded\n";
+		}
+		
+		if($overall =~ /\Encoded Text:.(.+)/i)
+		{
+			my $decoded;
+			$decoded = $1;
+			
+			$decoded =~ s/([a-fA-F0-9]{2})/chr(hex $1)/eg;
+			print $SOCK "PRIVMSG $dest :[dec] $decoded\n";
+		}
+	}
+}
+
+print LOGFILE "Bot exited successfully\n";
+print "Bot exited successfully\n";
+
+close(LOGFILE);
+
+# some useful functions
+sub LoadUDB()
+{
+	unless(open(USERDB, "$MyConf{'UserDB'}"))
+	{
+		print "Unable to open user database file ($!)!\n";
+		die "Unable to open user database file.";
+	}
+
+	while(<USERDB>)
+	{
+		chomp;
+		my ($name, $pass, $lastnick) = split(/ /);
+		push(@Users, ("n" => $name, "p" => $pass, "l" => $lastnick));
+	}
+}
+
+sub SaveUDB()
+{
+#	unless(open(USERDB, ">$MyConf{'UserDB'}"))
+#	{
+#		print "Unable to open user database file for write ($!)!\n";
+#		die "Unable to open user database file for write.";
+#	}
+
+#	foreach my $current (@Users)
+#	{
+#		print USERDB "$current{'n'} $current{'p'} $current{'l'}\n";
+#	}
+}
+
+sub MakeChecksum()
+{
+	$/ = $_[0];
+
+	my $sum = do
+	{
+		local $/;
+		unpack("%32C*",<>) % 65525;
+	};
+
+	return($sum);
+}

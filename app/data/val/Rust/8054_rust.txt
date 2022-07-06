@@ -1,0 +1,180 @@
+use services::*;
+use super::prelude::*;
+use models::launcher::*;
+use utils::convertor::VecConvertor;
+use params::*;
+pub fn init_router(router: &mut Router) {
+    router.get("/api/launcher/check_update/", do_check_update);
+    router.get("/api/launcher/home/", do_kind_home);
+    router.get("/api/launcher/secondary/", do_kind_secondary);
+    router.get("/api/launcher/app/category/", do_get_apk_category);
+    router.get("/api/launcher/app/", do_get_apk);
+}
+
+fn do_get_apk_category(req: &mut Request) -> IronResult<Response> {
+    #[derive(RustcEncodable)]
+    struct A {
+        id: i32,
+        title: Option<String>,
+        version_code: i32,
+        version_name: Option<String>,
+        package_name: Option<String>,
+        img_url: Option<String>,
+    }
+    #[derive(RustcEncodable,Default)]
+    struct Result {
+        status: i32,
+        apps: Vec<A>,
+    }
+
+    let mut result = Result::default();
+    result.status = 1;
+    let category_id = req.param::<i32>("category_id").unwrap_or(0);
+    if category_id > 0 {
+        result.apps = launcher::get_apk_list_by_category(category_id).convert(|app| {
+            A {
+                id: app.id,
+                title: app.title,
+                version_code: app.version_code,
+                version_name: app.version_name,
+                package_name: app.package_name,
+                img_url: app.recommend_screen_url,
+            }
+        });
+        result.status = 0;
+    }
+    response::ok_json(&json::encode(&result).unwrap())
+}
+
+
+fn do_get_apk(req: &mut Request) -> IronResult<Response> {
+    #[derive(RustcEncodable,Default)]
+    struct Result {
+        status: i32,
+        app: Option<LauncherApk>,
+    }
+    let mut result = Result::default();
+    result.status = 1;
+    let id = req.param::<i32>("id").unwrap_or(0);
+    if id > 0 {
+        result.app = launcher::get_apk_by_id(id);
+        result.status = 0;
+    }
+    response::ok_json(&json::encode(&result).unwrap())
+}
+
+
+fn do_check_update(req: &mut Request) -> IronResult<Response> {
+    #[derive(RustcEncodable,Default)]
+    struct Result {
+        status: i32,
+        version_code: i32,
+        version_name: Option<String>,
+        apk_url: Option<String>,
+        update_desc: Option<String>,
+    }
+    let mut result = Result::default();
+    result.status = 1;
+    let version_code = req.param::<i32>("version_code").unwrap_or(0);
+    let imei = req.param::<String>("imei");
+    if version_code > 0 {
+        if let Some(imei) = imei {
+            if let Some(device) = common::get_device_by_imei(imei) {
+                if let Some(launcher) = launcher::check_update(device.channel_id, version_code) {
+                    result.status = 0;
+                    result.version_code = launcher.version_code;
+                    result.version_name = launcher.version_name;
+                    result.apk_url = launcher.apk_url;
+                    result.update_desc = launcher.update_desc;
+                }
+            }
+        }
+    }
+    response::ok_json(&json::encode(&result).unwrap())
+}
+
+
+fn do_kind_home(req: &mut Request) -> IronResult<Response> {
+    #[derive(RustcEncodable)]
+    struct I {
+        img_url: Option<String>,
+        title: Option<String>,
+    }
+    #[derive(RustcEncodable)]
+    struct K {
+        type_id: i32,
+        title: Option<String>,
+        items: Vec<I>,
+    }
+    #[derive(RustcEncodable,Default)]
+    struct Result {
+        status: i32,
+        items: Vec<K>,
+    }
+    let mut result = Result::default();
+    result.status = 1;
+    if let Some(imei) = req.param::<String>("imei") {
+        if let Some(device) = common::get_device_by_imei(imei) {
+            let vec = launcher::get_by_channel(device.channel_id).convert(|kind| {
+                K {
+                    type_id: kind.id,
+                    title: kind.title,
+                    items: kind.items.convert(|item| {
+                        I {
+                            img_url: item.img_url,
+                            title: item.title,
+                        }
+                    }),
+                }
+            });
+            result.status = 0;
+            result.items = vec;
+        }
+    }
+    response::ok_json(&json::encode(&result).unwrap())
+}
+
+
+fn do_kind_secondary(req: &mut Request) -> IronResult<Response> {
+    #[derive(RustcEncodable)]
+    struct R {
+        id: i32,
+        title: Option<String>,
+        package_name: Option<String>,
+        img_url: Option<String>,
+    }
+    #[derive(RustcEncodable)]
+    struct C {
+        id: i32,
+        title: Option<String>,
+        img_url: Option<String>,
+    }
+    #[derive(RustcEncodable,Default)]
+    struct Result {
+        status: i32,
+        recommend: Vec<R>,
+        category: Vec<C>,
+    }
+    let mut result = Result::default();
+    result.status = 1;
+    let kind_id = req.param::<i32>("type_id").unwrap_or(0);
+    if kind_id > 0 {
+        result.recommend = launcher::get_apk_recommend_list_by_kind(kind_id).convert(|app| {
+            R {
+                id: app.id,
+                title: app.title,
+                package_name: app.package_name,
+                img_url: app.recommend_screen_url,
+            }
+        });
+        result.category = launcher::get_category_list_by_kind(kind_id).convert(|c| {
+            C {
+                id: c.id,
+                title: c.title,
+                img_url: c.img_url,
+            }
+        });
+        result.status = 0;
+    }
+    response::ok_json(&json::encode(&result).unwrap())
+}

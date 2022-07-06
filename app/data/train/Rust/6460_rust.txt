@@ -1,0 +1,109 @@
+pub mod multi;
+pub mod threshold;
+
+use std::cmp::min;
+
+use crate::{Levenshtein, Metric};
+
+impl Default for Levenshtein {
+    fn default() -> Self {
+        Levenshtein {}
+    }
+}
+
+impl<T: Eq, R: AsRef<[T]>> Metric<T, R> for Levenshtein {
+    fn distance(a: R, b: R) -> usize {
+        distance(a.as_ref(), b.as_ref())
+    }
+}
+
+fn distance<T>(a: &[T], b: &[T]) -> usize
+where
+    T: Eq,
+{
+    let a_length = a.len();
+    let b_length = b.len();
+
+    if a_length == 0 {
+        return b_length;
+    } else if b_length == 0 {
+        return a_length;
+    }
+
+    let (row_items, column_items) = if a_length < b_length { (b, a) } else { (a, b) };
+
+    let mut buffer = first_row(row_items, column_items);
+    other_rows(row_items, column_items, &mut buffer);
+    *buffer.last().unwrap()
+}
+
+fn first_row<T>(row_items: &[T], column_items: &[T]) -> Vec<usize>
+where
+    T: Eq,
+{
+    let columns = column_items.len();
+    let mut buffer = Vec::with_capacity(columns);
+
+    let mut column_iter = column_items.iter().enumerate();
+    let (_, column_item0) = column_iter.next().unwrap();
+    let row_item0 = &row_items[0];
+
+    // Row 1, Column 1
+    buffer.push(if row_item0 == column_item0 { 0 } else { 1 });
+
+    // Row 1, Column 2+
+    for (column, column_item) in column_iter {
+        let value = {
+            let diag = column;
+            if row_item0 == column_item {
+                diag
+            } else {
+                let left = buffer[column - 1];
+                min(diag, left) + 1
+            }
+        };
+        buffer.push(value);
+    }
+
+    buffer
+}
+
+fn other_rows<T>(row_items: &[T], column_items: &[T], buffer: &mut Vec<usize>)
+where
+    T: Eq,
+{
+    let row_iter = row_items.iter().enumerate();
+
+    for (row, row_item) in row_iter {
+        let mut last_up = buffer[0];
+        let mut column_iter = column_items.iter().enumerate();
+
+        // Row 2+, Column 1
+        let (_, column_item0) = column_iter.next().unwrap();
+        buffer[0] = {
+            let diag = row;
+            if row_item == column_item0 {
+                diag
+            } else {
+                let up = buffer[0];
+                min(diag, up) + 1
+            }
+        };
+
+        // Row 2+, Column 2+
+        for (column, column_item) in column_iter {
+            let value = {
+                let diag = last_up;
+                if row_item == column_item {
+                    diag
+                } else {
+                    let left = buffer[column - 1];
+                    let up = buffer[column];
+                    min(min(diag, left), up) + 1
+                }
+            };
+            last_up = buffer[column];
+            buffer[column] = value;
+        }
+    }
+}

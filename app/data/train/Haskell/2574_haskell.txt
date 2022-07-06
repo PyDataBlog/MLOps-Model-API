@@ -1,0 +1,142 @@
+module TTT.MinimaxSpec where
+
+import Control.Monad.State (evalState)
+import qualified Data.Map as M (empty)
+import Test.Hspec
+
+import TTT.Minimax (getMove)
+import TTT.Minimax.Internal (minimax)
+import TTT.GameState (GameState(..), Space(..), Token(..), availableMoves,initialState, makeMove, isWinFor, choose)
+
+playAllGameStates _ [] outcomes = outcomes
+playAllGameStates initialPlayer gameStates@(gameState@(GameState _ currentPlayer):xs) outcomes
+    |gameState `isWinFor` initialPlayer || moves == [] =
+        playAllGameStates initialPlayer xs (True:outcomes)
+    |gameState `isWinFor` (choose initialPlayer O X) =
+        playAllGameStates initialPlayer xs (False:outcomes)
+    |otherwise = case currentPlayer == initialPlayer of
+                     True -> playAllGameStates initialPlayer nextStates outcomes
+                     False -> playAllGameStates initialPlayer possibleStates outcomes
+        where moves = availableMoves gameState
+              possibleStates = genPossibleStates gameStates []
+              compMoves = getCompMoves gameStates []
+              compStatesAndMoves = (zip gameStates (reverse compMoves))
+              nextStates = genNextStates compStatesAndMoves []
+            
+genPossibleStates [] states = concat states
+genPossibleStates (x:xs) states =
+    let newGameStates = map (makeMove x) moves
+        in genPossibleStates xs (newGameStates:states)
+    where moves = availableMoves x
+
+genNextStates [] states = states
+genNextStates (x:xs) states =
+    let newGameState = makeMove (fst x) (snd x)
+        in genNextStates xs (newGameState:states)
+
+getCompMoves [] moves = moves
+getCompMoves (x:xs) moves = 
+    let move = evalState (getMove x) M.empty
+        in getCompMoves xs (move:moves)
+
+spec = describe "Minimax" $ do
+    context "scoring a win" $ do
+        it "should score a win for X on a 3x3 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Filled X, Blank, Blank, Blank, Blank, Blank, Blank] O) 
+                in evalState (minimax gameState) M.empty `shouldBe` 100
+
+        it "should score a win for X on a 4x4 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Filled X, Filled X, 
+                                       Blank, Blank, Blank, Blank, 
+                                       Blank, Blank, Blank, Blank, 
+                                       Blank, Blank, Blank, Blank] O) 
+                in evalState (minimax gameState) M.empty `shouldBe` 100
+
+        it "should score a win for O on a 3x3 board" $ do
+            let gameState = (GameState [Filled O, Filled O, Filled O, Blank, Blank, Blank, Blank, Blank, Blank] X) 
+                in evalState (minimax gameState) M.empty `shouldBe` (-100)
+
+        it "should score a win for O on a 4x4 board" $ do
+            let gameState = (GameState [Filled O, Filled O, Filled O, Filled O, 
+                                       Blank, Blank, Blank, Blank, 
+                                       Blank, Blank, Blank, Blank, 
+                                       Blank, Blank, Blank, Blank] O) 
+                in evalState (minimax gameState) M.empty `shouldBe` -100
+
+        it "should score a tie game on a 3x3 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Filled O,
+                                       Filled O, Filled O, Filled X, 
+                                       Filled X, Filled O, Filled X] O) 
+                in evalState (minimax gameState) M.empty `shouldBe` 0
+
+        it "should score a tie game on a 4x4 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Filled O, Filled X, 
+                                       Filled X, Filled O, Filled O, Filled O,
+                                       Filled O, Filled X, Filled O, Filled X,
+                                       Filled X, Filled O, Filled X, Filled O] O)
+                in evalState (minimax gameState) M.empty `shouldBe` 0
+
+        it "chooses the only available move on a 3x3 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Filled O,
+                                       Filled O, Filled O, Filled X, 
+                                       Blank, Filled O, Filled X] X) 
+                in evalState (getMove gameState) M.empty `shouldBe` 6
+
+        it "chooses the only available move on a 4x4 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Filled O, Filled X, 
+                                       Filled X, Filled O, Filled O, Filled O,
+                                       Filled O, Filled X, Filled O, Filled X,
+                                       Filled X, Filled O, Filled X, Blank] O)
+                in evalState (getMove gameState) M.empty `shouldBe` 15
+
+        it "X should prioritize winning over blocking on a 3x3 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Blank,
+                                       Blank, Filled O, Filled O, 
+                                       Blank, Blank, Blank] X) 
+                in evalState (getMove gameState) M.empty `shouldBe` 2
+
+        it "X should prioritize winning over blocking on a 4x4 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Filled X, Blank, 
+                                       Filled O, Filled O, Filled O, Blank, 
+                                       Blank, Blank, Blank, Blank, 
+                                       Blank, Blank, Blank, Blank] X) 
+                in evalState (getMove gameState) M.empty `shouldBe` 3
+
+        it "O should prioritize winning over blocking on a 3x3 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Blank,
+                                       Blank, Filled O, Filled O, 
+                                       Blank, Blank, Filled X] O) 
+                in evalState (getMove gameState) M.empty `shouldBe` 3
+
+        it "O should prioritize winning over blocking on a 4x4 board" $ do
+            let gameState = (GameState [Filled X, Filled X, Filled X, Blank, 
+                                       Filled O, Filled O, Filled O, Blank, 
+                                       Blank, Blank, Blank, Blank, 
+                                       Blank, Blank, Blank, Blank] O) 
+                in evalState (getMove gameState) M.empty `shouldBe` 7
+
+        it "will block a fork" $ do
+            let gameState = (GameState [Filled X, Blank, Blank,
+                                       Blank, Filled X, Blank, 
+                                       Blank, Blank, Filled O] O) 
+                in evalState (getMove gameState) M.empty `shouldBe` 2
+
+        it "will play through all possible gameStates on a 3x3 board as the first player and never lose" $ do
+            all (== True) (playAllGameStates X [(initialState 3)] [])
+            `shouldBe` True
+
+--      You'll be there for a while if you run this one.
+--        it "will play through all possible gameStates on a 4x4 board as the first player and never lose" $ do
+--            all (== True) (playAllGameStates X [(initialState 4)] [])
+--            `shouldBe` True
+
+        it "will play through all possible gameStates on 3x3 board as the second player and never lose" $ do
+            let moves = availableMoves (initialState 3)
+                initialStates = map (makeMove (initialState 3)) moves
+                in all (== True) (playAllGameStates O initialStates []) `shouldBe` True 
+
+--        Same here -- it's going to take a long time
+--        it "will play through all possible gameStates on 4x4 board as the second player and never lose" $ do
+--            let moves = availableMoves (initialState 4)
+--                initialStates = map (makeMove (initialState 4)) moves
+--                in all (== True) (playAllGameStates O initialStates []) `shouldBe` True 

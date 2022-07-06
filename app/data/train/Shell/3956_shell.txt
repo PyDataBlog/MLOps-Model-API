@@ -1,0 +1,49 @@
+#!/usr/bin/env bash
+
+set -uo pipefail
+source $(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/generic_functions.sh
+
+sleep 60
+
+DEST="dist-cl-testing7-kernel"
+TAG=`koji latest-build $DEST kernel | tail -1 | awk '{print $1}' | sed "s/kernel-//"`
+
+
+function module_update_and_build() {
+	local mod="$1"
+    cd $WORKSPACE
+	git clone dk@koji.cloudlinux.com:/var/lib/git/${mod}.git
+	check_exit_code 0
+	cd $mod
+	git checkout cl7
+	check_exit_code 0
+	git pull
+	check_exit_code 0
+	local specname=`ls *.spec`
+    RELEASE_EXPR=`cat $specname | grep Release: | awk '{print $2}'`
+    echo $RELEASE_EXPR
+	OLD_RELEASE=`echo $RELEASE_EXPR | awk -F "%" '{print $1}'`
+	NEW_RELEASE=`expr $OLD_RELEASE + 1`
+	sed -i "s/$RELEASE_EXPR/${NEW_RELEASE}\%{\?dist}/" $specname
+	check_exit_code 0
+	git commit -am "Build for kernel-$TAG"
+	check_exit_code 0
+	git push
+	check_exit_code 0
+    git tag -d $TAG
+    git tag $TAG
+    git push --tags
+    check_exit_code 0
+	koji_build_from_tag $mod $DEST $TAG
+	check=`echo $?`
+    cd $WORKSPACE
+	return $check
+}
+
+rm -rf $WORKSPACE/*
+MODULES_LIST="iolimits aacraid-kmod e1000e-kmod flashcache-kmod igb-kmod r8168-kmod tg3-kmod xtables-addons-kmod"
+
+for module in `echo $MODULES_LIST`; do
+	module_update_and_build $module
+	check_exit_code 0
+done

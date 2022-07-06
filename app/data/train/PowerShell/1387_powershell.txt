@@ -1,0 +1,176 @@
+function GetLastCreatedDir
+{
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        [string]$Directory
+    )
+
+    if(!(Test-Path $Directory))
+    {
+        return $null
+    }
+
+	$lastCreatedDir = Get-ChildItem -Path $Directory | Where-Object {$_.PSIsContainer} | Sort-Object CreationTime -Descending | Select-Object -First 1 | Select-Object -ExpandProperty FullName
+        
+    return $lastCreatedDir
+}
+
+function NewUniqueDir
+{
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        [ValidateScript({
+            if (Test-Path $_) { $true }
+            else { Throw "'$_' path is not valid. Please, provide a valid value" }})]
+        [string]$Directory,
+
+        [string]$SubDirectory
+    )
+
+    if (![String]::IsNullOrWhiteSpace($SubDirectory)) 
+    {
+        $subDir = Join-Path -Path $Directory -ChildPath $SubDirectory
+
+        if (!(Test-Path $subDir))
+        {
+            New-Item -Path $subDir -ItemType Directory | Out-Null
+        }
+
+        $Directory = $subDir
+    }
+
+	$uniqueFolderName = get-date -format "yyyy-MM-dd-HHmmss"
+	$count = 1
+	$uniqueDirPath = Join-Path $Directory $uniqueFolderName
+	
+    while(Test-Path $uniqueDirPath) 
+    {
+		$count++
+		$unique = $uniqueFolderName + "(" + $count + ")"
+		$uniqueDirPath = Join-Path $Directory $unique
+	}
+
+    $uniqueDir = New-Item -Path $uniqueDirPath -ItemType Directory
+    return $uniqueDir.FullName
+}
+
+function RemoveItem
+{
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        [string]$Path
+    )
+
+    if ([String]::IsNullOrWhiteSpace($Path))
+    {
+        return
+    }
+    
+    if (Test-Path $Path)
+    {
+        #TODO handle locked items
+        Remove-Item -Path $Path -Force -Recurse
+    }
+}
+
+function NewEmptyDirs
+{
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+        [ValidateScript({
+            if (Test-Path $_) { $true }
+            else { Throw "'$_' path is not valid. Please, provide a valid value" }})]
+        [string]$Directory,
+
+        [string[]]$RelativeDirs 
+    )
+
+    ForEach($dir in $RelativeDirs)
+    {
+        $absolutePath = Join-Path -Path $Directory -ChildPath $dir
+
+        if(Test-Path $absolutePath)
+        {
+            continue
+        }
+
+        #TODO handle files
+        New-Item -Path $absolutePath -ItemType Directory | Out-Null
+    }
+}
+
+function ShowRobocopyResultMessage
+{
+    [CmdletBinding()]
+    Param
+    (
+        [string]$LogFile
+    )
+
+    $lastExitcodeMessage = "Robocopy 'Exit code $LASTEXITCODE':"
+    $checkLogMessage = "Check Robocopy log file for details"
+
+    switch ($LASTEXITCODE)
+    {
+        0 { WriteLog -Path $LogFile -Message "OUTPUT: $lastExitcodeMessage Success. No errors occurred, and no copying was done. The source and destination directory trees are completely synchronized" }
+        1 { WriteLog -Path $LogFile -Message "OUTPUT: $lastExitcodeMessage Success. One or more files were copied successfully" }
+        2 { WriteLog -Path $LogFile -Message "OUTPUT: $lastExitcodeMessage Success. Some Extra files or directories were detected. No files were copied" }
+        3 { WriteLog -Path $LogFile -Message "OUTPUT: $lastExitcodeMessage Success. Some files were copied. Additional files were present. No failure was encountered" }
+        4 { WriteLog -Path $LogFile -Message "WARNING: $lastExitcodeMessage Warning. Some Mismatched files or directories were detected. Housekeeping might be required. $checkLogMessage" }
+        5 { WriteLog -Path $LogFile -Message "WARNING: $lastExitcodeMessage Warning. Some files were copied. Some files were mismatched. No failure was encountered. $checkLogMessage" }
+        6 { WriteLog -Path $LogFile -Message "WARNING: $lastExitcodeMessage Warning. Additional files and mismatched files exist. No files were copied and no failures were encountered. This means that the files already exist in the destination directory. $checkLogMessage" }
+        7 { WriteLog -Path $LogFile -Message "WARNING: $lastExitcodeMessage Warning. Files were copied, a file mismatch was present, and additional files were present. $checkLogMessage" }
+        8 { WriteLog -Path $LogFile -Message "ERROR: $lastExitcodeMessage Error. Some files or directories could not be copied(copy errors occurred and the retry limit was exceeded). $checkLogMessage" }
+        { @(9, 10, 11, 12, 13, 14, 15) -contains $_ } { WriteLog -Path $LogFile -Message "ERROR: $lastExitcodeMessage ERROR. $checkLogMessage" }
+        16 { WriteLog -Path $LogFile -Message "ERROR: $lastExitcodeMessage Fatal error. Robocopy did not copy any files. Either a usage error or an error due to insufficient access privileges on the source or destination directories. $checkLogMessage" } 
+        default { WriteLog -Path $LogFile -Message "ERROR: $lastExitcodeMessage Error. Unknown code. $checkLogMessage" }
+    }
+}
+
+function NewRemoteSession
+{
+    [CmdletBinding()]
+    Param
+    (
+        [Parameter(Mandatory=$true)]
+		[ValidateNotNullOrEmpty()]
+		[string]$ComputerName,
+		
+		[Parameter(Mandatory=$true)]
+		[ValidateNotNullOrEmpty()]
+		[string]$Username,
+
+		[Parameter(Mandatory=$true)]
+		[ValidateNotNullOrEmpty()]
+		[string]$Password,
+
+        [string]$LogFile	
+    )
+
+    WriteLog -Path $LogFile -Message "Testing network connection for '$ComputerName'"
+    $availableRemote = ConfirmRemoteConnection -ComputerName $ComputerName
+    if (!$availableRemote) 
+    {
+        Throw "Network connection failed for '$ComputerName'"
+    }
+    WriteLog -Path $LogFile -Message "Successful network connection for '$ComputerName'"
+
+    WriteLog -Path $LogFile -Message "Creating credential object"
+    $securePassword = ConvertTo-SecureString -AsPlainText $password -Force
+    $credential = New-Object -TypeName "System.Management.Automation.PSCredential" -ArgumentList $Username, $securePassword
+    WriteLog -Path $LogFile -Message "Credential object created"
+
+    WriteLog -Path $LogFile -Message "Creating session object"
+    $session = New-PSSession -ComputerName $ComputerName -Credential $credential -ErrorAction Stop
+    WriteLog -Path $LogFile -Message "Session object created"
+
+    return $session
+}

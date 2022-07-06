@@ -1,0 +1,51 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+
+import qualified Network.WebSockets as WS
+import qualified Data.Text as T
+import qualified Data.Text.IO as T
+import Control.Monad (forever)
+import Control.Concurrent (forkIO)
+import Network
+import System.IO
+import Text.Printf
+import System.Environment (lookupEnv)
+
+server = "irc.freenode.org"
+port = 6667
+chan = "#haskell"
+nick = "tutbot-413"
+
+type Username = String
+type Password = String
+type AppState = (Username, Password, Handle)
+
+main :: IO ()
+main = do hIrc <- connectTo server (PortNumber (fromIntegral port))
+          maybePw <- lookupEnv "PW"
+          let pw = case maybePw of Just x -> x
+                                   Nothing -> "guest"
+          write hIrc "NICK" nick
+          write hIrc "USER" (nick++" 0 * :tutorial bot")
+          write hIrc "JOIN" chan
+          hSetBuffering hIrc NoBuffering
+          putStrLn "Running on port 9160"
+          WS.runServer "0.0.0.0" 9160 $ application (nick, pw, hIrc)
+
+application (nick, pw, hIrc) pending = do conn <- WS.acceptRequest pending
+                                          passwd :: T.Text <- WS.receiveData conn
+                                          if passwd == T.pack pw
+                                          then talkloop conn hIrc
+                                          else WS.sendTextData conn ("Bad pass" :: T.Text)
+
+talkloop conn hIrc = do forkIO $ getwsmsg conn hIrc
+                        getircmsg conn hIrc
+
+getwsmsg conn hIrc = forever $ do msg :: T.Text <- WS.receiveData conn
+                                  WS.sendTextData conn msg
+
+getircmsg conn hIrc = forever $ do s <- hGetLine hIrc
+                                   WS.sendTextData conn $ T.pack s
+
+write :: Handle -> String -> String -> IO ()
+write h s t = do hPrintf h "%s %s\r\n" s t

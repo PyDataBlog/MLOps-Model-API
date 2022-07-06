@@ -1,0 +1,475 @@
+[BITS 32]
+
+; This is a very dumb implementation of a filesystem
+
+; Sectors 2-1023 contains a file/directory descriptors
+; Byte  0: "AKOSFS"
+; Byte  6: NN (Version # string)
+; Byte  7: Type (0=free, 1=directory, 2=file)
+; Byte  8: ???? (Unused)
+; Byte 12: name (52 bytes max)
+; ** File **
+; Byte 64: #### (Parent dir node)
+; Byte 66: #### (Start sector for data)	- For file (max = FFFF/65535 = 33MB)
+; Byte 68: #### (Number of sectors)		- For file
+; ** Dir **
+; Byte 64: #### (Parent dir node)
+; Byte 66: #### (1st child - corresponds to sector so between 2-1023)
+; Byte 68: #### (2nd child, etc. until == 0000)
+	
+
+; Globals
+global	init_fs
+global	format_fs
+global	ls
+global	pwd
+global	cd_parent
+global	create_file
+global	create_dir
+global	cd
+
+; Externs
+extern	tty_print
+extern	tty_print_char
+extern	tty_print_nchars
+extern	tty_print_hex_byte
+extern	tty_print_hex_word
+extern	write_sectors
+extern	read_sectors
+extern	sleep
+extern	str_copy
+extern	str_cmp
+extern 	init_ide
+extern	tty_print_newline
+
+%define	AKOSFS_TYPE_FREE	'-'
+%define	AKOSFS_TYPE_DIR	'd'
+%define	AKOSFS_TYPE_FILE	'f'
+
+%define	AKOSFS_NODE_HEAD		0
+%define	AKOSFS_NODE_TYPE		7
+%define	AKOSFS_NODE_RES		8
+%define	AKOSFS_NODE_NAME		12
+%define	AKOSFS_NODE_PARENT	64
+%define	AKOSFS_NODE_CHILDREN	66
+
+%macro	print 1
+	mov	eax,%1
+	call	tty_print
+%endmacro
+
+%macro	w_sec	3
+	mov	eax,%1
+	mov	ebx,%2
+	mov	ecx,%3
+	call	write_sectors
+%endmacro
+
+%macro	r_sec	3
+	mov	eax,%1
+	mov	ebx,%2
+	mov	ecx,%3
+	call	read_sectors
+%endmacro
+
+;*********************************************************
+; DATA SECTION
+;*********************************************************
+
+msg_init_fs:
+	db	'[INFO ] Initialising filesystem',10 ,0
+msg_formatting_fs:
+	db	'[INFO ] Formatting drive at ide0',10, 0
+msg_clear_buffer:
+	db	'[INFO ] Clearing buffer', 10, 0
+msg_create_file:
+	db	'[INFO ] Creating file', 10, 0
+msg_read_file:
+	db	'[INFO ] Reading file', 10, 0
+msg_creating_boot:
+	db	'[DEBUG] Creating boot sectors', 10, 0
+msg_creating_root:
+	db	'[DEBUG] Creating root node', 10, 0
+msg_creating_free:
+	db	'[DEBUG] Marking descriptors as free', 10, 0
+msg_ls:
+	db	'[DEBUG] ls: ',10, 0
+msg_cd:
+	db	'[DEBUG] cd: ',10, 0
+msg_pwd:
+	db	'[DEBUG] pwd: ',10, 0
+msg_finding_next_free:
+	db	'[DEBUG] Finding next free node',10,0
+msg_ind:
+	db	'<',10,0
+msg_no_match:
+	db	'[ERROR] Couldnt find specified directory', 10, 0
+	
+sector_data:
+	times 512 db 0
+
+root_sector:
+	db	'AKSFS01'		; BYTE 0
+	db	AKOSFS_TYPE_DIR	; BYTE 7
+	db	'????'		; BYTE 8
+	db	'ROOT'		; BYTE 12 
+	times	48 db 0		;   Pad the rest of the 52 bytes
+	dw	-1			; Invalid for root node
+	dw	0			; BYTE 66: No child nodes
+	times	512 db 0		;   Fill the rest of the sector with 0s
+	
+free_sector:
+	db	'AKSFS01'		; BYTE 0
+	db	AKOSFS_TYPE_FREE	; BYTE 6
+	times	512 db 0		;   Fill the rest of the sector with 0s
+	
+node_head:
+	db	'AKSFS01',0
+	
+current_dir:
+	dw	2			; Point to current dir
+	
+next_free_node:
+	dw	3
+	
+child_list:
+	dw	200			; LIst of child nodes owned by current dir
+	
+
+
+;*********************************************************
+; CODE SECTION
+;*********************************************************
+	
+init_fs:
+	print	msg_init_fs
+	ret
+
+;-----------------------------------------------------------------------
+; cd_parent:
+;	Navigate up a directory
+;
+; TODO: Shouldn't be able to go above root
+;-----------------------------------------------------------------------
+cd_parent:
+	; Read the current dir node to add the file to it
+	mov	eax,sector_data
+	mov	ebx,[current_dir]
+	mov	ecx,1
+	call	read_sectors
+	mov	eax,sector_data
+	add	eax,AKOSFS_NODE_PARENT
+	mov	ax,[eax]
+	mov	[current_dir],ax
+	ret
+	
+;-----------------------------------------------------------------------
+; cd:
+;	Change the current directory to that given in eax string
+;
+; TODO:	Clear child list before use, bounds checking
+;-----------------------------------------------------------------------
+cd:
+	mov	esi,eax						; Store string in esi temporarily
+	print	msg_cd
+
+	r_sec	sector_data, [current_dir], 1
+	
+	; Load the list of child inodes into a work buffer (child_list)
+	xor	edx,edx
+	mov	eax,sector_data
+	mov	ebx,child_list
+	add	eax,AKOSFS_NODE_CHILDREN			; Jump to list of children
+__get_child_list2:
+	mov	dx,[eax]
+	mov	[ebx],dx
+	add	eax,2
+	add	ebx,2
+	cmp	dx,0
+	jne	__get_child_list2					; TODO: Bounds checking
+	; Run through that list and print the corresponding file/dir names
+	mov	edx,child_list
+__iterate_node2:
+	mov	bx,[edx]
+	cmp	bx,0
+	je	__no_match
+	
+	; Load in each of the child nodes
+	mov	ax,bx
+	call	_load_node
+	
+	mov	eax,sector_data
+	add	eax,AKOSFS_NODE_NAME				; Child name in eax
+	mov	ebx,esi
+	;push	eax
+	;pop	eax
+	call	str_cmp
+	cmp	al,0
+	je	__name_match					; Found it!
+	add	edx,2
+	jmp	__iterate_node2
+__name_match:
+	mov	ax,[edx]
+	mov	[current_dir],ax
+	ret
+__no_match:
+	print	msg_no_match
+	ret
+
+;-----------------------------------------------------------------------
+; pwd:
+;	Display the name of the current directory
+;-----------------------------------------------------------------------
+pwd:
+	print	msg_pwd
+
+	mov	eax,sector_data
+	mov	ebx,[current_dir]
+	mov	ecx,1
+	call	read_sectors
+	mov	eax,sector_data
+	add	eax,AKOSFS_NODE_NAME
+	call	tty_print
+	call	tty_print_newline
+	ret
+
+;-----------------------------------------------------------------------
+; ls:
+;	Display contents of current directory
+;-----------------------------------------------------------------------
+ls:
+	print	msg_ls
+	
+	xor	eax,eax
+	mov	ax,[current_dir]
+	call	_load_node
+	
+	; Load the list of child inodes into a work buffer (child_list)
+	xor	edx,edx
+	mov	eax,sector_data
+	mov	ebx,child_list
+	add	eax,66				; Jump to list of children
+__get_child_list:
+	mov	dx,[eax]
+	mov	[ebx],dx
+	add	eax,2
+	add	ebx,2
+	cmp	dx,0
+	jne	__get_child_list			; TODO: Bounds checking
+	; Run through that list and print the corresponding file/dir names
+	mov	edx,child_list
+__iterate_node:
+	mov	bx,[edx]
+	cmp	bx,0
+	je	__all_done
+	
+	; Load in each of the child nodes
+	mov	ax,bx
+	call	_load_node
+	
+	mov	eax,sector_data
+	add	eax,AKOSFS_NODE_TYPE
+	mov	al,[eax]
+	cmp	al,AKOSFS_TYPE_DIR
+	jne	__type_file
+	mov	al,':'
+	call	tty_print_char
+	jmp	__skip_char
+__type_file:
+	mov	al,'-'
+	call	tty_print_char
+__skip_char:
+	mov	eax,sector_data
+	add	eax,AKOSFS_NODE_NAME
+	call	tty_print
+	call	tty_print_newline
+	add	edx,2
+	jmp	__iterate_node
+__all_done:
+	ret
+
+;-----------------------------------------------------------------------
+; format_fs
+;	Format drive with AKERNOS filesystem
+;-----------------------------------------------------------------------
+format_fs:
+	print	msg_formatting_fs
+	print	msg_creating_boot
+
+	; Init the boot sector
+	mov	eax,sector_data
+	mov	ecx,512
+_loopfill:
+	mov	byte [eax],'x'
+	inc	eax
+	loop	_loopfill
+
+	; Create the Boot sector
+	w_sec	sector_data, 1, 1
+	
+	print	msg_creating_root
+	
+	; Create the Root node
+	w_sec	root_sector, 2, 1
+	
+	print	msg_creating_free
+			
+	;Mark the rest up to 1024 as free
+	mov	eax,free_sector
+	mov	ebx,3					; Start with the 3rd sector
+_clear_sector_loop:
+	mov	ecx,1
+	call	write_sectors
+	add	ebx,1
+	cmp	bx,124
+	jl	_clear_sector_loop
+	ret
+
+
+;-----------------------------------------------------------------------
+; create_dir:
+;	Creates a file node with name given in eax
+;-----------------------------------------------------------------------
+create_file:
+	mov	bl,AKOSFS_TYPE_FILE
+	call	_create_node
+	ret
+	
+;-----------------------------------------------------------------------
+; create_file:
+;	Creates a file node with name given in eax
+;-----------------------------------------------------------------------
+create_dir:
+	mov	bl,AKOSFS_TYPE_DIR
+	call	_create_node
+	ret
+	
+;-----------------------------------------------------------------------
+; _create_node
+;	Creates a file node with name given in eax and type in bl
+;
+; TODO:	Bounds checking, clear child list before use
+;-----------------------------------------------------------------------
+_create_node:
+	push	ebx
+	; Reset the sector data
+	call	_clear_buffer
+	
+	; Copy in filename
+	mov	ebx,sector_data
+	add	ebx,AKOSFS_NODE_NAME
+	call	str_copy
+	
+	; Copy in header
+	mov	eax,node_head
+	mov	ebx,sector_data
+	call	str_copy
+	
+	; Set filetype
+	pop	ebx
+	mov	dl,bl
+	mov	ebx,sector_data
+	add	ebx,AKOSFS_NODE_TYPE
+	mov	byte [ebx],dl
+	
+	; Set reserved bytes
+	mov	ebx,sector_data
+	add	ebx,AKOSFS_NODE_RES
+	mov	dword [ebx],'????'
+	
+	; Set parent node info
+	mov	ebx,sector_data
+	add	ebx,AKOSFS_NODE_PARENT
+	mov	eax,current_dir
+	mov	ax,[eax]
+	mov	[ebx],ax
+	
+	;print	msg_create_file
+	
+	; Write the file node in the next free node sector
+	w_sec	sector_data, [next_free_node], 1
+	
+	; Read the current dir node to add the file to it
+	mov	eax,sector_data
+	mov	ebx,[current_dir]
+	mov	ecx,1
+	call	read_sectors
+	
+	; Find the next free child entry
+	; NOTE: No out-of-bounds checking here!
+	mov	eax,sector_data
+	add	eax,64						; Point to list of children
+check_node_loop:
+	mov	dx,[eax]
+	cmp	dx,0
+	je	found_free
+	add	eax,2
+	jmp	check_node_loop
+found_free:
+	mov	bx,[next_free_node]
+	mov	[eax],bx
+	
+	w_sec	sector_data, [current_dir], 1
+	
+	call	_find_next_free_node
+	
+	ret
+
+
+;-----------------------------------------------------------------------
+; _load_node
+;	Helper function to load a node (eax) into the sector_data buffer
+;-----------------------------------------------------------------------
+_load_node:
+	pusha
+	mov	ebx,eax
+	mov	eax,sector_data
+	mov	ecx,1
+	call	read_sectors
+	popa
+	ret
+	
+;-----------------------------------------------------------------------
+; _find_next_free_node
+;	An internal function that reads through the node sectors finding
+;	the next available free one
+;
+; TODO:	Bounds checking
+;-----------------------------------------------------------------------
+_find_next_free_node:
+	pusha
+	mov	ebx,0
+	mov	bx,[next_free_node]
+	inc	bx						; Start with the current node + 1
+_search_loop:
+	mov	ecx,1
+	mov	eax,sector_data
+	call	read_sectors
+	mov	eax,sector_data
+	add	eax,7
+	mov	al,[eax]
+	cmp	al,AKOSFS_TYPE_FREE
+	je	_found_free
+	add	bx,1						;TODO: Bounds checking
+	jmp	_search_loop
+_found_free:
+	mov	[next_free_node],bx
+	mov	ax,bx
+	popa
+	ret
+
+;-----------------------------------------------------------------------
+; _clear_buffer
+;	Clears the data in 'sector_data'
+;-----------------------------------------------------------------------
+_clear_buffer:
+	pusha
+	mov	eax,sector_data
+	mov	ecx,128
+_clear_buffer_loop:
+	mov	dword [eax],0
+	add	eax,4
+	loop	_clear_buffer_loop
+	popa
+	ret
+	

@@ -1,0 +1,137 @@
+bits 32
+
+global time
+extern SystemInfoGetRTCHasCentury
+
+%macro read_cmos    1
+    mov     al, %1
+    out     0x70, al
+    in      al, 0x71
+%endmacro
+
+%define seconds     esp
+%define minutes     esp + 4
+%define hours       esp + 8
+%define month_day   esp + 12
+%define month       esp + 16
+%define year        esp + 20
+%define timestamp   esp + 24
+
+section .data
+    ; At the beginning of the month, you're this many days into the year.
+    day_of_year:    dd  0,  0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334
+
+section .text
+; Get the current UNIX timestamp as a 32-bit integer.
+; WARNING - THIS IS HIGHLY INACCURATE BECAUSE I IGNORE LEAP-EVERYTHING.
+time:
+    ; Save flags. We don't want to enable interrupts if they were disabled when
+    ; this function was called.
+    pushfd
+    cli
+
+    push    ebp
+    mov     ebp, esp
+    sub     esp, 32
+
+    ; Wait until the CMOS starts updating. If we only checked if the update flag
+    ; was clear, it could start updating right in the middle of our code.
+    .while_updating:
+        read_cmos   0x0a
+        and         al, 0x80
+        jnz         .while_updating
+
+    ; Get seconds
+    read_cmos   0x00
+    and     eax, 0xff
+    mov     [seconds], eax
+
+    ; Minutes
+    read_cmos   0x02
+    and     eax, 0xff
+    mov     [minutes], eax
+
+    ; Hours
+    read_cmos   0x04
+    and     eax, 0xff
+    mov     [hours], eax
+
+    ; Day of month
+    read_cmos   0x07
+    and     eax, 0xff
+    mov     [month_day], eax
+
+    ; Month
+    read_cmos   0x08
+    and     eax, 0xff
+    mov     [month], eax
+
+    ; Year
+    read_cmos   0x09
+    and     eax, 0xff
+    mov     [year], eax
+
+    call    SystemInfoGetRTCHasCentury  ; We might be able to get the century
+    or      eax, eax
+    jz      .no_century                 ; Skip this bit if we can't.
+
+    ; Get the century...
+    read_cmos   0x32
+    and     eax, 0xff           ; Clear out trash bits
+    mov     ecx, 100            ; We're gonna multiply the century by 100...
+    xor     edx, edx
+    mul     ecx
+    add     [year], eax         ; ...and add that to the current year.
+    jmp     .calculate_timestamp
+
+    .no_century:
+    ; Assume we're in the 2000s. You're not gonna be using this in 2100!
+    add     eax, 2000
+    mov     [year], eax
+
+    .calculate_timestamp:
+    ; This is incredibly stupid. We ignore leap years and time zones so whatever
+    ; the RTC has, this calculates literally.
+
+    mov     eax, [year]
+    sub     DWORD [year], 1970      ; *NIX epoch time starts here
+
+    mov     eax, [seconds]          ; Start off the timestamp with seconds
+    mov     [timestamp], eax
+
+    ; Multiply minutes by 60 and add to the time
+    mov     eax, [minutes]
+    mov     ecx, 60                     ; 60 seconds per minute
+    xor     edx, edx
+    mul     ecx
+    add     [timestamp], eax
+
+    ; Multiply hours by 3600 and add to the time
+    mov     eax, [hours]
+    mov     ecx, 3600                   ; 3600 seconds per hour
+    xor     edx, edx
+    mul     ecx
+    add     [timestamp], eax
+
+    ; Figure out what day in the year we're in and multiply it by 86400
+    mov     ecx, [month]                ; Get the month
+    mov     eax, [day_of_year + ecx*4]  ; Index into array of year days by month
+    add     eax, [month_day]            ; Add the day of the month
+    dec     eax                         ; month_day is 1-31; we need 0-30.
+    mov     ecx, 86400                  ; Multiply day of year by 86400 sec/day
+    xor     edx, edx
+    mul     ecx
+    add     [timestamp], eax            ; Add day seconds to timestamp
+
+    ; Multiply the year by 31536000
+    mov     eax, [year]
+    mov     ecx, 31536000
+    xor     edx, edx
+    mul     ecx
+    add     [timestamp], eax
+
+    ; All done!
+    mov     eax, [timestamp]
+    leave
+    popfd
+    ret

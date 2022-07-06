@@ -1,0 +1,223 @@
+; master library - PC-9801
+;
+; Description:
+;	^C}èÝ
+;		Jn - timer_start
+;		I¹ - timer_end
+;
+; Function/Procedures:
+;	int timer_start( unsigned count, void (far * pfunc)(void) ) ;
+;	void timer_end(void) ;
+;	void timer_leave(void) ;
+;
+; Parameters:
+;	count	^C}èÝÌüúBPÊÍ^C}ÉæÁÄÙÈéB
+;		0ÍÖ~B
+;	pfunc	^C}èÝ[`ÌAhXB
+;		timer_CountðJEg·é¾¯Å¼ÉªsvÈÌÈç
+;		0ðüêÄàæ¢B
+;
+; Returns:
+;	timer_start:
+;		0=¸s(·ÅÉ®¢Ä¢é)
+;		1=¬÷
+;
+; Global Variables:
+;	void (far * timer_Proc)(void) ;
+;	unsigned long timer_Count ;
+;
+; Binding Target:
+;	Microsoft-C / Turbo-C / Turbo Pascal
+;
+; Running Target:
+;	PC-9801
+;
+; Requiring Resources:
+;	CPU: 8086
+;
+; Notes:
+;	@^C}èÝ[`ÌÅÍAWX^ÌÛ¶ðA¼èÈÇÍ
+;	ÊíÌÖÆÙÚ¯lÅ·BX^bNZOgªs¾È±ÆÆA
+;	èÝªÖ~óÔÅ é±ÆÉÓµÄ­¾³¢B
+;	@EOIð­s·éÍKv èÜ¹ñB
+;
+;	@timer_startðÀsµ½çADOSÉßéÜÅÉK¸timer_endðÀsµÄ
+;	º³¢B
+;
+; Compiler/Assembler:
+;	TASM 3.0
+;	OPTASM 1.6
+;
+; Author:
+;	öËºF
+;
+; Revision History:
+;	94/ 3/19 Initial: timer.asm/master.lib 0.23
+;	94/ 4/10 [M0.23] bugfix, timer_startÌøðá¤Æ±ë©çæÁÄ«Ä½
+;	94/ 6/21 [M0.23] timer_startÅtimer_Countð0NA·éæ¤Éµ½
+
+	.MODEL SMALL
+	include func.inc
+	EXTRN DOS_SETVECT:CALLMODEL
+
+TIMER_VECT	EQU 8	; ^C}èÝÌxN^
+IMR		EQU 2	; èÝ}XNWX^
+TIMER_DISABLE	EQU 1	; ^C}èÝÌ}XNrbg
+
+
+	.DATA
+	EXTRN timer_Proc : DWORD	; tim.asm
+	EXTRN timer_Count : DWORD	; tim.asm
+
+timer_OldMask DB	0
+	EVEN
+
+	.DATA?
+timer_OldVect DD	?
+
+	.CODE
+
+TIMER_CNT	equ	71h
+TIMER_SET	equ	77h
+
+
+; TIMERèÝÌúÝèÆJn
+func TIMER_START	; timer_start() {
+	push	BP
+	mov	BP,SP
+	; ø
+	count	= (RETSIZE+3)*2
+	pfunc	= (RETSIZE+1)*2
+
+	xor	AX,AX
+	mov	word ptr timer_Count,AX
+	mov	word ptr timer_Count+2,AX
+
+	cmp	timer_OldMask,AL ; house keeping
+	jne	short S_IGNORE
+
+	mov	AX,[BP+pfunc]
+	mov	word ptr timer_Proc,AX
+	mov	AX,[BP+pfunc+2]
+	mov	word ptr timer_Proc+2,AX
+
+	mov	AL,TIMER_VECT	; TIMERèÝxN^ÌÝèÆÛ¶
+	push	AX
+	push	CS
+	mov	AX,offset TIMER_ENTRY
+	push	AX
+	call	DOS_SETVECT
+	mov	word ptr timer_OldVect,AX
+	mov	word ptr timer_OldVect+2,DX
+
+	pushf
+	CLI
+
+	mov	AL,36h		; [h(timer#0 MODE#3 LSB+HSB BINARY)
+	out	TIMER_SET,AL
+	mov	AX,[BP+count]	; üú
+	out	TIMER_CNT,AL
+	mov	AL,AH
+	out	TIMER_CNT,AL
+
+				; ÈOÌTIMERèÝ}XNÌæ¾Æ
+	in	AL,IMR		; TIMERèÝÌÂ
+	mov	AH,AL
+	and	AL,NOT TIMER_DISABLE
+	out	IMR,AL
+
+	popf
+
+	or	AH,NOT TIMER_DISABLE
+	mov	timer_OldMask,AH
+
+	mov	AX,1	; success
+
+S_IGNORE:
+	pop	BP
+	ret	6
+	EVEN
+endfunc			; }
+
+; INT 08h TIMERèÝ
+TIMER_ENTRY proc far
+	push	AX
+	push	DS
+	mov	AX,seg DGROUP
+	mov	DS,AX
+	add	word ptr timer_Count,1
+	adc	word ptr timer_Count+2,0
+
+	cmp	WORD PTR timer_Proc+2,0
+	je	short TIMER_COUNT_END
+	push	BX
+	push	CX
+	push	DX
+	push	SI	; for pascal
+	push	DI	; for pascal
+	push	ES
+	CLD
+	call	DWORD PTR timer_Proc
+	pop	ES
+	pop	DI	; for pascal
+	pop	SI	; for pascal
+	pop	DX
+	pop	CX
+	pop	BX
+	CLI
+
+TIMER_COUNT_END:
+	pop	DS
+	mov	AL,20h		; EOI
+	out	0,AL		; send EOI to master PIC
+	pop	AX
+	iret
+	EVEN
+TIMER_ENTRY endp
+
+
+; TIMERèÝÌI¹Æ³
+	public TIMER_LEAVE
+func TIMER_END		; timer_end() {
+TIMER_LEAVE label callmodel
+	cmp	timer_OldMask,0 ; house keeping
+	je	short E_IGNORE
+
+	pushf
+	CLI
+
+	xor	BX,BX
+	mov	ES,BX
+	test	byte ptr ES:[0501H],80h
+
+	mov	AL,36h		; timer#0 MODE#3 LSB+HSB BINARY
+	out	TIMER_SET,AL
+	mov	AX,19968	; üúð10msÉ·é
+	jnz	short SKIP1
+	mov	AX,24576
+SKIP1:
+	out	TIMER_CNT,AL
+	jmp	$+2
+	mov	AL,AH
+	out	TIMER_CNT,AL
+
+	mov	AX,TIMER_VECT	; TIMERèÝxN^Ì³
+	push	AX
+	push	word ptr timer_OldVect + 2
+	push	word ptr timer_OldVect
+	call	DOS_SETVECT
+
+	in	AL,IMR		; TIMERèÝ}XNÌ³
+	and	AL,timer_OldMask
+	out	IMR,AL
+
+	popf
+
+	xor	AL,AL
+	mov	timer_OldMask,AL
+
+E_IGNORE:
+	ret
+endfunc			; }
+
+END

@@ -1,0 +1,866 @@
+function checkCollision(position)
+  local boundBox = mcontroller.boundBox()
+  boundBox[1] = boundBox[1] - mcontroller.position()[1] + position[1]
+  boundBox[2] = boundBox[2] - mcontroller.position()[2] + position[2]
+  boundBox[3] = boundBox[3] - mcontroller.position()[1] + position[1]
+  boundBox[4] = boundBox[4] - mcontroller.position()[2] + position[2]
+
+  return not world.rectCollision(boundBox)
+end
+
+function randomProjectileLine(startPoint, endPoint, stepSize, projectile, chanceToSpawn)
+  local dist = math.distance(startPoint, endPoint)
+  local steps = math.floor(dist / stepSize)
+  local normX = (endPoint[1] - startPoint[1]) / dist
+  local normY = (endPoint[2] - startPoint[2]) / dist
+  for i = 0, steps do
+    local p1 = { normX * i * stepSize + startPoint[1], normY * i * stepSize + startPoint[2]}
+	local p2 = { normX * (i + 1) * stepSize + startPoint[1] + math.random(-1, 1), normY * (i + 1) * stepSize + startPoint[2] + math.random(-1, 1)} 
+	if math.random() <= chanceToSpawn then
+	  world.spawnProjectile(projectile, math.midPoint(p1, p2), entity.id(), {normX, normY}, false)
+	end
+  end
+  return endPoint
+end
+
+function blinkAdjust(position, doPathCheck, doCollisionCheck, doLiquidCheck, doStandCheck)
+  local blinkCollisionCheckDiameter = tech.parameter("blinkCollisionCheckDiameter")
+  local blinkVerticalGroundCheck = tech.parameter("blinkVerticalGroundCheck")
+  local blinkFootOffset = tech.parameter("blinkFootOffset")
+  local blinkHeadOffset = tech.parameter("blinkHeadOffset")
+
+  if doPathCheck then
+    local collisionBlocks = world.collisionBlocksAlongLine(mcontroller.position(), position, {"Null", "Block", "Dynamic"}, 1)
+    if #collisionBlocks ~= 0 then
+      local diff = world.distance(position, mcontroller.position())
+      diff[1] = diff[1] > 0 and 1 or -1
+      diff[2] = diff[2] > 0 and 1 or -1
+
+      position = {collisionBlocks[1][1] - math.min(diff[1], 0), collisionBlocks[1][2] - math.min(diff[2], 0)}
+    end
+  end
+
+  if doCollisionCheck then
+    local diff = world.distance(position, mcontroller.position())
+    local collisionPoly = mcontroller.collisionPoly()
+
+    --Add foot offset if there is ground
+    if diff[2] < 0 then
+      local groundBlocks = world.collisionBlocksAlongLine(position, {position[1], position[2] + blinkFootOffset}, {"Null", "Block", "Dynamic"}, 1)
+      if #groundBlocks > 0 then
+        position[2] = groundBlocks[1][2] + 1 - blinkFootOffset
+      end
+    end
+
+    --Add head offset if there is ceiling
+    if diff[2] > 0 then
+      local ceilingBlocks = world.collisionBlocksAlongLine(position, {position[1], position[2] + blinkHeadOffset}, {"Null", "Block", "Dynamic"}, 1)
+      if #ceilingBlocks > 0 then
+        position[2] = ceilingBlocks[1][2] - blinkHeadOffset
+      end
+    end
+
+    --Resolve position
+    position = world.resolvePolyCollision(collisionPoly, position, blinkCollisionCheckDiameter)
+
+    if not position or world.lineTileCollision(mcontroller.position(), position, {"Null", "Block", "Dynamic"}) then
+      return nil
+    end
+  end
+
+  if doStandCheck then
+    local groundFound = false 
+    for i = 1, blinkVerticalGroundCheck * 2 do
+      local checkPosition = {position[1], position[2] - i / 2}
+	  
+      if world.pointTileCollision(checkPosition, {"Null", "Block", "Dynamic", "Platform"}) then
+        groundFound = true
+        position = {checkPosition[1], checkPosition[2] + 0.5 - blinkFootOffset}
+        break
+      end
+    end
+
+    if not groundFound then
+      return nil
+    end
+  end
+
+  if doLiquidCheck and (world.liquidAt(position) or world.liquidAt({position[1], position[2] + blinkFootOffset})) then
+    return nil
+  end
+
+  return position
+end
+
+function findRandomBlinkLocation(doCollisionCheck, doLiquidCheck, doStandCheck)
+  local randomBlinkTries = tech.parameter("randomBlinkTries")
+  local randomBlinkDiameter = tech.parameter("randomBlinkDiameter")
+
+  for i=1,randomBlinkTries do
+    local position = mcontroller.position()
+    position[1] = position[1] + (math.random() * 2 - 1) * randomBlinkDiameter
+    position[2] = position[2] + (math.random() * 2 - 1) * randomBlinkDiameter
+
+    local position = blinkAdjust(position, false, doCollisionCheck, doLiquidCheck, doStandCheck)
+    if position then
+      return position
+    end
+  end
+
+  return nil
+end
+
+function init()
+  self.level = tech.parameter("mechLevel", 6)
+  
+  self.mechState = "off"
+  self.mechStateTimer = 0
+  self.specialLast = false
+  self.active = false
+  self.fireTimer = 0
+  tech.setVisible(false)
+  tech.rotateGroup("guns", 0, true)
+  self.multiJumps = 0
+  self.lastJump = false
+  self.mode = "none"
+  self.timer = 0
+  self.targetPosition = nil
+  self.grabbed = false
+  self.holdingJump = false
+  self.ranOut = false
+  self.airDashing = false
+  self.dashTimer = 0
+  self.dashDirection = 0
+  self.dashLastInput = 0
+  self.dashTapLast = 0
+  self.dashTapTimer = 0
+  self.aoeLastInput = 0
+  self.aoeTapLast = 0
+  self.aoeTapTimer = 0
+  self.dashAttackfireTimer = 0
+  self.dashAttackTimer = 0
+  self.dashAttackDirection = 0
+  self.dashAttackLastInput = 0
+  self.dashAttackTapLast = 0
+  self.dashAttackTapTimer = 0
+  self.holdingUp = false
+  self.holdingDown = false
+  self.holdingLeft = false
+  self.holdingRight = false
+  self.speedMultiplier = 1.1
+  self.levitateActivated = false
+  self.mechTimer = 0
+end
+
+function uninit()
+  if self.active then
+    local mechTransformPositionChange = tech.parameter("mechTransformPositionChange")
+    mcontroller.translate({-mechTransformPositionChange[1], -mechTransformPositionChange[2]})
+    tech.setParentOffset({0, 0})
+	
+    self.active = false
+    tech.setVisible(false)
+    tech.setParentState()
+    tech.setToolUsageSuppressed(false)
+    mcontroller.controlFace(nil)
+  end
+end
+
+function input(args)
+
+  if self.dashTimer > 0 then
+    return nil
+  end
+
+  local maximumDoubleTapTime = tech.parameter("maximumDoubleTapTime")
+
+  if self.dashTapTimer > 0 then
+    self.dashTapTimer = self.dashTapTimer - args.dt
+  end
+  
+    if args.moves[""] and self.active then
+    if self.dashLastInput ~= 1 then
+      if self.dashTapLast == 1 and self.dashTapTimer > 0 then
+        self.dashTapLast = 0
+        self.dashTapTimer = 0
+        return "dashRight"
+      else
+        self.dashTapLast = 1
+        self.dashTapTimer = maximumDoubleTapTime
+      end
+    end
+    self.dashLastInput = 1
+  elseif args.moves[""] and self.active then
+    if self.dashLastInput ~= -1 then
+      if self.dashTapLast == -1 and self.dashTapTimer > 0 then
+        self.dashTapLast = 0
+        self.dashTapTimer = 0
+        return "dashLeft"
+      else
+        self.dashTapLast = -1
+        self.dashTapTimer = maximumDoubleTapTime
+      end
+    end
+    self.dashLastInput = -1
+  else
+    self.dashLastInput = 0
+  end
+  
+  ------------------------
+  
+  local maximumDoubleTapTime2 = tech.parameter("maximumDoubleTapTime2")
+  
+  if self.aoeTapTimer > 0 then
+    self.aoeTapTimer = self.aoeTapTimer - args.dt
+  end
+  
+    if args.moves["down"] and self.active then
+    if self.aoeLastInput ~= 1 then
+      if self.aoeTapLast == 1 and self.aoeTapTimer > 0 then
+        self.aoeTapLast = 0
+        self.aoeTapTimer = 0
+        return "mechSecFire"
+      else
+        self.aoeTapLast = 1
+        self.aoeTapTimer = maximumDoubleTapTime2
+      end
+    end
+    self.aoeLastInput = 1
+  else
+    self.aoeLastInput = 0
+  end
+  
+  -------------------------
+  
+  if args.moves["jump"] and mcontroller.jumping() then
+    self.holdingJump = true
+  elseif not args.moves["jump"] then
+    self.holdingJump = false
+  end
+	
+  if args.moves["special"] == 1 then
+    if self.active then
+      return "mechDeactivate"
+    else
+      return "mechActivate"
+    end
+	
+  elseif args.moves["special"] == 2 and self.active then
+    return "blink"
+  elseif args.moves[""] and args.moves[""] and args.moves[""] and not self.levitateActivated and self.active then
+    return "grab"
+  elseif args.moves["down"] and args.moves["right"] and not self.levitateActivated and self.active then
+    return "dashAttackRight"
+  elseif args.moves["down"] and args.moves["left"] and not self.levitateActivated and self.active then
+    return "dashAttackLeft"
+  elseif args.moves["primaryFire"] and self.active then
+    return "mechFire"
+  elseif args.moves["altFire"] and self.active then
+    return "mechAltFire"
+  elseif args.moves[""] and args.moves[""] and self.active then
+    return "mechSecFire"
+  elseif args.moves["jump"] and not mcontroller.canJump() and not self.holdingJump and self.active then
+    return "jetpack"
+  elseif args.moves[""] and not mcontroller.jumping() and not mcontroller.canJump() and not self.lastJump then
+    self.lastJump = true
+    return "multiJump"
+  else
+    self.lastJump = args.moves["jump"]
+  end
+  
+  self.specialLast = args.moves["special"] == 1
+  
+  --RedOrb
+  -- if args.moves["left"] then
+    -- self.holdingLeft = true
+  -- elseif not args.moves["left"] then
+    -- self.holdingLeft = false
+  -- end
+
+  -- if args.moves["right"] then
+    -- self.holdingRight = true
+  -- elseif not args.moves["right"] then
+    -- self.holdingRight = false
+  -- end
+
+  -- if args.moves["up"] then
+    -- self.holdingUp = true
+  -- elseif not args.moves["up"] then
+    -- self.holdingUp = false
+  -- end
+
+  -- if args.moves["down"] then
+    -- self.holdingDown = true
+  -- elseif not args.moves["down"] then
+    -- self.holdingDown = false
+  -- end
+  
+  -- if not args.moves["jump"] and not args.moves["left"]and not args.moves["right"]and not args.moves["up"]and not args.moves["down"] and not tech.canJump() and not self.holdingJump and self.levitateActivated then
+    -- return "levitatehover"
+  -- elseif args.moves["jump"] and not tech.canJump() and not self.holdingJump then
+    -- return "levitate"
+  -- elseif args.moves["left"] and args.moves["right"] and not tech.canJump() and self.levitateActivated then
+    -- return "levitatehover"
+  -- elseif args.moves["up"] and args.moves["down"] and not tech.canJump() and self.levitateActivated then
+    -- return "levitatehover"
+  -- elseif (args.moves["jump"] or args.moves["up"]) and args.moves["left"] and not tech.canJump() and not self.holdingRight and self.levitateActivated then
+    -- return "levitateleftup"
+  -- elseif (args.moves["jump"] or args.moves["up"]) and args.moves["right"] and not tech.canJump() and not self.holdingLeft and self.levitateActivated then
+    -- return "levitaterightup"
+  -- elseif args.moves["down"] and args.moves["left"] and not tech.canJump() and not self.holdingRight and self.levitateActivated then
+    -- return "levitateleftdown"
+  -- elseif args.moves["down"] and args.moves["right"] and not tech.canJump() and not self.holdingLeft and self.levitateActivated then
+    -- return "levitaterightdown"
+  -- elseif args.moves["left"] and not tech.canJump() and not self.holdingRight and self.levitateActivated then
+    -- return "levitateleft"
+  -- elseif args.moves["right"] and not tech.canJump() and not self.holdingLeft and self.levitateActivated then
+    -- return "levitateright"
+  -- elseif args.moves["up"] and not tech.canJump() and not self.holdingDown and self.levitateActivated then
+    -- return "levitateup"
+  -- elseif args.moves["down"] and not tech.canJump() and not self.holdingUp and self.levitateActivated then
+    -- return "levitatedown"
+   -- else
+    -- return nil
+  -- end
+  --RedOrbEnd
+
+  end
+
+
+
+
+function update(args)
+
+  tech.burstParticleEmitter("glowParticles")
+
+  if self.mechTimer > 0 then
+	self.mechTimer = self.mechTimer - args.dt
+  end
+
+  local dashControlForce = tech.parameter("dashControlForce")
+  local dashSpeed = tech.parameter("dashSpeed")
+  local dashDuration = tech.parameter("dashDuration")
+  local energyUsageDash = tech.parameter("energyUsageDash")
+
+  local usedEnergy = 0
+  if args.actions["dashRight"] and self.dashTimer <= 0 and status.resource("energy") > energyUsageDash then
+    self.dashTimer = dashDuration
+    self.dashDirection = 1
+    usedEnergy = energyUsageDash
+    self.airDashing = not mcontroller.onGround()
+	return tech.consumeTechEnergy(energyUsageDash)
+  elseif args.actions["dashLeft"] and self.dashTimer <= 0 and status.resource("energy") > energyUsageDash then
+    self.dashTimer = dashDuration
+    self.dashDirection = -1
+    usedEnergy = energyUsageDash
+    self.airDashing = not mcontroller.onGround()
+	return tech.consumeTechEnergy(energyUsageDash)
+  end
+
+  if self.dashTimer > 0 then
+    mcontroller.controlApproachXVelocity(dashSpeed * self.dashDirection, dashControlForce, true)
+
+    if self.airDashing then
+      mcontroller.controlParameters({gravityEnabled = false})
+      mcontroller.controlApproachYVelocity(0, dashControlForce, true)
+    end
+
+    if self.dashDirection == -1 then
+      mcontroller.controlFace(-1)
+      tech.setFlipped(true)
+    else
+      mcontroller.controlFace(1)
+      tech.setFlipped(false)
+    end
+    tech.setAnimationState("dashing", "on")
+    tech.setParticleEmitterActive("dashParticles", true)
+    self.dashTimer = self.dashTimer - args.dt
+  else
+    tech.setAnimationState("dashing", "off")
+    tech.setParticleEmitterActive("dashParticles", false)
+  end
+  
+  local dashAttackControlForce = tech.parameter("dashAttackControlForce")
+  local dashAttackSpeed = tech.parameter("dashAttackSpeed")
+  local dashAttackDuration = tech.parameter("dashAttackDuration")
+  local energyUsageDashAttack = tech.parameter("energyUsageDashAttack")
+  local diffDash = world.distance(tech.aimPosition(), mcontroller.position())
+  local aimAngleDash = math.atan(diffDash[2], diffDash[1])
+  local mechDashFireCycle = tech.parameter("mechDashFireCycle")
+  local mechDashProjectile = tech.parameter("mechDashProjectile")
+  local mechDashProjectileConfig = tech.parameter("mechDashProjectileConfig")
+  local flipDash = aimAngleDash > math.pi / 2 or aimAngleDash < -math.pi / 2
+
+  	if flipDash then
+      tech.setFlipped(false)
+      mcontroller.controlFace(-1)
+	  self.dashAttackDirection = -1
+    else
+      tech.setFlipped(true)
+      mcontroller.controlFace(1)
+	  self.dashAttackDirection = 1
+    end
+  
+if status.resource("energy") > energyUsageDashAttack and args.actions["dashAttackLeft"] or args.actions["dashAttackRight"] then
+    if self.dashAttackTimer <= 0 then
+        world.spawnProjectile(mechDashProjectile, vec2.add(mcontroller.position(), tech.partPoint("frontDashGun", "firePoint")), entity.id(), {math.cos(0), math.sin(0)}, false, mechDashProjectileConfig)
+        self.dashAttackTimer = self.dashAttackTimer + mechDashFireCycle
+	else
+        self.dashAttackTimer = self.dashAttackTimer - args.dt
+	end
+    
+    mcontroller.controlApproachXVelocity(dashAttackSpeed * self.dashAttackDirection, dashAttackControlForce, true)
+    tech.setAnimationState("dashingAttack", "on")
+    tech.setParticleEmitterActive("dashAttackParticles", true)
+  else
+    tech.setAnimationState("dashingAttack", "off")
+    tech.setParticleEmitterActive("dashAttackParticles", false)
+  end
+
+  local energyUsageBlink = tech.parameter("energyUsageBlink")
+  local blinkMode = tech.parameter("blinkMode")
+  local blinkOutTime = tech.parameter("blinkOutTime")
+  local blinkInTime = tech.parameter("blinkInTime")
+
+  if args.actions["blink"] and self.mode == "none" and status.resource("energy") > energyUsageBlink then
+    local blinkPosition = nil
+    if blinkMode == "random" then
+      local randomBlinkAvoidCollision = tech.parameter("randomBlinkAvoidCollision")
+      local randomBlinkAvoidMidair = tech.parameter("randomBlinkAvoidMidair")
+      local randomBlinkAvoidLiquid = tech.parameter("randomBlinkAvoidLiquid")
+
+      blinkPosition =
+        findRandomBlinkLocation(randomBlinkAvoidCollision, randomBlinkAvoidMidair, randomBlinkAvoidLiquid) or
+        findRandomBlinkLocation(randomBlinkAvoidCollision, randomBlinkAvoidMidair, false) or
+        findRandomBlinkLocation(randomBlinkAvoidCollision, false, false)
+    elseif blinkMode == "cursor" then
+      blinkPosition = blinkAdjust(tech.aimPosition(), true, true, false, false)
+    elseif blinkMode == "cursorPenetrate" then
+      blinkPosition = blinkAdjust(tech.aimPosition(), false, true, false, false)
+    end
+
+    if blinkPosition then
+      self.targetPosition = blinkPosition
+      self.mode = "start"
+    else
+      -- Make some kind of error noise
+    end
+  end
+
+  if self.mode == "start" then
+    mcontroller.setVelocity({0, 0})
+    self.mode = "out"
+    self.timer = 0
+    return tech.consumeTechEnergy(energyUsageBlink)
+  elseif self.mode == "out" then
+    tech.setParentDirectives("?multiply=00000000")
+    tech.setVisible(false)
+    tech.setAnimationState("blinking", "out")
+    mcontroller.setVelocity({0, 0})
+    self.timer = self.timer + args.dt
+
+    if self.timer > blinkOutTime then
+      mcontroller.setPosition(self.targetPosition)
+      self.mode = "in"
+      self.timer = 0
+    end
+    return 0
+  elseif self.mode == "in" then
+    tech.setParentDirectives()
+    tech.setVisible(true)
+    tech.setAnimationState("blinking", "in")
+    mcontroller.setVelocity({0, 0})
+    self.timer = self.timer + args.dt
+
+    if self.timer > blinkInTime then
+      self.mode = "none"
+    end
+    return 0
+  end
+
+  local energyUsageJump = tech.parameter("energyUsageJump")
+  local multiJumpCount = tech.parameter("multiJumpCount")
+
+  if args.actions["multiJump"] and self.multiJumps < multiJumpCount and status.resource("energy") > energyUsageJump then
+    mcontroller.controlJump(true)
+    self.multiJumps = self.multiJumps + 1
+    tech.burstParticleEmitter("multiJumpParticles")
+    tech.playSound("sound")
+    return tech.consumeTechEnergy(energyUsageJump)
+  else
+    if mcontroller.onGround() or mcontroller.liquidMovement() then
+      self.multiJumps = 0
+    end
+  end
+
+  local energyCostPerSecond = tech.parameter("energyCostPerSecond")
+  local energyCostPerSecondPrim = tech.parameter("energyCostPerSecondPrim")
+  local energyCostPerSecondSec = tech.parameter("energyCostPerSecondSec")
+  local energyCostPerSecondAlt = tech.parameter("energyCostPerSecondAlt")
+  local mechCustomMovementParameters = tech.parameter("mechCustomMovementParameters")
+  local mechTransformPositionChange = tech.parameter("mechTransformPositionChange")
+  local parentOffset = tech.parameter("parentOffset")
+  local mechCollisionTest = tech.parameter("mechCollisionTest")
+  local mechAimLimit = tech.parameter("mechAimLimit") * math.pi / 180
+  local mechFrontRotationPoint = tech.parameter("mechFrontRotationPoint")
+  local mechFrontFirePosition = tech.parameter("mechFrontFirePosition")
+  local mechBackRotationPoint = tech.parameter("mechBackRotationPoint")
+  local mechBackFirePosition = tech.parameter("mechBackFirePosition")
+  local mechFireCycle = tech.parameter("mechFireCycle")
+  local mechProjectile = tech.parameter("mechProjectile")
+  local mechProjectileConfig = tech.parameter("mechProjectileConfig")
+  local mechAltFireCycle = tech.parameter("mechAltFireCycle")
+  local mechAltProjectile = tech.parameter("mechAltProjectile")
+  local mechAltProjectileConfig = tech.parameter("mechAltProjectileConfig")
+  local mechSecFireCycle = tech.parameter("mechSecFireCycle")
+  local mechSecProjectile = tech.parameter("mechSecProjectile")
+  local mechSecProjectileConfig = tech.parameter("mechSecProjectileConfig")
+  local mechGunBeamMaxRange = tech.parameter("mechGunBeamMaxRange")
+  local mechGunBeamStep = tech.parameter("mechGunBeamStep")
+  local mechGunBeamSmokeProkectile = tech.parameter("mechGunBeamSmokeProkectile")
+  local mechGunBeamEndProjectile = tech.parameter("mechGunBeamEndProjectile")
+  local mechGunBeamUpdateTime = tech.parameter("mechGunBeamUpdateTime")
+  local mechTransform = tech.parameter("mechTransform")
+  
+  local mechActiveSide = nil
+	  if tech.setFlipped(true) then
+	    mechActiveSide = "left"
+	  elseif tech.setFlipped(false) then
+	    mechActiveSide = "right"
+	  end  
+  
+  local mechStartupTime = tech.parameter("mechStartupTime")
+  local mechShutdownTime = tech.parameter("mechShutdownTime")
+
+  if not self.active and args.actions["mechActivate"] and self.mechState == "off" then
+    mechCollisionTest[1] = mechCollisionTest[1] + mcontroller.position()[1]
+    mechCollisionTest[2] = mechCollisionTest[2] + mcontroller.position()[2]
+    mechCollisionTest[3] = mechCollisionTest[3] + mcontroller.position()[1]
+    mechCollisionTest[4] = mechCollisionTest[4] + mcontroller.position()[2]
+	
+    if not world.rectCollision(mechCollisionTest) then
+      tech.burstParticleEmitter("mechActivateParticles")
+      mcontroller.translate(mechTransformPositionChange)
+      tech.setVisible(true)
+	  tech.setAnimationState("transform", "in")
+	  -- status.modifyResource("health", status.stat("maxHealth") / 20)
+      tech.setParentState("sit")
+      tech.setToolUsageSuppressed(true)
+	  self.mechState = "turningOn"
+	  self.mechStateTimer = mechStartupTime
+	  self.active = true
+    else
+      -- Make some kind of error noise
+    end
+  elseif self.mechState == "turningOn" and self.mechStateTimer <= 0 then
+    tech.setParentState("sit")
+    self.mechState = "on"
+	self.mechStateTimer = 0
+  elseif (self.active and (args.actions["mechDeactivate"] and self.mechState == "on" or (energyCostPerSecond * args.dt > status.resource("energy")) and self.mechState == "on")) then
+	self.mechState = "turningOff"
+	tech.setAnimationState("transform", "out")
+	self.mechStateTimer = mechShutdownTime
+  elseif self.mechState == "turningOff" and self.mechStateTimer <= 0 then 
+    tech.burstParticleEmitter("mechDeactivateParticles")
+	mcontroller.translate({-mechTransformPositionChange[1], -mechTransformPositionChange[2]})
+    tech.setVisible(false)
+    tech.setParentState()
+    tech.setToolUsageSuppressed(false)
+    tech.setParentOffset({0, 0})
+	self.mechState = "off"
+	
+	self.mechStateTimer = 0
+    self.active = false
+  end
+  
+    mcontroller.controlFace(nil)
+  
+  if self.mechStateTimer > 0 then
+	self.mechStateTimer = self.mechStateTimer - args.dt
+  end
+  if self.active then
+    local diff = world.distance(tech.aimPosition(), mcontroller.position())
+    local aimAngle = math.atan(diff[2], diff[1])
+    local flip = aimAngle > math.pi / 2 or aimAngle < -math.pi / 2
+
+    mcontroller.controlParameters(mechCustomMovementParameters)
+    if flip then
+      tech.setFlipped(false)
+      local nudge = tech.transformedPosition({0, 0})
+      tech.setParentOffset({-parentOffset[1] - nudge[1], parentOffset[2] + nudge[2]})
+      mcontroller.controlFace(-1)
+
+      if aimAngle > 0 then
+        aimAngle = math.max(aimAngle, math.pi - mechAimLimit)
+      else
+        aimAngle = math.min(aimAngle, -math.pi + mechAimLimit)
+      end
+
+      tech.rotateGroup("guns", math.pi + aimAngle)
+    else
+      tech.setFlipped(true)
+      local nudge = tech.transformedPosition({0, 0})
+      tech.setParentOffset({parentOffset[1] + nudge[1], parentOffset[2] + nudge[2]})
+      mcontroller.controlFace(1)
+
+      if aimAngle > 0 then
+        aimAngle = math.min(aimAngle, mechAimLimit)
+      else
+        aimAngle = math.max(aimAngle, -mechAimLimit)
+      end
+
+      tech.rotateGroup("guns", -aimAngle)
+    end
+
+ if not mcontroller.onGround() then
+      if mcontroller.velocity()[2] > 0 then
+	  	if args.actions["mechFire"] then
+		tech.setAnimationState("movement", "jumpAttack")
+		elseif args.actions["mechAltFire"] then
+      	tech.setAnimationState("movement", "jumpAttack")
+		elseif args.actions["mechSecFire"] then
+      	tech.setAnimationState("movement", "jumpAttack")
+		else
+		tech.setAnimationState("movement", "jump")
+		end  
+      else
+	  if args.actions["mechFire"] then
+        tech.setAnimationState("movement", "fallAttack")
+        elseif args.actions["mechAltFire"] then
+      	tech.setAnimationState("movement", "fallAttack")
+		elseif args.actions["mechSecFire"] then
+      	tech.setAnimationState("movement", "fallAttack")
+		else
+		tech.setAnimationState("movement", "fall")
+		end
+      end
+    elseif mcontroller.walking() or mcontroller.running() then
+      if flip and mcontroller.movingDirection() == 1 or not flip and mcontroller.movingDirection() == -1 then
+	  if args.actions["mechFire"] then
+        tech.setAnimationState("movement", "backWalkAttack")
+        elseif args.actions["mechAltFire"] then
+      	tech.setAnimationState("movement", "backWalkAttack")
+		elseif args.actions["mechSecFire"] then
+      	tech.setAnimationState("movement", "backWalkAttack")
+		elseif args.actions["dashAttackRight"] then
+      	tech.setAnimationState("movement", "backWalkDash")
+		elseif args.actions["dashAttackLeft"] then
+      	tech.setAnimationState("movement", "backWalkDash")
+		else
+		tech.setAnimationState("movement", "backWalk")
+		end
+      else
+	  	if args.actions["mechFire"] then
+        tech.setAnimationState("movement", "walkAttack")
+		elseif args.actions["mechAltFire"] then
+      	tech.setAnimationState("movement", "walkAttack")
+		elseif args.actions["mechSecFire"] then
+      	tech.setAnimationState("movement", "walkAttack")
+		elseif args.actions["dashAttackRight"] then
+      	tech.setAnimationState("movement", "walkDash")
+		elseif args.actions["dashAttackLeft"] then
+      	tech.setAnimationState("movement", "walkDash")
+		else
+		tech.setAnimationState("movement", "walk")
+		end
+      end
+    else
+	if args.actions["mechFire"] then
+      tech.setAnimationState("movement", "idleAttack")
+	  elseif args.actions["mechAltFire"] then
+      tech.setAnimationState("movement", "idleAttack")
+	  elseif args.actions["mechSecFire"] then
+      tech.setAnimationState("movement", "idleAttack")
+	  else
+	  tech.setAnimationState("movement", "idle")
+	  end
+    end
+    
+    
+    local telekinesisProjectile = tech.parameter("telekinesisProjectile")
+  	local telekinesisProjectileConfig = tech.parameter("telekinesisProjectileConfig")
+  	local telekinesisFireCycle = tech.parameter("telekinesisFireCycle")
+	local energyUsagePerSecondTelekinesis = tech.parameter("energyUsagePerSecondTelekinesis")
+	local energyUsageTelekinesis = energyUsagePerSecondTelekinesis * args.dt
+
+	if self.active and args.actions["grab"] and not self.grabbed then
+		local monsterIds = world.monsterQuery(tech.aimPosition(), 5)
+
+		for i,v in pairs(monsterIds) do
+			--world.spawnNpc( tech.aimPosition(), "glitch", "lonesurvivor_positionnpc", 2, 1)
+			world.monsterQuery(tech.aimPosition(),5, { callScript = "lonesurvivor_grab", callScriptArgs = { tech.aimPosition() } })
+			break
+		end
+		
+		self.grabbed = true
+	elseif self.grabbed and not args.actions["grab"] then
+		--world.spawnNpc( tech.aimPosition(), "glitch", "lonesurvivor_positionnpc", 3, 1)
+		world.monsterQuery(tech.aimPosition(),30, { callScript = "lonesurvivor_release", callScriptArgs = { tech.aimPosition() } })
+		self.grabbed = false
+	elseif self.active and self.grabbed then
+		--world.spawnNpc( tech.aimPosition(), "glitch", "lonesurvivor_positionnpc", 1, 1)
+		world.monsterQuery(tech.aimPosition(),15, { callScript = "lonesurvivor_move", callScriptArgs = { tech.aimPosition() } })
+	end
+	
+	if args.actions["grab"] and status.resource("energy") > energyUsageTelekinesis then
+      if self.fireTimer <= 0 then
+        world.spawnProjectile(telekinesisProjectile, tech.aimPosition(), entity.id(), {math.cos(aimAngle), math.sin(aimAngle)}, false, telekinesisProjectileConfig)
+        self.fireTimer = self.fireTimer + telekinesisFireCycle
+        tech.setAnimationState("telekinesis", "telekinesisOn")
+      else
+        local oldFireTimer = self.fireTimer
+        self.fireTimer = self.fireTimer - args.dt
+        if oldFireTimer > telekinesisFireCycle / 2 and self.fireTimer <= telekinesisFireCycle / 2 then
+
+        end
+      end
+	  return tech.consumeTechEnergy(energyUsageTelekinesis)
+    end
+
+    if args.actions["mechFire"] and status.resource("energy") > energyCostPerSecondPrim then
+      if self.fireTimer <= 0 then
+        world.spawnProjectile(mechProjectile, vec2.add(mcontroller.position(), tech.partPoint("frontGun", "firePoint")), entity.id(), {math.cos(aimAngle), math.sin(aimAngle)}, false, mechProjectileConfig)
+        self.fireTimer = self.fireTimer + mechFireCycle
+        tech.setAnimationState("frontFiring", "fire")
+--tech.setParticleEmitterActive("jetpackParticles3", true)
+ local startPoint = vec2.add(mcontroller.position(), tech.partPoint("frontGun", "firePoint"))
+ local endPoint = vec_add(mcontroller.position(), {tech.partPoint("frontDashGun", "firePoint")[1] + mechGunBeamMaxRange * math.cos(aimAngle), tech.partPoint("frontDashGun", "firePoint")[2] + mechGunBeamMaxRange * math.sin(aimAngle) })
+ local beamCollision = progressiveLineCollision(startPoint, endPoint, mechGunBeamStep)
+ randomProjectileLine(startPoint, beamCollision, mechGunBeamStep, mechGunBeamSmokeProkectile, 0.08)
+	  else
+        local oldFireTimer = self.fireTimer
+        self.fireTimer = self.fireTimer - args.dt
+        if oldFireTimer > mechFireCycle / 2 and self.fireTimer <= mechFireCycle / 2 then
+        end
+      end
+	  return tech.consumeTechEnergy(energyCostPerSecondPrim)
+    end
+	
+	if not args.actions["mechFire"] then
+	--tech.setParticleEmitterActive("jetpackParticles3", false)
+	end
+	
+	if args.actions["mechAltFire"] and status.resource("energy") > energyCostPerSecondAlt then
+      if self.fireTimer <= 0 then
+        world.spawnProjectile(mechAltProjectile, vec2.add(mcontroller.position(), tech.partPoint("frontAltGun", "firePoint")), entity.id(), {math.cos(aimAngle), math.sin(aimAngle)}, false, mechAltProjectileConfig)
+        self.fireTimer = self.fireTimer + mechAltFireCycle
+        tech.setAnimationState("frontAltFiring", "fireAlt")
+      else
+        local oldFireTimer = self.fireTimer
+        self.fireTimer = self.fireTimer - args.dt
+        if oldFireTimer > mechAltFireCycle / 2 and self.fireTimer <= mechAltFireCycle / 2 then
+
+        end
+      end
+	  return tech.consumeTechEnergy(energyCostPerSecondAlt)
+    end
+	
+	if args.actions["mechSecFire"] and status.resource("energy") > energyCostPerSecondSec then
+	world.spawnProjectile(mechSecProjectile, vec2.add(mcontroller.position(), tech.partPoint("frontSecGun", "firePoint")), entity.id(), {math.cos(aimAngle), math.sin(aimAngle)}, false, mechAltProjectileConfig)
+    tech.setAnimationState("frontSecFiring", "fireSec")
+      -- if self.fireSecTimer <= 0 then
+        -- world.spawnProjectile(mechSecProjectile, vec2.add(mcontroller.position(), tech.partPoint("frontSecGun", "firePoint")), entity.id(), {math.cos(0), math.sin(0)}, false, mechAltProjectileConfig)
+        -- self.fireSecTimer = self.fireSecTimer + mechSecFireCycle
+        -- tech.setAnimationState("frontSecFiring", "fireSec")
+      -- else
+        -- local oldFireSecTimer = self.fireSecTimer
+        -- self.fireSecTimer = self.fireSecTimer - args.dt
+        -- if oldFireSecTimer > mechSecFireCycle / 2 and self.fireSecTimer <= mechSecFireCycle / 2 then
+
+        -- end
+      -- end
+	  return tech.consumeTechEnergy(energyCostPerSecondSec)
+    end
+	
+  local jetpackSpeed = tech.parameter("jetpackSpeed")
+  local jetpackControlForce = tech.parameter("jetpackControlForce")
+  local energyUsagePerSecond = tech.parameter("energyUsagePerSecond")
+  local energyUsage = energyUsagePerSecond * args.dt
+
+   if status.resource("energy") < energyUsage then
+     self.ranOut = true
+  elseif mcontroller.onGround() or mcontroller.liquidMovement() then
+    self.ranOut = false
+  end
+  
+  if args.actions["jetpack"] and not self.ranOut then
+    tech.setAnimationState("jetpack", "on")
+    mcontroller.controlApproachYVelocity(jetpackSpeed, jetpackControlForce, true)
+    return tech.consumeTechEnergy(energyUsage)
+  else
+    tech.setAnimationState("jetpack", "off")
+    return 0
+  end
+  
+  -- local levitateSpeed = tech.parameter("levitateSpeed")
+  -- local levitateControlForce = tech.parameter("levitateControlForce")
+  -- local energyUsagePerSecondLevitate = tech.parameter("energyUsagePerSecondLevitate")
+  -- local energyUsagelevitate = energyUsagePerSecondLevitate * args.dt
+
+  -- if args.availableEnergy < energyUsagelevitate then
+    -- self.ranOut = true
+  -- elseif mcontroller.onGround() or mcontroller.liquidMovement() then
+    -- self.ranOut = false
+  -- end
+
+  -- if args.actions["levitate"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+    -- mcontroller.controlApproachYVelocity(levitateSpeed, levitateControlForce, true)
+	-- self.levitateActivated = true
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitatehover"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+    -- mcontroller.controlApproachYVelocity(0, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(0, levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitateleft"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+		-- mcontroller.controlApproachYVelocity(0, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(-(levitateSpeed*self.speedMultiplier), levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitateleftup"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+    -- mcontroller.controlApproachYVelocity(levitateSpeed, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(-(levitateSpeed*self.speedMultiplier), levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitateleftdown"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+    -- mcontroller.controlApproachYVelocity(-(levitateSpeed)*0.5, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(-(levitateSpeed*self.speedMultiplier), levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitateright"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+		-- mcontroller.controlApproachYVelocity(0, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(levitateSpeed*self.speedMultiplier, levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitaterightup"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+    -- mcontroller.controlApproachYVelocity(levitateSpeed, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(levitateSpeed*self.speedMultiplier, levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitaterightdown"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+    -- mcontroller.controlApproachYVelocity(-(levitateSpeed)*0,5, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(levitateSpeed*self.speedMultiplier, levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitateup"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+    -- mcontroller.controlApproachYVelocity(levitateSpeed, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(0, levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- elseif args.actions["levitatedown"] and not self.ranOut then
+    -- tech.setAnimationState("levitate", "on")
+    -- mcontroller.controlApproachYVelocity(-(levitateSpeed)*0.5, levitateControlForce, true)
+		-- mcontroller.controlApproachXVelocity(0, levitateControlForce, true)
+    -- return tech.consumeTechEnergy(energyUsagelevitate)
+  -- else
+	-- self.levitateActivated = false
+    -- tech.setAnimationState("levitate", "off")
+    -- return 0
+  -- end
+
+    ----return energyCostPerSecond * args.dt
+  end
+
+  return 0
+end

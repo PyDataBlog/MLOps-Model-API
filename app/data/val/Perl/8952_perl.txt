@@ -1,0 +1,188 @@
+package Parser;
+use strict;
+use warnings;
+require Exporter;
+
+our @ISA = qw(Exporter);
+our @EXPORT = qw( validate parser );
+
+our $VERSION = "0.01";
+
+
+# [SUMMARY] Pass in a delimited filename and a list of validations to run against the different fields.
+#  If any of the chekcs fails, the function returns an array ref containing the errors.
+#  The validations are specified using dynamic code, so there is essentially no limit on what kind of checks you can run.
+#  Examples of validations you might want are:
+#    1. Verify the field count
+#    2. Verify that a field matches a given regular expression pattern (e.g. is just digits)
+#  You can skip lines in the input file if they match some pattern (e.g. if they're comments)
+# Here's an example of how it's called:
+#  rhuther@rhuther-VirtualBox:~/personal_projects$ egrep 'validate\(' Remarketing/*
+#    Remarketing/simulate.pl:  if ($err = validate($input_file, "\t", "", 0, [ 'skip=/^\s*#/', 'f=3','0=/^(abandon|browse|purchase)/i', '1=date', '2=w' ])) {
+#    Remarketing/simulate.pl:  if ($err = validate($output_settings, "\t", "", 0, [ 'skip=/^#/', 'f=4', '0=d', '1=/^(abandon|browse|purchase).*?=\d+-\d+$/i', "2=/${exclude_pattern}(?:;$exclude_pattern)*\$/i" ])) {
+sub validate {
+  my $filename = shift;
+  my $delim = shift;
+  my $enclosure = shift;
+  my $strip_enclosure = shift;
+  my $opts = shift;
+  my @errs;
+  my $linecnt;
+  my $ret;
+  my %option_menu = (
+    f => \&field_count_check,
+    field => \&field_count_check,
+    fields => \&field_count_check,
+    d => '/^\d+$/',
+    date => '/^\d+$/',
+    a => '/^\p{L}+$/',
+    alpha => '/^\p{L}+$/',
+    w => '/^\w+/',
+    word => '/^\w+/',
+  );
+  my $basename = (split('/', $filename))[-1];
+
+  open(IN, "<", $filename) or die "Failed opening <$filename> for reading: $!\n";
+  FILELOOP:while (my $line = <IN>) {
+    $line =~ s/[\r\n]*$//;
+    my $err;
+    my $coderef;
+    $linecnt++;
+    my $ret = parser($line, $delim, $enclosure);
+    my ($enclosure_err, $fields) = ($ret->[0], $ret->[1]);
+  # This enclosure_err allows us to have the caller decide if
+  #  he'd like to try robustly recovering from the error:
+  #  for instance, if @$fields doesn't match some expected count,
+  #  and if we $enclosure_err is set, it may be that we have
+  #  to join this line to the next one (which would also have 
+  #  an enclosure/field error).
+    if ($enclosure_err) {
+      my $err_indicator;
+      my $indent = ">> At line $linecnt: ";
+      warn "[PARSER WARNING] Unmatched enclosure found:\n${indent}$_";
+      for (my $i=0; $i < length($_); $i++) {
+        if ($i == ($enclosure_err - 1)) {
+           $err_indicator .= "^";
+        } else {
+          $err_indicator .= " ";
+        }
+      }
+      warn " " x length($indent) . "$err_indicator\n";
+    }
+  # Parse the validate option for 
+    my @options = @$opts;
+    foreach my $o (@options) {
+      my ($lval, $rval) = split /=/, $o, 2;
+      unless (defined $lval && defined $rval) {
+        warn "[CALLER ERROR] lval=<$lval> or rval=<$rval> is empty: bad option passed: <$o>\n";
+        next;
+      }
+      # This refers to a field in the @$fields array
+      # Check if the rval is in a list of regex shortcuts
+      if ($lval =~ /^\d+$/) {
+        if ($coderef = $option_menu{$rval}) {
+        } elsif ($rval =~ /\/.+\//) {
+           $coderef = $rval;
+        } else {
+          warn "[CALLER ERROR] Unrecognized rval=<$rval>: must be a keyword or a regex.\n";
+          next;
+        }
+        my $c = "\$ret = \$fields->[$lval] =~ $coderef;"; 
+        unless (eval $c.1) {
+          warn "[CALLER ERROR] Failed to eval <$c>:\n\t$@";
+        }
+        unless ($ret) {
+          push(@errs, "[FILE ERROR] $basename:$linecnt: option=<$o> failed\n");
+        }
+      } elsif ($lval =~ /^s(?:kip)?/i) {
+        my $c = "\$ret = \$line =~ $rval;";
+        unless (eval $c.1) {
+          warn "[CALLER ERROR] Failed to eval <$c>:\n\t$@";
+        }
+        if ($ret) {
+          #warn "[DEBUG][SKIPPING] <$line> matched <$rval>: ret=<$ret>\n";
+# [TODO] If this entry in the fileloop accrued other errors before hitting skip (because 'skip' wasn't placed at the front of the options)
+#  then you shouldn't treat those other errors as fatal.  Instead of pushing the errors onto the global array immediately,
+#  you should only do that if you successfully reach the end of the fileloop using a temporary array variable.  Then, if you hit the
+#  skip option, you blank out this temp array so that the record doesn't error out.
+#  Another possibility is to just search the record (using grep or something) for the skip option.  If you find it, then edit
+#  the option to move it to the front, and then process as normal in this loop.
+          next FILELOOP;
+        }
+      } elsif ($coderef = $option_menu{$lval}) {
+        if ($err = $coderef->($fields, $rval, $linecnt)) {
+          push(@errs, "[FILE ERROR] $basename:$linecnt: $err");
+        }
+      } else {
+        warn "[CALLER ERROR] Unrecognized lval=<$lval>: must be a keyword or an index number of field to validate.\n";
+        next;
+      }
+    }
+  }
+
+  return @errs ? \@errs : undef;
+}
+
+# This parser works well if the delim and enclosure are single characters.
+#  But what if they're multiple characters?  Rather than just checking
+#  for equality like "$c eq $delim", you'd have to check to see if you
+#  can match the entire string against the next n characters in the 
+#  @chars array.  You'd use a different loop index; something like
+#  if ($c eq $delim[0]) { my $match = 0; for ($j=1; $j < @delim; $j++) { if ($chars[$j+$i] ne $delim[$j]) { $match = 0; last; }} if ($match) { $i = $j; push(@fields, $string); $string=""; }}
+# Also, would it handle UTF8 characters?
+# Also, it would be great if it could handle regex characters... but maybe that's asking for too much.  Maybe you'd have to define that in a separate function (e.g. parser_re)
+sub parser {
+  my $line = shift;
+  my $delim = shift;
+  my $enclosure = shift;
+  my $strip_enclosure = shift;
+  my @fields;
+  my $in_enclosure;
+  my $backslash;
+  my $string;
+  my $c;
+  my $p;
+  
+  my @chars = split //, $line;
+  for (my $i=0; $i < @chars; $i++) {
+    $c = $chars[$i];
+    if ($c eq '\\' && $p ne '\\') {
+      $backslash = 1;
+      goto ENDP;
+    } 
+    if ($c eq $enclosure && !$backslash) {
+      if ($in_enclosure) { # You're changing the enclosure state.
+        $in_enclosure = 0;
+        $string .= $c unless $strip_enclosure;
+        push(@fields, $string);
+        $string = "";
+      } else {
+        $in_enclosure = $i+1;
+        $string .= $c unless $strip_enclosure;
+      }
+    } elsif ($c eq $delim) {
+      if (!$in_enclosure) {
+        push(@fields, $string);
+        $string = "";
+      } else {
+        $string .= $c;
+      }
+    } elsif ($c eq "\r" || $c eq "\n") {
+    # Ignore CRLF characters.
+    } else {
+      $string .= $c;
+    }
+    $backslash = 0;   # Reset this, since if it WAS set at the top of the loop, it won't apply to the next loop.
+    ENDP:$p = $c;
+  }
+  push(@fields, $string) if $string;
+  return [ $in_enclosure, \@fields ];
+}
+
+sub field_count_check { 
+  my $fields = shift; 
+  my $expected_field_count = shift; 
+  my $actual_field_count = scalar(@$fields); 
+  return $expected_field_count == $actual_field_count ? undef : 
+         "expected field count of <$expected_field_count> but found <$actual_field_count> instead.\n"; 
+}

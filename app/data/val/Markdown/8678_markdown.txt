@@ -1,0 +1,2 @@
+# RomanNumeralCalcInFSharp
+Kata for Guild

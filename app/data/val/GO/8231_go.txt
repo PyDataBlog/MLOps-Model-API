@@ -1,0 +1,90 @@
+package main
+
+import (
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"strings"
+	"sync"
+)
+
+var (
+	logger       *log.Logger
+	log_filename string
+	log_mutex    sync.Mutex
+)
+
+func log_init(filename string) {
+	// ...
+
+	log_filename = filename
+
+	var log_file *os.File = nil
+
+	_, err := os.Stat(log_filename)
+	if os.IsNotExist(err) {
+		log_file, err = os.Create(log_filename)
+		err = nil
+	} else if err != nil {
+		fmt.Printf("unknown error checking log file %s\n", log_filename)
+		fmt.Printf("%v\n", err)
+		os.Exit(1)
+	} else {
+		log_file, err = os.OpenFile(log_filename,
+			os.O_APPEND|os.O_WRONLY,
+			0644)
+	}
+
+	if err != nil {
+		fmt.Printf("error opening log file %s\n", log_filename)
+		fmt.Printf("%v\n", err)
+		os.Exit(1)
+	}
+
+	logger = new_logger(log_file)
+}
+
+func new_logger(w io.Writer) *log.Logger {
+	// Create a new Logger with the default log parameters
+
+	return log.New(w, "", log.Ldate|log.Ltime|log.LUTC)
+}
+
+func log_printf(format string, a ...interface{}) {
+	// ...
+
+	// Make sure the log file exists before trying to log a message.  Something
+	// like logrotate may move the log file out from under the program.
+	//
+	// If the log does not exist:
+	// - lock the log mutex--multiple threads may wait here
+	// - once the lock is obtained, check again whether the log file exists,
+	//   because another thread may have already fixed the problem
+	// - if the log file indeed does not exist, create a new file and reset the
+	//   logger
+	// - unlock the log mutex
+	_, err := os.Stat(log_filename)
+	if err != nil && os.IsNotExist(err) {
+		log_mutex.Lock()
+
+		_, err := os.Stat(log_filename)
+		if err != nil && os.IsNotExist(err) {
+			// create the missing log file
+			new_log_file, err := os.Create(log_filename)
+			if err != nil {
+				fmt.Printf("error creating new log file\n")
+				os.Exit(1)
+			}
+			logger = new_logger(new_log_file)
+		}
+
+		log_mutex.Unlock()
+	}
+
+	logger.Printf(format, a...)
+
+	if strings.Compare(config_get("stdout"), "true") == 0 {
+		fmt.Printf(format, a...)
+	}
+}

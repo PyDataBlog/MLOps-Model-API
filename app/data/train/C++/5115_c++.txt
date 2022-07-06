@@ -1,0 +1,174 @@
+#include "yJRTP_R.h"
+
+boost::circular_buffer<uint8_t> cir_buf(BUFF_SIZE);
+using namespace boost::lockfree;
+//boost::lockfree::fixed_sized<false>;
+boost::lockfree::queue<DataCache,boost::lockfree::fixed_sized<false> > queue_buf(0);
+
+void checkerror(int rtperr)
+{
+    if (rtperr < 0)
+    {
+        std::cout << "ERROR: " << RTPGetErrorString(rtperr) << std::endl;
+        exit(-1);
+    }
+}
+
+
+yJRTP_R::yJRTP_R(){
+
+    rframe = new yH264Frame(BUFF_SIZE);
+    cur_size = 0;
+}
+yJRTP_R::~yJRTP_R(){
+
+    delete rframe;
+}
+void yJRTP_R::InitRTPSess(void){
+
+    int status;
+    // Now, we'll create a RTP session, set the destination
+    // and poll for incoming data.
+
+    RTPUDPv4TransmissionParams transparams;
+    RTPSessionParams sessparams;
+
+    // IMPORTANT: The local timestamp unit MUST be set, otherwise
+    //            RTCP Sender Report info will be calculated wrong
+    // In this case, we'll be just use 8000 samples per second.
+    sessparams.SetOwnTimestampUnit(1.0/9000.0);
+    sessparams.SetAcceptOwnPackets(true);
+
+    transparams.SetPortbase(PORTBASE);
+
+    status = this->Create(sessparams,&transparams);
+    checkerror(status);
+
+#define SERVER_IP "127.0.0.1"
+#define SERVER_PORT 6004
+
+    std::string ipstr = SERVER_IP;
+    uint32_t destip;
+
+    if ( (destip = inet_addr(ipstr.c_str())) == INADDR_NONE)
+    {
+        std::cerr << "Bad IP address specified" << std::endl;
+        return;
+    }
+
+    destip = ntohl(destip);
+    RTPIPv4Address addr(destip,SERVER_PORT);
+    status = this->AddDestination(addr);
+    checkerror(status);
+
+#define CONNECT_SERVER_TIMES 10
+    char *buf = "notice server";
+
+    for (int i = 0; i < CONNECT_SERVER_TIMES; i++)
+    {
+
+        this->SendPacket((void *)buf,sizeof(buf));
+    }
+
+
+}
+
+void yJRTP_R::StrartRecieve(void){
+    int status;
+    static long pkg_num = 0;
+    while ( 1 )
+    {
+        this->BeginDataAccess();
+
+        // check incoming packets
+        if (this->GotoFirstSourceWithData()){
+
+            //printf("Got rtp pkg : %ld\n",pkg_num);
+            //pkg_num++;
+            do
+            {
+
+                RTPPacket *pack;
+                RTPSourceData *srcdat;
+
+                srcdat = this->GetCurrentSourceInfo();
+                while ((pack = this->GetNextPacket()) != NULL)
+                {
+                    // You can examine the data here
+                    //printf("Got packet !\n");
+                    this->ProcessRTPPacket(*srcdat,*pack);
+                    // we don't longer need the packet, so
+                    // we'll delete it
+                    this->DeletePacket(pack);
+                }
+            } while (this->GotoNextSourceWithData());
+        }
+
+        this->EndDataAccess();
+
+        //RTPTime::Wait(RTPTime(1,0));
+#ifndef RTP_SUPPORT_THREAD
+        status = this->Poll();
+        checkerror(status);
+#endif // RTP_SUPPORT_THREAD
+    }
+
+}
+
+int yJRTP_R::ProcessRTPPacket(const RTPSourceData &srcdat,const RTPPacket &pack){
+
+    if(pack.GetPayloadType() == H264)
+    {
+        //std::cout<<"Got H264 packet：êo " << rtppack.GetExtendedSequenceNumber() << " from SSRC " << srcdat.GetSSRC() <<std::endl;
+        if(pack.HasMarker())//如果是最后一包则进行组包
+        {
+
+            //printf("Got a nal unit \n");
+            memcpy(this->rframe->pframe + this->cur_size,pack.GetPayloadData(),pack.GetPayloadLength());
+            this->cur_size += pack.GetPayloadLength();
+            this->rframe->use_len = this->cur_size;
+
+
+//***************************
+#define yDO_WRITE_FILE
+#ifdef DO_WRITE_FILE
+            int fd_out = open("rec.h264", O_CREAT | O_RDWR,S_IRWXU|S_IRWXO|S_IRWXG);
+            lseek(fd_out, 0, SEEK_END);
+            write(fd_out, this->rframe->pframe,this->rframe->use_len);
+            close(fd_out);
+#endif
+//***************************
+#ifdef CIR_BUF
+            while(1){
+            if ( cir_buf.reserve() > this->rframe->use_len){
+
+                for (long i = 0; i < this->rframe->use_len; i++){
+
+                    cir_buf.push_back( *(this->rframe->pframe + i) );
+                }
+                break;
+            }
+            }
+#else
+
+            DataCache tmp;
+
+            memcpy(tmp.data,this->rframe->pframe,this->rframe->use_len);
+            tmp.len = this->rframe->use_len;
+            queue_buf.push(tmp);
+
+#endif//CIR_BUF
+            //cir_buf.push_back(;
+
+            memset(this->rframe->pframe,0,this->rframe->use_len);//清空缓存，为下次做准备
+
+            this->cur_size = 0;
+        }
+        else//放入缓冲区，在此必须确保有序
+        {
+
+            memcpy(this->rframe->pframe + this->cur_size,pack.GetPayloadData(),pack.GetPayloadLength());
+            this->cur_size += pack.GetPayloadLength();
+        }
+    }
+}

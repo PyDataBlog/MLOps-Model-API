@@ -1,0 +1,58 @@
+
+function Convert-UnixTimeToDateTime($unixtime){
+   $origin = New-Object -Type DateTime -ArgumentList 1970, 1, 1, 9, 0, 0, 0
+   $origin.AddSeconds($unixTime)
+}
+
+# get directory name.
+if( $args.Length -And (Test-Path $args[0])){
+    $dir = Convert-Path $args[0]
+} else { 
+    Write-Host "no parameter or an incorrcet path"
+    $dir = $PSScriptRoot 
+}
+
+# get txet file lists of directory.
+$fs = Get-ChildItem -Path $dir\* -Include *.txt
+
+foreach ($f in $fs) {
+    if(($length = $f.Length) -eq 0){ continue }
+
+    Write-Host "import filename : $f $length byte"
+
+    $PingResults = New-Object System.Collections.ArrayList 
+    $number = 1
+
+    Get-Content $f -Encoding UTF8 | ForEach-Object {
+                     # [1491393611.129579] 64 bytes from 192.168.0.1: icmp_seq=1 ttl=64 time=1.01 ms
+        if($_ -match "^\[(\d+\.\d+)\]\s(\d{2,4})\sbytes from\s(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\:\sicmp_seq=(\d{1,4})\sttl=(\d{1,10})\stime=(\d+\.\d+)\sms"){
+            $PingResult = New-Object psobject | Select-Object Number, UNIXTIME, DATE, Payload, replyAddress, Sequence, TTL, RTT
+            $PingResult.Number = $number++
+            $PingResult.UNIXTIME = $matches[1]
+            $PingResult.DATE = Convert-UnixTimeToDateTime $matches[1]
+            $PingResult.Payload = $matches[2]
+            $PingResult.replyAddress = $matches[3] 
+            $PingResult.Sequence = $matches[4]
+            $PingResult.TTL = $matches[5]
+            $PingResult.RTT = $matches[6]
+            [void]$PingResults.Add($PingResult)
+        } elseif ($_ -match "^(\d{2,4})\sbytes from\s(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\:\sicmp_seq=(\d{1,4})\sttl=(\d{1,10})\stime=(\d+\.\d+)\sms"){
+            $PingResult = New-Object psobject | Select-Object Number, Payload, replyAddress, Sequence, TTL, RTT
+            $PingResult.Number = $number++
+            $PingResult.Payload = $matches[1]
+            $PingResult.replyAddress = $matches[2] 
+            $PingResult.Sequence = $matches[3]
+            $PingResult.TTL = $matches[4]
+            $PingResult.RTT = $matches[5]
+            [void]$PingResults.Add($PingResult)
+        } else { Write-Host undetected }
+    }
+
+    $basename = $f.BaseName
+    $outputFilename = "$dir\$basename.csv"
+    Write-Host "export filename : $outputFilename"
+    $PingResults | Export-Csv $outputFilename -Encoding UTF8
+    $PingResults | ft -AutoSize
+}
+
+

@@ -1,0 +1,1 @@
+A PvPGNChatParser converts raw messages received from PvPGNChat to ChatMessage objects

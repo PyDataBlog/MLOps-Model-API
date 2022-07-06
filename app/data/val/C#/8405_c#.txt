@@ -1,0 +1,355 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+using SOURCE.BackOffice.Web.Controllers.ActionResults;
+using System.Net;
+using SOURCE.Infrastructure.Constant;
+using SOURCE.BackOffice.Web.Controllers.Helpers;
+using Castle.Core.Logging;
+using System.Web.Mvc;
+using SOURCE.Infrastructure.Services.Depots;
+using SOURCE.Infrastructure.Services.Encryption;
+using SOURCE.BackOffice.Web.Controllers.Modularity;
+using SOURCE.BackOffice.Web.ViewModels.ModelBuilders.Common;
+using SOURCE.BackOffice.Web.ViewModels.Pages.Common;
+using System.Transactions;
+using SOURCE.Domaine.Results;
+using SOURCE.Infrastructure.Extensions;
+using System.Web.Routing;
+using System.Configuration;
+using SOURCE.Infrastructure.Services.Caching;
+using SOURCE.BackOffice.Web.Controllers.WSEspaceCandidature;
+using SOURCE.Infrastructure.Services.Exports;
+using SOURCE.BackOffice.Web.Controllers.WSAfnorPostIt;
+using Newtonsoft.Json;
+using SOURCE.Infrastructure.Exceptions;
+using SOURCE.Domaine;
+
+using System.Net.Http;
+using System.Security.Cryptography.X509Certificates;
+
+namespace SOURCE.BackOffice.Web.Controllers.Common
+{
+
+    public class CommonController : ModularController
+    {
+        public CommonController(
+            ILogger logger,
+            ICryptography encryption,
+            IDepotFactory depotFactory,
+            ICommonModelBuilder commonModelBuilder,
+            ICaching cachingService,
+            IExcelExport exportService)
+            : base(logger, encryption, depotFactory, commonModelBuilder, cachingService, exportService)
+        {
+        }
+
+        [HttpGet]
+        public ActionResult GetActions(long vueID, long? idFonctionnel, long modeAffichage)
+        {
+            var res = _depotFactory.GenericDepot.GetActions(Context.User.ID, vueID, idFonctionnel, modeAffichage, Context.User.LangueID);
+
+            return new JsonHttpStatusResult((int)HttpStatusCode.OK, res);
+        }
+
+        [HttpGet]
+        public ActionResult GetCombo(string comboName, long vueID, long idFonctionnel, int? withEmptyItem = 1)
+        {
+            var res = _depotFactory.GenericDepot.GetCombo(comboName, vueID, Context.User.ID == 0 ? -1 : Context.User.ID, idFonctionnel, Context.User.LangueID);
+
+            if (withEmptyItem.HasValue && withEmptyItem.Value > 0)
+            {
+                res = res.WithEmptyItem<ComboResultDto>(() => new ComboResultDto());
+            }
+
+            return new JsonHttpStatusResult(res);
+        }
+
+        [HttpGet]
+        public ActionResult GetComboArchive(string comboName, long vueID, long idFonctionnel, long idValeurDefaut, bool gestionArchiveAll)
+        {
+            var res = _depotFactory.GenericDepot.GetCombo(comboName, vueID, Context.User.ID == 0 ? -1 : Context.User.ID, idFonctionnel, Context.User.LangueID, idValeurDefaut, idValeurDefaut > 0 ? true : false, gestionArchiveAll).WithEmptyItem<ComboResultDto>(() => new ComboResultDto());
+
+            return new JsonHttpStatusResult(res);
+        }
+
+        [HttpGet]
+        public ActionResult GetAutoComplete(string comboName, long vueID, long idFonctionnel, string searchTerm)
+        {
+            var res = _depotFactory.GenericDepot.GetAutoComplete(comboName, vueID, Context.User.ID, idFonctionnel, Context.User.LangueID, searchTerm);
+
+            return new JsonHttpStatusResult(res);
+        }
+
+        [HttpGet]
+        public ActionResult GetAutoCompleteArchives(string comboName, long vueID, long idFonctionnel, string searchTerm, bool includeArchives)
+        {
+            var res = _depotFactory.GenericDepot.GetAutoComplete(comboName, vueID, Context.User.ID, idFonctionnel, Context.User.LangueID, searchTerm, includeArchives);
+
+            return new JsonHttpStatusResult(res);
+        }
+
+        [HttpGet]
+        public ActionResult GetDiff(string diffType, long vueID, long idFonctionnel)
+        {
+            var res = _commonModelBuilder.BuildDiffToolViewModel(Context, diffType, vueID, idFonctionnel);
+
+            return new JsonHttpStatusResult(res);
+        }
+
+        public ActionResult DiffTool()
+        {
+            return View("~/Views/Common/DiffTool/DiffTool.cshtml", new DiffToolViewModel());
+        }
+
+        public ActionResult Traductions(long id, string type)
+        {
+            BuildActionContext(VueEnum.Traduction, id);
+
+            var vm = _commonModelBuilder.BuildTraductionViewModel(Context, type, id);
+
+            return View(vm);
+        }
+
+        public ActionResult SaveTraductions(TraductionsViewModel model)
+        {
+            BuildActionContext(VueEnum.Traduction, model.ID, model.ID > 0 ? (long)TypeActionEnum.Save : (long)TypeActionEnum.Add, model.TimeStamp);
+
+            Save(() => { _depotFactory.TraductionOMDepot.SaveTraductionOM(model.Traductions); return null; });
+
+            return new JsonHttpStatusResult();
+        }
+
+        [HttpPost]
+        public ActionResult Language(long langueID)
+        {
+            var langue = _depotFactory.LangueDepot.Find(x => x.ID == langueID && x.Actif == true).FirstOrDefault();
+
+            if (langue != null)
+            {
+                var user = _depotFactory.UtilisateurDepot.GetById(Context.User.ID);
+                user.LangueID = langueID;
+                _depotFactory.UtilisateurDepot.Update();
+            }
+
+            string url;
+            if (HttpContext.Request.UrlReferrer != null)
+            {
+                url = HttpContext.Request.UrlReferrer.AbsolutePath;
+            }
+            else
+            {
+                url = RoutesHelper.GetUrl(Constants.GetStringValue(RouteCodeEnum.DefaultRoute));
+            }
+
+            return Redirect(url);
+        }
+
+        [HttpPost]
+        public ActionResult DeleteGeneric(string type, long id)
+        {
+            using (TransactionScope transaction = new TransactionScope())
+            {
+                var res = _depotFactory.GenericDepot.DeleteGeneric(Context.User.ID, type, id);
+
+                if (res.Any(x => x.ErreurNumber < 0))
+                {
+                    throw new ValidationException(res.Where(x => x.ErreurNumber < 0).Select(x => Tuple.Create(x.ErreurCode, x.ErreurLib)));
+                }
+
+                transaction.Complete();
+
+                return new JsonHttpStatusResult();
+            }
+        }
+
+        public ActionResult ClearCache()
+        {
+            //Vider le cache BackOffice
+            RoutesHelper.Reset();
+            _cachingService.Reset();
+            //Vider le cache EspaceCandidature
+
+            var url = ConfigurationManager.AppSettings["EspaceCandidature.Base.Url"];
+
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                //Ignore certificat error
+                //http://stackoverflow.com/questions/15205814/net-client-connecting-to-ssl-web-api#answer-15206507
+                //http://www.cnblogs.com/hetring/p/4029335.html  中文
+                ServicePointManager.ServerCertificateValidationCallback += (sender, cert, chain, sslPolicyErrors) => true;
+
+                using (var client = new HttpClient())
+                {
+                    var token = Guid.NewGuid().ToString();
+                    _depotFactory.ServiceTokenDepot.GenerateToken(Context.User.ID, null, DateTime.Now.AddMinutes(1), Constants.GetStringValue(TypeTokenEnum.ServiceEspaceCandidature), token, null);
+
+                    Uri uri = new Uri(new Uri(url), RoutesHelper.GetUrl("CLEAR_CACHE_FO", new { token = token }));
+
+                    var response = client.GetAsync(uri).Result;
+
+                    if (!response.IsSuccessStatusCode)
+                    {
+                        throw new Exception(_cachingService.Translate("CLIENT_CLEAR_CACHE_FAILED"));
+                    }
+
+                    //if (response.IsSuccessStatusCode)
+                    //{
+                    //    // by calling .Result you are performing a synchronous call
+                    //    var responseContent = response.Content;
+
+                    //    // by calling .Result you are synchronously reading the result
+                    //    string responseString = responseContent.ReadAsStringAsync().Result;
+                    //}
+                }
+            }
+            //ServiceEspaceCandidatureClient serviceEspaceCandidatureClient = new ServiceEspaceCandidatureClient();
+            //serviceEspaceCandidatureClient.ClearCache(token);
+
+            var vm = _commonModelBuilder.BuildPartialViewModel(Context, null);
+
+            return View("~/Views/Administration/Cache/ClearCache.cshtml", vm);
+        }
+
+        public ActionResult ServiceToken(long id, int typeToken)
+        {
+            if (id > 0)
+            {
+                DateTime currentTime = DateTime.Now;
+                string token = _encryption.Encrypt(currentTime.ToString());
+                string typeCode = string.Empty;
+                long idFonctionnel = -1;//TODO, une valeur pertinente
+                switch (typeToken)
+                {
+                    case (int)TypeTokenEnum.Candidature:
+                        typeCode = Constants.GetStringValue(TypeTokenEnum.Candidature);
+                        idFonctionnel = _depotFactory.IntervenantDepot.GetById(id).PersonneID;
+                        break;
+                    case (int)TypeTokenEnum.Planning:
+                        typeCode = Constants.GetStringValue(TypeTokenEnum.Planning);
+                        //TODO 
+                        break;
+                    default:
+                        break;
+                }
+
+                _depotFactory.ServiceTokenDepot.GenerateToken(Context.User.ID, idFonctionnel, currentTime.AddMinutes(10), typeCode, token, null);
+
+                var url = ConfigurationManager.AppSettings.Get("EspaceCandidature.ServiceToken.Url").Replace("{token}", token);
+
+                return Redirect(url);
+            }
+            return new EmptyResult();
+        }
+
+        public ActionResult Export(long options, string type, string paramOption)
+        {
+            var vm = _commonModelBuilder.BuildExportGenericViewModel(Context, options, type, paramOption);
+
+            return View("~/Views/Common/Exports/ExportConfiguration.cshtml", vm);
+        }
+
+        public ActionResult ExportToXml(ExportGenericViewModel model)
+        {
+            var xlsContent = _depotFactory.GenericDepot.ExportGeneriqueToXml(
+                model.IdFonctionnel,
+                model.ExportType,
+                Context.User.ID,
+                model.DateDebut,
+                model.DateFin,
+                model.Seuil,
+                model.Details,
+                model.SelectValue);
+
+            if (model.ExportType != "ExportsServiceTraitementPeriodique" && !String.IsNullOrEmpty(xlsContent))
+            {
+                var exportUrl = CreateExportFile(xlsContent, model.ExportType + ".xls", FileDownloadTypes.ExportGenerique);
+                return new JsonHttpStatusResult((int)HttpStatusCode.OK, exportUrl);
+            }
+
+            return new JsonHttpStatusResult((int)HttpStatusCode.OK);
+        }
+
+        [HttpGet]
+        public ActionResult GetSelecteurCompetence(long domaineCompetenceID, long vueID, long idFonctionnel, string criteria, bool tous)
+        {
+            var res = _depotFactory.GenericDepot.GetSelecteurCompetence(domaineCompetenceID, vueID, idFonctionnel, Context.User.ID, Context.User.LangueID, criteria, tous);
+
+            return new JsonHttpStatusResult((int)HttpStatusCode.OK, res);
+        }
+
+        #region Post-it
+        [HttpGet]
+        public ActionResult GetPostItCount(long groupeVueID, long? idFonctionnel)
+        {
+            var servicePostit = new ServicePostItClient();
+
+            var postitServiceRequest = PostItHelper.BuildPostitServiceRequest(Context, _depotFactory, _cachingService, groupeVueID, idFonctionnel);
+
+            var postitServiceResponse = servicePostit.GetCount(postitServiceRequest);
+
+            if (postitServiceResponse == null || !string.IsNullOrWhiteSpace(postitServiceResponse.ErrorCode))
+            {
+                _logger.Warn(string.Format("Erreur lors de la récupération des postits: {1}", JsonConvert.SerializeObject(new { Request = postitServiceRequest, Response = postitServiceResponse })));
+
+                throw new Exception(string.Format("Service Postit: {0}", postitServiceResponse.ErrorMessage));
+            }
+
+            return new JsonHttpStatusResult(new { Count = postitServiceResponse.Count, HasImportant = postitServiceResponse.CountImportant > 0 });
+        }
+
+        [HttpGet]
+        public ActionResult RedirectPostIt(long groupeVueID, long? idFonctionnel)
+        {
+            //Récupérer une session pour se connecter à l'application Afnor Postit
+            var servicePostit = new ServicePostItClient();
+
+            var postitServiceRequest = PostItHelper.BuildPostitServiceRequest(Context, _depotFactory, _cachingService, groupeVueID, idFonctionnel);
+
+            var postitServiceResponse = servicePostit.GetSessionUrl(postitServiceRequest);
+
+            if (postitServiceResponse == null || !string.IsNullOrWhiteSpace(postitServiceResponse.ErrorCode))
+            {
+                _logger.Warn(string.Format("Erreur lors de la récupération des postits: {1}", JsonConvert.SerializeObject(new { Request = postitServiceRequest, Response = postitServiceResponse })));
+
+                throw new Exception(string.Format("Service Postit: {0}", postitServiceResponse.ErrorMessage));
+            }
+
+            return Redirect(postitServiceResponse.Url);
+        }
+        #endregion
+
+        [HttpPost]
+        public ActionResult ConnectAs(string email, long personneID)
+        {
+            var personne = _depotFactory.PersonneDepot.Find(x => x.ID == personneID && x.Email.Equals(email)).FirstOrDefault();
+
+            if (personne != null)
+            {
+
+                SeConnecterEnTantQue connection = new SeConnecterEnTantQue
+                {
+                    PersonneID = personneID,
+                    UtilisateurID = Context.User.ID,
+                    Token = Guid.NewGuid().ToString(),
+                    DateExpiration = DateTime.Now.AddMinutes(3)
+                };
+
+                _depotFactory.SeConnecterEnTantQueDepot.Add(connection);
+
+                bool isFOHttps = false;
+                bool.TryParse(ConfigurationManager.AppSettings["FO.IS.HTTPS"] ?? "false", out isFOHttps);
+                UriBuilder uriBldr = new UriBuilder(ConfigurationManager.AppSettings.Get("EspaceCandidature.Base.Url"));
+
+                string res = string.Format("{0}://{1}?token={2}", isFOHttps ? "https" : "http", uriBldr.Host, connection.Token);
+
+                return new JsonHttpStatusResult((int)HttpStatusCode.OK, new { url = res });
+            }
+
+            return new JsonHttpStatusResult((int)HttpStatusCode.BadRequest);
+        }
+
+    }
+}

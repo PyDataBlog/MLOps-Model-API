@@ -1,0 +1,547 @@
+﻿using System;
+using System.IO;
+using System.Collections.Generic;
+using Newtonsoft.Json;
+using NUnit.Framework;
+using System.Net;
+
+namespace PasswordSync.Tests
+{
+    [TestFixture]
+    //[TestClass()]
+    public class PasswordSyncTests
+    {
+        private void ResetConfig()
+        {
+            if (File.Exists(AppDomain.CurrentDomain.BaseDirectory + "passwordsync.json"))
+            {
+                File.Delete(AppDomain.CurrentDomain.BaseDirectory + "passwordsync.json");
+            }
+            if (File.Exists(AppDomain.CurrentDomain.BaseDirectory + "log4net.config"))
+            {
+                File.Delete(AppDomain.CurrentDomain.BaseDirectory + "log4net.config");
+            }
+        }
+
+        private SyncConfig ReadConfig()
+        {
+            if (File.Exists(AppDomain.CurrentDomain.BaseDirectory + "passwordsync.json"))
+            {
+                using (StreamReader r = new StreamReader(AppDomain.CurrentDomain.BaseDirectory + "passwordsync.json"))
+                {
+                    return JsonConvert.DeserializeObject<SyncConfig>(r.ReadToEnd());
+                }
+            }
+            return new SyncConfig();
+
+        }
+
+        private Source GetConfigSource(string domain)
+        {
+            //read config in memory
+            IList<Source> sources = ReadConfig().Sources;
+            //find config for test domain
+            Source testdom = null;
+            foreach (Source tmp in sources)
+            {
+                if (domain.Equals(tmp.Domain))
+                {
+                    testdom = tmp;
+                    break;
+                }
+            }
+            Assert.IsNotNull(testdom);
+            return testdom;
+        }
+
+        [Test]
+        public void PasswordSyncTest()
+        {
+            //clean config
+            ResetConfig();
+            PasswordSync pws = null;
+            //basic instantiation no file.
+            pws = new PasswordSync();
+            //check that we have an object
+            Assert.IsNotNull(pws);
+            //add info to file
+            pws.SetPassword("test.dom", "Administrator", "Pa$$w0rd");
+            pws.SetAnchor("test.dom", "SamAccountName");
+            pws.AddOU("test.dom", "OU=Users,DC=test,DC=dom");
+            pws.AddOU("test.dom", "OU=Groups,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressource,OU=Users,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressource,OU=Groups,DC=test,DC=dom");
+            //reinstantiate password sync
+            pws = null;
+            pws = new PasswordSync();
+            //check that we still have a filled in object
+            Assert.IsNotNull(pws);
+            Assert.IsTrue(pws.SyncConfig.Sources.Count > 0);
+            ResetConfig();
+        }
+
+        [Test]
+        public void FindDestinationTest()
+        {
+            //clean config
+            ResetConfig();
+            PasswordSync pws = null;
+            //basic instantiation no file.
+            pws = new PasswordSync();
+            pws.SetPassword("test.dom", "Administrator", "Pa$$w0rd");
+            pws.SetAnchor("test.dom", "SamAccountName");
+            pws.AddOU("test.dom", "OU=Users,DC=test,DC=dom");
+            pws.AddOU("test.dom", "OU=Groups,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressource,OU=Users,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressource,OU=Groups,DC=test,DC=dom");
+            pws.SetPassword("second.dom", "Admin", "S3cr3t");
+            pws.SetAnchor("second.dom", "UserPrincipalName");
+            pws.AddOU("second.dom", "OU=Users,DC=second,DC=dom");
+            pws.AddOU("second.dom", "OU=Groups,DC=second,DC=dom");
+            pws.AddExcludeOU("second.dom", "OU=Ressource,OU=Users,DC=second,DC=dom");
+            pws.AddExcludeOU("second.dom", "OU=Ressource,OU=Groups,DC=second,DC=dom");
+            ResetConfig();
+        }
+
+        [Test]
+        public void RunTest()
+        {
+			PasswordSync passsync = new PasswordSync();
+            string[] args = new string[0];
+            bool found = true;
+            StringWriter sw = new StringWriter();
+            Console.SetOut(sw);
+			passsync.Run(args);
+            Console.SetOut(new StreamWriter(Console.OpenStandardError()));
+            string output = sw.ToString();
+            sw.Close();
+            output = output.Replace("\r", "").ToLower();
+            string[] lines = output.Split('\n');
+            string[] expexted = {
+                " help",
+                " setpassword <domain> <username> <password>",
+                " addou <domain> <ou>",
+                " removeou <domain> <ou>",
+                " addexcludeou <domain> <ou>",
+                " removeexcludeou <domain> <ou>",
+                " setanchor <domain> <anchor>",
+                " sync <domain>",
+                " sync",
+                " info <domain>",
+                " info",
+                " setrefresh <refresh>"
+            };
+            foreach (string expect in expexted)
+            {
+                bool foundline = false;
+                foreach (string line in lines)
+                {
+                    if (expect.Equals(line))
+                    {
+                        foundline = true;
+                        break;
+                    }
+                }
+                if (!foundline)
+                {
+                    found = false;
+                    break;
+                }
+            }
+            Assert.IsTrue(found);
+            args = new string[1];
+            args[0] = "help";
+            found = true;
+            sw = new StringWriter();
+            Console.SetOut(sw);
+            passsync.Run(args);
+            Console.SetOut(new StreamWriter(Console.OpenStandardError()));
+            output = sw.ToString();
+            sw.Close();
+            output = output.Replace("\r", "").ToLower();
+            lines = output.Split('\n');
+            foreach (string expect in expexted)
+            {
+                bool foundline = false;
+                foreach (string line in lines)
+                {
+                    if (expect.Equals(line))
+                    {
+                        foundline = true;
+                        break;
+                    }
+                }
+                if (!foundline)
+                {
+                    found = false;
+                    break;
+                }
+            }
+            Assert.IsTrue(found);
+            args = new string[1];
+            args[0] = "invalid";
+            sw = new StringWriter();
+            Console.SetOut(sw);
+            passsync.Run(args);
+            Console.SetOut(new StreamWriter(Console.OpenStandardError()));
+            output = sw.ToString();
+            sw.Close();
+            StringAssert.Contains("no method to run found!", output);
+            sw = new StringWriter();
+            Console.SetOut(sw);
+            passsync.Run(null);
+            Console.SetOut(new StreamWriter(Console.OpenStandardError()));
+            output = sw.ToString();
+            sw.Close();
+            StringAssert.Contains("Run called without arguments", output);
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void SetPasswordTest()
+        {
+            //check that a password is set not its conformity...
+            //clean config
+            ResetConfig();
+            //get password sync
+            PasswordSync pws = new PasswordSync();
+            //set password
+            pws.SetPassword("test.dom", "Administrator", "Pa$$w0rd");
+            //find config for test domain
+            Source testdom = GetConfigSource("test.dom");
+            //check found domain
+            Assert.AreEqual("Administrator", testdom.Username);
+            Assert.IsNotNull(testdom.SecuredPassword);
+            Assert.AreNotEqual("", testdom.SecuredPassword);
+            //store old password
+            string oldpass = testdom.SecuredPassword;
+            //test changing credential 
+            pws.SetPassword("test.dom", "Admin", "S3cr3t");
+            // get informations
+            testdom = GetConfigSource("test.dom");
+            Assert.AreEqual("Admin", testdom.Username);
+            Assert.IsNotNull(testdom.SecuredPassword);
+            Assert.AreNotEqual("", testdom.SecuredPassword);
+            Assert.AreNotEqual(oldpass, testdom.SecuredPassword);
+            //reset config
+            ResetConfig();
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void AddOUTest()
+        {
+            //check that a password is set not its conformity...
+            //clean config
+            ResetConfig();
+            //get password sync
+            PasswordSync pws = new PasswordSync();
+            //set password
+            pws.AddOU("test.dom", "OU=Users,DC=test,DC=dom");
+            pws.AddOU("test.dom", "OU=Groups,DC=test,DC=dom");
+            //find config for test domain
+            Source testdom = GetConfigSource("test.dom");
+            //check ou present
+            Assert.AreEqual("OU=Users,DC=test,DC=dom", testdom.OUs[0]);
+            Assert.AreEqual("OU=Groups,DC=test,DC=dom", testdom.OUs[1]);
+            //clean config
+            ResetConfig();
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void RemoveOUTest()
+        {
+            //check that a password is set not its conformity...
+            //clean config
+            ResetConfig();
+            //get password sync
+            PasswordSync pws = new PasswordSync();
+            //set password
+            pws.AddOU("test.dom", "OU=Users,DC=test,DC=dom");
+            pws.AddOU("test.dom", "OU=Groups,DC=test,DC=dom");
+            //find config for test domain
+            Source testdom = GetConfigSource("test.dom");
+            //check addition...
+            Assert.AreEqual("OU=Users,DC=test,DC=dom", testdom.OUs[0]);
+            Assert.AreEqual("OU=Groups,DC=test,DC=dom", testdom.OUs[1]);
+            //remove one ou
+            pws.RemoveOU("test.dom", "OU=Users,DC=test,DC=dom");
+            //find config for test domain
+            testdom = GetConfigSource("test.dom");
+            //check that one is still there
+            Assert.AreEqual("OU=Groups,DC=test,DC=dom", testdom.OUs[0]);
+            //remove the last one
+            pws.RemoveOU("test.dom", "OU=Groups,DC=test,DC=dom");
+            //find config for test domain
+            testdom = GetConfigSource("test.dom");
+            //check if no more ous
+            Assert.IsTrue(testdom.OUs.Count == 0);
+            //clean config
+            ResetConfig();
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void AddExcludeOUTest()
+        {
+            //check that a password is set not its conformity...
+            //clean config
+            ResetConfig();
+            //get password sync
+            PasswordSync pws = new PasswordSync();
+            //set password
+            pws.AddExcludeOU("test.dom", "OU=Ressources,OU=Users,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressources,OU=Groups,DC=test,DC=dom");
+            //find config for test domain
+            Source testdom = GetConfigSource("test.dom");
+            //check ou present
+            Assert.AreEqual("OU=Ressources,OU=Users,DC=test,DC=dom", testdom.ExcludeOUs[0]);
+            Assert.AreEqual("OU=Ressources,OU=Groups,DC=test,DC=dom", testdom.ExcludeOUs[1]);
+            //clean config
+            ResetConfig();
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void RemoveExcludeOUTest()
+        {
+            //check that a password is set not its conformity...
+            //clean config
+            ResetConfig();
+            //get password sync
+            PasswordSync pws = new PasswordSync();
+            //set password
+            pws.AddExcludeOU("test.dom", "OU=Ressources,OU=Users,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressources,OU=Groups,DC=test,DC=dom");
+            //find config for test domain
+            Source testdom = GetConfigSource("test.dom");
+            //check addition...
+            Assert.AreEqual("OU=Ressources,OU=Users,DC=test,DC=dom", testdom.ExcludeOUs[0]);
+            Assert.AreEqual("OU=Ressources,OU=Groups,DC=test,DC=dom", testdom.ExcludeOUs[1]);
+            //remove one ou
+            pws.RemoveExcludeOU("test.dom", "OU=Ressources,OU=Users,DC=test,DC=dom");
+            //find config for test domain
+            testdom = GetConfigSource("test.dom");
+            //check that one is still there
+            Assert.AreEqual("OU=Ressources,OU=Groups,DC=test,DC=dom", testdom.ExcludeOUs[0]);
+            //remove the last one
+            pws.RemoveExcludeOU("test.dom", "OU=Ressources,OU=Groups,DC=test,DC=dom");
+            //find config for test domain
+            testdom = GetConfigSource("test.dom");
+            //check if no more ous
+            Assert.IsTrue(testdom.ExcludeOUs.Count == 0);
+            //clean config
+            ResetConfig();
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void SetAnchorTest()
+        {
+            //clean config
+            ResetConfig();
+            //get password sync
+            PasswordSync pws = new PasswordSync();
+            //set anchor
+            pws.SetAnchor("test.dom", "SamAccountName");
+            //find config for test domain
+            Source testdom = GetConfigSource("test.dom");
+            //check ou present
+            Assert.AreEqual("SamAccountName", testdom.Anchor);
+            //change anchor
+            pws.SetAnchor("test.dom", "UserPrincipalName");
+            //find config for test domain
+            testdom = GetConfigSource("test.dom");
+            //check ou present
+            Assert.AreEqual("UserPrincipalName", testdom.Anchor);
+            //clean config
+            ResetConfig();
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void HelpTest()
+        {
+            PasswordSync pws = new PasswordSync();
+            bool found = true;
+            using (StringWriter sw = new StringWriter())
+            {
+                Console.SetOut(sw);
+                pws.Help();
+                Console.SetOut(new StreamWriter(Console.OpenStandardError()));
+                string output = sw.ToString();
+                output = output.Replace("\r", "").ToLower();
+                string[] lines = output.Split('\n');
+                string[] expexted = {
+                    " help",
+                    " setpassword <domain> <username> <password>",
+                    " addou <domain> <ou>",
+                    " removeou <domain> <ou>",
+                    " addexcludeou <domain> <ou>",
+                    " removeexcludeou <domain> <ou>",
+                    " setanchor <domain> <anchor>",
+                    " sync <domain>",
+                    " sync",
+                    " info <domain>",
+                    " info"
+                };
+                foreach (string expect in expexted)
+                {
+                    bool foundline = false;
+                    foreach (string line in lines)
+                    {
+                        if (expect.Equals(line))
+                        {
+                            foundline = true;
+                            break;
+                        }
+                    }
+                    if (!foundline)
+                    {
+                        found = false;
+                        break;
+                    }
+
+                }
+            }
+            Assert.IsTrue(found);
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void InfoTest()
+        {
+            //clean config
+            ResetConfig();
+            //get password sync
+            PasswordSync pws = new PasswordSync();
+            pws.SetPassword("test.dom", "Administrator", "Pa$$w0rd");
+            pws.SetAnchor("test.dom", "SamAccountName");
+            pws.AddOU("test.dom", "OU=Users,DC=test,DC=dom");
+            pws.AddOU("test.dom", "OU=Groups,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressource,OU=Users,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressource,OU=Groups,DC=test,DC=dom");
+            string expected =
+@"test.dom:
+    Server: 
+    Credentials: Administrator
+    OUs:
+        OU=Users,DC=test,DC=dom
+        OU=Groups,DC=test,DC=dom
+    Exclude OUs:
+        OU=Ressource,OU=Users,DC=test,DC=dom
+        OU=Ressource,OU=Groups,DC=test,DC=dom
+
+".Replace("\r", "").Replace("    ", "\t");
+            //get info output
+            using (StringWriter sw = new StringWriter())
+            {
+                Console.SetOut(sw);
+                pws.Info("test.dom");
+                Console.SetOut(new StreamWriter(Console.OpenStandardError()));
+                string output = sw.ToString();
+                output = output.Replace("\r", "");
+                Assert.AreEqual(output, expected);
+            }
+            //clean config
+            ResetConfig();
+        }
+
+        [Test]
+        //[TestMethod()]
+        public void InfoAllTest()
+        {
+            //clean config
+            ResetConfig();
+            //get password sync
+            PasswordSync pws = new PasswordSync();
+            pws.SetPassword("test.dom", "Administrator", "Pa$$w0rd");
+            pws.SetAnchor("test.dom", "SamAccountName");
+            pws.AddOU("test.dom", "OU=Users,DC=test,DC=dom");
+            pws.AddOU("test.dom", "OU=Groups,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressource,OU=Users,DC=test,DC=dom");
+            pws.AddExcludeOU("test.dom", "OU=Ressource,OU=Groups,DC=test,DC=dom");
+            pws.SetPassword("second.dom", "Admin", "S3cr3t");
+            pws.SetAnchor("second.dom", "UserPrincipalName");
+            pws.AddOU("second.dom", "OU=Users,DC=second,DC=dom");
+            pws.AddOU("second.dom", "OU=Groups,DC=second,DC=dom");
+            pws.AddExcludeOU("second.dom", "OU=Ressource,OU=Users,DC=second,DC=dom");
+            pws.AddExcludeOU("second.dom", "OU=Ressource,OU=Groups,DC=second,DC=dom");
+            string expected =
+@"test.dom:
+    Server: 
+    Credentials: Administrator
+    OUs:
+        OU=Users,DC=test,DC=dom
+        OU=Groups,DC=test,DC=dom
+    Exclude OUs:
+        OU=Ressource,OU=Users,DC=test,DC=dom
+        OU=Ressource,OU=Groups,DC=test,DC=dom
+
+second.dom:
+    Server: 
+    Credentials: Admin
+    OUs:
+        OU=Users,DC=second,DC=dom
+        OU=Groups,DC=second,DC=dom
+    Exclude OUs:
+        OU=Ressource,OU=Users,DC=second,DC=dom
+        OU=Ressource,OU=Groups,DC=second,DC=dom
+
+".Replace("\r", "").Replace("    ", "\t");
+            //get info output
+            using (StringWriter sw = new StringWriter())
+            {
+                Console.SetOut(sw);
+                pws.Info();
+                Console.SetOut(new StreamWriter(Console.OpenStandardError()));
+                string output = sw.ToString();
+                output = output.Replace("\r", "");
+                Assert.AreEqual(output, expected);
+            }
+            //clean config
+            ResetConfig();
+        }
+
+        [Test]
+        public void CheckServerTest()
+        {
+            Assert.IsFalse(SourceUtils.CheckServer(null, 80));
+            IPHostEntry ips = Dns.GetHostEntry("www.google.com");
+            if (ips.AddressList.Length > 0)
+            {
+                IPAddress ip = ips.AddressList[0];
+                Assert.IsTrue(SourceUtils.CheckServer(ip, 80));
+                Assert.IsFalse(SourceUtils.CheckServer(ip, 389));
+            }
+            else
+            {
+                Assert.Inconclusive("No ipaddress to test");
+            }
+        }
+
+        [Test]
+        public void GetServerFromNameTest()
+        {
+            IPAddress ip = null;
+            ip = SourceUtils.GetServer("www.google.com", 80);
+            Assert.IsNotNull(ip);
+            ip = SourceUtils.GetServer("microsoft.com", 80);
+            Assert.IsNotNull(ip);
+            ip = SourceUtils.GetServer("www.google.com", 389);
+            Assert.IsNull(ip);
+            ip = SourceUtils.GetServer("ad.contoso.local", 389);
+            Assert.IsNull(ip);
+        }
+
+        [Test]
+        public void GetServerTest()
+        {
+            Source source = new Source();
+            source.Domain = "contoso.local";
+            source.GetServer();
+            Assert.IsNull(source.server);
+        }
+    }
+}

@@ -1,0 +1,56 @@
+{-# LANGUAGE DoAndIfThenElse #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+module Handler.Models where
+
+import Cache
+import Import hiding (intercalate, (<>))
+import Form
+import Data.List (nub)
+import SessionState
+import Data.Monoid
+import Database.Persist.Types
+import Database.Persist.Sql
+import qualified Data.Text as T
+
+getModelsR :: Text -> Handler Html
+getModelsR mu = do
+    showOrNot <- lookupShowAdvices
+    if showOrNot
+    then do
+      (mark' :: [Entity Mark]) <- runDB $ selectList [MarkUrl ==. mu] [LimitTo 1]
+      c <- getCache
+      itModels <- getEModels mu
+      let marks = getMarks c
+          models = getModels c
+          generations = getGenerations c
+          regions = getRegions c
+          lktags = getLkTags c
+          eGens = concat $ containedIn (fmap (lkTagGeneration . entityVal) lktags) g generations
+
+          textAdvices = getTextAdvices c
+          images = getImages c
+
+          eitLinks = itModels
+          dEitModels = divideThree eitLinks
+
+          g = entityKey
+
+          toMn = T.concat . map markName . map entityVal
+          mn = T.concat $ ["Обзоры б/у ", (toMn mark'), " с пробегом"]
+          mn :: Text
+
+      (sAdvice':_) <- getRandomSimpleAdvice
+
+      defaultLayout $ do
+          setTitle $ toHtml mn
+          toWidgetHead [hamlet|<meta name=description content="Подержанные #{toHtml $ toMn mark'}: #{modelsToString itModels} - плюсы и минусы, что ломается">|]
+
+          $(widgetFile "models")
+          $(fayFile    "HomeF")
+    else redirect HomeR
+
+succTuple :: forall a b c. (a, b, c) -> (b, c)
+succTuple (a,b,c) = (b,c)
+
+modelsToString = T.intercalate ", " . fmap (unSingle . (\(_,_,x,_,_) -> x))

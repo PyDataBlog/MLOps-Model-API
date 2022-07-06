@@ -1,0 +1,118 @@
+package node
+
+import (
+	"encoding/json"
+	"log"
+	"os"
+	"os/signal"
+	"time"
+
+	"github.com/gdamore/mangos"
+	"github.com/gdamore/mangos/protocol/rep"
+	"github.com/gdamore/mangos/protocol/surveyor"
+	"github.com/gdamore/mangos/transport/tcp"
+
+	"github.com/sudharsh/monk/messages"
+)
+
+type Master struct {
+	Node
+	CommandURL  string
+	commandSock mangos.Socket
+	eventSock   mangos.Socket
+}
+
+func NewMaster(commandURL string, eventURL string) *Master {
+	m := Master{}
+	m.URL = eventURL
+	m.CommandURL = commandURL
+	return &m
+}
+
+func startListeners(socket *mangos.Socket, sink chan []byte) {
+	_socket := *socket
+	for {
+		resp, err := _socket.Recv()
+		if err != nil {
+			log.Printf("Got error when receiving on socket %v\n", _socket)
+			continue
+		}
+		sink <- resp
+	}
+}
+
+func (m *Master) Start() {
+	c := make(chan os.Signal, 1)
+	cmdChan := make(chan []byte, 1)
+	pubChan := make(chan []byte, 1)
+
+	signal.Notify(c, os.Interrupt, os.Kill)
+
+	m.setupPorts()
+	go startListeners(&m.commandSock, cmdChan)
+	go startListeners(&m.eventSock, pubChan)
+	log.Print("monk master ready to receive commands and send events")
+	// Listen for events here.
+	for {
+		select {
+		case r := <-cmdChan:
+			log.Print("received a command")
+			m.despatchCommand(r)
+		case r := <-pubChan:
+			m.commandSock.Send(r)
+		case s := <-c:
+			log.Printf("Got signal to quit. Bye! - %s\n", s)
+			close(cmdChan)
+			close(pubChan)
+			m.commandSock.Close()
+			m.eventSock.Close()
+			os.Exit(0)
+		}
+	}
+}
+
+// Unexported functions follow
+func (m *Master) setupPorts() {
+	var err error
+	if m.commandSock, err = rep.NewSocket(); err != nil {
+		log.Fatalf("Couldn't get command socket - %s\n", err.Error())
+	}
+	m.commandSock.AddTransport(tcp.NewTransport())
+
+	if m.eventSock, err = surveyor.NewSocket(); err != nil {
+		log.Fatalf("Couldn't get publish socket - %s\n", err.Error())
+	}
+	m.eventSock.AddTransport(tcp.NewTransport())
+
+	err = m.commandSock.Listen(m.CommandURL)
+	if err != nil {
+		log.Fatalf("Couldn't get the command port open - %s\n", err.Error())
+	}
+	// Wait indefinitely for surveyor responses.
+	// FIXME: might be a bad idea?
+	err = m.eventSock.SetOption(mangos.OptionSurveyTime, time.Second*-1)
+	err = m.eventSock.Listen(m.URL)
+	if err != nil {
+		log.Fatalf("Couldn't get the publish port up - %s\n", err.Error())
+	}
+}
+
+func (m *Master) despatchCommand(command []byte) {
+	c := messages.UnmarshalCommand(command)
+	cmd := c.Command()
+	log.Printf("Got command - %s\n", cmd)
+	switch cmd {
+	case "register":
+		var p Pupil
+		err := json.Unmarshal(c.Args(), &p)
+		msg := messages.MarshalResponse(true, "registered")
+		if err != nil {
+			msg = messages.MarshalResponse(false, err.Error())
+		}
+		log.Printf("Successfully registered - %s:%s\n", p.UUID, p.URL)
+		m.commandSock.Send(msg)
+	case "facts":
+		facts, _ := messages.MarshalCommand("facts", nil)
+		m.eventSock.Send(facts)
+	}
+}

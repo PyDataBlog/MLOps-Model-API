@@ -1,0 +1,566 @@
+# coding: utf8
+
+from wsgidav.dav_provider import DAVCollection, DAVNonCollection
+from wsgidav.dav_error import DAVError, HTTP_FORBIDDEN
+from wsgidav import util
+from wsgidav.addons.tracim import role, MyFileStream
+from time import mktime
+from datetime import datetime
+from os.path import normpath, dirname, basename
+
+try:
+    from cStringIO import StringIO
+except ImportError:
+    from StringIO import StringIO
+
+
+class Root(DAVCollection):
+    def __init__(self, path, environ):
+        super(Root, self).__init__(path, environ)
+
+    def __repr__(self):
+        return 'Root folder'
+
+    def getCreationDate(self):
+        return mktime(datetime.now().timetuple())
+
+    def getDisplayName(self):
+        return 'Tracim - Home'
+
+    def getLastModified(self):
+        return mktime(datetime.now().timetuple())
+
+    def getMemberNames(self):
+        return self.provider.get_all_workspaces(only_name=True)
+
+    def getMember(self, workspace_name):
+        workspace = self.provider.get_workspace({'label': workspace_name})
+
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                workspace.workspace_id,
+                role["READER"]
+        ):
+            return None
+
+        return Workspace(self.path + workspace.label, self.environ, workspace)
+
+    def createEmptyResource(self, name):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def createCollection(self, name):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def getMemberList(self):
+        memberlist = []
+        for name in self.getMemberNames():
+            member = self.getMember(name)
+            if member is not None:
+                memberlist.append(member)
+        return memberlist
+
+
+class Workspace(DAVCollection):
+    def __init__(self, path, environ, workspace):
+        super(Workspace, self).__init__(path, environ)
+        self.workspace = workspace
+
+    def __repr__(self):
+        return "Workspace: %s" % self.workspace.label
+
+    def getCreationDate(self):
+        return mktime(self.workspace.created.timetuple())
+
+    def getDisplayName(self):
+        return self.workspace.label
+
+    def getLastModified(self):
+        return mktime(self.workspace.updated.timetuple())
+
+    def getMemberNames(self):
+        return self.provider.get_workspace_children_id(self.workspace)
+
+    def getMember(self, item_id):
+        item = self.provider.get_item({'id': item_id, 'child_revision_id': None})
+
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                item.workspace_id,
+                role["READER"]
+        ):
+            return None
+
+        return Folder(self.path + item.item_name, self.environ, item)
+
+    def createEmptyResource(self, name):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def createCollection(self, name):
+        assert "/" not in name
+
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.workspace.workspace_id,
+                role["CONTENT_MANAGER"]
+        ):
+            raise DAVError(HTTP_FORBIDDEN)
+
+        item = self.provider.add_item(
+            item_name=name,
+            item_type="FOLDER",
+            workspace_id=self.workspace.workspace_id
+        )
+
+        return Folder(self.path + name, self.environ, item)
+
+    def delete(self):
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.workspace.workspace_id,
+                role["WORKSPACE_MANAGER"]
+        ):
+            raise DAVError(HTTP_FORBIDDEN)
+
+        self.provider.delete_workspace(self.workspace)
+        self.removeAllLocks(True)
+
+    def copyMoveSingle(self, destpath, ismove):
+        if ismove:
+            self.provider.set_workspace_label(self.workspace, basename(normpath(destpath)))
+        else:
+            self.provider.add_workspace(basename(normpath(destpath)))
+
+    def supportRecursiveMove(self, destpath):
+        return True
+
+    def moveRecursive(self, destpath):
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.workspace.workspace_id,
+                role["WORKSPACE_MANAGER"]
+        ) or dirname(normpath(destpath)) != '/':
+            raise DAVError(HTTP_FORBIDDEN)
+
+        self.provider.set_workspace_label(self.workspace, basename(normpath(destpath)))
+
+    def setLastModified(self, destpath, timestamp, dryrun):
+        return False
+
+    def getMemberList(self):
+        memberlist = []
+        for name in self.getMemberNames():
+            member = self.getMember(name)
+            if member is not None:
+                memberlist.append(member)
+        return memberlist
+
+
+class Folder(DAVCollection):
+    def __init__(self, path, environ, item):
+        super(Folder, self).__init__(path, environ)
+        self.item = item
+
+    def __repr__(self):
+        return "Folder: %s" % self.item.item_name
+
+    def getCreationDate(self):
+        return mktime(self.item.created.timetuple())
+
+    def getDisplayName(self):
+        return self.item.item_name
+
+    def getLastModified(self):
+        return mktime(self.item.updated.timetuple())
+
+    def getMemberNames(self):
+        return self.provider.get_item_children(self.item.id)
+
+    def getMember(self, item_id):
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.item.workspace_id,
+                role["READER"]
+        ):
+            return None
+
+        item = self.provider.get_item({'id': item_id, 'child_revision_id': None})
+
+        return self.provider.getResourceInst(self.path + item.item_name, self.environ)
+
+    def createEmptyResource(self, name):
+        assert "/" not in name
+
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.item.workspace_id,
+                role["CONTRIBUTOR"]
+        ):
+            raise DAVError(HTTP_FORBIDDEN)
+
+        item = self.provider.add_item(
+            item_name=name,
+            item_type="FILE",
+            workspace_id=self.item.workspace_id,
+            parent_id=self.item.id
+        )
+
+        return File(self.path + name, self.environ, item)
+
+    def createCollection(self, name):
+        assert "/" not in name
+
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.item.workspace_id,
+                role["CONTENT_MANAGER"]
+        ):
+            raise DAVError(HTTP_FORBIDDEN)
+
+        item = self.provider.add_item(
+            item_name=name,
+            item_type="FOLDER",
+            workspace_id=self.item.workspace_id,
+            parent_id=self.item.id
+        )
+
+        return Folder(self.path + name, self.environ, item)
+
+    def delete(self):
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.item.workspace_id,
+                role["CONTENT_MANAGER"]
+        ):
+            raise DAVError(HTTP_FORBIDDEN)
+
+        self.provider.delete_item(self.item)
+        self.removeAllLocks(True)
+
+    def copyMoveSingle(self, destpath, ismove):
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.item.workspace_id,
+                role["CONTENT_MANAGER"]
+        ) or dirname(normpath(destpath)) == '/':
+            raise DAVError(HTTP_FORBIDDEN)
+
+        if ismove:
+            self.provider.move_item(self.item, destpath)
+        else:
+            self.provider.copy_item(self.item, destpath)
+
+    def supportRecursiveMove(self, destpath):
+        return True
+
+    def moveRecursive(self, destpath):
+        self.copyMoveSingle(destpath, True)
+
+    def setLastModified(self, destpath, timestamp, dryrun):
+        return False
+
+    def getMemberList(self, copyOrMove=False):
+        memberlist = []
+        for name in self.getMemberNames():
+            member = self.getMember(name)
+            if member is not None:
+                memberlist.append(member)
+
+        print "j'ai : ", copyOrMove
+        if memberlist != [] and not copyOrMove:
+            memberlist.append(HistoryFolder(self.path + ".history", self.environ, self.item))
+
+        return memberlist
+
+
+    def getDescendants(self, collections=True, resources=True,
+                       depthFirst=False, depth="infinity", addSelf=False, copyOrMove=False):
+        assert depth in ("0", "1", "infinity")
+        res = []
+        if addSelf and not depthFirst:
+            res.append(self)
+        if depth != "0" and self.isCollection:
+            for child in self.getMemberList(copyOrMove):
+                if not child:
+                    _ = self.getMemberList(copyOrMove)
+                want = (collections and child.isCollection) or (resources and not child.isCollection)
+                if want and not depthFirst:
+                    res.append(child)
+                if child.isCollection and depth == "infinity":
+                    res.extend(child.getDescendants(collections, resources, depthFirst, depth, addSelf=False, copyOrMove=copyOrMove))
+                if want and depthFirst:
+                    res.append(child)
+        if addSelf and depthFirst:
+            res.append(self)
+        return res
+
+
+class HistoryFolder(Folder):
+    def __init__(self, path, environ, item):
+        super(HistoryFolder, self).__init__(path, environ, item)
+
+    def __repr__(self):
+        return "Folder history of : %s" % self.item.item_name
+
+    def getCreationDate(self):
+        return mktime(datetime.now().timetuple())
+
+    def getDisplayName(self):
+        return '.history'
+
+    def getLastModified(self):
+        return mktime(datetime.now().timetuple())
+
+    def getMember(self, item_id):
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.item.workspace_id,
+                role["READER"]
+        ):
+            return None
+
+        item = self.provider.get_item({'id': item_id, 'child_revision_id': None})
+
+        if item.item_type == 'FOLDER':
+            return None
+
+        return HistoryFileFolder(self.path + item.item_name, self.environ, item)
+
+    def createEmptyResource(self, name):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def createCollection(self, name):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def handleDelete(self):
+        return True
+
+    def handleCopy(self, destPath, depthInfinity):
+        return True
+
+    def handleMove(self, destPath):
+        return True
+
+    def setLastModified(self, destpath, timestamp, dryrun):
+        return False
+
+    def getMemberList(self, copyOrMove=False):
+        memberlist = []
+        for name in self.getMemberNames():
+            member = self.getMember(name)
+            if member is not None:
+                memberlist.append(member)
+        return memberlist
+
+
+class HistoryFileFolder(HistoryFolder):
+    def __init__(self, path, environ, item):
+        super(HistoryFileFolder, self).__init__(path, environ, item)
+
+    def __repr__(self):
+        return "File folder history of : %s" % self.item.item_name
+
+    def getCreationDate(self):
+        return mktime(datetime.now().timetuple())
+
+    def getDisplayName(self):
+        return self.item.item_name
+
+    def createCollection(self, name):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def getLastModified(self):
+        return mktime(datetime.now().timetuple())
+
+    def getMemberNames(self):
+        return self.provider.get_all_revisions_from_item(self.item, only_id=True)
+
+    def getMember(self, item_id):
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.item.workspace_id,
+                role["READER"]):
+            return None
+
+        item = self.provider.get_item({'id': item_id})
+
+        if item.item_type in ["FILE"]:
+            return HistoryFile(self.path + str(item.id) + '-' + item.item_name , self.environ, item)
+        else:
+            return HistoryOtherFile(self.path + str(item.id) + '-' + item.item_name, self.environ, item)
+
+
+class File(DAVNonCollection):
+    def __init__(self, path, environ, item):
+        super(File, self).__init__(path, environ)
+
+        self.item = item
+        self.filestream = MyFileStream(self.provider, self.item)
+
+    def __repr__(self):
+        return "File: %s" % self.item.item_name
+
+    def getContentLength(self):
+        return len(self.item.item_content)
+
+    def getContentType(self):
+        return util.guessMimeType(self.item.item_name)
+
+    def getCreationDate(self):
+        return mktime(self.item.created.timetuple())
+
+    def getDisplayName(self):
+        return self.item.item_name
+
+    def getLastModified(self):
+        return mktime(self.item.updated.timetuple())
+
+    def getContent(self):
+        filestream = StringIO()
+        filestream.write(self.item.item_content)
+        filestream.seek(0)
+
+        return filestream
+
+    def beginWrite(self, contentType=None):
+        return self.filestream
+
+    def delete(self):
+        if not self.provider.has_right(
+            self.environ["http_authenticator.username"],
+            self.item.workspace_id,
+            role["CONTENT_MANAGER"]
+        ):
+            raise DAVError(HTTP_FORBIDDEN)
+
+        self.provider.delete_item(self.item)
+        self.removeAllLocks(True)
+
+    def copyMoveSingle(self, destpath, ismove):
+        if not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.provider.get_workspace_id_from_path(destpath),
+                role["CONTRIBUTOR"]
+        ) or not self.provider.has_right(
+                self.environ["http_authenticator.username"],
+                self.item.workspace_id,
+                role["READER"]
+        ) or dirname(normpath(destpath)) == '/' \
+                or dirname(dirname(normpath(destpath))) == '/':
+            raise DAVError(HTTP_FORBIDDEN)
+
+        if ismove:
+            self.provider.move_all_revisions(self.item, destpath)
+        else:
+            self.provider.copy_item(self.item, destpath)
+
+    def supportRecursiveMove(self, dest):
+        return True
+
+    def moveRecursive(self, destpath):
+        self.copyMoveSingle(destpath, True)
+
+    def setLastModified(self, dest, timestamp, dryrun):
+        return False
+
+
+class HistoryFile(File):
+    def __init__(self, path, environ, item):
+        super(HistoryFile, self).__init__(path, environ, item)
+
+    def __repr__(self):
+        return "File history: %s-%s" % (self.item.item_name, self.item.id)
+
+    def getDisplayName(self):
+        return str(self.item.id) + '-' + self.item.item_name
+
+    def beginWrite(self, contentType=None):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def delete(self):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def handleDelete(self):
+        return True
+
+    def handleCopy(self, destPath, depthInfinity):
+        return True
+
+    def handleMove(self, destPath):
+        return True
+
+    def copyMoveSingle(self, destpath, ismove):
+        raise DAVError(HTTP_FORBIDDEN)
+
+
+class OtherFile(File):
+    def __init__(self, path, environ, item):
+        super(OtherFile, self).__init__(path, environ, item)
+
+        self.content = self.design(self.item.item_content)
+
+    def __repr__(self):
+        return "File: %s" % self.item.item_name
+
+    def getContentLength(self):
+        return len(self.content)
+
+    def getContentType(self):
+        return 'text/html'
+
+    def getContent(self):
+        filestream = StringIO()
+        filestream.write(self.content)
+        filestream.seek(0)
+        return filestream
+
+    def design(self, content):
+        f = open('wsgidav/addons/tracim/style.css', 'r')
+        style = f.read()
+        f.close()
+
+        file = '''
+            <html>
+                <head>
+                    <title>Hey</title>
+                    <style>%s</style>
+                </head>
+                <body>
+                    <div>
+                        %s
+                    </div>
+                </body>
+            </html>
+        ''' % (style, content)
+
+        return file
+
+
+class HistoryOtherFile(OtherFile):
+    def __init__(self, path, environ, item):
+        super(HistoryOtherFile, self).__init__(path, environ, item)
+
+        self.content = self.design(self.item.item_content)
+
+    def __repr__(self):
+        return "File history: %s-%s" % (self.item.item_name, self.item.id)
+
+    def getDisplayName(self):
+        return str(self.item.id) + '-' + self.item.item_name
+
+    def beginWrite(self, contentType=None):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def delete(self):
+        raise DAVError(HTTP_FORBIDDEN)
+
+    def handleDelete(self):
+        return True
+
+    def handleCopy(self, destPath, depthInfinity):
+        return True
+
+    def handleMove(self, destPath):
+        return True
+
+    def copyMoveSingle(self, destpath, ismove):
+        raise DAVError(HTTP_FORBIDDEN)

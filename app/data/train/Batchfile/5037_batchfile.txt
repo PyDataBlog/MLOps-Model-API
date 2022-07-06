@@ -1,0 +1,1 @@
+cmd_lib/lzo/lzo_compress.o := /mnt/640/ubu/gtabkernelsrc/android_prebuilt_toolchains-master/arm-cortex_a15-linux-gnueabihf-linaro_4.9.1/bin/arm-cortex_a15-linux-gnueabihf-ld -EL    -r -o lib/lzo/lzo_compress.o lib/lzo/lzo1x_compress.o 

@@ -1,0 +1,193 @@
+package actions
+
+import (
+	"bufio"
+	"github.com/gernox/bootstrap"
+	"github.com/gernox/bootstrap/util"
+	"github.com/urfave/cli"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// PKICommand defines a CLI command to manage the PKI in a development environment
+func PKICommand(bootstrap bootstrap.Bootstrap) cli.Command {
+	var fqdn, _ = util.FQDN()
+
+	return cli.Command{
+		Name:  "pki",
+		Usage: "manage the development environment PKI",
+		Subcommands: []cli.Command{
+			{
+				Name:  "generate",
+				Usage: "generate PKI certificates for the development environment",
+				Subcommands: []cli.Command{
+					{
+						Name:  "ca",
+						Usage: "generate a CA certificate for the development environment",
+						Action: func(c *cli.Context) {
+							bootstrap.UpdateConfiguration(c)
+
+							if err := generateCA(bootstrap); err != nil {
+								log.Errorf("PKI generate CA failed: %s\n", err)
+							}
+						},
+					},
+					{
+						Name:  "cert",
+						Usage: "generate a host certificate for the development environment",
+						Action: func(c *cli.Context) {
+							bootstrap.UpdateConfiguration(c)
+
+							if err := generateCert(bootstrap); err != nil {
+								log.Errorf("PKI generate cert failed: %s\n", err)
+							}
+						},
+						Flags: []cli.Flag{
+							cli.StringFlag{
+								Name:   "fqdn",
+								Value:  fqdn,
+								Usage:  "fully qualified domain name",
+								EnvVar: "PKI_FQDN",
+							},
+							cli.StringFlag{
+								Name:   "alt-names, n",
+								Usage:  "comma separated list of Subject Alternative Names",
+								EnvVar: "PKI_ALT_NAMES",
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+}
+
+func generateCA(bootstrap bootstrap.Bootstrap) (err error) {
+	env := bootstrap.MustEnvironment()
+	certDirectory := "/vagrant/bootstrap/certs"
+	password := "12345"
+
+	if err := util.EnsureDirectory(certDirectory, 0755); err != nil {
+		return err
+	}
+
+	if err := os.Chdir(certDirectory); err != nil {
+		return err
+	}
+
+	_, err = os.Stat(env.PKI.CertificateAuthority + ".crt")
+
+	if os.IsNotExist(err) {
+		log.Infof("Generate new development CA\n")
+
+		if err := util.ExecBash("/usr/bin/openssl genrsa -aes256 -passout pass:" + password + " -out " + env.PKI.CertificateAuthority + ".key 2048"); err != nil {
+			return err
+		}
+
+		if err := util.ExecBash("/usr/bin/openssl req -x509 -new -passin pass:" + password + " -nodes -extensions v3_ca -key " + env.PKI.CertificateAuthority + ".key -days 1024 -out " + env.PKI.CertificateAuthority + ".crt -sha512 -subj '/C=DE/ST=Dev/L=Dev/O=Development/OU=Development/CN=Development CA'"); err != nil {
+			return err
+		}
+	} else {
+		log.Infof("Use existing development CA\n")
+	}
+
+	return nil
+}
+
+func generateCert(bootstrap bootstrap.Bootstrap) (err error) {
+	certDirectory := "/vagrant/bootstrap/certs"
+	env := bootstrap.MustEnvironment()
+	password := "12345"
+	fqdn, _ := bootstrap.Config("fqdn")
+
+	altNames, _ := bootstrap.Config("alt-names")
+	altNamesArr := strings.Split(altNames, ",")
+	altNamesStr := ""
+
+	if len(altNames) > 0 && len(altNamesArr) > 0 {
+		log.Debugf("AltNames: %s %d\n", altNames, len(altNamesArr))
+
+		for i := 0; len(altNames) > 0 && i < len(altNamesArr); i++ {
+			altNamesStr += "DNS." + strconv.Itoa(i+2) + " = " + altNamesArr[i] + "\n"
+		}
+	} else {
+		log.Debugf("no alt-names defined")
+	}
+
+	if err := util.EnsureDirectory(certDirectory, 0755); err != nil {
+		return err
+	}
+
+	if err := os.Chdir(certDirectory); err != nil {
+		return err
+	}
+
+	_, err = os.Stat(certDirectory + "/" + fqdn)
+
+	if os.IsNotExist(err) {
+		log.Infof("Generate new certificate for %s (altNames: %s)\n", fqdn, altNames)
+
+		_, err = os.Stat(certDirectory + "/" + env.PKI.CertificateAuthority + ".crt")
+		if os.IsNotExist(err) {
+			return err
+		}
+
+		if err := util.EnsureDirectory(certDirectory+"/"+fqdn, 0755); err != nil {
+			return err
+		}
+
+		if err := os.Chdir(certDirectory + "/" + fqdn); err != nil {
+			return err
+		}
+
+		extensions := `[req]
+distinguished_name = req_distinguished_name
+req_extensions = v3_req
+
+[req_distinguished_name]
+commonName_max = 64
+
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+
+[alt_names]
+DNS.1 = %FQDN%
+`
+		extensions = strings.Replace(extensions, "%FQDN%", fqdn, -1)
+		extensions += altNamesStr
+
+		file, err := os.Create("openssl_extensions")
+
+		writer := bufio.NewWriter(file)
+		_, err = writer.WriteString(extensions)
+
+		if err != nil {
+			return err
+		}
+
+		writer.Flush()
+
+		if err != nil {
+			return err
+		}
+
+		if err := util.ExecBash("/usr/bin/openssl genrsa -out " + fqdn + ".key 4096"); err != nil {
+			return err
+		}
+
+		if err := util.ExecBash("/usr/bin/openssl req -new -key " + fqdn + ".key -out " + fqdn + ".csr -sha512 -subj '/C=DE/ST=Dev/L=Dev/O=Development/OU=Development/CN=" + fqdn + "' -config openssl_extensions"); err != nil {
+			return err
+		}
+
+		if err := util.ExecBash("/usr/bin/openssl x509 -req -in " + fqdn + ".csr -passin pass:" + password + " -CA " + certDirectory + "/" + env.PKI.CertificateAuthority + ".crt -CAkey " + certDirectory + "/" + env.PKI.CertificateAuthority + ".key -CAcreateserial -out " + fqdn + ".crt -days 365 -sha512 -extfile openssl_extensions"); err != nil {
+			return err
+		}
+	} else {
+		log.Infof("Use existing certificate for %s\n", fqdn)
+	}
+
+	return nil
+}

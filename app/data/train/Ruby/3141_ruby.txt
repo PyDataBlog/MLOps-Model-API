@@ -1,0 +1,147 @@
+require 'uuid'
+require 'sinatra'
+require 'network-projector/vnc/client'
+
+module NetworkProjector
+
+	class NPConnection
+		attr_reader :host, :port, :passwd, :id, :client, :label
+		
+		def initialize options = {}
+			@id   = UUID.generate
+			@label = options[:label]
+			@host = options[:host]
+			@port = options[:port]
+			@passwd = options[:passwd]
+			@client = VncClient.new
+		end
+
+		def status
+			@client.started? ? "Started" : "Stopped"
+		end
+
+		def run
+			@client.run :host => @host, :port => @port, :passwd => @passwd
+		end
+
+		def screenshot filename
+			@client.screenshot :filename => filename, :host => @host, :port => @port, :passwd => @passwd
+		end
+		def stop
+			@client.stop if @client.started?
+		end
+	end
+
+	class NPServer < Sinatra::Base
+		STACK=[]
+		
+		set :logging, true
+		set :dump_errors, true
+		set :port, 9495
+
+		helpers do
+			def register connection
+				connection.screenshot(settings.public_folder+"/#{connection.id}.png")
+				STACK.push connection
+			end
+			
+			def menu_active id
+				"class='active'" if id == @menu
+			end
+
+			def connection_by_id id
+				STACK.find do |c| c.id == id end
+			end
+
+			def unregister connection
+				begin
+					File.delete settings.public_folder+"/#{connection.id}.png"
+				rescue
+				end
+				connection.client.stop
+				STACK.delete connection
+				connect_one
+			end
+
+			def connect_one
+				return if STACK.empty?
+				connection = STACK[-2]
+				if connection then
+					connection.client.stop
+				end
+				connection = STACK[-1]
+				connection.run
+			end
+
+			def connected
+				STACK.find do |c| c.client.started? end
+			end
+		end
+
+		get '/' do
+			redirect '/screen'
+		end
+
+		get '/screen' do
+			@menu = :screen
+			@stack = STACK
+			@connection = connected
+			erb :screen
+		end
+
+		get '/status' do
+			@menu = :status
+			@stack = STACK
+		  erb :status
+		end
+
+		post '/start' do
+			id = params[:id]
+			connection = connection_by_id(id)
+			if connection then
+				connected.stop if connected				
+				connection.run
+			else
+				halt "Connection not found"
+			end
+			return nil
+		end
+
+		post '/stop' do
+			id = params[:id]
+			connection = connection_by_id(id)
+			if connection then
+				connection.stop
+			else
+				halt "Connection not found"
+			end
+			return nil
+		end
+
+		post '/disconnect' do
+			id = params[:id]
+			connection = connection_by_id(id)
+			if connection then
+				unregister connection
+				""
+			else
+				halt "Connection not found"
+			end
+		end
+		post '/connect' do
+			host   = request.ip
+			label  = params[:user]
+			if params[:vnc] then
+				port   = params[:vnc][:port]
+				passwd = params[:vnc][:passwd]
+			end
+			halt 'Need a port' unless port
+			halt 'need a passwd' unless passwd
+			puts "Connection request from #{host}:#{port}"
+			connection = NPConnection.new(:host => host, :port => port, :passwd => passwd, :label => label)
+			register connection
+			connect_one
+			return connection.id
+		end
+	end
+end

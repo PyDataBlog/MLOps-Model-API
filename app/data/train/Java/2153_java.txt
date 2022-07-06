@@ -1,0 +1,223 @@
+package com.lee.game;
+
+import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.content.pm.ResolveInfo;
+import android.os.Bundle;
+import android.support.v7.widget.LinearLayoutManager;
+import android.support.v7.widget.RecyclerView;
+import android.text.TextUtils;
+import android.view.View;
+import android.widget.TextView;
+
+import com.lee.base.activity.BaseActivity;
+import com.lee.base.application.PackageNameContainer;
+import com.noobyang.log.LogUtil;
+
+import java.text.Collator;
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.Comparator;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import butterknife.BindView;
+import butterknife.ButterKnife;
+
+/**
+ /**
+ * Main Activity
+ * <p/>
+ * Created by LiYang on 2019/4/8.
+ */
+public class MainActivity extends BaseActivity {
+
+    private static final String ACTION_SAMPLE_CODE = "com.lee.main.action.SAMPLE_CODE_GAME";
+
+    private static final String EXTRA_NAME_PATH = "com.lee.main.Path";
+
+    private static final String PATH_DIVIDED_SYMBOLS = ".";
+    private static final String PATH_DIVIDED_SYMBOLS_REGEX = "\\.";
+
+    @BindView(R.id.tv_path)
+    TextView tvPath;
+    @BindView(R.id.rv_sample_code)
+    RecyclerView rvSampleCode;
+
+    private PackageManager packageManager;
+    private List<SampleCodeEntity> sampleCodeEntities;
+    private SampleCodeAdapter sampleCodeAdapter;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_main);
+        ButterKnife.bind(this);
+        initData();
+        initView();
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        updateSampleCodes();
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+    }
+
+    private void initData() {
+        packageManager = getPackageManager();
+        sampleCodeAdapter = new SampleCodeAdapter(this, sampleCodeEntities, itemClickListener);
+    }
+
+    private void initView() {
+        LinearLayoutManager layoutManager = new LinearLayoutManager(this);
+        layoutManager.setOrientation(LinearLayoutManager.VERTICAL);
+        rvSampleCode.setLayoutManager(layoutManager);
+        rvSampleCode.setAdapter(sampleCodeAdapter);
+
+        updateSampleCodes();
+    }
+
+    private void updateSampleCodes() {
+        String path = getIntent().getStringExtra(EXTRA_NAME_PATH);
+        initSampleCodes(path);
+        sampleCodeAdapter.setData(sampleCodeEntities);
+        sampleCodeAdapter.notifyDataSetChanged();
+
+        setPathText(path);
+    }
+
+    private void setPathText(String path) {
+        if (TextUtils.isEmpty(path)) {
+            tvPath.setText(R.string.app_name);
+        } else {
+            tvPath.setText(path);
+        }
+    }
+
+    protected void initSampleCodes(String path) {
+        if (sampleCodeEntities == null) {
+            sampleCodeEntities = new ArrayList<>();
+        } else {
+            sampleCodeEntities.clear();
+        }
+
+        List<ResolveInfo> sampleCodeResolveInfoList = getSampleCodeResolveInfoList();
+
+        if (sampleCodeResolveInfoList == null || sampleCodeResolveInfoList.size() == 0) {
+            return;
+        }
+
+        String[] prefixPaths;
+        String currentPrefixPath;
+
+        Map<String, Boolean> folderLabel = new HashMap<>();
+        String label;
+        String[] labelPath;
+        String sampleCodeLabel;
+
+        for (ResolveInfo sampleCodeResolveInfo : sampleCodeResolveInfoList) {
+            if (TextUtils.isEmpty(path)) {
+                prefixPaths = null;
+                currentPrefixPath = null;
+            } else {
+                path = getRelativeName(path);
+                prefixPaths = path.split(PATH_DIVIDED_SYMBOLS_REGEX);
+                currentPrefixPath = path + PATH_DIVIDED_SYMBOLS;
+            }
+            label = getRelativeName(sampleCodeResolveInfo.activityInfo.name);
+            LogUtil.d("getData currentPrefixPath = " + currentPrefixPath + "---label = " + label);
+
+            if (TextUtils.isEmpty(currentPrefixPath) || label.startsWith(currentPrefixPath)) {
+                labelPath = label.split(PATH_DIVIDED_SYMBOLS_REGEX);
+                int prefixPathsLen = prefixPaths == null ? 0 : prefixPaths.length;
+                sampleCodeLabel = labelPath[prefixPathsLen];
+
+                if (prefixPathsLen == labelPath.length - 1) {
+                    // activity
+                    addActivityItem(sampleCodeEntities, sampleCodeLabel,
+                            sampleCodeResolveInfo.activityInfo.applicationInfo.packageName,
+                            sampleCodeResolveInfo.activityInfo.name);
+                } else {
+                    // folder
+                    if (folderLabel.get(sampleCodeLabel) == null) {
+                        addFolderItem(sampleCodeEntities, sampleCodeLabel, currentPrefixPath);
+                        folderLabel.put(sampleCodeLabel, true);
+                    }
+                }
+            }
+        }
+
+        Collections.sort(sampleCodeEntities, comparator);
+    }
+
+    private String getRelativeName(String className) {
+        if (TextUtils.isEmpty(className)) {
+            return className;
+        }
+
+        for (String packageName : PackageNameContainer.getPackageNames()) {
+            if (className.startsWith(packageName + PATH_DIVIDED_SYMBOLS)) {
+                return className.substring(packageName.length() + 1);
+            }
+        }
+        return className;
+    }
+
+    private List<ResolveInfo> getSampleCodeResolveInfoList() {
+        Intent sampleCodeIntent = new Intent(ACTION_SAMPLE_CODE, null);
+        sampleCodeIntent.addCategory(Intent.CATEGORY_SAMPLE_CODE);
+        return packageManager.queryIntentActivities(sampleCodeIntent, 0);
+    }
+
+    private final static Comparator<SampleCodeEntity> comparator =
+            new Comparator<SampleCodeEntity>() {
+                private final Collator collator = Collator.getInstance();
+
+                public int compare(SampleCodeEntity entity1, SampleCodeEntity entity2) {
+                    return collator.compare(entity1.getTitle(), entity2.getTitle());
+                }
+            };
+
+    private void addActivityItem(List<SampleCodeEntity> data, String sampleCodeLabel,
+                                 String packageName, String className) {
+        Intent activityIntent = new Intent();
+        activityIntent.setClassName(packageName, className);
+        addItem(data, SampleCodeEntity.SampleCodeType.SAMPLE_CODE_TYPE_ACTIVITY, sampleCodeLabel, activityIntent);
+    }
+
+    private void addFolderItem(List<SampleCodeEntity> data, String sampleCodeLabel,
+                               String currentPrefixPath) {
+        Intent folderIntent = new Intent();
+        folderIntent.setClass(this, MainActivity.class);
+        String path = TextUtils.isEmpty(currentPrefixPath) ? sampleCodeLabel : currentPrefixPath + sampleCodeLabel;
+        folderIntent.putExtra(EXTRA_NAME_PATH, path);
+        addItem(data, SampleCodeEntity.SampleCodeType.SAMPLE_CODE_TYPE_FOLDER, sampleCodeLabel, folderIntent);
+
+    }
+
+    protected void addItem(List<SampleCodeEntity> data, int type, String title, Intent intent) {
+        SampleCodeEntity entity = new SampleCodeEntity(type, title, intent);
+        data.add(entity);
+    }
+
+    private SampleCodeAdapter.OnItemClickListener itemClickListener =
+            new SampleCodeAdapter.OnItemClickListener() {
+                @Override
+                public void onItemClick(View view, int position) {
+                    SampleCodeEntity entity = sampleCodeEntities.get(position);
+                    if (entity != null) {
+                        Intent intent = entity.getIntent();
+                        intent.addCategory(Intent.CATEGORY_SAMPLE_CODE);
+                        startActivity(intent);
+                    }
+                }
+            };
+
+}

@@ -1,0 +1,304 @@
+﻿using Microsoft.Xna.Framework;
+using Microsoft.Xna.Framework.Graphics;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+
+namespace MonogameDraw
+{
+	public enum LINECAP
+	{
+		NONE,
+		SQUARE,
+		CIRCLE
+	};
+
+	public class Renderer
+	{
+		private GraphicsDevice gd;
+		private BasicEffect effect;
+		private Matrix orthographic;
+
+		private static VertexPosition[] drawRectangleVertices = new[] {
+			new VertexPosition(new Vector3(-0.5f, -0.5f, 0)),
+			new VertexPosition(new Vector3(0.5f, -0.5f, 0)),
+			new VertexPosition(new Vector3(0.5f, 0.5f, 0)),
+			new VertexPosition(new Vector3(-0.5f, 0.5f, 0)),
+			new VertexPosition(new Vector3(-0.5f, -0.5f, 0))
+		};
+		private static VertexPosition[] fillRectangleVertices = new[] {
+			new VertexPosition(new Vector3(-0.5f, -0.5f, 0)),
+			new VertexPosition(new Vector3(0.5f, -0.5f, 0)),
+			new VertexPosition(new Vector3(-0.5f, 0.5f, 0)),
+			new VertexPosition(new Vector3(0.5f, 0.5f, 0))
+		};
+
+		private static Dictionary<int, VertexPosition[]> filledNgons = new Dictionary<int, VertexPosition[]>();
+		private static Dictionary<int, VertexPosition[]> drawnNgons = new Dictionary<int, VertexPosition[]>();
+		private const int NGON_CACHE_SIZE = 25;
+
+		public Renderer(GraphicsDevice gd)
+		{
+			this.gd = gd;
+			effect = new BasicEffect(gd);
+			orthographic = Matrix.CreateOrthographicOffCenter(0, gd.Viewport.Width, gd.Viewport.Height, 0, 0, 1);
+		}
+
+		~Renderer()
+		{
+			effect.Dispose();
+		}
+
+		private void Draw(PrimitiveType primitiveType, VertexPosition[] vertexPositions, int primitiveCount, Color color, Matrix worldMatrix)
+		{
+			effect.World = worldMatrix;
+			effect.DiffuseColor = color.ToVector3();
+			foreach (EffectPass pass in effect.CurrentTechnique.Passes)
+			{
+				pass.Apply();
+				gd.DrawUserPrimitives(primitiveType, vertexPositions, 0, primitiveCount);
+			}
+		}
+
+		public void FillNgon(float x, float y, float rx, float ry, int sides, Color color, double angle = 0, double offsetAngle = 0)
+		{
+			if (rx <= 0 || ry <= 0 || sides < 3) return;
+
+			VertexPosition[] vertexPositions;
+			if (filledNgons.ContainsKey(sides))
+			{
+				vertexPositions = filledNgons[sides];
+			}
+			else
+			{
+				Vector3[] vertices = new Vector3[sides];
+				double nextAngle = MathHelper.TwoPi / sides;
+				for (int i = 0; i < sides; i++)
+				{
+					double currX = Math.Cos(nextAngle * i + offsetAngle - MathHelper.PiOver2);
+					double currY = Math.Sin(nextAngle * i + offsetAngle - MathHelper.PiOver2);
+					vertices[i] = new Vector3((float)currX, (float)currY, 0);
+				}
+				vertexPositions = new VertexPosition[sides];
+				vertexPositions[0] = new VertexPosition(vertices[0]);
+				for (int i = 0; i < sides / 2; i++)
+				{
+					vertexPositions[i * 2 + 1] = new VertexPosition(vertices[i + 1]);
+					if (i * 2 + 2 != sides)
+						vertexPositions[i * 2 + 2] = new VertexPosition(vertices[sides - i - 1]);
+				}
+				if (filledNgons.Count > NGON_CACHE_SIZE) filledNgons.Remove(filledNgons.Keys.First());
+				filledNgons.Add(sides, vertexPositions);
+			}
+
+			Matrix translation = Matrix.CreateTranslation(x, y, 0);
+			Matrix rotation = Matrix.CreateRotationZ((float)angle);
+			Matrix scale = Matrix.CreateScale(rx, ry, 1);
+			Draw(PrimitiveType.TriangleStrip, vertexPositions, sides - 2, color, scale * rotation * translation * orthographic);
+		}
+
+		public void FillRect(float x, float y, float width, float height, Color color, double angle = 0)
+		{
+			Matrix translation = Matrix.CreateTranslation(x, y, 0);
+			Matrix rotation = Matrix.CreateRotationZ((float)angle);
+			Matrix scale = Matrix.CreateScale(width, height, 1);
+			Draw(PrimitiveType.TriangleStrip, fillRectangleVertices, 2, color, scale * rotation * translation * orthographic);
+		}
+
+		public void FillSquare(float x, float y, float length, Color color, double angle = 0)
+		{
+			FillRect(x, y, length, length, color, angle);
+		}
+
+		public void FillCircle(float x, float y, float radius, Color color, float quality = 1f)
+		{
+			FillEllipse(x, y, radius, radius, color, quality);
+		}
+
+		public void FillEllipse(float x, float y, float rx, float ry, Color color, float quality = 1f)
+		{
+			int sides = Math.Max((int)(quality * (rx + ry) / 3f + 3), 8);
+			FillNgon(x, y, rx, ry, sides, color);
+		}
+
+		public void StrokeLine(float ax, float ay, float bx, float by, Color color, int thickness = 1, LINECAP linecap = LINECAP.NONE)
+		{
+			if (thickness == 1)
+			{
+				VertexPosition[] vertexPositions = new[]
+				{
+					new VertexPosition(new Vector3(ax, ay, 0)),
+					new VertexPosition(new Vector3(bx, by, 0))
+				};
+				Draw(PrimitiveType.LineStrip, vertexPositions, 1, color, orthographic);
+			}
+			else
+			{
+				double angle = Math.Atan2(by - ay, bx - ax);
+				float xDelta = (float)(Math.Cos(angle + MathHelper.PiOver2) * thickness / 2);
+				float yDelta = (float)(Math.Sin(angle + MathHelper.PiOver2) * thickness / 2);
+				VertexPosition[] vertexPositions = new[]
+				{
+					new VertexPosition(new Vector3(ax + xDelta, ay + yDelta, 0)),
+					new VertexPosition(new Vector3(ax - xDelta, ay - yDelta, 0)),
+					new VertexPosition(new Vector3(bx + xDelta, by + yDelta, 0)),
+					new VertexPosition(new Vector3(bx - xDelta, by - yDelta, 0))
+				};
+				if (thickness > 2)
+				{
+					switch (linecap)
+					{
+						case LINECAP.CIRCLE:
+							FillCircle(ax, ay, thickness / 2, color);
+							FillCircle(bx, by, thickness / 2, color);
+							break;
+						case LINECAP.SQUARE:
+							FillSquare(ax, ay, thickness, color, angle);
+							FillSquare(bx, by, thickness, color, angle);
+							break;
+					}
+				}
+				Draw(PrimitiveType.TriangleStrip, vertexPositions, 2, color, orthographic);
+			}
+		}
+
+		public void StrokePath(List<Vector2> points, Color color, int thickness = 1, LINECAP linecap = LINECAP.NONE)
+		{
+			if (points.Count < 2) return;
+			if (thickness == 1)
+			{
+				VertexPosition[] vertexPositions = new VertexPosition[points.Count];
+				for (int i = 0; i < points.Count; i++)
+				{
+					vertexPositions[i] = new VertexPosition(new Vector3(points[i].X, points[i].Y, 0));
+				}
+				Draw(PrimitiveType.LineStrip, vertexPositions, points.Count - 1, color, orthographic);
+			}
+			else
+			{
+				if (points.Count == 2)
+				{
+					StrokeLine(points[0].X, points[0].Y, points[1].X, points[2].Y, color, thickness);
+					return;
+				}
+				VertexPosition[] vertexPositions = new VertexPosition[points.Count * 4 - 4];
+				double angle = 0;
+				for (int i = 0; i < points.Count - 1; i++)
+				{
+					Vector2 point = points[i];
+					Vector2 nextPoint = points[i + 1];
+					angle = Math.Atan2(nextPoint.Y - point.Y, nextPoint.X - point.X);
+					float xDelta = (float)(Math.Cos(angle + MathHelper.PiOver2) * thickness / 2);
+					float yDelta = (float)(Math.Sin(angle + MathHelper.PiOver2) * thickness / 2);
+					vertexPositions[4 * i] = new VertexPosition(new Vector3(point.X + xDelta, point.Y + yDelta, 0));
+					vertexPositions[4 * i + 1] = new VertexPosition(new Vector3(point.X - xDelta, point.Y - yDelta, 0));
+					vertexPositions[4 * i + 2] = new VertexPosition(new Vector3(nextPoint.X + xDelta, nextPoint.Y + yDelta, 0));
+					vertexPositions[4 * i + 3] = new VertexPosition(new Vector3(nextPoint.X - xDelta, nextPoint.Y - yDelta, 0));
+					switch(linecap)
+					{
+						case LINECAP.CIRCLE:
+							FillCircle(points[i].X, points[i].Y, thickness / 2, color);
+							break;
+						case LINECAP.SQUARE:
+							if(i == 0) FillSquare(points[i].X, points[i].Y, thickness, color, angle);
+							break;
+					}
+				}
+				switch (linecap)
+				{
+					case LINECAP.CIRCLE:
+						FillCircle(points[points.Count - 1].X, points[points.Count - 1].Y, thickness / 2, color);
+						break;
+					case LINECAP.SQUARE:
+						FillSquare(points[points.Count - 1].X, points[points.Count - 1].Y, thickness, color, angle);
+						break;
+				}
+				Draw(PrimitiveType.TriangleStrip, vertexPositions, points.Count * 4 - 6, color, orthographic);
+			}
+		}
+
+		public void StrokeLoop(List<Vector2> points, Color color, int thickness = 1)
+		{
+			if (points.Count < 2) return;
+			if (thickness == 1)
+			{
+				points.Add(points[0]);
+				StrokePath(points, color, thickness);
+			}
+			else
+			{
+				if (points.Count == 2)
+				{
+					StrokeLine(points[0].X, points[0].Y, points[1].X, points[2].Y, color, thickness);
+					return;
+				}
+				points.Add(points[0]);
+				VertexPosition[] vertexPositions = new VertexPosition[points.Count * 4 - 2];
+				for (int i = 0; i < points.Count - 1; i++)
+				{
+					Vector2 point = points[i];
+					Vector2 nextPoint = points[i + 1];
+					double angle = Math.Atan2(nextPoint.Y - point.Y, nextPoint.X - point.X);
+					float xDelta = (float)(Math.Cos(angle + MathHelper.PiOver2) * thickness / 2);
+					float yDelta = (float)(Math.Sin(angle + MathHelper.PiOver2) * thickness / 2);
+					vertexPositions[4 * i] = new VertexPosition(new Vector3(point.X + xDelta, point.Y + yDelta, 0));
+					vertexPositions[4 * i + 1] = new VertexPosition(new Vector3(point.X - xDelta, point.Y - yDelta, 0));
+					vertexPositions[4 * i + 2] = new VertexPosition(new Vector3(nextPoint.X + xDelta, nextPoint.Y + yDelta, 0));
+					vertexPositions[4 * i + 3] = new VertexPosition(new Vector3(nextPoint.X - xDelta, nextPoint.Y - yDelta, 0));
+				}
+				vertexPositions[vertexPositions.Length - 2] = vertexPositions[0];
+				vertexPositions[vertexPositions.Length - 1] = vertexPositions[1];
+				Draw(PrimitiveType.TriangleStrip, vertexPositions, points.Count * 4 - 4, color, orthographic);
+			}
+		}
+
+		public void StrokeNgon(float x, float y, float rx, float ry, int sides, Color color, double angle = 0, double offsetAngle = 0)
+		{
+			if (rx <= 0 || ry <= 0 || sides < 3) return;
+
+			VertexPosition[] vertexPositions;
+			if (drawnNgons.ContainsKey(sides))
+			{
+				vertexPositions = drawnNgons[sides];
+			}
+			else
+			{
+				vertexPositions = new VertexPosition[sides + 1];
+				double nextAngle = MathHelper.TwoPi / sides;
+				for (int i = 0; i < sides; i++)
+				{
+					double currX = Math.Cos(nextAngle * i + offsetAngle - MathHelper.PiOver2);
+					double currY = Math.Sin(nextAngle * i + offsetAngle - MathHelper.PiOver2);
+					vertexPositions[i] = new VertexPosition(new Vector3((float)currX, (float)currY, 0));
+				}
+				vertexPositions[vertexPositions.Length - 1] = vertexPositions[0];
+				if (drawnNgons.Count > NGON_CACHE_SIZE) drawnNgons.Remove(drawnNgons.Keys.First());
+				drawnNgons.Add(sides, vertexPositions);
+			}
+
+			Matrix translation = Matrix.CreateTranslation(x, y, 0);
+			Matrix rotation = Matrix.CreateRotationZ((float)angle);
+			Matrix scale = Matrix.CreateScale(rx, ry, 1);
+			Draw(PrimitiveType.LineStrip, vertexPositions, sides, color, scale * rotation * translation * orthographic);
+		}
+
+		public void StrokeCircle(float x, float y, float radius, Color color, float qualityFactor = 1f)
+		{
+			StrokeEllipse(x, y, radius, radius, color, qualityFactor);
+		}
+
+		public void StrokeEllipse(float x, float y, float rx, float ry, Color color, float qualityFactor = 1f)
+		{
+			int quality = Math.Max((int)(qualityFactor * ((rx + ry) / 3f + 3)), 8);
+			StrokeNgon(x, y, rx, ry, quality, color);
+		}
+
+		public void StrokeRect(float x, float y, float width, float height, Color color, double angle = 0)
+		{
+			Matrix translation = Matrix.CreateTranslation(x, y, 0);
+			Matrix rotation = Matrix.CreateRotationZ((float)angle);
+			Matrix scale = Matrix.CreateScale(width, height, 1);
+			Draw(PrimitiveType.LineStrip, drawRectangleVertices, 4, color, scale * rotation * translation * orthographic);
+		}
+	}
+}

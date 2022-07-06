@@ -1,0 +1,398 @@
+﻿Imports Transporter_AEHF.Objects.EmcFunctions.Math
+'Imports NationalInstruments.Analysis.Math
+Imports MathNet.Numerics.LinearAlgebra
+Imports Keysight.Visa
+Imports Ivi.Visa
+Imports Transporter_AEHF.Objects.Enumerations
+
+Public Class DataController
+    'Private CurrentTraceData As Double(,) = New Double(,) {}
+    Private _tempCalArray As Double(,) = New Double(,) {}
+    Private _tempAntArray As Double(,) = New Double(,) {}
+    'Private EMC As Transporter.EMC.Math
+
+    Public Sub New()
+
+    End Sub
+
+    Function GetMarkerValue(ByVal traceNum As Integer, ByVal azrSession As TcpipSession, ByVal azrModel As PumaEnums.AnalyzerModels, ByVal findPeak As Boolean) As String()
+
+        Dim valueY As String = ""
+        Dim valueX As String = ""
+        Dim localArray(1) As String
+        Try
+
+            If findPeak = True Then
+                Select Case azrModel
+                    Case PumaEnums.AnalyzerModels.AgilentFieldFox
+                        azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":FUNC:MAX")
+                    Case Else
+                        azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":MAX")
+                End Select
+            End If
+            azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":X?")
+            valueX = azrSession.FormattedIO.ReadString
+            azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":Y?")
+            valueY = azrSession.FormattedIO.ReadString
+            localArray(0) = valueX
+            localArray(1) = valueY
+        Catch ex As Exception
+            MsgBox("error! Unable to grab marker " & traceNum & "value: " & ex.Message)
+        End Try
+
+        Return localArray
+
+    End Function
+
+    Public Sub SetMarker(ByVal traceNum As Integer, ByVal azrSession As TcpipSession, ByVal azrModel As PumaEnums.AnalyzerModels, ByVal onPeak As Boolean, Optional ByVal freq As String = "")
+
+        Try
+            If onPeak = False Then
+
+                Dim centerFreq As String = freq
+
+                If azrModel = PumaEnums.AnalyzerModels.AgilentFieldFox Then
+                    azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":TRACE " & traceNum)
+                    azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":FUNC:MAX")
+                    azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":X " & centerFreq)
+                Else
+                    azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":MODE POSITION")
+                    azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":TRACE " & traceNum)
+                    azrSession.FormattedIO.WriteLine(":CALC:MARK" & (traceNum) & ":X " & centerFreq)
+                End If
+            Else
+                Select Case azrModel
+                    Case PumaEnums.AnalyzerModels.AgilentFieldFox
+                        azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":FUNC:MAX")
+                    Case Else
+                        azrSession.FormattedIO.WriteLine(":CALC:MARK" & traceNum & ":MAX")
+                End Select
+            End If
+
+        Catch ex As Exception
+            MsgBox("Unable to set up marker: " & ex.Message)
+        End Try
+
+    End Sub
+
+    Function GetTraceBinary(ByVal azr As Integer, ByVal traceNum As Integer, ByVal azrSession As TcpipSession, ByVal azrType As PumaEnums.AnalyzerModels) As Trace
+
+        Dim newTrace As New Trace
+        ' step 1. Get the traces
+        With newTrace
+            azrSession.FormattedIO.WriteLine("POWer:ATTenuation?")
+            .Attenuation = azrSession.FormattedIO.ReadString
+            azrSession.FormattedIO.WriteLine("DISPlay:WINDow:TRACe:Y:RLEVel?")
+            .ReferenceLevel = azrSession.FormattedIO.ReadString()
+            azrSession.FormattedIO.WriteLine("Bandwidth:Resolution?")
+            .ResolutionBandwidth = azrSession.FormattedIO.ReadString()
+            azrSession.FormattedIO.WriteLine("Bandwidth:video?")
+            .VideoBandwidth = azrSession.FormattedIO.ReadString()
+            azrSession.FormattedIO.WriteLine("Sweep:Time?")
+            .SweepTime = azrSession.FormattedIO.ReadString()
+            azrSession.FormattedIO.WriteLine("FREQuency:STARt?")
+            .StartFrequency = azrSession.FormattedIO.ReadString()
+            azrSession.FormattedIO.WriteLine("FREQuency:STOP?")
+            .StopFrequency = azrSession.FormattedIO.ReadString()
+            .Errorcode = ""
+        End With
+
+        'change some default values
+        'azrSession.SetBufferSize(IOBuffers.ReadWrite, 200000) ' value on bytes
+        'azrSession.TimeoutMilliseconds = 60000           ' time in milliseconds
+
+
+        'trace formatting stuff
+        'Dim format As String = azrSession.Query(":Format:Data?") 'just for debugging to see what it is '2/3/14: got rid of the word TRACE to support FieldFox
+        'If azrType <> PumaEnums.AnalyzerModels.AgilentFieldFox Then
+
+        'End If
+        'format = azrSession.Query(":Format:Data?") 'just for debugging to ensure that it changed '2/3/14: got rid of the word TRACE to support FieldFox
+
+        ' get trace 
+        If azrType = PumaEnums.AnalyzerModels.AgilentFieldFox Then
+            azrSession.FormattedIO.WriteLine("FORM REAL,32")
+            azrSession.FormattedIO.WriteLine(":Format:Border SWAPped") ' get the bytes LSB first
+            azrSession.FormattedIO.WriteLine("INIT:CONT OFF")   'initiate continuous off
+            azrSession.FormattedIO.WriteLine("INIT:IMM;*OPC?")
+            azrSession.FormattedIO.ReadString()  'initiate immediate and wait for op complete
+            azrSession.FormattedIO.WriteLine(":TRACE" & traceNum & ":DATA?")
+        Else
+            azrSession.FormattedIO.WriteLine(":Format:Data REAL,32") 'get the trace data y axis values as 32 bit real numbers '2/3/14: got rid of the word TRACE to support FieldFox
+            azrSession.FormattedIO.WriteLine(":Format:Border SWAPped") ' get the bytes LSB first
+            azrSession.FormattedIO.WriteLine(":TRAC:DATA? TRACE" & traceNum) 'request trace values
+        End If
+        Dim traceByte() As Byte = azrSession.FormattedIO.ReadBinaryBlockOfByte() ' store the values into a byte array
+        azrSession.Clear()
+        ' step 2. Convert the trace data to display it
+
+        'get the start and stop frequencies and number of data points
+        azrSession.FormattedIO.WriteLine(":Sense:Freq:Start?")
+        Dim startFreq As String = azrSession.FormattedIO.ReadString()
+        azrSession.FormattedIO.WriteLine(":Sense:Freq:Stop?")
+        Dim stopFreq As String = azrSession.FormattedIO.ReadString()
+        azrSession.FormattedIO.WriteLine(":Sense:Sweep:Points?")
+        Dim numDataPoints As String = azrSession.FormattedIO.ReadString()
+
+        'set-up the output arrays
+        Dim dataPoints As Double = CDbl(numDataPoints)
+        Dim span As Double = CDbl(startFreq) - CDbl(stopFreq)
+
+        Dim fPoint(dataPoints - 1) As Double
+        Dim ampAarray(dataPoints - 1) As Single
+        'get some temporary loop variables
+        Dim ii As Integer = 0
+        Dim jj As Integer = 0
+        Dim idx As Integer = 0
+        Dim fPt As Double = 0
+
+        'determine how at which point we need to start at in the byte arrays to leap over some header
+        'bytes and get into the amplitude bytes
+        'The need for this has been eliminated with the use of NI-VISA
+        'NI-VISA provides a function that reads block data and removes the header
+        'If traceByte.Length < 1000000 Then
+        '    jj = 8
+        'End If
+
+        'If traceByte.Length < 100000 Then
+        '    jj = 7
+        'End If
+
+        'If traceByte.Length < 10000 Then  ' if the byte array length is less than 10,000 bytes
+        '    jj = 6
+        'End If
+
+        'If traceByte.Length < 1000 Then
+        '    jj = 5
+        'End If
+
+        'If traceByte.Length < 100 Then
+        '    jj = 4
+        'End If
+
+        'If traceByte.Length < 10 Then
+        '    jj = 3
+        'End If
+        Try
+            'loop through and build the arrays
+            ReDim newTrace.DataSingles(dataPoints - 1)
+            For ii = 0 To (dataPoints - 1)
+                fPt = CDbl(startFreq) + (span * idx / (dataPoints)) 'calc freq of this point
+                fPoint(idx) = fPt / (10 ^ 6) ' convert to MHz
+                If azrType = PumaEnums.AnalyzerModels.AgilentFieldFox Then  'field fox uses little endian and must be swapped here
+                    Dim tmparr(3) As Byte
+                    tmparr(3) = traceByte(jj)
+                    tmparr(2) = traceByte(jj + 1)
+                    tmparr(1) = traceByte(jj + 2)
+                    tmparr(0) = traceByte(jj + 3)
+                    ampAarray(idx) = System.BitConverter.ToSingle(tmparr, 0)
+                Else
+                    Dim tmparr As Byte = System.BitConverter.ToSingle(traceByte, jj)
+                    ampAarray(idx) = tmparr
+                End If
+                newTrace.DataSingles(idx) = System.Math.Round(ampAarray(idx), 3)
+                idx += 1  ' increment the freq and amplitude arrays by 1
+                jj += 4   ' advance the byte arrays by 4 (4 bytes to one single)
+            Next
+        Catch ex As Exception
+            Dim test = 0
+        End Try
+        Return newTrace
+
+
+    End Function
+
+    ''' <summary>
+    ''' takes a Trace and generates the Frequency column for the TraceData. This is used to Plot the data in a graph
+    ''' </summary>
+    ''' <param name="tracedata"></param>
+    ''' <returns>A 2 by datapoints array of Doubles</returns>
+    ''' <remarks></remarks>
+
+    Function DataArrayConverterDoubles(ByVal tracedata As Trace) As Double(,)
+        Dim mDataArray As Double(,)
+        Dim x As Integer = tracedata.DataSingles.Length - 1
+        ReDim mDataArray(1, x) ' resize array
+        Dim I As Integer = 0, fpoint As Double, span As Double = CDbl(tracedata.StopFrequency) - CDbl(tracedata.StartFrequency), dataPoints As Double = tracedata.DataSingles.Length
+        For Each ss In tracedata.DataSingles() 'convert to mDataArray 
+            If dataPoints <> 1 Then
+                fpoint = CDbl(tracedata.StartFrequency) + span * (I) / (dataPoints - 1) 'calc freq of point
+            Else
+                fpoint = CDbl(tracedata.StartFrequency)
+            End If
+            mDataArray(0, I) = CDbl(fpoint / 1000000) 'Freq in Mhz
+            mDataArray(1, I) = ss
+            If tracedata.DataSingles.Length <> dataPoints Then
+                Dim tmpStr As String = ("datapoint mismatch " & tracedata.Name)
+                'Me.ErrorLogFile(tmpStr)
+                Exit For
+            End If
+
+            I += 1
+        Next
+        Return mDataArray
+    End Function
+
+    Function ScaleData(ByVal currentTrace As Trace, ByVal mCurrentTraceData As Double(,), ByVal mCalData As Double(,), ByVal mAntData As Double(,), ByVal unitsStr As String, Optional ByVal interpdArrays As Boolean = False) As Double(,)
+        Control.CheckForIllegalCrossThreadCalls = False
+        Dim traces As Integer = 0
+        Dim points As Integer = 0
+        Dim freq As Double = Nothing
+        Dim gain As Double = Nothing
+        Dim af As Double = Nothing
+        Dim dataPoints As Integer = mCurrentTraceData.Length ' determine number of Data Points in Trace
+        Dim mScaleData As Double(,)
+        Dim arraySize As Integer = dataPoints - 1
+        ReDim mScaleData(1, arraySize)
+        Dim currentFile As String = ""
+        Dim ss As String = "" 's As String 
+
+        dataPoints = currentTrace.DataSingles.Length.ToString
+        If currentTrace.Azimuth <> "" Then currentTrace.Azimuth = currentTrace.Azimuth.Replace(" ", "") 'remove blank space in legacy data files
+        'If DataScatterGraph.Caption <> "" Then DataScatterGraph.Caption = CStr(CurrentTrace.Name)
+        Dim span As Double = CDbl(currentTrace.StopFrequency) - CDbl(currentTrace.StartFrequency)
+        Dim fpoint As Double
+        Dim I As Integer = 0
+        'MsgBox(CurrentTrace.Data().Length.ToString)
+        If currentTrace.DataSingles.Length < 20 Then
+            For Each ss In currentTrace.Data() 'convert to CurrentTraceData 
+                fpoint = CDbl(currentTrace.StartFrequency) + span * (I) / (dataPoints - 1) 'calc freq of point
+                mCurrentTraceData(0, I) = fpoint / 1000000 'Freq in Mhz
+                mCurrentTraceData(1, I) = CDbl(ss)
+                If currentTrace.Data.Length <> dataPoints Then
+                    Dim tmpStr As String = ("datapoint mismatch " & currentTrace.Name)
+                    'Me.ErrorLogFile(tmpStr)
+                    Exit For
+
+                End If
+
+                I += 1
+            Next
+        Else
+            For Each ss In currentTrace.DataSingles() 'convert to CurrentTraceData 
+                fpoint = CDbl(currentTrace.StartFrequency) + span * (I) / (dataPoints - 1) 'calc freq of point
+                mCurrentTraceData(0, I) = fpoint / 1000000 'Freq in Mhz
+                mCurrentTraceData(1, I) = currentTrace.DataSingles(I)
+                If currentTrace.DataSingles.Length <> dataPoints Then
+                    Dim tmpStr As String = ("datapoint mismatch " & currentTrace.Name)
+                    'Me.ErrorLogFile(tmpStr)
+                    Exit For
+
+                End If
+
+                I += 1
+            Next
+
+        End If
+
+        'return an interpolated array for the cable cal file that will match the frequency points in the trace data
+        If interpdArrays = False Then
+            Dim xTempCalArray(,) As Double = MyLinearDataInterpelator(mCalData, mCurrentTraceData) 'spline Cal Data to match   data
+            _tempCalArray = xTempCalArray
+        Else
+            _tempCalArray = mCalData
+        End If
+
+        'correct the trace data for the cable losses
+        mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, _tempCalArray, PumaEnums.Operatortype.SubTract)
+
+        'return an interpolated array for the antenna cal file that will match the frequency points in the trace data
+        If interpdArrays = False Then
+
+            Dim tempAntennaData As Double(,) = New Double(,) {}, element As Double, jj As Integer = 0
+            Select Case unitsStr
+                Case "V/m"
+                    jj = 2 'AF'  ss = CStr(System.Math.Pow(10, (Val(ss) + AntennaFactorData(points) + 107 + 1 - 120) / 20))  ' dBuV conversion
+                Case "dBuV"
+                    jj = 1 'Gain '     ss = CStr(Val(ss) + 107)
+                Case "dBuV/m"
+                    jj = 2 'AF '     ss = CStr(Val(ss) + AntennaFactorData(points)+ 107)
+                Case "dBm"
+                    jj = 1 'Gain '     ss = CStr(Val(ss) - AntennaGainData(points)) 'dBm'subtract gain
+                Case "dBm/Hz"
+                    jj = 1 'Gain '     ss = CStr(Val(ss) - AntennaGainData(points)) 'dBm'subtract gain
+                Case "W/m2"
+                    jj = 2  'AF      ss =  CStr(System.Math.Pow(10,  ( E(dBuV/m) - 120 - 25.76) /10)
+                Case "mW/cm2"
+                    jj = 2  'AF      ss = W/m2 / 10
+            End Select
+
+            'Dim II As Integer = 0
+            'ReDim TempAntennaData(1, ArrayOperation.CopyRow(mANTData, 0).Length - 1)
+            'For Each Element In ArrayOperation.CopyRow(mANTData, 1) ' make 2D Array to pass to MyLinearDataInterpelator
+            '    TempAntennaData(0, II) = Element
+            '    TempAntennaData(1, II) = mANTData(JJ, II)
+            '    II += 1
+            'Next
+            Dim elIdx = 0
+            Dim frqs = Matrix(Of Double).Build.DenseOfArray(mAntData).Row(0).ToArray()
+            ReDim tempAntennaData(1, frqs.Length - 1)
+            For Each element In frqs
+                tempAntennaData(0, elIdx) = element
+                tempAntennaData(1, elIdx) = mAntData(jj, elIdx)
+                elIdx += 1
+            Next
+
+            _tempAntArray = MyLinearDataInterpelator(tempAntennaData, mCurrentTraceData)
+        Else
+            _tempAntArray = mAntData
+        End If
+
+        '   Dim AntennaDataIndex As Integer = 0, Fa As Double, Fb As Double, Ga As Double, Gb As Double, AFa As Double, AFb As Double
+        Select Case unitsStr
+            Case "V/m"
+                'note: was all CurrentTraceData
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, TempAntArray, operatortype.ADD) ' add Antenna Factors
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, 107, operatortype.ADD) 'dBm/m to dBuV/m
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, 120, operatortype.SubTract) 'dBuV/m to dBV/m
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, 20, operatortype.ToThePower) 'dBV/m to V/m
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, _tempAntArray, PumaEnums.Operatortype.Add) ' add Antenna Factors
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 107, PumaEnums.Operatortype.Add) 'dBm/m to dBuV/m
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 120, PumaEnums.Operatortype.SubTract) 'dBuV/m to dBV/m
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 20, PumaEnums.Operatortype.ToThePower) 'dBV/m to V/m
+            Case "dBuV/m"
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, _tempAntArray, PumaEnums.Operatortype.Add) ' add Antenna Factors
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 107, PumaEnums.Operatortype.Add) 'dBm/m to dBuV/m
+            Case "dBuV"
+                'note: was all CurrentTraceData
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, TempAntArray, operatortype.SubTract) ' subtract Antenna Gains
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, 107, operatortype.ADD) 'dBm to dBuV
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, _tempAntArray, PumaEnums.Operatortype.SubTract) ' subtract Antenna Gains
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 107, PumaEnums.Operatortype.Add) 'dBm to dBuV
+            Case "dBm"
+                'note: was all CurrentTraceData
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, TempAntArray, operatortype.SubTract) ' subtract Antenna Gains
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, _tempAntArray, PumaEnums.Operatortype.SubTract)
+            Case "dBm/Hz"
+                'note: was all CurrentTraceData
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, TempAntArray, operatortype.SubTract) ' subtract Antenna Gains
+                'CurrentTraceData = EMC.Math.MyDataArrayAddingMachine(CurrentTraceData, 10 * System.Math.Log10(CDbl(CurrentTrace.ResolutionBandwidth)), operatortype.SubTract)
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, _tempAntArray, PumaEnums.Operatortype.SubTract) ' subtract Antenna Gains
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 10 * System.Math.Log10(CDbl(currentTrace.ResolutionBandwidth)), PumaEnums.Operatortype.SubTract)
+
+            Case "W/m2"
+                ' ss =  CStr(System.Math.Pow(10,  ( E(dBuV/m) - 120 - 25.76) /10)
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, _tempAntArray, PumaEnums.Operatortype.Add) ' add Antenna Factors
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 107, PumaEnums.Operatortype.Add) 'dBm/m to dBuV/m
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 120, PumaEnums.Operatortype.SubTract) 'dBuV/m to dBV/m
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 25.76, PumaEnums.Operatortype.SubTract) 'dBV/m to dBW/m2
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 10, PumaEnums.Operatortype.ToThePower) 'dBW/m2 to W/m2
+
+            Case "mW/cm2"
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, _tempAntArray, PumaEnums.Operatortype.Add) ' add Antenna Factors
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 107, PumaEnums.Operatortype.Add) 'dBm/m to dBuV/m
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 120, PumaEnums.Operatortype.SubTract) 'dBuV/m to dBV/m
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 25.76, PumaEnums.Operatortype.SubTract) 'dBV/m to dBW/m2
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 10, PumaEnums.Operatortype.ToThePower) 'dBW/m2 to W/m2
+                mCurrentTraceData = MyDataArrayAddingMachine(mCurrentTraceData, 10, PumaEnums.Operatortype.Divide) 'W/m2 to mW/cm2
+
+        End Select
+
+        points = 0
+        Dim maxElement As Double = 0
+        Dim currentAzimuth As Double = 0
+        traces += 1
+        Return mCurrentTraceData
+    End Function
+
+End Class

@@ -1,0 +1,92 @@
+require 'spec_helper'
+
+describe NewrelicTag do
+  def self.with_rack_env(value)
+    before(:each) do
+      @old_rack_env = ENV['RACK_ENV']
+      ENV['RACK_ENV'] = value
+    end
+    
+    after(:each) do
+      ENV['RACK_ENV'] = @old_rack_env
+    end
+  end
+  
+  def self.allow_environment(value)
+    before(:each) do
+      @old_envs = NewrelicTag.allowed_environments
+      NewrelicTag.allowed_environments << value
+    end
+    
+    after(:each) do
+      NewrelicTag.allowed_environments = @old_envs
+    end
+  end
+  
+  describe '.configure' do
+    it 'should set values in passed block' do
+      described_class.configure { |c| c.tag = 'x' }
+      described_class.tag.should == 'x'
+    end
+  end
+  
+  describe '.enabled?' do
+    subject { described_class }
+    
+    let(:compute) { described_class.instance_eval { compute } }
+    let(:server) { compute.servers.create :image_id => 'img123' }
+    
+    before(:each) do
+      FakeWeb.register_uri :get, described_class.instance_id_url, :body => server.id
+    end
+    
+    context "the server is tagged" do
+      before(:each) do
+        tag = compute.tags.create 'resource_id' => server.id, 'key' => described_class.tag, 'value' => 'true'
+      end
+      
+      it { should be_enabled }
+      
+      context "but enabling is not allowed in this environment" do
+        with_rack_env("xxxxxx")
+        
+        it { should_not be_enabled }
+      end
+    end
+    
+    context "the server is untagged" do
+      it { should_not be_enabled }
+    end
+    
+    context "the tag lookup fails" do
+      before(:each) do
+        FakeWeb.register_uri :get, described_class.instance_id_url,  :status => 500
+      end
+      
+      it { should_not be_enabled }
+    end
+  end
+  
+  describe "#environment_allowed?" do
+    subject { described_class.instance }
+    
+    context "when RACK_ENV is production" do
+      with_rack_env('production')
+      it { should be_environment_allowed }
+    end
+    
+    context "when RACK_ENV is not in the list" do
+      with_rack_env("xxxxxx")
+      it { should_not be_environment_allowed }
+    end
+    
+    context "when RACK_ENV is in the allowed list" do
+      "enabled-env".tap do |env|
+        allow_environment(env)
+        with_rack_env(env)
+      end
+      
+      it { should be_environment_allowed }
+    end
+  end
+end

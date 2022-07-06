@@ -1,0 +1,168 @@
+<?php
+/*
+ * @author: Allan C. Perez
+ * @module: Mailing list Controller
+ */
+
+namespace MailingList\Controller;
+
+use MailingList\Model\MailingList;
+use Zend\Mvc\Controller\AbstractActionController;
+use MailingList\Form\MailingListForm;
+
+class MailingListController extends AbstractActionController
+{
+    protected $mailingListTable;
+    /*
+     * Add function
+     * @access public
+     */
+    public function addAction()
+    {
+        $this->accessRights(12);
+        $this->childModuleAccessRights(28,'add'); //Accept Child Module ID & it's Actions: add, edit, view, disable
+
+        $form = new MailingListForm();
+
+        $request = $this->getRequest();
+        if ($request->isPost()) {
+            $mailinglist = new MailingList();
+            $form->setInputFilter($mailinglist->getInputFilter());
+            $form->setData($request->getPost());
+
+            if ($form->isValid()) {
+                $mailinglist->exchangeArray($form->getData());
+
+                if ($this->noRecordExists('mailing_lists', 'mailing_list_name')) {
+                    // saves data to db
+                    $this->getMailingListTable()->saveMailingList($mailinglist);
+
+                    // prepares audti trail parameters
+                    $from = $this->getRequest()->getPost()->toArray();
+                    unset($from['submit'],$from['mailing_list_id']);
+                    $added = $this->prepare_added_data($from);
+
+                    // saves audit trail
+                    $this->save_to_audit_trail($request->getPost('mailing_list_name'), $added, '--', 'add', 28);
+
+                    // alert message success
+                    $this->flashMessenger()->addMessage(['content' => $request->getPost('mailing_list_name') . ' mailing list saved', 'type' => 'success']);
+
+                } else {
+                    $this->flashMessenger()->addMessage(['content' => $request->getPost('mailing_list_name') . ' mailing list already exists!', 'type' => 'danger']);
+                }
+            }
+            return $this->redirect()->toRoute('mail');
+        }
+    }
+
+    /*
+     * Edit function
+     * @access public
+     */
+    public function editAction()
+    {
+        $this->accessRights(12);
+        $this->childModuleAccessRights(28,'edit'); //Accept Child Module ID & it's Actions: add, edit, view, disable
+
+        $id = (int)$this->params()->fromRoute('id', 0);
+        if (!$id) {
+            return $this->redirect()->toRoute('mailinglist', array(
+                'action' => 'add'
+            ));
+        }
+
+        try {
+            $mailinglist = $this->getMailingListTable()->getMailingList($id);
+        } catch (\Exception $ex) {
+            return $this->redirect()->toRoute('mailinglist', array(
+                'action' => 'index'
+            ));
+        }
+
+        $form = new MailingListForm();
+        $form->bind($mailinglist);
+        $form->get('submit')->setAttribute('value', 'Edit');
+        $request = $this->getRequest();
+
+        if ($request->isPost()) {
+            // prepare audit trail parameters
+            $from = (array)$mailinglist;
+            $to = $this->getRequest()->getPost()->toArray();
+            $diff=array_diff_assoc($to,$from);
+
+            unset($diff['submit'],$diff['mailing_list_id']);
+            $changes = $this->prepare_modified_data($from,$to,$diff);
+            // end of audit trail parameters
+
+            $form->setInputFilter($mailinglist->getInputFilter());
+
+            // arrange data to form
+            $form->setData($request->getPost());
+
+            if ($form->isValid()) {
+
+                if ($this->noRecordExists('mailing_lists', 'mailing_list_name') || $from['mailing_list_name'] == $to['mailing_list_name']) {
+
+                    $diff=array_diff_assoc($to,$from);
+
+                    unset($diff['submit'],$diff['mailing_list_id']);
+                    $changes = $this->prepare_modified_data($from,$to,$diff);
+                    $this->getMailingListTable()->saveMailingList($mailinglist);
+                    $this->save_to_audit_trail($to['mailing_list_name'], $changes['pre'], $changes['post'], 'edit', 28);
+                    // show alert of updated data
+                    $this->flashMessenger()->addMessage(['content' => $request->getPost('mailing_list_name') . ' has beed updated.', 'type' => 'success']);
+
+                } else {
+
+                    $this->flashMessenger()->addMessage(['content' => $request->getPost('mailing_list_name') . ' mailing list already exists!', 'type' => 'danger']);
+                }
+            }
+
+            return $this->redirect()->toRoute('mail');
+        }
+    }
+
+    // update mailing list status
+    public function updateStatusAction()
+    {
+        $this->accessRights(12);
+        $this->childModuleAccessRights(28,'disable'); //Accept Child Module ID & it's Actions: add, edit, view, disable
+
+        $status = (int) $this->params()->fromRoute('id', 0);
+        $list_id = (int) $this->params()->fromRoute('id2', 1);
+
+        // parameter for audit trail
+        $mailinglist = $this->getMailingListTable()->getMailingList($list_id);
+        $array_mailinglist = (array)$mailinglist;
+
+        $from = ($status == 1) ? 'disabled' : 'enabled';
+        $to = ($status == 1) ? 'enabled' : 'disabled';
+        // end of audit trail parameters
+
+        if($this->getMailingListTable()->updateMailingListStatus($status, $list_id)){
+            $this->save_to_audit_trail($array_mailinglist['mailing_list_name'], $from, $to, $to, 28);//save to audit trail
+
+            if ($status == 0) {
+                $this->flashMessenger()->addMessage(['content' => $array_mailinglist['mailing_list_name'] . ' has been disabled', 'type' => 'danger']);
+            } elseif ($status == 1) {
+                $this->flashMessenger()->addMessage(['content' => $array_mailinglist['mailing_list_name'] . ' has been enabled', 'type' => 'success']);
+            }
+
+            return $this->redirect()->toRoute('mail');
+        }
+
+    }
+    // access to model
+    public function getMailingListTable()
+    {
+        if (!$this->mailingListTable) {
+            $sm = $this->getServiceLocator();
+            $this->mailingListTable = $sm->get('mailinglist\Model\mailingListTable');
+        }
+        return $this->mailingListTable;
+    }
+}
+
+// end of Mailing list controller
+// @path: project\module\MailingList\src\MailingList\Controller\MailingListController.php

@@ -1,0 +1,214 @@
+﻿using System;
+using System.IO;
+using System.Collections.Generic;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Options;
+using System.Reflection;
+
+namespace Light.DataCore
+{
+    static class DataMapperConfiguration
+    {
+        static object locker = new object();
+
+        static string DirectoryPath;
+
+        static List<string> FileNames = new List<string>();
+
+        static bool Initialed;
+
+        static Dictionary<Type, DataTableMapperSetting> SettingDict;
+
+        static List<IConfigurationRoot> Configurations = new List<IConfigurationRoot>();
+
+        public static void SetDirectoryPath(string path)
+        {
+            if (string.IsNullOrWhiteSpace(path))
+                throw new ArgumentNullException(nameof(path));
+            DirectoryPath = path;
+        }
+
+        public static void SetFileName(string name)
+        {
+            if (string.IsNullOrWhiteSpace(name))
+                throw new ArgumentNullException(nameof(name));
+            FileNames.Add(name);
+        }
+
+        static void Initial()
+        {
+            if (FileNames.Count == 0) {
+                FileNames.Add("lightdata.json");
+            }
+
+            foreach (string fileName in FileNames) {
+                var builder = new ConfigurationBuilder();
+                if (DirectoryPath != null) {
+                    builder.SetBasePath(DirectoryPath);
+                }
+                else {
+                    builder.SetBasePath(Directory.GetCurrentDirectory());
+                }
+                builder.AddJsonFile(fileName, true);
+                var configuration = builder.Build();
+                Configurations.Add(configuration);
+
+            }
+
+            LoadData();
+
+            Initialed = true;
+        }
+
+        static void LoadData()
+        {
+            var settings = new Dictionary<Type, DataTableMapperSetting>();
+            foreach (IConfigurationRoot configuration in Configurations) {
+                IServiceCollection services = new ServiceCollection();
+                services.AddOptions();
+                services.Configure<LightMapperOptions>(configuration.GetSection("lightMapper"));
+                var options = services.BuildServiceProvider().GetService<IOptions<LightMapperOptions>>().Value;
+
+                if (options.DataTypes != null && options.DataTypes.Length > 0) {
+                    int typeIndex = 0;
+                    foreach (DataTypeSection typeConfig in options.DataTypes) {
+                        typeIndex++;
+                        var typeName = typeConfig.Type;
+                        if (typeName == null) {
+                            throw new LightDataException(string.Format(SR.ConfigDataTypeNameIsNull, typeIndex));
+                        }
+                        var dataType = Type.GetType(typeName, true);
+                        var dataTableMap = new DataTableMapperConfig(dataType);
+                        var setting = new DataTableMapperSetting(dataTableMap);
+
+                        dataTableMap.TableName = typeConfig.TableName;
+                        dataTableMap.IsEntityTable = typeConfig.IsEntityTable;
+                        var configParam = new ConfigParamSet();
+                        var paramConfigs = typeConfig.ConfigParams;
+                        if (paramConfigs != null && paramConfigs.Length > 0) {
+                            foreach (ConfigParamSection paramConfig in paramConfigs) {
+                                configParam.SetParamValue(paramConfig.Name, paramConfig.Value);
+                            }
+                        }
+                        dataTableMap.ConfigParams = configParam;
+                        var dataFieldConfigs = typeConfig.DataFields;
+
+                        if (dataFieldConfigs != null && dataFieldConfigs.Length > 0) {
+                            int fieldIndex = 0;
+                            foreach (var fieldConfig in dataFieldConfigs) {
+                                fieldIndex++;
+                                var fieldName = fieldConfig.FieldName;
+                                if (fieldName == null) {
+                                    throw new LightDataException(string.Format(SR.ConfigDataFieldNameIsNull, typeName, fieldIndex));
+                                }
+                                var property = dataType.GetProperty(fieldName);
+                                if (property == null) {
+                                    throw new LightDataException(string.Format(SR.ConfigDataFieldIsNotExists, typeName, fieldName));
+                                }
+                                var dataFieldMap = new DataFieldMapperConfig(fieldName);
+                                dataFieldMap.Name = fieldConfig.Name;
+                                dataFieldMap.IsPrimaryKey = fieldConfig.IsPrimaryKey;
+                                dataFieldMap.IsIdentity = fieldConfig.IsIdentity;
+                                dataFieldMap.DbType = fieldConfig.DbType;
+                                dataFieldMap.DataOrder = fieldConfig.DataOrder;
+                                dataFieldMap.IsNullable = fieldConfig.IsNullable;
+                                var defaultValue = fieldConfig.DefaultValue;
+                                if (!string.IsNullOrEmpty(defaultValue)) {
+                                    Type type = property.PropertyType;
+                                    TypeInfo info = type.GetTypeInfo();
+                                    if (info.IsGenericType) {
+                                        Type frameType = type.GetGenericTypeDefinition();
+                                        if (frameType.FullName == "System.Nullable`1") {
+                                            Type[] arguments = type.GetGenericArguments();
+                                            type = arguments[0];
+                                        }
+                                    }
+                                    object valueObj;
+                                    if (type == typeof(string)) {
+                                        valueObj = defaultValue;
+                                    }
+                                    else if (info.IsEnum) {
+                                        try {
+                                            valueObj = Enum.Parse(type, defaultValue, true);
+                                        }
+                                        catch (Exception ex) {
+                                            throw new LightDataException(string.Format(SR.ConfigDataFieldLoadError, typeName, fieldName, ex.Message));
+                                        }
+                                    }
+                                    else {
+                                        if (type == typeof(DateTime)) {
+                                            if (DateTime.TryParse(defaultValue, out DateTime dt)) {
+                                                valueObj = dt;
+                                            }
+                                            else {
+                                                try {
+                                                    valueObj = Enum.Parse(typeof(DefaultTime), defaultValue, true);
+                                                }
+                                                catch (Exception ex) {
+                                                    throw new LightDataException(string.Format(SR.ConfigDataFieldLoadError, typeName, fieldName, ex.Message));
+                                                }
+                                            }
+                                        }
+                                        else {
+                                            try {
+                                                valueObj = Convert.ChangeType(defaultValue, type);
+                                            }
+                                            catch (Exception ex) {
+                                                throw new LightDataException(string.Format(SR.ConfigDataFieldLoadError, typeName, fieldName, ex.Message));
+                                            }
+                                        }
+                                    }
+                                    dataFieldMap.DefaultValue = valueObj;
+                                }
+                                setting.AddDataFieldMapConfig(fieldName, dataFieldMap);
+                            }
+                        }
+                        var relationFieldConfigs = typeConfig.RelationFields;
+                        if (relationFieldConfigs != null && relationFieldConfigs.Length > 0) {
+                            int fieldIndex = 0;
+                            foreach (var fieldConfig in relationFieldConfigs) {
+                                fieldIndex++;
+                                if (fieldConfig.RelationPairs != null && fieldConfig.RelationPairs.Length > 0) {
+                                    var fieldName = fieldConfig.FieldName;
+                                    if (fieldName == null) {
+                                        throw new LightDataException(string.Format(SR.ConfigDataFieldNameIsNull, typeName, fieldIndex));
+                                    }
+                                    var property = dataType.GetProperty(fieldName);
+                                    if (property == null) {
+                                        throw new LightDataException(string.Format(SR.ConfigDataFieldIsNotExists, typeName, fieldName));
+                                    }
+                                    var dataFieldMap = new RelationFieldMapConfig(fieldName);
+                                    foreach (var pair in fieldConfig.RelationPairs) {
+                                        dataFieldMap.AddRelationKeys(pair.MasterKey, pair.RelateKey);
+                                    }
+                                    setting.AddRelationFieldMapConfig(fieldName, dataFieldMap);
+                                }
+                            }
+                        }
+                        settings[dataType] = setting;
+                    }
+                }
+            }
+            SettingDict = settings;
+        }
+
+        private static void CheckData()
+        {
+            if (!Initialed) {
+                lock (locker) {
+                    if (!Initialed) {
+                        Initial();
+                    }
+                }
+            }
+        }
+
+        public static DataTableMapperSetting GetSetting(Type type)
+        {
+            CheckData();
+            SettingDict.TryGetValue(type, out DataTableMapperSetting setting);
+            return setting;
+        }
+    }
+}

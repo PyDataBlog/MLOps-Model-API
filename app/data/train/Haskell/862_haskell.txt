@@ -1,0 +1,104 @@
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE DeriveGeneric #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE GADTs #-}
+module Network.Krist.Transaction
+  where
+
+import Data.Aeson
+import GHC.Generics
+import Data.Monoid
+
+import Control.Krist.Request
+import Control.Monad
+import Control.Monad.IO.Class
+
+import System.FilePath
+import Network.Krist.Node
+
+data Transaction
+  = Transaction { transID :: Int
+                , transFrom :: Maybe String
+                , transTo :: String
+                , transValue :: Int
+                , transTime :: String
+                , transName :: Maybe String
+                , transMeta :: Maybe String }
+  deriving (Eq, Show, Ord)
+
+data TrnsRequestResp
+  = TrnsRequestResp { ok :: Bool
+                    , transaction :: Transaction }
+  deriving (Eq, Show, Ord, Generic)
+
+data TransesRequestRep
+  = TransesRequestRep { ok :: Bool
+                      , count :: Int
+                      , total :: Int
+                      , transactions :: [Transaction] }
+  deriving (Eq, Show, Ord, Generic)
+
+instance FromJSON TrnsRequestResp
+instance FromJSON TransesRequestRep
+instance FromJSON Transaction where
+  parseJSON (Object v)
+    = Transaction <$> v .: "id"
+                  <*> v .: "from"
+                  <*> v .: "to"
+                  <*> v .: "value"
+                  <*> v .: "time"
+                  <*> v .: "name"
+                  <*> v .: "metadata"
+  parseJSON _ = mzero
+
+data TransRequest a where
+  GetTransaction     :: Int -> TransRequest Transaction
+  GetTransactions    :: Int -> Int -> TransRequest [Transaction]
+  GetLatest          :: Int -> Int -> TransRequest [Transaction]
+  GetLatestMined     :: Int -> Int -> TransRequest [Transaction]
+  GetAddrLatest      :: String -> Int -> Int -> TransRequest [Transaction]
+  GetAddrLatestMined :: String -> Int -> Int -> TransRequest [Transaction]
+
+instance Requestable TransRequest where
+  makeRequest n (GetTransaction x)
+    = selector transaction $ requestJSON n ("transactions" </> show x)
+  makeRequest n (GetTransactions a o)
+    = selector transactions $ requestJSON n ("transactions?limit=" <> show a <> "&offset=" <> show o)
+  makeRequest n (GetLatest a o)
+    = selector transactions $ requestJSON n $ concat [ "transactions/latest?limit=" , show a
+                                                     , "&offset=", show o
+                                                     , "&excludeMined=true" ]
+  makeRequest n (GetLatestMined a o)
+    = selector transactions $ requestJSON n $ concat [ "transactions/latest?limit=" , show a
+                                                     , "&offset=", show o
+                                                     , "&excludeMined=false" ]
+
+  makeRequest n (GetAddrLatestMined a l o)
+    = selector transactions $ requestJSON (n `nodeAt` ("addresses" </> a))
+       $ concat [ "transactions?limit=" , show l
+                , "&offset=", show o
+                , "&excludeMined=true" ] 
+
+  makeRequest n (GetAddrLatest a l o)
+    = selector transactions $ requestJSON (n `nodeAt` ("addresses" </> a))
+       $ concat [ "transactions?limit=" , show l
+                , "&offset=", show o
+                , "&excludeMined=falsed" ]
+
+getTransaction :: MonadIO m => Node -> Int -> m (Either ReqError Transaction)
+getTransaction n x = makeRequest n (GetTransaction x)
+
+getTransactions :: MonadIO m => Node -> Int -> Int -> m (Either ReqError [Transaction])
+getTransactions n a o = makeRequest n (GetTransactions a o)
+
+getLatestTransactions :: MonadIO m => Node -> Int -> Int -> m (Either ReqError [Transaction])
+getLatestTransactions n a o = makeRequest n (GetLatest a o)
+
+getLatestMined :: MonadIO m => Node -> Int -> Int -> m (Either ReqError [Transaction])
+getLatestMined n a o = makeRequest n (GetLatestMined a o)
+
+addressTransactions :: MonadIO m => Node -> String -> Int -> Int -> m (Either ReqError [Transaction])
+addressTransactions n a l o = n `makeRequest` GetAddrLatest a l o
+
+addressMined :: MonadIO m => Node -> String -> Int -> Int -> m (Either ReqError [Transaction])
+addressMined n a l o = n `makeRequest` GetAddrLatestMined a l o

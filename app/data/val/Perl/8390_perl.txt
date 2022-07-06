@@ -1,0 +1,151 @@
+#!/usr/bin/env perl
+# Integration tests for build command line tool
+#***************************************************************************
+#  Copyright 2014-2017, mettatw <mettatw@users.noreply.github.com>
+#
+#  Licensed under the Apache License, Version 2.0 (the "License");
+#  you may not use this file except in compliance with the License.
+#  You may obtain a copy of the License at
+#
+#      http://www.apache.org/licenses/LICENSE-2.0
+#
+#  Unless required by applicable law or agreed to in writing, software
+#  distributed under the License is distributed on an "AS IS" BASIS,
+#  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+#  See the License for the specific language governing permissions and
+#  limitations under the License.
+#***************************************************************************
+use warnings; use strict; use v5.14;
+
+use FindBin qw($Bin);
+use lib "$Bin/local/lib/perl5";
+use lib "$Bin/../local/lib/perl5";
+use lib "$Bin/../lib";
+use Test2::V0;
+use Test2::Tools::Spec ':ALL';
+spec_defaults case => (iso => 1, async => 1);
+
+use File::Slurp;
+use POSIX qw(strftime);
+use IPC::Cmd qw( run_forked );
+$ENV{'PATH'} = "$Bin/../bin:$ENV{'PATH'}";
+
+use lib "$Bin";
+use CommonBuildTest;
+
+describe 'Run the build generator and check results' => sub {
+
+  before_all 'Build test repo' => sub {
+    prepareBuildDir("$Bin/build", "$Bin/data");
+  };
+
+  before_case 'Fallback options' => sub {
+    my $self = shift;
+    $self->{'.param'} = '';
+    $self->{'.tofail'} = 0;
+    $self->{'.ans'} = 'ATemplate';
+  };
+
+  case 'simple source script' => sub {
+    my $self = shift;
+    $self->{'.input'} = 'shellframe/source.sh';
+  };
+
+  case 'simple shell script' => sub {
+    my $self = shift;
+    $self->{'.input'} = 'shellframe/shell.sh';
+  };
+
+  case 'exported shell script' => sub {
+    my $self = shift;
+    $self->{'.input'} = 'shellframe/hash.sh';
+  };
+
+  case 'variable source' => sub {
+    my $self = shift;
+    $self->{'.input'} = 'shellframe/var.sh';
+  };
+
+  case 'double tag only appear once' => sub {
+    my $self = shift;
+    $self->{'.input'} = 'shellframe/doubletag.sh';
+  };
+
+  case 'misc thing: auto external build do work' => sub {
+    my $self = shift;
+    $self->{'.input'} = 'shellframe/meta.sh';
+    $self->{'.ans'} = strftime("%Y%m%d", localtime);
+  };
+
+  case 'Options (without shell-begin)' => sub {
+    my $self = shift;
+    $self->{'.input'} = 'shellframe/optionsonly.sh';
+    $self->{'.ans'} = "325\nquote\n1\n1\n326\n0\nvalue\n1";
+  };
+
+  case 'Scalar options' => sub {
+    my $self = shift;
+    $self->{'.input'} = 'shellframe/options.sh';
+    $self->{'.ans'} = "5566\n33.44";
+  };
+
+  case 'Scalar options: specify from command line' => sub {
+    my $self = shift;
+    $self->{'.param'} = 'optionnumber=3344';
+    $self->{'.input'} = 'shellframe/options.sh';
+    $self->{'.ans'} = "3344\n33.44";
+  };
+
+  case 'Scalar options: required not met' => sub {
+    my $self = shift;
+    $self->{'.param'} = 'optionnumber=';
+    $self->{'.input'} = 'shellframe/options.sh';
+    $self->{'.tofail'} = 1;
+  };
+
+  case 'Scalar options: mismatched type' => sub {
+    my $self = shift;
+    $self->{'.param'} = 'optionfloat=ABCD';
+    $self->{'.input'} = 'shellframe/options.sh';
+    $self->{'.tofail'} = 1;
+  };
+
+  case 'Scalar options: mismatched type 2' => sub {
+    my $self = shift;
+    $self->{'.param'} = 'optionnumber=3.14';
+    $self->{'.input'} = 'shellframe/options.sh';
+    $self->{'.tofail'} = 1;
+  };
+
+  case 'Array options: specify from command line' => sub {
+    my $self = shift;
+    $self->{'.param'} = 'optionnumber=11 --optionnumber=22';
+    $self->{'.input'} = 'shellframe/array.sh';
+    $self->{'.ans'} = "11 22";
+  };
+
+  case 'Array options: wrong type' => sub {
+    my $self = shift;
+    $self->{'.param'} = 'optionnumber=ABCD';
+    $self->{'.input'} = 'shellframe/array.sh';
+    $self->{'.tofail'} = 1;
+  };
+
+  it 'Run fine and answer correct' => sub {
+    my $self = shift;
+    my $stats = run_forked(qq(
+      cd $Bin/build && run/$self->{'.input'} $self->{'.param'}
+    ));
+
+    if ($self->{'.tofail'} == 1) {
+      isnt($stats->{'exit_code'}, 0, $stats->{'stderr'});
+    } else {
+      my $output = $stats->{'stdout'};
+      chomp($output);
+      is($stats->{'exit_code'}, 0, $stats->{'stderr'});
+      is($output, $self->{'.ans'}, 'correct answer');
+    }
+  }; # end test Run ok
+}; # end test fix Run the build generator and check results
+
+done_testing;

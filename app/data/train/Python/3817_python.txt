@@ -1,0 +1,187 @@
+from django import forms
+from django.core import validators
+from comperio.accounts.models import cUser, Settings, cGroup
+from django.core.validators import email_re
+import random, datetime, sha
+
+MIN_PASSWORD_LENGTH = 6
+
+class LoginForm(forms.Form):
+    """account login form"""
+    username = forms.CharField(widget=forms.TextInput(attrs={'class':'span-5', 'placeholder':'username', 'tabindex':'1'}), help_text="username or email")
+    password = forms.CharField(widget=forms.PasswordInput(attrs={'class':'span-5 char_count','placeholder':'password', 'tabindex':'2'}))
+
+class RegistrationForm(forms.Form):
+    """user registration form"""
+    
+    def check_consent(val):
+        """check if the user has agreed to the consent form"""
+        return val
+    
+    username = forms.CharField(widget=forms.TextInput(attrs={'class':'span-5', 'placeholder':'username'}), max_length=30)
+    email = forms.CharField(widget=forms.TextInput(attrs={'class':'span-5','placeholder':'email'}), max_length=60, validators=[validators.validate_email])
+    password1 = forms.CharField(widget=forms.PasswordInput(attrs={'class':'span-5 char_count','placeholder':'password'}), max_length=60, validators=[validators.MinLengthValidator(MIN_PASSWORD_LENGTH)])
+    password2 = forms.CharField(widget=forms.PasswordInput(attrs={'class':'span-5 char_count','placeholder':'verify password'}), max_length=60, validators=[validators.MinLengthValidator(MIN_PASSWORD_LENGTH)])
+    consent = forms.BooleanField(widget=forms.CheckboxInput() , label="I have read and understood the above consent form")
+    honeypot = forms.CharField(widget=forms.HiddenInput(), required=False)
+    
+    def isValidHuman(self, new_data):
+        """check if the user is human"""
+        return new_data['honeypot'] == ""
+        
+    def isValidUsername(self, new_data):
+        """check if the username is valid"""
+        if not cUser.objects.filter(username=new_data['username']):
+            return True
+        return False
+    
+    def isValidEmail(self, new_data):
+        """check if the email is unique"""
+        # TODO: email is ok if same
+        if not cUser.objects.filter(email=new_data['email']):
+            return True
+        return False
+    
+    # TODO: display specific error messages on the form
+    # TODO: form is not passing field errors.
+    def isValidPassword(self, new_data):
+        """
+        check if the passwords match
+        """
+        if len(new_data['password1']) < MIN_PASSWORD_LENGTH or len(new_data['password2']) < MIN_PASSWORD_LENGTH:
+            return False
+        return True
+    
+    def PasswordsMatch(self, new_data):
+        """check if the passwords match"""
+        if new_data['password1'] == new_data['password2']:
+            return True
+        return False
+    
+    
+    def save(self, new_data):
+        """create a new inactive user from the form data"""
+        # make sure email is unique
+        if new_data['consent'] == False:
+            raise forms.ValidationError(u'You must agree to the consent form')
+        try:
+            duplicate = cUser.objects.get(email=new_data['email'])
+        except cUser.DoesNotExist:
+            # make sure we have a valid email
+            if email_re.search(new_data['email']):
+                # Build the activation key for their account                                                                                                                    
+                salt = sha.new(str(random.random())).hexdigest()[:5]
+                activation_key = sha.new(salt+new_data['username']).hexdigest()
+                key_expires = datetime.datetime.today() + datetime.timedelta(2)
+                
+                u = cUser.objects.create(username=new_data['username'],
+                                             email=new_data['email'],
+                                             activation_key=activation_key,
+                                             key_expires=key_expires,
+                                             )
+                
+                u.set_password(new_data['password1'])
+                u.is_active=False
+                u.save()
+                return u
+            # invalid email
+            raise forms.ValidationError(u'invalid email')
+        # duplciate user or bad email
+        raise forms.ValidationError(u'email already in use')
+        return None
+
+class EditAccountForm(forms.Form):
+    """user registration form"""
+    username = forms.CharField(widget=forms.TextInput(attrs={'class':'span-5', 'placeholder':'username'}), max_length=30)
+    email = forms.CharField(widget=forms.TextInput(attrs={'class':'span-5','placeholder':'email'}), max_length=60, validators=[validators.validate_email])
+    password1 = forms.CharField(widget=forms.PasswordInput(attrs={'class':'span-5 char_count','placeholder':'password'}), max_length=60, validators=[validators.MinLengthValidator(MIN_PASSWORD_LENGTH)], required=False)
+    password2 = forms.CharField(widget=forms.PasswordInput(attrs={'class':'span-5 char_count','placeholder':'verify password'}), max_length=60, validators=[validators.MinLengthValidator(MIN_PASSWORD_LENGTH)], required=False)
+    
+    def isValidUsername(self, new_data):
+        """check if the username is valid"""
+        # TODO: username ok if same
+        if not cUser.objects.filter(username=new_data['username']):
+            return True
+        return False
+    
+    # TODO: display specific error messages on the form
+    # TODO: form is not passing field errors.
+    def isValidPassword(self, new_data):
+        """
+        check if the passwords match
+        """
+        if new_data['password1'] != '':
+            if len(new_data['password1']) < MIN_PASSWORD_LENGTH or len(new_data['password2']) < MIN_PASSWORD_LENGTH:
+                return False
+        return True
+    
+    def isValidEmail(self, new_data):
+        """check if the email is unique"""
+        # TODO: email is ok if same
+        if not cUser.objects.filter(email=new_data['email']):
+            return True
+        return False
+    
+    def PasswordsMatch(self, new_data):
+        """check if the passwords match"""
+        if new_data['password1'] == new_data['password2']:
+            return True
+        return False
+    
+    def update(self, request, u):
+        """update an existing user from the form data"""
+        # make sure email is unique
+        new_data = request.POST.copy()
+        if u.email != new_data['email']:
+            try:
+                duplicate = cUser.objects.get(email=new_data['email'])
+                raise forms.ValidationError(u'email is not available')
+            except cUser.DoesNotExist:
+                u.email = new_data['email']
+            
+        if u.username != new_data['username']:
+            try:
+                duplicate = cUser.objects.get(username=new_data['username'])
+                raise forms.ValidationError(u'username is not available')
+            except cUser.DoesNotExist:
+                u.username = new_data['username']
+            
+        if new_data['password1'] != '':
+            u.set_password(new_data['password1'])
+            
+        u.save()
+    
+class CreateGroupForm(forms.Form):
+    """create a new user group"""
+    title = forms.CharField(widget=forms.TextInput(attrs={'class':'span-10 title',}), max_length=100)
+    description = forms.CharField(widget=forms.Textarea(attrs={'class':'span-10 description-textarea',}), max_length=1000, required=False)
+    
+#
+#
+# Hierarchical: only managers can send invites (individual and mass)
+# overview page of students/minions
+# can view code quality and comment ratio.
+#
+# Peer: all members can send invites, only managers can send mass invites
+#
+#
+
+    type = forms.CharField(widget=forms.Select(choices=cGroup.types), required=False)
+    visibility = forms.CharField(widget=forms.Select(choices=cGroup.visibility_types), required=False)
+    open_registration = forms.CharField(widget=forms.CheckboxInput(), help_text="Open registration allows anyone to request group membership")
+    
+class SettingsForm(forms.ModelForm):
+    """profile settings form"""
+    class Meta:
+        model = Settings
+        exclude = ("user",)
+
+# TODO: Should we allow users to change their username?
+#
+#class EditProfileForm(forms.ModelForm):
+#    """edit profile details"""
+#    username = forms.CharField(widget=forms.TextInput(attrs={'class':'span-5', 'placeholder':'username'}), max_length=30)
+#    email = forms.CharField(widget=forms.TextInput(attrs={'class':'span-5','placeholder':'email'}), max_length=30, validators=[validators.validate_email])
+#    password1 = forms.CharField(widget=forms.PasswordInput(attrs={'class':'span-5 char_count','placeholder':'password'}), max_length=60, validators=[validators.MinLengthValidator(MIN_PASSWORD_LENGTH)])
+#    password2 = forms.CharField(widget=forms.PasswordInput(attrs={'class':'span-5 char_count','placeholder':'verify password'}), max_length=60, validators=[validators.MinLengthValidator(MIN_PASSWORD_LENGTH)])
+#    

@@ -1,0 +1,65 @@
+<?php
+class GoogleDataAPI {
+	const GOOGLE_OAUTH_REQUEST_TOKEN_API = 'https://www.google.com/accounts/OAuthGetRequestToken';
+	const GOOGLE_OAUTH_ACCESS_TOKEN_API = 'https://www.google.com/accounts/OAuthGetAccessToken';
+	const GOOGLE_OAUTH_AUTHORIZE_API ='https://www.google.com/accounts/OAuthAuthorizeToken';
+	
+	const GOOGLE_POCO_CONTACT_INFO_API = 'http://www-opensocial.googleusercontent.com/api/people/@me/@self';
+	
+	public $oauth;
+	public $scopes = array("http://www.google.com/calendar/feeds/", "http://www.blogger.com/feeds/");
+	
+	public function __construct ($consumer_key, $secret_key, $debug_mode = false) {
+		$this->oauth = new OAuth(
+			$consumer_key,
+			$secret_key,
+			OAUTH_SIG_METHOD_HMACSHA1,
+			OAUTH_AUTH_TYPE_URI
+		);
+		if ($debug_mode) $this->oauth->enableDebug();
+	}
+	
+	public function getRequestToken ($callback) {
+		$config = Config::getInstance();
+		try {
+			$request_token_url = self::GOOGLE_OAUTH_REQUEST_TOKEN_API."?".
+											"scope=".$this->_encodeScopes()."&".
+											"oauth_callback=".urlencode($callback)."&".
+											"xoauth_displayname=".urlencode($config->app_title);
+			$array_response = $this->oauth->getRequestToken($request_token_url);
+			$_SESSION[$config->namespace."request_token_resp"] = $array_response;
+			$authorize_url = self::GOOGLE_OAUTH_AUTHORIZE_API."?".
+											"oauth_token=".$array_response['oauth_token'];
+			header ("Location: ".$authorize_url);
+			exit();
+		} catch (OAuthException $e) {
+			echo "Response: ".$e->lastResponse."\n";
+		}
+	}
+	
+	public function exchangeToken () {
+		$config = Config::getInstance();
+		try {
+			$oauth_token = $_SESSION[$config->namespace."request_token_resp"]["oauth_token"];
+			$oauth_token_secret = $_SESSION[$config->namespace."request_token_resp"]["oauth_token_secret"];
+			$this->oauth->setToken($oauth_token,$oauth_token_secret);
+			return $this->oauth->getAccessToken(self::GOOGLE_OAUTH_ACCESS_TOKEN_API);
+		} catch (OAuthException $e) {
+			echo "Response: ".$e->lastResponse."\n";
+		}
+	}
+	
+	public function getUserProfile ($access_token, $token_secret) {
+		$this->oauth->setToken($access_token, $token_secret);
+		$this->oauth->setAuthType(OAUTH_AUTH_TYPE_AUTHORIZATION);
+		$this->oauth->fetch(self::GOOGLE_POCO_CONTACT_INFO_API);
+		$json = json_decode($this->oauth->getLastResponse());
+		return $json;
+	}
+	
+	private function _encodeScopes () {
+		$scopes = array_map("urlencode", $this->scopes);
+		return implode("%20", $scopes);
+	}
+}
+?>

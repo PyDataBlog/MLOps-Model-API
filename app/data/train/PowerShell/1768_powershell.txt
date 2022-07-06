@@ -1,0 +1,191 @@
+﻿function Add-LineComment
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(HelpMessage = 'The line number to begin selection on', Mandatory = $true)]
+        [int]$LineNumber
+    )
+
+    # no matter what, the LineNumber will always be greater than or equal to 1 for this and Position
+    if ($LineNumber -le 0) {
+       $e = New-Object System.ArgumentOutOfRangeException -ArgumentList `
+                "Must provide an argument greater than or equal to 1 for the 'LineNumber' parameter", 
+                $([System.ArgumentException]@{Source = "Add-LineComment function"})
+        Write-Error -Exception $e -Message $e.Message -RecommendedAction "Call 'Get-Help Add-LineComment' for examples of proper usage"
+        return
+    }
+
+    if ($LineNumber -gt $psISE.CurrentFile.Editor.LineCount) {
+        $e = New-Object System.ArgumentOutOfRangeException -ArgumentList `
+                "The argument supplied to the 'LineNumber' parameter has a higher index than total line count for the script", 
+                $([System.ArgumentException]@{Source = "Add-LineComment function"})
+        Write-Error -Exception $e -Message $e.Message -RecommendedAction "Call 'Get-Help Add-LineComment' for examples of proper usage"
+        return
+    }
+
+    # this variable is really just for object-shortcutting... So I don't have to type $psISE.CurrentFile.Editor each time
+    $editor = $psISE.CurrentFile.Editor
+    
+    # Just one thing to ensure the thing works across selections,
+    # and then on to unit testing to make sure multi-line commenting works
+    if ($editor.SelectedText.Contains("`n"))
+    {
+        $commentedText = "<#`n`n{0}`n`n#>" -f $editor.SelectedText
+        $editor.InsertText($commentedText)
+        return
+    }
+
+    $currentLine = $editor.CaretLine
+    $currentCol  = $editor.CaretColumn
+
+    # if all is okay then we'll simply leave
+    $editor.SetCaretPosition($LineNumber, 1)
+    
+    # check to ensure the current line is not null or whitespace, because if it is,
+    # there's no reason to comment it (I don't think)
+    if ([string]::IsNullOrWhiteSpace($editor.CaretLineText) -or $editor.GetLineLength($editor.CaretLine) -eq 0)
+    {
+        # means there's nothing to comment out - go back
+        $editor.SetCaretPosition($currentLine, $currentCol)
+        return
+    }
+
+    # There's no reason why this SHOULD fail at this point...
+    # no use-case for block-commenting in this case, so just comment and go
+    $pos = 1
+    $current = $editor.CaretLineText
+    # 0x20 = TAB (char value)
+    while (([string]::IsNullOrWhiteSpace($current[$pos]) -or $current[$pos] -eq 0x20) -and ($pos -lt $current.Length))
+    {
+        $pos++
+    }
+
+    # position needs to be incremented one more time for some reason...
+    if ($pos -gt 2)
+    {
+        $pos++
+    }
+
+    # should have the first element of the line that is a char value
+    # get the current line and column values, set the caret position to where we think it
+    # should be based off the above info, insert our comment, and select the line for outlining
+    
+    $editor.SetCaretPosition($LineNumber, $pos)
+    $editor.InsertText("#")
+
+    $editor.SelectCaretLine()
+
+    return
+
+}
+
+function Remove-LineComment
+{
+    [CmdletBinding()]
+    param (
+        [Parameter(HelpMessage = 'The line number to begin selection on', Mandatory = $true)]
+        [int]$LineNumber,
+
+        [Parameter(HelpMessage = 'If used, will remove ALL line comments that appear on the beginning of a line.',
+            Mandatory = $false)]
+        [Switch]$RemoveAllBeginningOfLineComments
+    )
+
+#region Input Validation
+
+    # no matter what, the LineNumber will always be greater than or equal to 1 for this and Position
+    if ($LineNumber -le 0) {
+        $e = New-Object System.ArgumentOutOfRangeException -ArgumentList `
+                "Must provide an argument greater than or equal to 1 for the 'LineNumber' parameter", 
+                $([System.ArgumentException]@{Source = "Remove-LineComment function"})
+        Write-Error -Exception $e -Message $e.Message -RecommendedAction "Call 'Get-Help Remove-LineComment' for examples of proper usage"
+        return
+    }
+
+    if ($LineNumber -gt $psISE.CurrentFile.Editor.LineCount) {
+        $e = New-Object System.ArgumentOutOfRangeException -ArgumentList `
+                "The argument supplied to the 'LineNumber' parameter has a higher index than total line count for the script", 
+                $([System.ArgumentException]@{Source = "Remove-LineComment function"})
+        Write-Error -Exception $e -Message $e.Message -RecommendedAction "Call 'Get-Help Remove-LineComment' for examples of proper usage"
+        return
+    }
+
+#endregion Input Validation
+
+    # this variable is really just for object-shortcutting... So I don't have to type $psISE.CurrentFile.Editor each time
+    $editor = $psISE.CurrentFile.Editor
+    $currentLine = $editor.CaretLine
+    
+    $editor.Select($LineNumber, 1, $LineNumber, 1)
+    $current = $editor.CaretLineText
+
+    # check to ensure the current line is not null or whitespace, because if it is,
+    # there's no reason to comment it (I don't think)
+    if ([string]::IsNullOrWhiteSpace($current))
+    {
+        # means there's nothing to comment out
+        return
+    }
+
+    # by the way... There's no reason why this SHOULD fail at this point...
+    # no use-case for block-commenting in this case, so just uncomment and go
+    $pos = $current.IndexOf("#") + 1
+    
+    # normally, [string].IndexOf([char]) would return -1 for not found, but because this
+    # script is adding 1 to the value, we need to check the case of $pos being less than or equal
+    # to 0. No biggie, because the values being returned for the Editors' properties aren't 0-indexed
+    if ($pos -le 0) {
+        # the char value for a comment wasn't found -- EXIT!
+       return
+    }
+
+    # should have the first element of the line that is a char value
+    # set the caret position to where we think it to remove the comments
+    # should be based off the above info, replace our comment, and select the selection that changed
+    $editor.Select($LineNumber, $pos, $LineNumber, $pos + 1)
+    $editor.InsertText("")
+    $editor.SelectCaretLine()
+    
+    # recursion is probably easier in this case... Basically, just re-call the function on itself 
+    # if there's still a comment. The switch param must be equal to $true (which means called) in order
+    # for this to run. Also, I test the value of the switch first because if it's false, we don't want to
+    # waste CPU cycles on a regex - the other part won't ever be true. Just a tiny efficiency thing
+    if ($RemoveAllBeginningOfLineComments -eq $true -and $current -match "^(\s+)?#") {
+         Remove-LineComment -LineNumber $LineNumber -RemoveAllBeginningOfLineComments:$RemoveAllBeginningOfLineComments
+    }
+    
+    return
+    
+}
+
+function PowerShellISE-ExtensionCommand_Add-LineComment
+{
+    Add-LineComment -LineNumber $psISE.CurrentFile.Editor.CaretLine
+}
+
+function PowerShellISE-ExtensionCommand_Remove-LineComment
+{
+    # no parameters - this is just a wrapper for the Add-ons menu item
+    # also, please note that function scope will cause this to always grab the current line
+    Remove-LineComment -LineNumber $psISE.CurrentFile.Editor.CaretLine -RemoveAllBeginningOfLineComments
+}
+
+$menus = $psISE.CurrentPowerShellTab.AddOnsMenu.Submenus
+$menuLoaded = $false
+
+foreach ($m in $menus)
+{
+    if ($m.DisplayName -eq "PS ISE Line Comments")
+    {
+        $menuLoaded = $true
+        break
+    }
+}
+
+# semantically equal to $menuLoaded -eq $false
+if (!$menuLoaded)
+{
+    $newMenu = $menus.Add("PS ISE Line Comments",$null, $null)
+    $newMenu.Submenus.Add("Comment Line Or Selection", {PowerShellISE-ExtensionCommand_Add-LineComment}, "Ctrl+0")
+    $newMenu.Submenus.Add("Uncomment Line", {PowerShellISE-ExtensionCommand_Remove-LineComment},"Ctrl+9")
+}

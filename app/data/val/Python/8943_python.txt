@@ -1,0 +1,100 @@
+#!/usr/bin/env python3
+
+from django.shortcuts import render
+
+# Create your views here.
+
+from CnbetaApis.datas.Models import *
+from CnbetaApis.datas.get_letv_json import get_letv_json
+from CnbetaApis.datas.get_youku_json import get_youku_json
+from django.views.decorators.csrf import csrf_exempt
+
+
+from django.http import *
+from datetime import timezone, timedelta
+import json
+
+
+def getrelate(ids, session):
+    relateds = session.query(Article).filter(Article.id.in_(ids))
+    relateds_arr = []
+    for related in relateds:
+        relateds_arr.append({
+            'id': related.id,
+            'title': related.title,
+            'url': related.url,
+        })
+    return relateds_arr
+
+def get_home_data(request):
+
+    if not request.method == 'GET':
+        raise HttpResponseNotAllowed('GET')
+    lastID = request.GET.get('lastid')
+    limit = request.GET.get('limit') or 20
+
+    session = DBSession()
+    datas = None
+    if lastID:
+        datas = session.query(Article).order_by(desc(Article.id)).filter(and_(Article.introduction != None, Article.id < lastID)).limit(limit).all()
+    else:
+        datas = session.query(Article).order_by(desc(Article.id)).limit(limit).all()
+    values = []
+
+    for data in datas:
+        values.append({
+            'id': data.id,
+            'title': data.title,
+            'url': data.url,
+            'source': data.source,
+            'imgUrl': data.imgUrl,
+            'introduction': data.introduction,
+            'createTime': data.createTime.replace(tzinfo=timezone(timedelta(hours=8))).astimezone(timezone.utc).timestamp(),
+            'related': getrelate(data.related.split(','), session),
+            'readCount': data.readCount,
+            'opinionCount': data.opinionCount,
+        })
+    session.close()
+    return JsonResponse({"result": values})
+
+
+def get_article_content(request):
+    if not request.method == 'GET':
+        raise HttpResponseNotAllowed('GET')
+    article_id = request.GET.get('id')
+    session = DBSession()
+    datas = session.query(Article).filter(Article.id == article_id).all()
+    if not len(datas):
+        raise Http404('Article not exist')
+    data = datas[0]
+    result = {'result': {
+        'id': data.id,
+        'title': data.title,
+        'url': data.url,
+        'imgUrl': data.imgUrl,
+        'source': data.source,
+        'introduction': data.introduction,
+        'createTime': data.createTime.replace(tzinfo=timezone(timedelta(hours=8))).astimezone(timezone.utc).timestamp(),
+        'related': getrelate(data.related.split(','), session),
+        'readCount': data.readCount,
+        'opinionCount': data.opinionCount,
+        'content': json.loads(data.content),
+    }}
+    session.close()
+    return JsonResponse(result)
+
+@csrf_exempt
+def get_video_realUrl(req):
+    if not req.method == 'POST':
+        raise HttpResponseNotAllowed('POST')
+    source_url = req.POST.get('url')
+    source_type = req.POST.get('type')
+    if source_type == "youku":
+        source_url = get_youku_json(source_url)
+    elif source_type == "letv":
+        source_url = get_letv_json(source_url)
+    else:
+        raise Http404('Article not exist')
+
+    return JsonResponse({"result": source_url})
+

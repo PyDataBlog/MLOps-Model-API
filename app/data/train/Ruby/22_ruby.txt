@@ -1,0 +1,65 @@
+Given(/^I have an Auton that has two steps, first step scheduling the next step$/) do
+  class ScheduleSecondStepAuton < Nestene::Auton
+
+    def first
+      context.schedule_step(:second)
+    end
+
+    def second
+      'ok'
+    end
+
+    attr_accessor :context
+
+    attribute foo: Fixnum
+  end
+  @auton_type="ScheduleSecondStepAuton"
+  @auton_id = Celluloid::Actor[:nestene_core].create_auton(@auton_type)
+end
+
+When(/^I schedule the first step that returns the uuid of the second scheduled step$/) do
+  @step_execution_id = Celluloid::Actor[:nestene_core].schedule_step @auton_id, :first
+  @step_execution_id = Celluloid::Actor[:nestene_core].wait_for_execution_result(@auton_id, @step_execution_id)
+end
+
+When(/^I wait for the second step to finish$/) do
+  @execution_result = Celluloid::Actor[:nestene_core].wait_for_execution_result(@auton_id, @step_execution_id)
+end
+
+
+Given(/^I have two autons where first auton schedules step on the other auton$/) do
+  class StepSchedulingAuton < Nestene::Auton
+
+    def schedule_step
+      self.step_id = context.schedule_step_on_auton('step_executor', :step)
+    end
+
+    attr_accessor :context
+
+    attribute step_id: Fixnum
+  end
+
+  class StepExecutorAuton < Nestene::Auton
+
+    def step
+      context.schedule_step(:second)
+    end
+
+    attr_accessor :context
+
+    attribute foo: Fixnum
+  end
+
+  @first_auton_id = Celluloid::Actor[:nestene_core].create_auton('StepSchedulingAuton')
+  @second_auton_id = Celluloid::Actor[:nestene_core].create_auton('StepExecutorAuton','step_executor')
+end
+
+When(/^I schedule the step on the first auton and wait for it's execution$/) do
+  step_id = Celluloid::Actor[:nestene_core].schedule_step @first_auton_id, :schedule_step
+  @second_auton_step_id = Celluloid::Actor[:nestene_core].wait_for_execution_result @first_auton_id, step_id
+
+end
+
+Then(/^second auton should either have scheduled or executed step$/) do
+  Celluloid::Actor[:nestene_core].wait_for_execution_result @second_auton_id, @second_auton_step_id
+end

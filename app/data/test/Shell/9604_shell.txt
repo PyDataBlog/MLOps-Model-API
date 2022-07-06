@@ -1,0 +1,1 @@
+export GRADLE_HOME=$HOME/dev-tools/gradle-1.8/bin

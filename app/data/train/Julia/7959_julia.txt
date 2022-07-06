@@ -1,0 +1,233 @@
+using Images
+using PyPlot
+
+
+@inline gaussian(i, σ) = exp(-i^2/(2*σ^2))
+
+# Create a gaussian filter
+"""
+gaussian filter is generally defined as
+\$ g(x)=e(-x^2/(2*σ^2)) \$
+in case of discrete length of kernel size,
+the normalized form would be:
+\$ \\frac{1}{\\sum{g}}g(x) \$
+"""
+function makegaussianfilter(size::Array{Int,2}, sigma::Array{Float64, 2})
+  m, n = size
+  σ1, σ2 = sigma
+
+  if !isodd(m) || !isodd(n)
+    throw(ArgumentError("length must be odd"))
+  end
+
+  x = n>>1
+  y = m>>1
+  gx = [gaussian(i, σ2) for i in -x:x]
+  gx = gx/sum(gx)
+
+  gy = [gaussian(i, σ1) for i in -y:y]
+  gy = gy/sum(gy)
+
+  f = gy*gx'
+  return f::Array{Float64,2}
+end
+
+# Create a binomial filter
+function makebinomialfilter(length::Array{Int,2})
+
+  if length[1] <= 0 || length[2] <= 0
+    throw(ArgumentError(("length must be greater zero!")))
+  end
+  m, n = length - 1
+  normx = 1/(2^n)
+  normy = 1/(2^m)
+  bx = [binomial(n, k) for k in 0:n]
+  by = [binomial(m, k) for k in 0:m]
+  f = normx*normy*(by*bx')
+  return f::Array{Float64,2}
+end
+
+# Downsample an image by a factor of 2
+function downsample2(A::Array{Float64,2})
+  m, n = size(A)
+  D = [A[i, j] for i=1:2:m, j=1:2:n]
+  return D::Array{Float64,2}
+end
+
+# Upsample an image by a factor of 2
+function upsample2(A::Array{Float64,2}, fsize::Array{Int,2}, neighbors="replicate")
+  m, n = size(A)
+
+  # image container
+  U = zeros((2*m, 2*n))
+
+  # fill the zero-neighbors via replicating non zero pixel
+  if neighbors=="replicate"
+    [U[i:i+1, j:j+1] = A[Int((i+1)/2), Int((j+1)/2)] for i=1:2*m, j=1:2*n if (((i+1)%2)==0) && (((j+1)%2)==0)]
+  elseif neighbors=="zero" # let pixels be zero
+    [U[i, j] = A[Int((i+1)/2), Int((j+1)/2)] for i=1:2*m, j=1:2*n if (((i+1)%2)==0) && (((j+1)%2)==0)]
+  else
+    throw(ArgumentError("Unvalid neighbors value!"))
+  end
+
+  kernel = makebinomialfilter(fsize)
+
+  U = imfilter(U, centered(kernel), [border="reflect"])*4
+  return U::Array{Float64,2}
+end
+
+# Build a gaussian pyramid from an image.
+# The output array should contain the pyramid levels in decreasing sizes.
+function makegaussianpyramid(im::Array{Float32,2},nlevels::Int,fsize::Array{Int,2},sigma::Float64)
+  G = Array{Array{Float64,2},1}()
+  imgds = float64.(copy(im))
+
+  kernel = makegaussianfilter(fsize, [sigma sigma])
+  push!(G, imgds)
+
+  for i=1:nlevels-1
+    imfiltered = imfilter(imgds, centered(kernel))
+    imgds = downsample2(imfiltered)
+    push!(G, imgds)
+  end
+  return G::Array{Array{Float64,2},1}
+end
+
+# Display a given image pyramid (laplacian or gaussian)
+function displaypyramid(P::Array{Array{Float64,2},1})
+  hlen = sum([size(i)[1] for i in P])
+  canvas = zeros(size(P[1])[1], hlen)
+
+  index = 1
+  for p in P
+    m, n = size(p)
+
+    # normalize image to [0, 1]
+    pmin, pmax = minimum(p), maximum(p)
+    p = (1/(pmax - pmin))*(p - pmin)
+
+    # add normilized image to the canvas
+    canvas[1: m, index:index+n-1] = p
+    index += n
+  end
+
+  figure()
+  imshow(canvas, "gray", interpolation="none")
+  gcf()
+
+  return nothing::Void
+end
+
+# Build a laplacian pyramid from a gaussian pyramid.
+# The output array should contain the pyramid levels in decreasing sizes.
+function makelaplacianpyramid(G::Array{Array{Float64,2},1},nlevels::Int,fsize::Array{Int,2})
+  depth = size(G)[1]
+  L = Array{Array{Float64,2},1}()
+
+  for i=1:depth-1
+    curimg = G[i]
+    previmg = G[i+1]
+    previmg = upsample2(previmg, fsize, "zero")
+    push!(L, curimg - previmg)
+  end
+  push!(L, G[depth])
+  return L::Array{Array{Float64,2},1}
+end
+
+# Amplify frequencies of the first two layers of the laplacian pyramid
+function amplifyhighfreq2(L::Array{Array{Float64,2},1})
+  A = copy(L)
+  A[1] *= 0.01
+  A[2] *= 50
+  A[3] *= 0.001
+  A[4] *= 0.001
+  A[5] *= 0.001
+  return A::Array{Array{Float64,2},1}
+end
+
+# Reconstruct an image from the laplacian pyramid
+function reconstructlaplacianpyramid(L::Array{Array{Float64,2},1},fsize::Array{Int,2})
+  depth = size(L)[1]
+
+  img = L[depth]
+  for i=depth-1:-1:1
+    imgus = upsample2(img, fsize, "zero")
+    img = L[i] + imgus
+  end
+  img = float64.(img)
+  return img::Array{Float64,2}
+end
+
+# Problem 1: Image Pyramids and Image Sharpening
+function problem1()
+  # parameters
+  fsize = [5 5]
+  sigma = 1.5
+  nlevels = 6
+
+  # load image
+  im = PyPlot.imread("asgn2_data_v1/data-julia/a2p1.png")
+
+  # create gaussian pyramid
+  G = makegaussianpyramid(im,nlevels,fsize,sigma)
+
+  # display gaussianpyramid
+  displaypyramid(G)
+  title("Gaussian Pyramid")
+
+  # create laplacian pyramid
+  L = makelaplacianpyramid(G,nlevels,fsize)
+
+  # dispaly laplacian pyramid
+  displaypyramid(L)
+  title("Laplacian Pyramid")
+
+  # amplify finest 2 subands
+  L_amp = amplifyhighfreq2(L)
+
+  # reconstruct image from laplacian pyramid
+  im_rec = reconstructlaplacianpyramid(L_amp,fsize)
+
+  # display original and reconstructed image
+  figure()
+  subplot(131)
+  imshow(im,"gray",interpolation="none")
+  axis("off")
+  title("Original Image")
+  subplot(132)
+  imshow(im_rec,"gray",interpolation="none")
+  axis("off")
+  title("Reconstructed Image")
+  subplot(133)
+  imshow(im-im_rec,"gray",interpolation="none")
+  axis("off")
+  title("Difference")
+  gcf()
+
+  return
+end
+
+function test()
+  img = PyPlot.imread("asgn2_data_v1/data-julia/a2p1.png")
+  imgds = downsample2(float64.(img))
+  imgus_zero = upsample2(imgds, [5 5], "zero")*4
+  imgus_replicate = upsample2(imgds, [5 5])*4
+
+  plt = PyPlot
+  fig = plt.figure("pyplot_subplot",figsize=(2,2))
+  plt.subplot(221)
+  plt.title("Originial Image")
+  plt.imshow(img, "gray", interpolation="none")
+
+  plt.subplot(222)
+  plt.title("Down sampled Image")
+  plt.imshow(imgds, "gray", interpolation="none")
+
+  plt.subplot(223)
+  plt.title("Up sampled Image with zeros")
+  plt.imshow(imgus_zero, "gray", interpolation="none")
+
+  plt.subplot(224)
+  plt.title("Up sampled Image with replicated neighbors")
+  plt.imshow(imgus_replicate, "gray", interpolation="none")
+end

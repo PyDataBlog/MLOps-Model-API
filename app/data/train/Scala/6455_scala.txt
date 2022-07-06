@@ -1,0 +1,104 @@
+package com.plasmaconduit.jwt
+
+import java.util.Date
+
+import com.plasmaconduit.json._
+import com.plasmaconduit.jwa.DigitalSignatureOrMAC
+import com.plasmaconduit.jws.JSONWebSignature
+import com.plasmaconduit.validation.{Failure, Success, Validation}
+
+import scala.util.control.NoStackTrace
+
+object JSONWebToken {
+
+  def sign(alg: DigitalSignatureOrMAC, secretOrKey: Array[Byte], payload: JsValue): String = {
+    val signature = JSONWebSignature(
+      alg     = alg,
+      typ     = Some("JWT"),
+      payload = payload.toString.getBytes("UTF-8")
+    )
+    signature.sign(secretOrKey)
+  }
+
+  def verify(secretOrKey: Array[Byte],
+             token: String,
+             issuer: Option[String] = None,
+             audience: Seq[String] = Seq(),
+             time: Option[Long] = None): Validation[JwtVerificationError, JsValue] =
+  for {
+    verified <- JSONWebSignature.verify(secretOrKey, token).mapError(_ => JwtSignatureVerificationFailure)
+    payload  <- JsonParser.parse(new String(verified.payload, "UTF-8")).mapError(_ => JwtJsonParseFailure)
+    issuer   <- verifyIssuer(issuer, payload)
+    audience <- verifyAudience(audience, payload)
+    expiry   <- verifyExpiration(time, payload)
+  } yield payload
+
+  private def verifyIssuer(issuer: Option[String], json: JsValue): Validation[JwtVerificationError, JsValue] = {
+    def matchesIssuer(valid: String, supplied: String) = {
+      if (valid == supplied) Success(json)
+      else                   Failure(JwtInvalidIssuer)
+    }
+    issuer match {
+      case None    => Success(json)
+      case Some(n) => for {
+        obj <- json.as[Map[String, JsValue]].mapError(_ => JwtIssuerFormatError)
+        iss <- obj.get("iss").fold[Validation[JwtVerificationError, JsValue]](Failure(JwtMissingIssuerField))(n => Success(n))
+        str <- iss.as[String].mapError(_ => JwtIssuerFormatError)
+        _   <- matchesIssuer(n, str)
+      } yield json
+    }
+  }
+
+  private def verifyAudience(audience: Seq[String], json: JsValue): Validation[JwtVerificationError, JsValue] = {
+    def matchesAudience(audValue: JsValue) = audValue match {
+      case JsString(s) =>
+        if (audience.contains(s)) Success(json)
+        else Failure(JwtInappropriateAudience)
+      case JsArray(a) =>
+        a.as[String] match {
+          case Failure(_)      => Failure(JwtInappropriateAudience)
+          case Success(string) =>
+            if (audience.toSet.contains(string)) Success(json)
+            else Failure(JwtInappropriateAudience)
+        }
+      case _ => Failure(JwtInappropriateAudience)
+    }
+    if (audience.size > 0) {
+      for {
+        obj    <- json.as[Map[String, JsValue]].mapError(_ => JwtAudienceFormatError)
+        aud    <- obj.get("aud").fold[Validation[JwtVerificationError, JsValue]](Failure(JwtInappropriateAudience))(n => Success(n))
+        result <- matchesAudience(aud)
+      } yield result
+    } else {
+      Success(json)
+    }
+  }
+
+  private def verifyExpiration(time: Option[Long], json: JsValue): Validation[JwtVerificationError, JsValue] = {
+    def testExpiration(exp: Option[JsValue]) = exp match {
+      case None    => Success(json)
+      case Some(v) => v match {
+        case JsLong(n) =>
+          if (time.getOrElse(new Date().getTime / 1000) <= n) Success(json)
+          else Failure(JwtSessionExpired)
+        case _ => Success(json)
+      }
+    }
+    for {
+      obj    <- json.as[Map[String, JsValue]].mapError(_ => JwtExpirationFormatError)
+      result <- testExpiration(obj.get("exp"))
+    } yield result
+  }
+
+}
+
+sealed trait JwtVerificationError
+case object JwtSignatureVerificationFailure extends JwtVerificationError
+case object JwtJsonParseFailure extends JwtVerificationError
+case object JwtMissingIssuerField extends JwtVerificationError
+case object JwtIssuerFormatError extends JwtVerificationError
+case object JwtInvalidIssuer extends JwtVerificationError
+case object JwtAudienceFormatError extends JwtVerificationError
+case object JwtInappropriateAudience extends JwtVerificationError
+case object JwtExpirationFormatError extends JwtVerificationError
+case object JwtSessionExpired extends JwtVerificationError

@@ -1,0 +1,291 @@
+module RoHelper
+  module Cmd
+    module Ins
+      module Misc
+        def new_old_meth_name_map
+          self.class.meths.each do |meth_name|
+            meth_name = meth_name.to_s
+            new_meth_name = meth_name.gsub(%r{\_}, "")
+            new_old_meth_name_map[:"#{new_meth_name}"] = meth_name
+          end
+        end
+
+        def ivs(iv, val, *args, &blk)
+          instance_variable_set(:"@#{iv}", val)
+        end
+
+        def ivg(iv, *args, &blk)
+          instance_variable_get(:"@#{iv}")
+        end
+
+        attr_writer :cur_pj_name
+
+        def cur_pj_name
+          basename = File.basename(Dir.pwd).gsub(%r{\.\w+$}, "")
+          @cur_pj_name ||= basename
+        end
+
+        def tmply_set_opt(*args, &blk)
+          args, opts = args.ro_opts
+          kls_opts_obj.tmply_set do
+            kls_opts_obj.set(opts)
+            kls_opts
+            yield
+          end
+        end
+
+        def tmply_set_force(*args, &blk)
+          tmply_set_opt force: true, &blk
+        end
+
+        def pck(pid, *args, &blk)
+          Process.kill("HUP", pid)
+        end
+
+        def new_old_meth_name_map
+          @new_old_meth_name_map ||= {}
+        end
+
+        def load_ro_bin(path, *args, &blk)
+          ::RoCmd.ro_args = args
+          require path
+        end
+
+        def to_args(*args, &blk)
+
+          new_args = []
+          args.each do |arg|
+            new_args << lambda do
+              if arg.is_a? String
+                _to_args(arg)
+              elsif arg.is_a? Array
+                arg.flatten
+              else
+                arg
+              end
+            end.call
+          end
+
+          new_args.flatten
+        end
+
+        def _to_args(str)
+          # split by ""
+          parts = split_by_quote_smth_quote(str)
+          r = parts.map do |e|
+            r = e
+            unless e.match(%r{[\'\"]})
+              r = e.split(" ")
+            end
+            r
+          end.flatten
+
+          r
+        end
+
+        def split_by_quote_smth_quote(str)
+          a = str.split(%r{\s(?=([\"\']))})
+          a.delete_if do |e|
+            if e.is_a?(String)
+              e.chomp.match(%r{^[\"\']$})
+            end
+          end
+          a
+        end
+
+        def parent_basename_basename(path)
+          d, f = parent_basename_and_basename(path)
+          File.join(d, f)
+        end
+
+        def pbb(*args, &blk)
+          parent_basename_basename(*args, &blk)
+        end
+
+        def parent_basename_and_basename(path)
+          asr path, :have_val?
+
+          p = Pathname.new(path)
+          d = p.parent.basename.to_s
+          f = p.basename.to_s.gsub(%r{\.\w+$}, "")
+          return d, f
+        end
+
+        def pbnb(*args, &blk)
+          parent_basename_and_basename(*args, &blk)
+        end
+
+        def path_match_path_sc(path_sc, *args, &blk)
+          ps = Pathname.new(path_sc)
+          dir_sc = ps.parent.to_s
+          file_sc = File.basename(path_sc).gsub(%r{\.\w+$}, "")
+          path_match_dir_file_sc(dir_sc, file_sc, *args, &blk)
+        end
+
+        def path_match_dir_file_sc(dir_sc, file_sc, *args, &blk)
+          args, opts = args.ro_opts
+
+          _dirs = dirs(dir_sc, opts)
+
+          file = lambda do
+            _dirs.each do |d|
+              Dir[File.join(d, '**')].each do |f|
+                if test(?f, f) and File.basename(f).implicit_match?(file_sc)
+                  return f
+                end
+              end
+            end
+            nil
+          end.call
+
+          file
+        end
+
+        def dirs(dir_sc, opts)
+          in_dir = opts[:in] || %w(lib)
+
+          all_dirs(in_dir)
+
+          _dirs = select_matched_dirs(dir_sc)
+
+          ignore_matched_dirs(_dirs, opts)
+
+          include_matched_dirs(_dirs, opts)
+
+          _dirs
+        end
+
+        def all_dirs(in_dir)
+          in_dir.each do |d|
+            matched_dirs << fd(File.join(Dir.pwd, d))
+          end
+        end
+
+        def include_matched_dirs(_dirs, opts)
+          if opts[:include]
+            _dirs.select! do |d|
+              d.match(%r{#{opts[:include]}})
+            end
+          end
+        end
+
+        def ignore_matched_dirs(_dirs, opts)
+          if opts[:ignore]
+            _dirs.delete_if do |d|
+              d.match(%r{#{opts[:ignore]}})
+            end
+          end
+        end
+
+        def select_matched_dirs(dir_sc)
+          _dirs = matched_dirs.select do |d|
+            file_basename = File.basename(d)
+            file_basename.implicit_match(dir_sc)
+          end
+        end
+
+        def matched_dirs
+          def_arr :matched_dirs
+        end
+
+        def sync_dir(from_dir)
+          files = ff(from_dir)
+
+          files.each do |file|
+            if block_given?
+              yield ::RoFile.rel_path_wio_ext(file, from_dir)
+            end
+          end
+        end
+
+        def rel_path(file, from_dir=Dir.pwd)
+          ::RoFile.rel_path(file, from_dir)
+        end
+
+
+        def gsub_file(file, from, to)
+          ::RoFile.gsub_file(file, from, to)
+        end
+
+        def cur_pj(file)
+          file = File.join(Dir.pwd, file)
+          if block_given?
+            if test(?d, file)
+              Dir[File.join(file, '**')].each do |file|
+                yield file
+              end
+            end
+          end
+          file
+        end
+
+        def dirname_basename(path)
+          dir = File.dirname(path)
+          dirname = File.basename(dir).gsub(%r{\.\w+$}, "")
+
+          basename = File.basename(path).gsub(%r{\.\w+$}, "")
+          if block_given?
+            yield dirname, basename
+          end
+          return dir, basename
+        end
+
+        def implicit(kw)
+          %r{^#{kw.implicit}.*$}
+        end
+
+        def ivk_ce(name, meth_name, *args, &blk)
+          require "ro_cell/#{name}"
+          ::RoCell.const_get(name.camelize).new.__send__(:"#{meth_name}", *args, &blk)
+        end
+
+        def implicit_ivk_cmds(*args, &blk)
+          ivk_cmds(:Implicit, :to_ivk, *args, &blk)
+        end
+
+        def ivk_cmds(ins_name, *args, &blk)
+          ins_name = ins_name.to_s.uncamelize
+          args.flatten!
+
+          begin
+            load "ro_cmd/#{ins_name}.rb"
+          rescue LoadError => e
+          end
+
+          kls_name = kls_name(ins_name)
+          @ivkd_kls = ::RoCmd.const_get(kls_name)
+
+          if ivkd_kls.nil? or !ivkd_kls.name.match(%r{RoCmd})
+            raise ::RoErr::NotFound, "Couldn't find RoCmd::#{kls_name}"
+          end
+
+          ivkd_kls.st(*args, kls_opts, &blk)
+        end
+
+        def idea(*args, &blk)
+          sc.idea(*args, &blk)
+        end
+
+        def rel_path_from_cur_pj(path)
+          path.gsub(%r{#{Dir.pwd}}, "")
+        end
+
+        def parse_opts(opts, dict)
+          super if defined? super
+          opts.map do |k, v|
+            opts[k] = dict[v.to_sym] || v
+          end
+          opts
+        end
+
+        def kw_implicit(kw)
+          %r{#{kw.implicit}}
+        end
+
+        def ki(*args, &blk)
+          kw_implicit(*args, &blk)
+        end
+      end
+    end
+  end
+end

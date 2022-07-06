@@ -1,0 +1,118 @@
+package archiveHelper
+
+import (
+	"archive/zip"
+	"errors"
+	"io/ioutil"
+	"sort"
+)
+
+var errRange = errors.New("File index out of range")
+
+type zipArchive struct {
+	reader *zip.ReadCloser
+	files  []*zip.File
+}
+
+type fileSlice []*zip.File
+
+func (c fileSlice) Len() int {
+	return len(c)
+}
+
+func (c fileSlice) Swap(i, j int) {
+	c[i], c[j] = c[j], c[i]
+}
+
+func (c fileSlice) Less(l, r int) bool {
+	var lstr = c[l].FileInfo().Name()
+	var rstr = c[r].FileInfo().Name()
+	return less(lstr, rstr)
+}
+
+func less(lstr, rstr string) bool {
+	var llen = len(lstr)
+	var rlen = len(rstr)
+	var slen = min(llen, rlen)
+
+	for i := 0; i < slen; i++ {
+		var lchar = lstr[i]
+		var rchar = rstr[i]
+
+		if lchar < rchar {
+			return true
+		}
+
+		if lchar > rchar {
+			return false
+		}
+	}
+
+	if llen < rlen {
+		return true
+	}
+	return false
+}
+
+func min(first int, args ...int) int {
+	for _, v := range args {
+		if first > v {
+			first = v
+		}
+	}
+	return first
+}
+
+func (a *zipArchive) GetFile(i int) ([]byte, error) {
+	if 0 <= i && i < len(a.files) {
+		f := a.files[i]
+
+		rc, err := f.Open()
+		if err != nil {
+			return nil, err
+		}
+		defer rc.Close()
+
+		data, err := ioutil.ReadAll(rc)
+
+		if err != nil {
+			return nil, err
+		}
+		return data, nil
+	}
+
+	return nil, errRange
+}
+
+func (a *zipArchive) GetFileInfo(i int) (FileInfoWrap, error) {
+	if 0 <= i && i < len(a.files) {
+		f := a.files[i]
+		return f.FileInfo(), nil
+	}
+	return nil, errRange
+}
+
+func (a *zipArchive) GetFileNumber() int {
+	return len(a.files)
+}
+
+func OpenZipArchive(absPath string) (ZipArchive, error) {
+
+	reader, err := zip.OpenReader(absPath)
+	if err != nil {
+		return nil, err
+	}
+
+	var list fileSlice
+	for _, f := range reader.File {
+		if !f.FileInfo().IsDir() {
+			list = append(list, f)
+		}
+	}
+	sort.Sort(list)
+
+	return &zipArchive{
+		reader: reader,
+		files:  list,
+	}, nil
+}

@@ -1,0 +1,190 @@
+package us.matthewcrocco.smashbrawl;
+
+import org.joda.time.DateTime;
+import us.matthewcrocco.smashbrawl.gui.GuiUtils;
+import us.matthewcrocco.smashbrawl.util.Console;
+
+import java.io.FileNotFoundException;
+import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.util.Optional;
+import java.util.Properties;
+import javafx.scene.control.Alert;
+import javafx.scene.control.TextInputDialog;
+
+public class Config {
+
+    private static final Properties settings;
+
+    private static String apiKey;
+    private static String eventName;
+    private static String databaseServer;
+    private static long timeoutWait;
+    private static long dbUpdateTime;
+
+    static {
+        try {
+            // Loading Config
+            Path p = Paths.get(".", "config", Strings.SETTINGS_FILENAME_DATABASE);
+
+            if (!Files.exists(p))
+                throw new FileNotFoundException("[CONFIG] Failed to Locate " + Strings.SETTINGS_FILENAME_DATABASE + "!");
+
+            // Load Settings from Config File as Properties
+            settings = new Properties();
+            settings.load(Files.newInputStream(p));
+
+            apiKey = settings.getProperty(Strings.SETTINGS_KEY_APIKEY);
+
+            if (apiKey == null)
+                throw new IllegalStateException("An API Key Must be Provided!");
+
+            dbUpdateTime = determineUpdateTime(settings.getProperty(Strings.SETTINGS_KEY_UPDATE_FREQ, "NORMAL").trim());
+            timeoutWait = determineTimeout(settings.getProperty(Strings.SETTINGS_KEY_TIMEOUT, "10s").trim());
+
+            Console.debug("Update Frequency : " + dbUpdateTime);
+            Console.debug("Timeout Length   : " + timeoutWait);
+
+            databaseServer = settings.getProperty(Strings.SETTINGS_KEY_SERVERHOST, "default").trim();
+            eventName = settings.getProperty(Strings.SETTINGS_KEY_COLLECTION, "request").trim();
+        } catch (IOException e) {
+            throw new ExceptionInInitializerError(e);
+        }
+    }
+
+    /**
+     * Validates Data that was loaded in Initialization. Being called more than once
+     * causes nothing to occur. The validation is only ever done once in an instance.
+     */
+    public static void load() {
+        eventName();
+        serverHost();
+    }
+
+    public static long updateTimeMillis() {
+        return dbUpdateTime;
+    }
+
+    public static long timeoutLengthMillis() {
+        return timeoutWait;
+    }
+
+    /**
+     * Retrieve Orchestrate API Key
+     *
+     * @return
+     */
+    public static String apiKey() {
+        return apiKey;
+    }
+
+    /**
+     * Retrieve the Event Name (Name of Database Table)
+     *
+     * @return
+     */
+    public static String eventName() {
+        if (eventName.isEmpty())
+            eventName = "request";
+
+        if (eventName.equalsIgnoreCase("auto") || eventName.equalsIgnoreCase("request")) {
+            DateTime time = DateTime.now();
+            String defEventName = String.format("EVENT_%s_%s_%s", time.getDayOfMonth(), time.getMonthOfYear(), time.getYearOfEra());
+
+            if (eventName.equalsIgnoreCase("auto")) {
+                eventName = defEventName;
+            } else if (eventName.equalsIgnoreCase("request")) {
+                while (true) {
+                    TextInputDialog prompt = new TextInputDialog(defEventName);
+                    prompt.initOwner(null);
+                    prompt.setTitle("DB Name Request");
+                    prompt.setContentText("Name of Event: ");
+
+                    Optional<String> input = prompt.showAndWait();
+                    eventName = input.orElse(defEventName);
+
+                    if (eventName.trim().isEmpty()) {
+                        Alert alert = GuiUtils.buildAlert(Alert.AlertType.ERROR, "Config Error: Invalid DB Name!", "Bad db.properties Value!", "Something must be entered for the Event Name!");
+                        alert.initOwner(null);
+                        alert.showAndWait();
+                    } else
+                        break;
+                }
+            }
+
+            Console.debug("Event Name set to " + eventName);
+        }
+
+        return eventName;
+    }
+
+    /**
+     * Retrieve the Orchestrate Server Hostname
+     *
+     * @return
+     */
+    public static String serverHost() {
+        if (databaseServer.equalsIgnoreCase("default") || databaseServer.equalsIgnoreCase("east"))
+            databaseServer = Strings.SETTINGS_SERVERHOST_EAST;
+        else if (databaseServer.equalsIgnoreCase("west"))
+            databaseServer = Strings.SETTINGS_SERVERHOST_WEST;
+
+        return databaseServer;
+    }
+
+    private static long determineTimeout(String value) {
+        if (value.equalsIgnoreCase("never") || value.equalsIgnoreCase("-1"))
+            return Long.MAX_VALUE;
+
+        if (!Character.isDigit(value.charAt(0))) {
+            GuiUtils.buildAlert(Alert.AlertType.WARNING, "Config Error: Bad Timeout Value!", "Bad db.properties Value!", value + " is not a valid timeout config value! Defaulting to 10s").show();
+            Console.bigWarning("Invalid Timeout Value: " + value + " --- Defaulting to 10 second timeout");
+            return 10_000;
+        }
+
+        int i = 0;
+        while (Character.isDigit(value.charAt(i)))
+            i++;
+
+        long timeout = Long.parseLong(value.substring(0, i));
+        if (value.endsWith("ms") || value.endsWith("millis") || value.endsWith("milliseconds")) {
+            return timeout;
+        } else if (value.endsWith("s") || value.endsWith("seconds")) {
+            // seconds * millis per second = seconds * 1000
+            return timeout * 1000;
+        } else if (value.endsWith("m") || value.endsWith("min") || value.endsWith("mins") || value.endsWith("minutes")) {
+            // minutes * seconds per minutes * millis per second
+            // minutes * 60 * 1000 = minutes * 60,000
+            return timeout * 60_000;
+        } else if (value.endsWith("h") || value.endsWith("hr") || value.endsWith("hrs") || value.endsWith("hours")) {
+            // hours * minutes per hour * seconds per minutes * millis per second
+            // hours * 60 * 60 * 1000 = hours * 3,600,000
+            return timeout * 3_600_000;
+        }
+
+        GuiUtils.buildAlert(Alert.AlertType.WARNING, "Config Error: Bad Timeout Length!", "Bad db.properties Value!", "Invalid Timeout Length! Must be in ms, s, min or hr. Defaulting to 10s.").show();
+        Console.bigWarning("Bad Timeout Length! Must be ms, s, min or hr... defaulting to 10s");
+        return 10_000;
+    }
+
+    private static long determineUpdateTime(String updateFreq) {
+        switch (updateFreq.toUpperCase()) {
+            case "RARELY":
+                return 10_000;
+            case "NORMAL":
+                return 5_000;
+            case "OFTEN":
+                return 3_000;
+            case "ALWAYS":
+                return 2_000;
+            case "ASAP":
+                return 1_000;
+            default:
+                GuiUtils.buildAlert(Alert.AlertType.WARNING, "Config Error: Bad Update Frequency!", "Bad db.properties Value!", "Invalid Frequency Value! Defaulting to OFTEN");
+                Console.bigWarning("Bad Update Freqency! - " + updateFreq + "... Defaulting to OFTEN");
+                return 3_000;
+        }
+    }
+}

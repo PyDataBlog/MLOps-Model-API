@@ -1,0 +1,53 @@
+Function Update-SourceDatabase {
+  Param (
+    # [Parameter(Mandatory=$True)][String]$name,
+    # [Parameter(Mandatory=$True)][ValidateSet('nugetFeed','directory','chocbotFeed')][String]$type,
+    # [Parameter(Mandatory=$True)]$data,
+    # [Switch]$reset = $true
+    [Parameter]$params
+  )
+  If ( $params.arg0 ) { Update-Database $sourceName} Else { ForEach ($sourceDb In Get-SourceDbs) { Update-Database $sourceDb.Name } }
+  
+  Function Update-Database ($sourceName) {
+    $sourceDb = Get-SourceDb $sourceName
+    $values = Switch ( $sourceDb.type) {
+      'nugetFeed' { Get-NugetFeedPackages $sourceName }
+      'directory' { Get-DirectoryPackages $sourceName }
+      'chocbotFeed' { Get-ChocbotPackages $sourceName }
+    }
+    $DataTable = $values | Out-DataTable
+    Invoke-SQLiteBulkCopy -DataSource $sourceDb -DataTable $DataTable -Table packages -force
+    Write-Host "Updated package source $sourceName"
+  }
+
+  Function Get-NugetFeedPackages ($sourceDb) {
+    $xml = $consts.nugetFeedXml
+    $selectedFields = $consts.nugetXmlFields
+    (Invoke-WebRequest "$($sourceDb.path)/packages").content -match 'There are (\d+) packages' | Out-Null
+    [Int]$numPackages = $matches[1]
+    $i = 0
+    $url = $feedUrl + '/api/v2/Packages()?$orderby=Created%20desc&$filter=IsLatestVersion&$skip=' + $i + '&includePrerelease=' + $includePrerelease + '&$select=' + $selectedFields
+  Do {
+    $percentComplete = @{$true=0; $false = [Int][Decimal]::Round($i / ($numPackages/100))}[$i -eq 0]
+    If ($percentComplete -gt 100) {$percentComplete = 100}
+    Write-Progress -Activity "Updating packages from $feedUrl..." -CurrentOperation "Got $i packages of $numPackages" -PercentComplete $percentComplete
+    [xml]$pageXml = Get-XMLWebRequest $url
+    ForEach ($XmlNode in $pageXml.feed.entry) {$xml.feed.AppendChild($xml.ImportNode($XmlNode, $true)) | Out-Null }
+    $i = $i + 40
+    $link = $pageXml.feed.link | where {$_.rel -eq 'next'}
+    $url = $link.href
+  } Until ( $link -eq $null )
+  Return $xml
+    $titles = @()
+    $values = ForEach ($entry In ($xml.feed.entry | Sort-Object id -Unique)) {
+      [PsCustomObject]@{
+        id = $entry.title."`#text" # Yes, I know, but that's how it works
+        title = $entry.properties.title
+        author = $entry.author.name
+        summary= $entry.summary."`#text"
+      }
+      $titles += $entry.title."`#text"
+    }
+    Return $values
+  }
+}

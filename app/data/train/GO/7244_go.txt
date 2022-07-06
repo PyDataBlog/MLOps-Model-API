@@ -1,0 +1,420 @@
+package hbv1
+
+import (
+	"encoding/json"
+	"errors"
+	"io/ioutil"
+	"net/http"
+	"net/url"
+	"strconv"
+	"time"
+)
+
+const BASE_URL string = "https://hummingbird.me/api/v1"
+
+// Hummingbird data structure
+type Hummingbird struct {
+	Username  string
+	AuthToken string
+	Library   []LibraryEntry
+}
+
+// LibraryEntry data structure
+type LibraryEntry struct {
+	EpisodesWatched uint
+	Rating          string
+	LastWatched     time.Time
+	UpdatedAt       time.Time
+	RewatchedTimes  uint
+	Notes           string
+	Status          string
+	Private         bool
+	Rewatching      bool
+	Anime           Anime
+}
+
+// LibraryEntryUpdate data structure to simplify updating a library entry
+type LibraryEntryUpdate struct {
+	Id              uint
+	Status          string
+	Rating          string
+	Rewatching      bool
+	RewatchedTimes  uint
+	EpisodesWatched uint
+	Notes           string
+}
+
+// Anime data structure
+type Anime struct {
+	Id               uint
+	Slug             string
+	Status           string
+	Url              string
+	Title            string
+	AlternativeTitle string
+	EpisodeCount     uint
+	CoverImage       string
+	Synopsis         string
+	ShowType         string
+	StartedAiring    time.Time
+	FinishedAiring   time.Time
+	CommunityRating  float32
+	AgeRating        string
+	Genres           []string
+}
+
+// Favorite data structure
+type Favorite struct {
+	Id        uint
+	UserId    uint
+	ItemId    uint
+	ItemType  string
+	CreatedAt time.Time
+	UpdatedAt time.Time
+}
+
+// User data structure
+type User struct {
+	Name                    string
+	Waifu                   string
+	WaifuOrHusbando         string
+	WaifuSlug               string
+	WaifuCharId             string
+	Location                string
+	Website                 string
+	Avatar                  string
+	CoverImage              string
+	Bio                     string
+	LifeSpentOnAnime        uint
+	ShowAdultContent        bool
+	TitleLanguagePreference string
+	LastLibraryUpdate       time.Time
+	Online                  bool
+	Favorites               []Favorite
+}
+
+// UserMini data structure
+type UserMini struct {
+	Name        string
+	Url         string
+	Avatar      string
+	AvatarSmall string
+}
+
+// Story data structure
+type Story struct {
+	Id              uint
+	StoryType       string
+	User            UserMini
+	UpdatedAt       time.Time
+	SelfPost        bool
+	Poster          UserMini
+	Media           Anime
+	SubstoriesCount uint
+	Substories      []Substory
+}
+
+// Substory data structure
+type Substory struct {
+	Id            uint
+	SubstoryType  string
+	CreatedAt     time.Time
+	Comment       string
+	EpisodeNumber string
+	FollowedUser  UserMini
+	NewStatus     string
+	Service       string
+}
+
+// NewHummingbird creates and returns a new Hummingbird data structure.
+func NewHummingbird(username string) (Hummingbird, error) {
+	if username == "" {
+		return Hummingbird{}, errors.New("invalid username \"\"")
+	}
+	hb := Hummingbird{Username: username}
+	return hb, nil
+}
+
+// GetAnime retrieves information regarding a specific anime based on the supplied id or slug.
+func (hb *Hummingbird) GetAnime(id_or_slug, language string) (Anime, error) {
+	var resp *http.Response
+	var err error
+
+	if id_or_slug == "" {
+		return Anime{}, errors.New("id or slug not supplied")
+	}
+
+	// Construct URL
+	url := BASE_URL + "/anime/" + id_or_slug + "?title_language_preference=" + language
+
+	// Set Default Language
+	if language == "" {
+		language = "canonical"
+	}
+	url += "?title_language_preference=" + language
+
+	// HTTP GET
+	resp, err = http.Get(url)
+	if err != nil {
+		return Anime{}, errors.New("failed to get data for anime with id or slug \"" + id_or_slug + "\"")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return Anime{}, errors.New("invalid if or slug \"" + id_or_slug + "\"")
+	}
+
+	// Read The Response Body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return Anime{}, errors.New("failed to read response body for anime with id or slug \"" + id_or_slug + "\"")
+	}
+
+	// Parse The Anime JSON
+	var ja jsonAnime
+	err = json.Unmarshal(body, &ja)
+	if err != nil {
+		return Anime{}, errors.New("failed to parse recieved JSON for anime with id or slug \"" + id_or_slug + "\"")
+	}
+
+	// Return Anime Structure
+	return convertJsonAnime(ja), nil
+}
+
+// SearchAnime searches for anime with titles closely matching the given query.
+func (hb *Hummingbird) SearchAnime(query string) ([]Anime, error) {
+	if query == "" {
+		return []Anime{}, errors.New("search query not supplied")
+	}
+
+	// HTTP GET
+	resp, err := http.Get(BASE_URL + "/search/anime/?query=" + query)
+	if err != nil {
+		return []Anime{}, errors.New("failed to get anime search data for query \"" + query + "\"")
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != 200 {
+		return []Anime{}, errors.New("error getting result for query \"" + query + "\"")
+	}
+
+	// Read The Response Body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return []Anime{}, errors.New("failed to read response body for query \"" + query + "\"")
+	}
+
+	// Parse The Anime JSON
+	var ja []jsonAnime
+	err = json.Unmarshal(body, &ja)
+	if err != nil {
+		return []Anime{}, errors.New("failed to parse recieved JSON for query \"" + query + "\"")
+	}
+
+	// Return Anime Structure
+	var ga []Anime
+	for i := range ja {
+		ga = append(ga, convertJsonAnime(ja[i]))
+	}
+
+	return ga, nil
+}
+
+// LoginWithPass authenticates with Hummingbird.me via a password and gets an auth token.
+func (hb *Hummingbird) LoginWithPass(password string) error {
+	// Construct Form Values
+	if password == "" {
+		return errors.New("password not supplied")
+	}
+	urlval := url.Values{}
+	urlval.Add("username", hb.Username)
+	urlval.Add("password", password)
+
+	// HTTP POST
+	resp, err := http.PostForm(BASE_URL+"/users/authenticate", urlval)
+	if err != nil {
+		return errors.New("failed to post authentication request for user \"" + hb.Username + "\"")
+	}
+	defer resp.Body.Close()
+
+	// Check Response Code
+	if resp.StatusCode != 201 {
+		return errors.New("invalid username \"" + hb.Username + "\" or password")
+	}
+
+	// Read The Response Body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return errors.New("failed to read response body for user \"" + hb.Username + "\"")
+	}
+
+	// Parse The Auth Token String
+	if len(body) >= 3 {
+		hb.AuthToken = string(body[1 : len(body)-1])
+	} else {
+		return errors.New("received invalid authentication code for user \"" + hb.Username + "\"")
+	}
+
+	return nil
+}
+
+// LoginWithToken authenticates with Hummingbird.me via an auth token.
+func (hb *Hummingbird) LoginWithToken(authtoken string) error {
+	// Check that the authtoken is not empty
+	if authtoken == "" {
+		return errors.New("no auth token supplied")
+	}
+
+	// Test that the auth token works
+	// TODO
+
+	// Asign the auth token if valid
+	if true {
+		hb.AuthToken = authtoken
+		return nil
+	} else {
+		return errors.New("invalid auth token")
+	}
+}
+
+// DownloadLibrary syncs the server-side library to the client.
+func (hb *Hummingbird) DownloadLibrary() error {
+	// Construct the URL
+	url := BASE_URL + "/users/" + hb.Username + "/library"
+
+	// HTTP GET
+	resp, err := http.Get(url)
+	if err != nil {
+		return errors.New("failed to get library for user \"" + hb.Username + "\"")
+	}
+	defer resp.Body.Close()
+
+	// Check Response Code
+	if resp.StatusCode != 200 {
+		return errors.New("invalid username \"" + hb.Username + "\"")
+	}
+
+	// Read The Response Body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return errors.New("failed to read response body for user \"" + hb.Username + "\"")
+	}
+
+	// Parse The JSON
+	var jsonTemp []jsonLibraryEntry
+	err = json.Unmarshal(body, &jsonTemp)
+	if err != nil {
+		return errors.New("failed to parse recieved JSON for user \"" + hb.Username + "\"")
+	}
+
+	// Convert JSON to internal structure
+	for _, le := range jsonTemp {
+		hb.Library = append(hb.Library, convertJsonLibraryEntry(le))
+	}
+
+	return nil
+}
+
+// UpdateLibraryEntry updates a users anime library entry.
+func (hb *Hummingbird) UpdateLibraryEntry(leu LibraryEntryUpdate) error {
+	// Check that auth token and anime id are supplied
+	urlval := url.Values{}
+	if hb.AuthToken == "" {
+		return errors.New("auth token or not supplied")
+	}
+	if leu.Id == 0 {
+		return errors.New("anime id not supplied")
+	}
+
+	// Construct Form Values
+	urlval.Add("auth_token", hb.AuthToken)
+	if leu.Status != "" {
+		urlval.Add("status", leu.Status)
+	}
+	if leu.Rating != "" {
+		urlval.Add("sane_rating_update", leu.Rating)
+	}
+	if leu.Notes != "" {
+		urlval.Add("notes", leu.Notes)
+	}
+	urlval.Add("private", "public")
+	urlval.Add("rewatching", strconv.FormatBool(leu.Rewatching))
+	urlval.Add("rewatched_times", strconv.Itoa(int(leu.RewatchedTimes)))
+	urlval.Add("episodes_watched", strconv.Itoa(int(leu.EpisodesWatched)))
+
+	// HTTP POST
+	resp, err := http.PostForm(BASE_URL+"/libraries/"+strconv.Itoa(int(leu.Id)), urlval)
+	if err != nil {
+		return errors.New("failed to update library entry with id " + strconv.Itoa(int(leu.Id)))
+	}
+	defer resp.Body.Close()
+
+	// Check Response Code
+	if resp.StatusCode == 200 && resp.StatusCode != 201 {
+		return errors.New("failed to update invalid library entry with id " + strconv.Itoa(int(leu.Id)))
+	}
+
+	// Read The Response Body
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return errors.New("failed to read response body for library entry with id " + strconv.Itoa(int(leu.Id)))
+	}
+
+	// Parse The Anime JSON
+	var jle jsonLibraryEntry
+	err = json.Unmarshal(body, &jle)
+	if err != nil {
+		return errors.New("failed to parse recieved JSON for ulibrary entry with id " + strconv.Itoa(int(leu.Id)))
+	}
+
+	// Add The Update Item To The Internal List
+	found := false
+	for i := range hb.Library {
+		if hb.Library[i].Anime.Id == jle.Anime.Id {
+			hb.Library[i] = convertJsonLibraryEntry(jle)
+			found = true
+			break
+		}
+	}
+	if !found {
+		hb.Library = append(hb.Library, convertJsonLibraryEntry(jle))
+	}
+	return nil
+}
+
+// RemoveLibraryEntry removes a users anime library entry.
+func (hb *Hummingbird) RemoveLibraryEntry(id uint) error {
+	// Check that auth token and anime id are supplied
+	urlval := url.Values{}
+	if hb.AuthToken == "" {
+		return errors.New("auth token or not supplied")
+	}
+	if id == 0 {
+		return errors.New("anime id not supplied")
+	}
+
+	// Construct Form Value
+	urlval.Add("auth_token", hb.AuthToken)
+
+	// HTTP POST
+	resp, err := http.PostForm(BASE_URL+"/libraries/"+strconv.Itoa(int(id))+"/remove", urlval)
+	if err != nil {
+		return errors.New("failed to remove library entry with id " + strconv.Itoa(int(id)))
+	}
+	defer resp.Body.Close()
+
+	// Check Response Code
+	if resp.StatusCode == 200 {
+		return errors.New("failed to remove invalid library entry with id " + strconv.Itoa(int(id)))
+	}
+
+	// Remove The Item From The Internal List
+	for i := range hb.Library {
+		if hb.Library[i].Anime.Id == id {
+			hb.Library[i] = hb.Library[len(hb.Library)-1]
+			hb.Library = hb.Library[:len(hb.Library)-1]
+			break
+		}
+	}
+	return nil
+}

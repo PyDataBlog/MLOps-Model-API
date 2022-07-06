@@ -1,0 +1,157 @@
+<?php
+/**
+  * @author Dennis Castelijns <admin@dhjcastelijns.nl>
+*/
+
+class Database {
+    // Class properties.
+	private static $_instance = null;
+	private $_pdo, $_query, $_error = false, $_results, $_count = 0;
+
+    // Construct an instance of the PDO connection.
+	private function __construct() {
+		if (Config::settings('pdo_settings/connection') == 'true') {
+			try {
+                // Assign values to relevant properties.
+				$server_name = Config::settings('pdo_settings/server_name');
+				$username = Config::settings('pdo_settings/username');
+				$password = Config::settings('pdo_settings/password');
+				$database_name = Config::settings('pdo_settings/database_name');
+
+                // Create an instance of the PDO connection.
+				$this->_pdo = new PDO('mysql:host=' . $server_name . ';dbname=' . $database_name . '', $username, $password);
+				$this->_pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, false);
+			} catch (PDOException $e) {
+                // Die and throw the error message.
+				die($e->getMessage());
+			}
+		}
+	}
+
+    // Return the PDO connection if it is set.
+	public static function connection() {
+        // Check if there is already an instance constructed.
+		if (!isset(self::$_instance)) {
+			self::$_instance = new Database();
+		}
+
+		return self::$_instance;
+	}
+
+    // Prepares, executes and store results and errors for each query.
+	public function query($sql, $parameters = array()) {
+		$this->_error = false;
+
+        // Prepare the PDO statement if the query is set.
+		if ($this->_query = $this->_pdo->prepare($sql)) {
+			$index = 1;
+
+            // Count the amount of parameters and bind each of their values.
+			if (count($parameters)) {
+				foreach ($parameters as $parameter) {
+					$this->_query->bindValue($index, $parameter);
+					$index++;
+				}
+			}
+
+            // Execute the query and store the results.
+			if ($this->_query->execute()) {
+				$this->_results = $this->_query->fetchAll(PDO::FETCH_OBJ);
+				$this->_count = $this->_query->rowCount();
+			} else {
+                // Display error.
+				$this->_error = true;
+			}
+		}
+
+		return $this;
+	}
+
+	public function action($action, $table, $where = array()) {
+		if (count($where) === 3) {
+			$operators = array('=', '>', '<', '>=', '<=');
+			$field = $where[0];
+			$operator = $where[1];
+			$value = $where[2];
+
+			if (in_array($operator, $operators)) {
+				$sql = "{$action} FROM {$table} WHERE `{$field}` {$operator} ?";
+				if (!$this->query($sql, array($value))->error()) {
+					return $this;
+				}
+			}
+		}
+
+		return false;
+	}
+
+	public function error() {
+		return $this->_error;
+	}
+
+	public function select($table, $where) {
+		return $this->action('SELECT *', $table, $where);
+	}
+
+	public function delete($table, $where) {
+		return $this->action('DELETE', $table, $where);
+	}
+
+	public function insert($table, $fields = array()) {
+		if (count($fields)) {
+			$keys = array_keys($fields);
+			$values = '';
+			$index = 1;
+
+			foreach ($fields as $field) {
+				$values .= '?';
+				if ($index < count($fields)) {
+					$values .= ', ';
+				}
+				$index++;
+			}
+            
+			$sql = "INSERT INTO {$table} (`" . implode('`, `', $keys) . "`) VALUES ({$values})"; 
+			if (!$this->query($sql, $fields)->error()) {
+				return true;
+			}
+		}
+
+		return false;
+	}
+
+	public function update($table, $id, $fields) {
+		$set = '';
+		$index = 1;
+
+		foreach ($fields as $name => $value) {
+			$set .= "{$name} = ?";
+			if ($index < count($fields)) {
+				$set .=  ', ';
+			}
+			$index++;
+		}
+
+		$sql = "UPDATE {$table} SET {$set} WHERE id = {$id}";
+		if (!$this->query($sql, $fields)->error()) {
+				return true;
+		}
+
+		return false;
+	}
+
+    // Return results.
+	public function results() {
+		return $this->_results;
+	}
+
+    // Return first result.
+	public function first_result() {
+		return $this->results()[0];
+	}
+
+    // Return row count.
+	public function count() {
+		return $this->_count;
+	}
+}

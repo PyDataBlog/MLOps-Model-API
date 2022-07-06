@@ -1,0 +1,1 @@
+cmd_/home/pi/nexmon/patches/bcm43438/7_45_41_26/nexmon/brcmfmac/built-in.o :=  rm -f /home/pi/nexmon/patches/bcm43438/7_45_41_26/nexmon/brcmfmac/built-in.o; ar rcsD /home/pi/nexmon/patches/bcm43438/7_45_41_26/nexmon/brcmfmac/built-in.o

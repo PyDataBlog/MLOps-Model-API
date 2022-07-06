@@ -1,0 +1,77 @@
+extern crate iron;
+extern crate session;
+extern crate rustc_serialize;
+use iron::prelude::*;
+use session::*;
+
+// To run, $ cargo run --example complex
+// to use, $ curl "http://localhost:3000/login"
+//         $ curl "http://localhost:3000/show_count"
+//         $ curl "http://localhost:3000/reset_count"
+//         $ curl "http://localhost:3000/clear_allA"
+
+#[derive(Debug,RustcEncodable, RustcDecodable)]
+struct Account {
+    id: usize,
+    name: Option<String>,
+    email: Option<String>,
+}
+
+fn main() {
+    let mut chain = Chain::new(handle);
+    let signing_key = "key-123456";
+    let expire_seconds = 3600;
+    let connect_str = "redis://localhost";
+    chain.around(session::Session::new(signing_key, expire_seconds, connect_str));
+    Iron::new(chain).http("localhost:3000").unwrap();
+}
+
+fn get_action(req: &Request) -> String {
+    String::from(req.url.path()[0])
+}
+
+
+fn handle(req: &mut Request) -> IronResult<Response> {
+    let action = get_action(req);
+    match action.as_str() {
+        "login" => login(req),
+        "clear_all" => clear_all(req),
+        "show_count" => show_count(req),
+        "reset_count" => reset_count(req),
+        _ => Ok(Response::with((iron::status::Ok, "login,logout,show_count,reset_count"))),
+    }
+}
+
+fn login(req: &mut Request) -> IronResult<Response> {
+    let account = match req.get_session::<Account>("account") {
+        Ok(a) => a,
+        Err(_) => {
+            let account = Account {
+                id: 1,
+                name: Some("alex".to_owned()),
+                email: None,
+            };
+            req.set_session("account", &account).unwrap();
+            account
+        }
+    };
+    let content = format!("user:{:?}", &account);
+    Ok(Response::with((iron::status::Ok, content)))
+}
+
+fn clear_all(req: &mut Request) -> IronResult<Response> {
+    req.clear_session().unwrap();
+    Ok(Response::with((iron::status::Ok, "clear all")))
+}
+
+fn show_count(req: &mut Request) -> IronResult<Response> {
+    let mut count = req.get_session::<usize>("count").unwrap_or(0);
+    count += 1;
+    req.set_session("count", &count).unwrap();
+    Ok(Response::with((iron::status::Ok, format!("count:{}", &count))))
+}
+
+fn reset_count(req: &mut Request) -> IronResult<Response> {
+    req.remove_session("count").unwrap();
+    Ok(Response::with((iron::status::Ok, "count reset")))
+}

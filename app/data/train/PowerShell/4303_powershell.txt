@@ -1,0 +1,158 @@
+﻿<################################################################################
+#
+#  Title:	VM Mass Deploy Script
+#  Version:	2.0w1
+#  Author:	Will Longo (wlongo-nospam@longoconsulting.us)
+#  Modified by: 
+#  Purpose:	Mass provisioning of VMs for rapid builds. By populating
+#    CSV files, user can specify the following specifications for VMs:
+#
+#    Name, # of CPUs, Memory, DataCenter, Cluster, ESX Host, DataStore, Folder,
+#    Resource Pool, Folder, IP, Subnet, Gateway, DNS (non-linux), Template to base from,
+#    Additional HDDs (with unique DS location and size)
+#
+#  Usage: Requires one parameter to the Master.ps1 script, being the something.csv file
+#    Master then reads the file, spawning a separate PS instance (Worker.PS1) for
+#    each and providing the parameters for that VM.  Master controls the number
+#    of worker processes by querying VC for active clone tasks and governing it
+#    to a defined value.
+#
+#    Worker builds a VM spec for the Sysprep and deploys from the template.  After
+#    a period, it then adjusts the # of CPUs and RAM, reads the HDD.csv file for
+#    any additional HDDs required (specific DS & size specs accepted, one line 
+#    per additional HDD) and finally starts the VM.  The VM then performs auto-login,
+#    Syspreps the box with hostname and IP info, then reboots.
+#
+#  Versioning:
+#	 1.0w3 - Added jobs, linux/windows support, post install
+#	 1.0w2 - Added vmware tools update (removed), modified gui(removed) and additional disks doc
+#    1.0 - Added GUI and changed required format of the excel doc for clinical
+#
+#
+################################################################################>
+#requires -version 3.0
+if ( (Get-PSSnapin | Where-Object { $_.Name -eq "VMware.VimAutomation.Core"}) -eq $null ){
+	Add-PSSnapIn VMware.VimAutomation.Core}
+Remove-VICredentialStoreItem $vcserver -confirm:$false -wa 0
+	#function to browse to the csv
+Function Browse(){   
+    [System.Reflection.Assembly]::LoadWithPartialName("System.windows.forms") |Out-Null
+    [System.Windows.Forms.Application]::EnableVisualStyles()
+    $OpenFileDialog = New-Object System.Windows.Forms.OpenFileDialog
+    $OpenFileDialog.initialDirectory = (get-location).path
+    $OpenFileDialog.filter = "CSV (*.csv)|*.csv|All files (*.*)|*.*"
+    $loop = $true
+    while($loop)
+    {
+        if ($OpenFileDialog.ShowDialog() -eq "OK")
+        {
+            $loop = $false
+        } 
+        else
+        {
+            $res = [System.Windows.Forms.MessageBox]::Show("You clicked Cancel. Try again or return to main form?", "Choose a directory", [System.Windows.Forms.MessageBoxButtons]::RetryCancel)
+            if($res -eq "Cancel")
+            {
+                #End script
+				Remove-VICredentialStoreItem $vcserver -confirm:$false -wa 0
+				return
+            }
+        }
+    }
+    $OpenFileDialog.filename
+}
+#the actual stuff
+<#Function Limit-Jobs {    		
+	Param([int]$MaxConcurrent,[int]$PauseTime)     	
+	$jobs = (get-job -state running | Measure-Object).count      
+	$RunningJobs = 0       		
+	if($jobs -ne $null)	{$RunningJobs = $jobs}     	
+	while($RunningJobs -ge $MaxConcurrent)	
+		{		
+			$jobs = (get-job -state running | Measure-Object).count      
+			$RunningJobs = 0       			
+			if($jobs -ne $null){
+				$RunningJobs = $jobs 
+		}   
+
+	Write-Warning "Current Running Jobs: $RunningJobs"
+	get-job
+	start-sleep -seconds  $PauseTime 		
+	}
+}#>
+function Program{
+	# Set Static Variables
+	$DeploymentThreads = "6"						#NUMBER OF DEPLOYMENTS TO RUN CONCURRENTLY
+	# set your job limit below at -MaxConcurrent on line 120
+	
+	#Export Credentials
+	$credSuper = $Host.ui.PromptForCredential("VCenter Credentials","Enter your vcenter super account and password","","")
+	if(!$credSuper){write-host "Cancelled by User!" -ForegroundColor Yellow -BackgroundColor Red;return}
+	$cred = new-vicredentialstoreitem -host $vcserver -user $credSuper.UserName -Password $credSuper.GetNetworkCredential().password
+	
+	#import and connect	
+	$CSV = Browse
+	if (!$csv){$cancel=$true}
+	if ($cancel){write-host "Cancelled by User!" -ForegroundColor Yellow -BackgroundColor Red;return}
+	$INFILE = Import-Csv $CSV
+
+	Connect-VIServer -server $cred.Host -user $cred.User -Password $cred.Password -wa 0
+	$host.ui.RawUI.WindowTitle = "VM Mass Deploy Script - Master"
+	foreach ($VM in $INFILE)
+	{	
+		#send the sheetpath/name, vm name, and current vcserver over to the worker
+		$loc=(get-location).path
+		$loc2=$loc+"\worker.ps1"
+				Write-Host "Starting job to deploy: " -NoNewline; Write-Host $VM.Name -ForegroundColor Yellow -BackgroundColor Red
+		
+		########
+		#How Lee handles jobs; only launches one at a time for me, but WORKS
+		########
+		$params = $loc2 +" "+ $CSV +" "+ $VM.Name +" "+ $vcserver+" "+ $loc
+		cmd /c start powershell -Command $params
+		sleep 45		# Time for clone task to begin or we get slammed with jobs
+		while ( ( get-task | where { $_.Name -eq "CloneVM_Task" } | where { $_.State -eq "Running"} ).count -ge $DeploymentThreads ) 
+		{ 
+			Write-Host "Sleeping..."
+			sleep 60
+		}
+		
+		########
+		# how im trying to do jobs, launches cleanly and limit-jobs is nice but doesnt complete jobs...
+		# Using jobs with concurrency limit
+		########
+		#Limit-Jobs -MaxConcurrent 3 -PauseTime 90
+		#start-job -FilePath $loc2 -ArgumentList @($CSV,$VM.Name,$vcserver,$loc) 
+	}
+	Disconnect-VIServer -Server $cred.host -Confirm:$False
+	sleep 120
+	remove-vicredentialstoreitem * -confirm:$false
+	write-host "Completed..."
+}
+
+##Initial start
+Write-host "Will Longo's Mass Provisioning tool"
+write-host ""
+write-host "1 for nadcwpappvct04.hca.corpad.net"
+write-host "2 for ordcwpappvct03.hca.corpad.net"
+write-host "3 for sadcwpappvct01.hca.corpad.net"
+write-host "4 for fwdcwpappvct03.hca.corpad.net"
+write-host "5 for drdcwpappvct09.hca.corpad.net"
+write-host "6 for mtdvwpappvct01.hca.corpad.net"
+write-host "7 for nadcwlappvct02.hca.corpad.net"
+write-host "8 for DRDCWPAPPVCT09.hca.corpad.net"
+write-host "9 for AKDCWPAPPVCT01.HCA.CORPAD.NET"
+write-host "10 for XRDCWPAPPVCT01.hca.corpad.net"
+$x = read-host "Select your vcenter by the number above"
+if ($x -eq 1){$vcserver = "nadcwpappvct04.hca.corpad.net"}
+elseif($x -eq 2){$vcserver = "ordcwpappvct03.hca.corpad.net"}
+elseif($x -eq 3){$vcserver = "sadcwpappvct01.hca.corpad.net"}
+elseif($x -eq 4){$vcserver = "fwdcwpappvct03.hca.corpad.net"}
+elseif($x -eq 5){$vcserver = "drdcwpappvct09.hca.corpad.net"}
+elseif($x -eq 6){$vcserver = "mtdvwpappvct01.hca.corpad.net"}
+elseif($x -eq 7){$vcserver = "nadcwlappvct02.hca.corpad.net"}
+elseif($x -eq 8){$vcserver = "DRDCWPAPPVCT09.hca.corpad.net"}
+elseif($x -eq 9){$vcserver = "AKDCWPAPPVCT01.HCA.CORPAD.NET"}
+elseif($x -eq 10){$vcserver = "XRDCWPAPPVCT01.hca.corpad.net"}
+else{Write-Host "Invalid Selection or server not added to script"}
+Program

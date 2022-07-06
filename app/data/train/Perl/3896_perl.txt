@@ -1,0 +1,250 @@
+package Mojolicious::Plugin::ID::OAuth::Mailru;
+use Mojo::Base 'Mojolicious::Plugin';
+use Mojo::Parameters;
+use Mojo::ByteStream;
+use Mojo::UserAgent;
+use JSON::XS;
+use Data::Dumper;
+our $VERSION = '0.01';
+
+# Documentaion
+# http://api.mail.ru/docs/guides/oauth/sites/
+# http://api.mail.ru/docs/reference/rest/users-getinfo/
+
+sub register {
+	my ($self, $app, $conf) = @_;
+	die "Not Found client_id or client_secret" if(ref($conf) ne 'HASH');
+
+	return if(!exists $conf->{'oauth'});
+	return if(!exists $conf->{'oauth'}->{'mailru'});
+	return if(!exists $conf->{'oauth'}->{'mailru'}->{'client_id'});
+	return if(!exists $conf->{'oauth'}->{'mailru'}->{'client_secret'});
+	return if(!exists $conf->{'oauth'}->{'mailru'}->{'secret_key'});
+
+	my $client_id     = $conf->{'oauth'}->{'mailru'}->{'client_id'};
+	my $client_secret = $conf->{'oauth'}->{'mailru'}->{'client_secret'};
+	my $return_url    = $conf->{'oauth'}->{'mailru'}->{'return_url'} || '/';
+	my $secret_key    = $conf->{'oauth'}->{'mailru'}->{'secret_key'};
+
+	die "Not found client_id" if(!$client_id);
+	die "Not found client_secret" if(!$client_secret);
+	die "Not found secret_key" if(!$secret_key);
+
+	if ($client_id !~ m/^\d+$/){
+		die "Invalid client_id";
+		return;
+	}
+
+	if (length($client_secret) != 32){
+		die "Invalid client_secret";
+		return;
+	}
+
+	$app->routes->any([qw(GET)]=>'/oauth/mailru/receiver.html'=>sub {
+		my ($self) = @_;
+		$self->render(text=>'<html><body><script src="http://connect.mail.ru/js/loader.js"></script><script>mailru.loader.require(\'receiver\', function(){	mailru.receiver.init();})</script></body></html>');
+		return;
+	});
+
+	$app->routes->any([qw(GET)]=>'/oauth/mailru/'=>sub {
+		my ($self) = @_;
+		my $state = $self->param('state');
+		if($state){
+			my $error = $self->param('error');
+			my $code  = $self->param('code');
+			if($error){
+				$self->app->log->error('error authorization server OAuth server:'.$error);
+				$self->redirect_to('/');
+				return;
+			}
+
+			my $redirect_uri;
+			my $host      = $self->req->headers->host;
+			my $is_secure = $self->req->is_secure;
+			if($is_secure){
+				$redirect_uri = "https://$host/oauth/mailru/";
+			}
+			else{
+				$redirect_uri = "http://$host/oauth/mailru/";
+			}
+
+			my $ua = Mojo::UserAgent->new;
+			my $json = JSON::XS->new()->utf8(1);
+			my $tx = $ua->post('https://connect.mail.ru/oauth/token'=>form=>{
+				redirect_uri=>$redirect_uri,
+				grant_type=>'authorization_code',
+				code=>$code,
+				client_id=>$client_id,
+				client_secret=>$client_secret,
+			});
+
+			if($tx->error){
+				my ($err, $code) = $tx->error;
+				$self->render_exception("https://connect.mail.ru/oauth/token (message:$err, http code:$code)");
+				return;
+			}
+
+			my $res = $tx->success;
+			my $content = $res->body;
+			eval{
+				$content = $json->decode($content);
+			};
+			if($@){
+				die "error parse json $@";
+			}
+
+			if(ref($content) ne 'HASH' && exists $content->{'access_token'} && !$content->{'access_token'}){
+				die "Invalid access_token";
+			}
+
+			my $access_token = $content->{'access_token'};
+			my $expires_in   = $content->{'expires_in'};
+			my $oauth_id     = $content->{'x_mailru_vid'};
+
+			if(length($access_token) != 32){
+				die "invalid param access_token";
+			}
+			my $get_info = $self->mailru_get_info(access_token=>$access_token, client_id=>$client_id, secret_key=>$secret_key, oauth_id=>$oauth_id);
+			$get_info->{'expires_in'} = $expires_in;
+			$self->flash({'plugin.id.oauth'=>$get_info});
+			$self->redirect_to($return_url);
+			return;
+		}
+		else{
+			my $redirect_uri;
+			my $host      = $self->req->headers->host;
+			my $is_secure = $self->req->is_secure;
+			if($is_secure){
+				$redirect_uri = "https://$host/oauth/mailru/";
+			}
+			else{
+				$redirect_uri = "http://$host/oauth/mailru/";
+			}
+
+			my $url = "https://connect.mail.ru/oauth/authorize?";
+			my $params = Mojo::Parameters->new;
+			$params = $params->append(response_type=>'code');
+			$params = $params->append(redirect_uri=>$redirect_uri);
+			$params = $params->append(client_id=>$client_id);
+			$params = $params->append(state=>'mailru');
+			$self->redirect_to($url.$params);
+		}
+		return;
+	});
+	$app->helper(mailru_get_info=>\&_mailru_get_info);
+}
+
+
+sub _mailru_get_info {
+	my $self = shift;
+	my %param = @_;
+
+	if(length($param{'access_token'}) != 32){
+		die "Invalid access_token";
+	}
+
+	my @params = ();
+	push(@params, "method=users.getInfo");
+	push(@params, "uids=$param{oauth_id}");
+	push(@params, "session_key=$param{access_token}");
+	push(@params, "secure=1");
+	push(@params, "app_id=$param{client_id}");
+	@params = sort{$a cmp $b} @params;
+	my $params = join('&',@params);
+	my $stream = Mojo::ByteStream->new(join('',@params).$param{'secret_key'});
+	my $sig = $stream->md5_sum;
+
+	my $json = JSON::XS->new()->utf8(1);
+	my $ua = Mojo::UserAgent->new;
+	my $tx = $ua->get("http://www.appsmail.ru/platform/api?$params&sig=$sig");
+	$self->app->log->debug("http://www.appsmail.ru/platform/api?$params&sig=$sig");
+	if($tx->error){
+		my ($err, $code) = $tx->error;
+		$code /= 'none';
+		$self->render_exception("error appsmail.ru http status:$code message:$err");
+		return;
+	}
+
+	my $res = $tx->success;
+	my $content = $res->body;
+
+	eval{
+		$content = $json->decode($content);
+	};
+	if($@){
+		die "error parse json $@";
+	}
+
+	my %result;
+	$result{'access_token'} = $param{'access_token'};
+	$result{'server'}       = 'mailru';
+	$result{'login'}        = undef;
+	$result{'email'}        = undef;
+	$result{'birthday'}     = undef;
+	$result{'gender'}       = undef;
+	$result{'lastname'}     = undef;
+	$result{'firstname'}    = undef;
+
+	if(!ref($content) eq 'ARRAY' && !ref($content->[0]) eq 'HASH' && !%{$content->[0]}){
+		$self->render_exception("http://www.appsmail.ru/platform/api (not HASH param)");
+		return;
+	}
+
+	if(exists $content->[0]->{'uid'} && $content->[0]->{'uid'} =~ m/^[0-9]+$/){
+		my $val = $content->[0]->{'uid'};
+		$result{'oauth_id'} = $val;
+	}
+	else{
+		die "http://www.appsmail.ru/platform/api (not oauth_id param)";
+	}
+
+	if(exists $content->[0]->{'email'} && $content->[0]->{'email'}){
+		my $val = $content->[0]->{'email'};
+		$val =~ s/^\s+|\s+$//g;
+		$val = lc($val);
+		$result{'email'} = $val;
+	}
+
+	if(exists $content->[0]->{'email'} && $content->[0]->{'email'}){
+		my $val = $content->[0]->{'email'};
+		$val =~ s/^\s+|\s+$//g;
+		if($val =~ m/^(?<login>([\w]+[\.\_\-]?[\w]+))\@/){
+			$val = $+{'login'};
+			$val = lc($val);
+			$val =~ s/\./-/g;
+			$result{'login'} = $val;
+		}
+	}
+
+	if(exists $content->[0]->{'birthday'} && $content->[0]->{'birthday'}){
+		my $val = $content->[0]->{'birthday'};
+		$val =~ s/^\s+|\s+$//g;
+		if($val =~ m/^(?<day>(\d{2}))\.(?<month>(\d{2}))\.(?<year>(\d{4}))$/){
+			my $day = $+{'day'};
+			my $month = $+{'month'};
+			my $year = $+{'year'};
+			$result{'birthday'} = "$year-$month-$day";
+		}
+	}
+
+	if(exists $content->[0]->{'sex'}){
+		my $val = $content->[0]->{'sex'};
+		if($val){
+			$result{'gender'} = 'female';
+		}
+		else{
+			$result{'gender'} = 'male';
+		}
+	}
+
+	if(exists $content->[0]->{'last_name'}){
+		$result{'lastname'} = $content->[0]->{'last_name'};
+	}
+
+	if(exists $content->[0]->{'first_name'}){
+		$result{'firstname'} = $content->[0]->{'first_name'};
+	}
+	return \%result;
+}
+1;
+

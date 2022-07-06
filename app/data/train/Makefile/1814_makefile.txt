@@ -1,0 +1,4 @@
+obj-$(CONFIG_MTK_COMBO_WIFI1) += mt6620/
+
+
+

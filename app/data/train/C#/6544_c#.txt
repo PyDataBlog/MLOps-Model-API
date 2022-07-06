@@ -1,0 +1,119 @@
+﻿using EzFramework.Core;
+using EzFramework.Data.AccessObject;
+using EzFramework.Data.Attributes;
+using EzFramework.Data.Map;
+using EzFramework.Utils;
+using System;
+using System.Reflection;
+
+namespace EzFramework.Data
+{
+    /// <summary>
+    /// 数据库持久层相关扩展方法
+    /// </summary>
+    public static class ExtendFun
+    {
+        /// <summary>
+        /// 分页查询,此方法不在建议使用
+        /// </summary>
+        /// <param name="info">分页信息</param>
+        /// <param name="selectColumns">需要查询的列</param>
+        /// <param name="fromTableOrViewNames">表或试图</param>
+        /// <param name="condition">条件，不需要包含关键字 where</param>
+        /// <param name="orderby">排序字段</param>
+        /// <param name="pkname">主键名</param>
+        /// <returns>分页查询对象</returns>
+        public static PageQuery QueryObj(this PagerInfo info, string selectColumns, string fromTableOrViewNames, string condition, string orderby, string pkname)
+        {
+            return new PageQuery(selectColumns, fromTableOrViewNames, condition, info.PageIndex, info.PageSize)
+            {
+                PkName = pkname,
+                OrderBy = orderby
+            };
+        }
+
+        /// <summary>
+        /// 根据SQL描述信息执行数据库操作
+        /// </summary>
+        /// <param name="dao">数据库操作对象</param>
+        /// <param name="descript">数据库</param>
+        /// <returns></returns>
+        public static bool ExecuteSqlDescrip(this IDefaultDao dao, SqlDescrip descript)
+        {
+            return dao.ExecuteSql(descript.SQlString, descript.DbParams) > 0; ;
+        }
+
+        /// <summary>
+        /// 根据SQL描述信息执行数据库操作
+        /// </summary>
+        /// <param name="dao">数据库操作对象</param>
+        /// <param name="descript">数据库</param>
+        /// <param name="cachekey">清除指定key的缓存</param>
+        /// <returns></returns>
+        public static bool ExecuteSqlDescrip(this IDefaultDao dao, SqlDescrip descript, string cachekey)
+        {
+            bool success = dao.ExecuteSql(descript.SQlString, descript.DbParams) > 0;
+            if (success && !string.IsNullOrEmpty(cachekey))
+            {
+                try
+                {
+                    CachePool.RemoveCachePool(cachekey);
+                }
+                catch (Exception exp)
+                {
+                    LogHelper.Error("数据缓存清除失败(" + cachekey + "):" + exp);
+                }
+            }
+            return success;
+        }
+        /// <summary>
+        /// 根据SQL描述信息执行数据库操作
+        /// </summary>
+        /// <param name="dao">数据库操作对象</param>
+        /// <param name="descript">数据库</param>
+        /// <param name="auto_cache_clear">是否清除所有类型前缀的缓存</param>
+        /// <returns></returns>
+        public static bool ExecuteSqlDescrip(this IDefaultDao dao, SqlDescrip descript, bool auto_cache_clear)
+        {
+            bool success = dao.ExecuteSql(descript.SQlString, descript.DbParams) > 0;
+            if (success && auto_cache_clear && descript.EntityType != null)
+            {
+                BaseDao.clearDbCache(descript.EntityType);
+            }
+            return success;
+        }
+        /// <summary>
+        /// 初始化表映射类中属性类型为string和datetime
+        /// </summary>
+        /// <typeparam name="T">表映射类类型</typeparam>
+        /// <param name="t">表映射类实例</param>
+        /// <returns></returns>
+        public static T Normalize<T>(this T t) where T : DefaultEntity, new()
+        {
+            PropertyInfo[] target_pinfos = t.GetType().GetProperties();
+            foreach (var property in target_pinfos)
+            {
+                System.TypeCode tcode = System.Type.GetTypeCode(property.PropertyType);
+                if (!property.CanWrite && !property.CanRead && (tcode != System.TypeCode.String || tcode != System.TypeCode.DateTime))
+                    continue;
+                object[] igones = property.GetCustomAttributes(typeof(IgoneTranslat), false);
+                if (igones != null && igones.Length > 0) continue;
+                igones = property.GetCustomAttributes(typeof(IgoneFiled), false);
+                if (igones.Length > 0) continue;
+
+                object obj = property.GetValue(t, null);
+                if (obj != null) continue;
+                if (tcode == System.TypeCode.String)
+                {
+                    property.SetValue(t, "", null);
+                }
+                else if (tcode == System.TypeCode.DateTime)
+                {
+                    property.SetValue(t, DateTime.MinValue, null);
+                }
+            }
+            return t;
+        }
+    }
+}
+

@@ -1,0 +1,335 @@
+package org.dol.json;
+
+
+import com.fasterxml.jackson.annotation.JacksonAnnotationsInside;
+import com.fasterxml.jackson.annotation.JsonInclude;
+import com.fasterxml.jackson.annotation.JsonProperty;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.databind.*;
+import com.fasterxml.jackson.databind.deser.DeserializationProblemHandler;
+import com.fasterxml.jackson.databind.introspect.Annotated;
+import com.fasterxml.jackson.databind.introspect.AnnotatedMethod;
+import com.fasterxml.jackson.databind.introspect.JacksonAnnotationIntrospector;
+import com.fasterxml.jackson.databind.type.MapType;
+import lombok.Data;
+import org.dol.model.FieldProperty;
+import org.dol.util.StringUtil;
+
+import java.io.IOException;
+import java.lang.annotation.Annotation;
+import java.lang.reflect.Type;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+public final class JSON {
+    public static final ObjectMapper DEFAULT_OBJECT_MAPPER;
+
+    static {
+        DEFAULT_OBJECT_MAPPER = createDefault();
+    }
+
+    public static ObjectMapper createDefault() {
+        ObjectMapper objectMapper = new ObjectMapper();
+        AnnotationIntrospector dimensionFieldSerializer = new CustomJacksonAnnotationIntrospector();
+        objectMapper.setAnnotationIntrospector(dimensionFieldSerializer);
+        objectMapper.setSerializationInclusion(JsonInclude.Include.NON_NULL);
+        objectMapper.disable(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES);
+        objectMapper.disable(SerializationFeature.FAIL_ON_EMPTY_BEANS);
+        objectMapper.disable(SerializationFeature.FAIL_ON_SELF_REFERENCES);
+        objectMapper.disable(SerializationFeature.FAIL_ON_UNWRAPPED_TYPE_IDENTIFIERS);
+        objectMapper.enable(JsonParser.Feature.ALLOW_MISSING_VALUES);
+        objectMapper.enable(MapperFeature.ACCEPT_CASE_INSENSITIVE_ENUMS);
+
+        objectMapper.enable(JsonParser.Feature.ALLOW_COMMENTS);
+        DeserializationConfig deserializationConfig = objectMapper.getDeserializationConfig().withHandler(BooleanDeserializationProblemHandler.INSTANCE);
+        objectMapper.setConfig(deserializationConfig);
+        return objectMapper;
+    }
+
+
+    public static <T> T parseObject(String json, Class<T> resultClazz) {
+        try {
+            return DEFAULT_OBJECT_MAPPER
+                    .readerFor(resultClazz)
+                    .readValue(json);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static Object parseObject(String json, Type type) {
+        try {
+            JavaType javaType = DEFAULT_OBJECT_MAPPER.getTypeFactory().constructType(type);
+            return DEFAULT_OBJECT_MAPPER.readerFor(javaType).readValue(json);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static <T> T parseObject(String json, Class<T> parametrized,
+                                    Class<?>... parameterClasses) {
+        try {
+            JavaType javaType = DEFAULT_OBJECT_MAPPER
+                    .getTypeFactory()
+                    .constructParametricType(parametrized, parameterClasses);
+            return DEFAULT_OBJECT_MAPPER.readerFor(javaType).readValue(json);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static <T> T[] parseJavaArray(String json, Class<T> elementType) {
+        try {
+            JavaType javaType = DEFAULT_OBJECT_MAPPER.getTypeFactory().constructArrayType(elementType);
+            return DEFAULT_OBJECT_MAPPER.readerFor(javaType).readValue(json);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static <T> List<T> parseArray(String json, Class<T> elementType) {
+        return parseList(json, elementType);
+
+    }
+
+    public static JSONArray parseArray(String json) {
+        List<Object> items = parseList(json, Object.class);
+        return new JSONArray(items);
+    }
+
+    public static String toJSONString(Object value) {
+        try {
+            return DEFAULT_OBJECT_MAPPER.writeValueAsString(value);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static String toJSONString(Object value, boolean pretty) {
+        if (pretty) {
+            try {
+                return DEFAULT_OBJECT_MAPPER.writerWithDefaultPrettyPrinter().writeValueAsString(value);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+        return toJSONString(value);
+    }
+
+
+    public static <T> List<T> parseList(String json, Class<T> elementClass) {
+        try {
+            JavaType javaType = DEFAULT_OBJECT_MAPPER
+                    .getTypeFactory()
+                    .constructCollectionType(ArrayList.class, elementClass);
+            return DEFAULT_OBJECT_MAPPER.readValue(json, javaType);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static <T> List<T> parseList(String json) {
+        try {
+            JavaType javaType = DEFAULT_OBJECT_MAPPER
+                    .getTypeFactory()
+                    .constructCollectionType(ArrayList.class, Object.class);
+            return DEFAULT_OBJECT_MAPPER.readValue(json, javaType);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static <K, V> Map<K, V> parseMap(String json, Class<V> valueClass) {
+        try {
+            MapType mapType = DEFAULT_OBJECT_MAPPER.getTypeFactory().constructMapType(
+                    HashMap.class,
+                    String.class,
+                    valueClass);
+            return DEFAULT_OBJECT_MAPPER.readValue(json, mapType);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static <K, V> Map<K, V> parseMap(String json, Class<? extends Map> mapClass, Class<String> keyClass, Class<V> valueClass) {
+        try {
+            MapType mapType = DEFAULT_OBJECT_MAPPER.getTypeFactory().constructMapType(
+                    mapClass,
+                    keyClass,
+                    valueClass);
+            return DEFAULT_OBJECT_MAPPER.readValue(json, mapType);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    public static Map<String, Object> parseMap(String json) {
+        return parseMap(json, Object.class);
+    }
+
+
+    public static JSONObject parseObject(String json) {
+        Map<String, Object> stringObjectMap = parseMap(json);
+        return new JSONObject(stringObjectMap);
+    }
+
+    @Data
+    public static class TestData {
+        private String name;
+    }
+
+    public static class BooleanDeserializationProblemHandler extends DeserializationProblemHandler {
+        private static final BooleanDeserializationProblemHandler INSTANCE =
+                new BooleanDeserializationProblemHandler();
+
+        @Override
+        public Object handleWeirdStringValue(DeserializationContext ctxt,
+                                             Class<?> targetType,
+                                             String valueToConvert,
+                                             String failureMsg) throws IOException {
+            if (Boolean.class.equals(targetType)) {
+                return "1".equals(valueToConvert)
+                        || "true".equalsIgnoreCase(valueToConvert);
+
+            }
+            if (String.class.equals(targetType)) {
+                return "1".equals(valueToConvert) || "true".equalsIgnoreCase(valueToConvert);
+
+            }
+            return super.handleWeirdStringValue(ctxt, targetType, valueToConvert, failureMsg);
+        }
+
+        @Override
+        public Object handleWeirdNumberValue(DeserializationContext ctxt,
+                                             Class<?> targetType,
+                                             Number valueToConvert,
+                                             String failureMsg) throws IOException {
+            if (Boolean.class.equals(targetType)) {
+                return valueToConvert.equals(1);
+            } else if (String.class.equals(targetType)) {
+                return valueToConvert.equals(1);
+            }
+            return super.handleWeirdNumberValue(ctxt, targetType, valueToConvert, failureMsg);
+        }
+
+        @Override
+        public Object handleWeirdNativeValue(DeserializationContext ctxt,
+                                             JavaType targetType,
+                                             Object valueToConvert, JsonParser p) throws IOException {
+            return super.handleWeirdNativeValue(ctxt, targetType, valueToConvert, p);
+        }
+
+        @Override
+        public Object handleUnexpectedToken(DeserializationContext ctxt,
+                                            Class<?> targetType,
+                                            JsonToken t,
+                                            JsonParser p,
+                                            String failureMsg) throws IOException {
+            if (Boolean.class.equals(targetType)) {
+                if (t == JsonToken.VALUE_NUMBER_FLOAT) {
+                    return p.getFloatValue() > 0;
+                }
+            }
+            return super.handleUnexpectedToken(ctxt, targetType, t, p, failureMsg);
+        }
+    }
+
+
+    public static class CustomJacksonAnnotationIntrospector extends JacksonAnnotationIntrospector {
+        public static String toJSONString(Object obj) {
+            try {
+                return DEFAULT_OBJECT_MAPPER.writeValueAsString(obj);
+            } catch (IOException e) {
+                throw new RuntimeException(e);
+            }
+        }
+
+        @Override
+        public PropertyName findNameForSerialization(Annotated a) {
+            PropertyName propertyName = getPropertyName(a);
+            return propertyName != null ? propertyName : super.findNameForSerialization(a);
+        }
+
+        @Override
+        public PropertyName findNameForDeserialization(Annotated a) {
+            PropertyName propertyName = getPropertyName(a);
+            return propertyName != null ? propertyName : super.findNameForDeserialization(a);
+        }
+
+        @Override
+        public boolean isAnnotationBundle(Annotation ann) {
+            Class<?> type = ann.annotationType();
+            Boolean b = _annotationsInside.get(type);
+            if (b == null) {
+                b = type.getAnnotation(JacksonAnnotationsInside.class) != null
+                        || type.getAnnotation(FieldProperty.class) != null;
+                _annotationsInside.putIfAbsent(type, b);
+            }
+            return b;
+        }
+
+        private PropertyName getPropertyName(Annotated a) {
+            FieldProperty FieldProperty = a.getAnnotation(FieldProperty.class);
+            if (FieldProperty != null && !FieldProperty.ignore()) {
+                if (StringUtil.notEmpty(FieldProperty.value())) {
+                    return PropertyName.construct(FieldProperty.value());
+                }
+                if (StringUtil.notEmpty(FieldProperty.name())) {
+                    return PropertyName.construct(FieldProperty.name());
+                }
+            }
+            return null;
+        }
+
+        @Override
+        public JsonProperty.Access findPropertyAccess(Annotated m) {
+            JsonProperty.Access propertyAccess = super.findPropertyAccess(m);
+            if (propertyAccess != null) {
+                return propertyAccess;
+            }
+            FieldProperty annotation = m.getAnnotation(FieldProperty.class);
+            if (annotation != null && !annotation.ignore()) {
+                if (!annotation.serialize() && annotation.deserialize()) {
+                    return JsonProperty.Access.WRITE_ONLY;
+                } else if (annotation.serialize() && !annotation.deserialize()) {
+                    return JsonProperty.Access.READ_ONLY;
+                }
+            }
+            return null;
+        }
+
+        @Override
+        protected boolean _isIgnorable(Annotated a) {
+            boolean ignorable = super._isIgnorable(a);
+            if (ignorable) {
+                return ignorable;
+            }
+            FieldProperty fieldProperty = a.getAnnotation(FieldProperty.class);
+            if (fieldProperty != null) {
+                return fieldProperty.ignore() || (!fieldProperty.serialize() && !fieldProperty.deserialize());
+            }
+            return ignorable;
+        }
+
+        @Override
+        public Object findDeserializer(Annotated a) {
+            Object deserializer = super.findDeserializer(a);
+            if (deserializer == null && (a instanceof AnnotatedMethod)) {
+                AnnotatedMethod method = (AnnotatedMethod) a;
+                if (method.getParameterCount() == 1 && method.getRawParameterType(0) == String.class) {
+                    FieldProperty annRaw = _findAnnotation(a, FieldProperty.class);
+                    if (annRaw != null && annRaw.rowString()) {
+                        return JsonRawValueDeserializer.INSTANCE;
+                    }
+                    if (annRaw == null || annRaw.trim()) {
+                        return TrimStringDeserializer.INSTANCE;
+                    }
+                }
+            }
+            return null;
+        }
+    }
+}

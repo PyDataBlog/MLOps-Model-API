@@ -1,0 +1,90 @@
+package bayes
+
+import (
+	"fmt"
+	. "fp/mat"
+	"math"
+)
+
+type GaussianKDE struct {
+	d, n               int
+	normFactor         float64
+	dataset            *Mat
+	covariance, invCov *Mat
+}
+
+func NewGaussianKDE(dataset *Mat, bw_method ...float64) *GaussianKDE {
+	if dataset.Cols() <= 1 {
+		panic("`dataset` input should have multiple elements")
+	}
+	d := dataset.Rows()
+	n := dataset.Cols()
+	var bandwidth float64
+	if len(bw_method) != 0 {
+		bandwidth = bw_method[0]
+	} else {
+		//scotts factor
+		bandwidth = math.Pow(float64(n), -1.0/float64(d+4))
+	}
+
+	factor := bandwidth
+	_data_covariance := CovOfRowvecs(dataset, 0)
+	_data_inv_cov := _data_covariance.Inv()
+	covariance := _data_covariance.MulScale(factor * factor)
+	invCov := _data_inv_cov.DivScale(factor * factor)
+	normFactor := math.Sqrt(covariance.MulScale(2*math.Pi).Det()) * float64(n)
+	return &GaussianKDE{
+		d:          d,
+		n:          n,
+		normFactor: normFactor,
+		dataset:    dataset.Clone(),
+		covariance: covariance,
+		invCov:     invCov,
+	}
+}
+
+//"""Evaluate the estimated pdf on a set of points.
+//Parameters
+//----------
+//points : (# of dimensions, # of points)-array
+//    Alternatively, a (# of dimensions,) vector can be passed in and
+//    treated as a single point.
+//Returns
+//-------
+//values : (# of points,)-array
+//    The values at each point.
+//Raises
+//------
+//ValueError : if the dimensionality of the input points is different than
+//             the dimensionality of the KDE.
+//"""
+func (self *GaussianKDE) Evaluate(points *Mat) *Mat {
+	d, m := points.Rows(), points.Cols()
+	if d != self.d {
+		panic(fmt.Errorf("points have dimension %v, dataset has dimension %v", d, self.d))
+	}
+
+	result := MatZeros(1, m)
+	if m >= self.n {
+		//there are more points than data, so loop over data
+		for i := 0; i < self.n; i++ {
+			diff := points.MulScale(-1.0).Add(self.dataset.NthCol(i))
+			tdiff := self.invCov.Mul(diff)
+			energy := diff.MulBit(tdiff).SumOfColvecs().DivScale(2.0)
+			result.AddEqual(Exp(energy.MulScale(-1.0)))
+		}
+		return result.DivScale(self.normFactor)
+	} else {
+		for i := 0; i < m; i++ {
+			diff := self.dataset.Sub(points.NthCol(i))
+			tdiff := self.invCov.Mul(diff)
+			energy := diff.MulBit(tdiff).SumOfColvecs().DivScale(2.0)
+			result.Set(0, i, Exp(energy.MulScale(-1.0)).SumOfAll())
+		}
+		return result.DivScale(self.normFactor)
+	}
+}
+
+func (self *GaussianKDE) Pdf(points *Mat) *Mat {
+	return self.Evaluate(points)
+}

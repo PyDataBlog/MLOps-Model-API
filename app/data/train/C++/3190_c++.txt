@@ -1,0 +1,332 @@
+
+// Shader Code
+
+#include <windows.h>
+#include <string>
+#include <fstream>
+#include <d3d9.h>
+#include <d3dx9.h>
+#include "../../math/Math.h"
+#include "../../base/base.h"
+#include "../../etc/Utility.h"
+#include <vector>
+#include <map>
+#include <sstream>
+#pragma comment( lib, "d3d9.lib" )
+#pragma comment( lib, "d3dx9.lib" )
+#pragma comment( lib, "winmm.lib" )
+
+
+using namespace std;
+using namespace graphic;
+
+LPDIRECT3DDEVICE9	g_pDevice = NULL;
+const int WINSIZE_X = 1024;		//ÃÊ±â À©µµ¿ì °¡·Î Å©±â
+const int WINSIZE_Y = 768;	//ÃÊ±â À©µµ¿ì ¼¼·Î Å©±â
+const int WINPOS_X = 0; //ÃÊ±â À©µµ¿ì ½ÃÀÛ À§Ä¡ X
+const int WINPOS_Y = 0; //ÃÊ±â À©µµ¿ì ½ÃÀÛ À§Ä¡ Y
+
+POINT g_CurPos;
+bool g_LButtonDown = false;
+bool g_RButtonDown = false;
+Matrix44 g_LocalTm;
+Vector3 g_camPos(0,100,-200);
+Vector3 g_lookAtPos(0,0,0);
+Matrix44 g_matProj;
+Matrix44 g_matView;
+
+graphic::cShader g_shader;
+graphic::cSphere g_sphere;
+graphic::cTexture g_texture;
+
+LPDIRECT3DDEVICE9 graphic::GetDevice()
+{
+	return g_pDevice;
+}
+
+
+// ÄÝ¹é ÇÁ·Î½ÃÁ® ÇÔ¼ö ÇÁ·ÎÅä Å¸ÀÔ
+LRESULT CALLBACK WndProc( HWND hWnd, UINT iMessage, WPARAM wParam, LPARAM lParam );
+bool InitVertexBuffer();
+void Render(int timeDelta);
+void UpdateCamera();
+void GetRay(int sx, int sy, Vector3 &orig, Vector3 &dir);
+bool IntersectTriangle( const D3DXVECTOR3& orig, const D3DXVECTOR3& dir,
+	D3DXVECTOR3& v0, D3DXVECTOR3& v1, D3DXVECTOR3& v2,
+	FLOAT* t, FLOAT* u, FLOAT* v );
+
+
+int APIENTRY WinMain(HINSTANCE hInstance, 
+	HINSTANCE hPrevInstance, 
+	LPSTR lpCmdLine, 
+	int nCmdShow)
+{
+	wchar_t className[32] = L"Shader_Phong";
+	wchar_t windowName[32] = L"Shader_Phong";
+
+	//À©µµ¿ì Å¬·¹½º Á¤º¸ »ý¼º
+	//³»°¡ ÀÌ·¯ÇÑ À©µµ¸¦ ¸¸µé°Ú´Ù ¶ó´Â Á¤º¸
+	WNDCLASS WndClass;
+	WndClass.cbClsExtra = 0;			//À©µµ¿ì¿¡¼­ »ç¿ëÇÏ´Â ¿©ºÐÀÇ ¸Þ¸ð¸®¼³Á¤( ±×³É 0 ÀÌ´Ù  ½Å°æ¾²Áö¸»ÀÚ )
+	WndClass.cbWndExtra = 0;			//À©µµ¿ì¿¡¼­ »ç¿ëÇÏ´Â ¿©ºÐÀÇ ¸Þ¸ð¸®¼³Á¤( ±×³É 0 ÀÌ´Ù  ½Å°æ¾²Áö¸»ÀÚ )
+	WndClass.hbrBackground = (HBRUSH)GetStockObject(GRAY_BRUSH);		//À©µµ¿ì ¹è°æ»ö»ó
+	WndClass.hCursor = LoadCursor( NULL, IDC_ARROW );			//À©µµ¿ìÀÇ Ä¿¼­¸ð¾ç °áÁ¤
+	WndClass.hIcon = LoadIcon( NULL, IDI_APPLICATION );		//À©µµ¿ì¾ÆÀÌÄÜ¸ð¾ç °áÁ¤
+	WndClass.hInstance = hInstance;				//ÇÁ·Î±×·¥ÀÎ½ºÅÏ½ºÇÚµé 
+	WndClass.lpfnWndProc = (WNDPROC)WndProc;			//À©µµ¿ì ÇÁ·Î½ÃÁ® ÇÔ¼ö Æ÷ÀÎÅÍ
+	WndClass.lpszMenuName = NULL;						//¸Þ´ºÀÌ¸§ ¾øÀ¸¸é NULL
+	WndClass.lpszClassName = className;				//Áö±Ý ÀÛ¼ºÇÏ°í ÀÖ´Â À©µµ¿ì Å¬·¹½ºÀÇ ÀÌ¸§
+	WndClass.style	 = CS_HREDRAW | CS_VREDRAW;	//À©µµ¿ì ±×¸®±â ¹æ½Ä ¼³Á¤ ( »çÀÌÁî°¡ º¯°æµÉ¶§ È­¸é°»½Å CS_HREDRAW | CS_VREDRAW )
+
+	//À§¿¡¼­ ÀÛ¼ºÇÑ À©µµ¿ì Å¬·¹½ºÁ¤º¸ µî·Ï
+	RegisterClass( &WndClass );
+
+	//À©µµ¿ì »ý¼º
+	//»ý¼ºµÈ À©µµ¿ì ÇÚµéÀ» Àü¿ªº¯¼ö g_hWnd °¡ ¹Þ´Â´Ù.
+	HWND hWnd = CreateWindow(
+		className,				//»ý¼ºµÇ´Â À©µµ¿ìÀÇ Å¬·¡½ºÀÌ¸§
+		windowName,				//À©µµ¿ì Å¸ÀÌÆ²¹Ù¿¡ Ãâ·ÂµÇ´Â ÀÌ¸§
+		WS_OVERLAPPEDWINDOW,	//À©µµ¿ì ½ºÅ¸ÀÏ WS_OVERLAPPEDWINDOW
+		WINPOS_X,				//À©µµ¿ì ½ÃÀÛ À§Ä¡ X 
+		WINPOS_Y,				//À©µµ¿ì ½ÃÀÛ À§Ä¡ Y
+		WINSIZE_X,				//À©µµ¿ì °¡·Î Å©±â ( ÀÛ¾÷¿µ¿ªÀÇ Å©±â°¡ ¾Æ´Ô )
+		WINSIZE_Y,				//À©µµ¿ì ¼¼·Î Å©±â ( ÀÛ¾÷¿µ¿ªÀÇ Å©±â°¡ ¾Æ´Ô )
+		GetDesktopWindow(),		//ºÎ¸ð À©µµ¿ì ÇÚµé ( ÇÁ·Î±×·¥¿¡¼­ ÃÖ»óÀ§ À©µµ¿ì¸é NULL ¶Ç´Â GetDesktopWindow() )
+		NULL,					//¸Þ´º ID ( ÀÚ½ÅÀÇ ÄÁÆ®·Ñ °´Ã¼ÀÇ À©µµ¿ìÀÎ°æ¿ì ÄÁÆ®·Ñ ID °¡ µÈ	
+		hInstance,				//ÀÌ À©µµ¿ì°¡ ¹°¸± ÇÁ·Î±×·¥ ÀÎ½ºÅÏ½º ÇÚµé
+		NULL					//Ãß°¡ Á¤º¸ NULL ( ½Å°æ²ôÀÚ )
+		);
+
+	//À©µµ¿ì¸¦ Á¤È®ÇÑ ÀÛ¾÷¿µ¿ª Å©±â·Î ¸ÂÃá´Ù
+	RECT rcClient = { 0, 0, WINSIZE_X, WINSIZE_Y };
+	AdjustWindowRect( &rcClient, WS_OVERLAPPEDWINDOW, FALSE );	//rcClient Å©±â¸¦ ÀÛ¾÷ ¿µ¿µÀ¸·Î ÇÒ À©µµ¿ì Å©±â¸¦ rcClient ¿¡ ´ëÀÔµÇ¾î ³ª¿Â´Ù.
+
+	//À©µµ¿ì Å©±â¿Í À©µµ¿ì À§Ä¡¸¦ ¹Ù²Ù¾îÁØ´Ù.
+	SetWindowPos( hWnd, NULL, 0, 0, rcClient.right - rcClient.left, rcClient.bottom - rcClient.top, 
+		SWP_NOZORDER | SWP_NOMOVE );
+
+	if (!graphic::InitDirectX(hWnd, WINSIZE_X, WINSIZE_Y, g_pDevice))
+	{
+		return 0;
+	}
+
+	InitVertexBuffer();
+	ShowWindow( hWnd, nCmdShow );
+
+
+	//¸Þ½ÃÁö ±¸Á¶Ã¼
+	MSG msg;		
+	ZeroMemory( &msg, sizeof( MSG ) );
+
+	int oldT = GetTickCount();
+	while (msg.message != WM_QUIT)
+	{
+		//PeekMessage ´Â ¸Þ½ÃÁö Å¥¿¡ ¸Þ½ÃÁö°¡ ¾ø¾îµµ ÇÁ·Î±×·¥ÀÌ ¸ØÃß±â ¾Ê°í ÁøÇàÀÌ µÈ´Ù.
+		//ÀÌ¶§ ¸Þ½ÃÁöÅ¥¿¡ ¸Þ½ÃÁö°¡ ¾øÀ¸¸é false °¡ ¸®ÅÏµÇ°í ¸Þ½ÃÁö°¡ ÀÖÀ¸¸é true °¡ ¸®ÅÏÀÌµÈ´Ù.
+		if (PeekMessage(&msg, 0, 0, 0, PM_REMOVE))
+		{
+			TranslateMessage( &msg ); //´­¸° Å°º¸µå ÀÇ ¹®ÀÚ¸¦ ¹ø¿ªÇÏ¿© WM_CHAR ¸Þ½ÃÁö¸¦ ¹ß»ý½ÃÅ²´Ù.
+			DispatchMessage( &msg );  //¹Þ¾Æ¿Â ¸Þ½ÃÁö Á¤º¸·Î À©µµ¿ì ÇÁ·Î½ÃÁ® ÇÔ¼ö¸¦ ½ÇÇà½ÃÅ²´Ù.
+		}
+		else
+		{
+			const int curT = timeGetTime();
+			const int elapseT = curT - oldT;
+			//if (elapseT > 15)
+			//{
+			oldT = curT;
+			Render(elapseT);
+			//}
+		}
+	}
+
+	if (g_pDevice)
+		g_pDevice->Release();
+	return 0;
+}
+
+
+//
+// À©µµ¿ì ÇÁ·Î½ÃÁ® ÇÔ¼ö ( ¸Þ½ÃÁö Å¥¿¡¼­ ¹Þ¾Æ¿Â ¸Þ½ÃÁö¸¦ Ã³¸®ÇÑ´Ù )
+//
+LRESULT CALLBACK WndProc( HWND hWnd, UINT msg, WPARAM wParam, LPARAM lParam )
+{
+	switch (msg)
+	{
+	case WM_KEYDOWN:
+		if (wParam == VK_ESCAPE)
+			::DestroyWindow(hWnd);
+		else if (wParam == VK_TAB)
+		{
+			static bool flag = false;
+			g_pDevice->SetRenderState(D3DRS_CULLMODE, flag);
+			g_pDevice->SetRenderState(D3DRS_FILLMODE, flag? D3DFILL_SOLID : D3DFILL_WIREFRAME);
+			flag = !flag;
+		}
+		else if (wParam == VK_SPACE)
+		{
+		}
+		break;
+
+	case WM_LBUTTONDOWN:
+		{
+			g_LButtonDown = true;
+			g_CurPos.x = LOWORD(lParam);
+			g_CurPos.y = HIWORD(lParam);
+		}
+		break;
+
+	case WM_RBUTTONDOWN:
+		{
+			g_RButtonDown = true;
+			g_CurPos.x = LOWORD(lParam);
+			g_CurPos.y = HIWORD(lParam);
+		}
+		break;
+
+	case WM_LBUTTONUP:
+		g_LButtonDown = false;
+		break;
+
+	case WM_RBUTTONUP:
+		g_RButtonDown = false;
+		break;
+
+	case WM_MOUSEMOVE:
+		if (g_LButtonDown)
+		{
+			POINT pos;
+			pos.x = LOWORD(lParam);
+			pos.y = HIWORD(lParam);
+
+			const int x = pos.x - g_CurPos.x;
+			const int y = pos.y - g_CurPos.y;
+			g_CurPos = pos;
+
+			Matrix44 mat1;
+			mat1.SetRotationY( -x * 0.01f );
+			Matrix44 mat2;
+			mat2.SetRotationX( -y * 0.01f );
+
+			g_LocalTm *= (mat1 * mat2);
+		}
+		if (g_RButtonDown)
+		{
+			POINT pos;
+			pos.x = LOWORD(lParam);
+			pos.y = HIWORD(lParam);
+
+			const int x = pos.x - g_CurPos.x;
+			const int y = pos.y - g_CurPos.y;
+			g_CurPos = pos;
+
+			Matrix44 rx;
+			rx.SetRotationY( x * 0.005f );
+
+			Matrix44 ry;
+			ry.SetRotationX( y * 0.005f );
+
+			Matrix44 m = rx * ry;
+			g_camPos *= m;
+
+			UpdateCamera();
+		}	
+		else
+		{
+			g_CurPos.x = LOWORD(lParam);
+			g_CurPos.y = HIWORD(lParam);
+		}
+		break;
+
+	case WM_MOUSEWHEEL:
+		{
+			const int fwKeys = GET_KEYSTATE_WPARAM(wParam);
+			const int zDelta = GET_WHEEL_DELTA_WPARAM(wParam);
+
+			Vector3 dir = g_lookAtPos - g_camPos;
+			dir.Normalize();
+			g_camPos += (zDelta < 0)? dir * -50 : dir*50;
+			UpdateCamera();
+		}
+		break;
+
+	case WM_DESTROY: //À©µµ¿ì°¡ ÆÄ±«µÈ´Ù¸é..
+		PostQuitMessage(0);	//ÇÁ·Î±×·¥ Á¾·á ¿äÃ» ( ¸Þ½ÃÁö ·çÇÁ¸¦ ºüÁ®³ª°¡°Ô µÈ´Ù )
+		break;
+	}
+	return DefWindowProc( hWnd, msg, wParam, lParam );
+}
+
+
+//·£´õ
+void Render(int timeDelta)
+{
+	//È­¸é Ã»¼Ò
+	if (SUCCEEDED(g_pDevice->Clear( 
+		0,			//Ã»¼ÒÇÒ ¿µ¿ªÀÇ D3DRECT ¹è¿­ °¹¼ö		( ÀüÃ¼ Å¬¸®¾î 0 )
+		NULL,		//Ã»¼ÒÇÒ ¿µ¿ªÀÇ D3DRECT ¹è¿­ Æ÷ÀÎÅÍ		( ÀüÃ¼ Å¬¸®¾î NULL )
+		D3DCLEAR_TARGET | D3DCLEAR_ZBUFFER | D3DCLEAR_STENCIL,	//Ã»¼ÒµÉ ¹öÆÛ ÇÃ·¹±× ( D3DCLEAR_TARGET ÄÃ·¯¹öÆÛ, D3DCLEAR_ZBUFFER ±íÀÌ¹öÆÛ, D3DCLEAR_STENCIL ½ºÅÙ½Ç¹öÆÛ
+		D3DCOLOR_XRGB(150, 150, 150),			//ÄÃ·¯¹öÆÛ¸¦ Ã»¼ÒÇÏ°í Ã¤¿öÁú »ö»ó( 0xAARRGGBB )
+		1.0f,				//±íÀÌ¹öÆÛ¸¦ Ã»¼ÒÇÒ°ª ( 0 ~ 1 0 ÀÌ Ä«¸Þ¶ó¿¡¼­ Á¦ÀÏ°¡±î¿î 1 ÀÌ Ä«¸Þ¶ó¿¡¼­ Á¦ÀÏ ¸Õ )
+		0					//½ºÅÙ½Ç ¹öÆÛ¸¦ Ã¤¿ï°ª
+		)))
+	{
+		//È­¸é Ã»¼Ò°¡ ¼º°øÀûÀ¸·Î ÀÌ·ç¾î Á³´Ù¸é... ·£´õ¸µ ½ÃÀÛ
+		g_pDevice->BeginScene();
+
+		RenderFPS(timeDelta);
+		RenderAxis();
+
+		Matrix44 matS;
+		matS.SetScale(Vector3(1,2,1));
+		Matrix44 tm = matS * g_LocalTm;
+
+		g_shader.SetVector("vLightDir", Vector3(0,-1,0));
+		g_shader.SetMatrix("mWVP", tm * g_matView * g_matProj);
+		g_shader.SetVector("vEyePos", g_camPos);
+
+		Matrix44 mWIT = tm.Inverse();
+		mWIT.Transpose();
+		g_shader.SetMatrix("mWIT", mWIT);
+
+		g_shader.Begin();
+		g_shader.BeginPass(0);
+		g_texture.Bind(0);
+		g_sphere.Render(tm);
+		g_shader.EndPass();
+		g_shader.End();
+
+
+		//·£´õ¸µ ³¡
+		g_pDevice->EndScene();
+		//·£´õ¸µÀÌ ³¡³µÀ¸¸é ·£´õ¸µµÈ ³»¿ë È­¸éÀ¸·Î Àü¼Û
+		g_pDevice->Present( NULL, NULL, NULL, NULL );
+	}
+}
+
+
+bool InitVertexBuffer()
+{
+	g_shader.Create("hlsl_box_normal_phong_tex.fx", "TShader" );
+	g_texture.Create("../../media/°­¼Ò¶ó.jpg");
+	g_sphere.Create(30, 20, 20);
+
+
+	// Ä«¸Þ¶ó, Åõ¿µÇà·Ä »ý¼º
+	UpdateCamera();
+
+	g_matProj.SetProjection(D3DX_PI * 0.5f, (float)WINSIZE_X / (float) WINSIZE_Y, 1.f, 10000.0f) ;
+	g_pDevice->SetTransform(D3DTS_PROJECTION, (D3DXMATRIX*)&g_matProj) ;
+	g_pDevice->SetRenderState(D3DRS_LIGHTING, false);
+
+	return true;
+}
+
+
+void UpdateCamera()
+{
+	Vector3 dir = g_lookAtPos - g_camPos;
+	dir.Normalize();
+	g_matView.SetView(g_camPos, dir, Vector3(0,1,0));
+	graphic::GetDevice()->SetTransform(D3DTS_VIEW, (D3DXMATRIX*)&g_matView);
+}

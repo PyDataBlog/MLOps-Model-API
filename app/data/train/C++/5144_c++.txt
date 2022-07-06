@@ -1,0 +1,584 @@
+// Base class window for all the different types of transmission lines
+#include <math.h>
+#include <QStringList>
+#include <QPixmap>
+
+#include "tline.h"
+#include "mainwindow.h"
+
+// fixme take a new parameter with enum singleended or differential. draw
+// appropriately.  we won't be changing this on the fly.
+TlineWindow::TlineWindow(MainWindow *w, QWidget *parent, enum Conductors c) : QStackedWidget(parent)
+{
+	QWidget *window = new QWidget();
+	addWidget(window);
+	conductors = c;
+	this->w = w;
+
+	// fixme - make these configurable.  Convert from MKS units
+	// the input dimension units don't matter, since they are all relative
+	// measurements.  ATLC outputs MKS units for these values:
+	labelDistanceUnits = new QLabel(tr("mils"));
+	labelCapacitanceUnits = new QLabel(tr("pF/inch"));
+	labelInductanceUnits = new QLabel(tr("nH/inch"));
+	labelDelayUnits = new QLabel(tr("ps/inch"));
+	labelVelFactor = new QLabel();			
+	convFactorCapacitance = 1e12/39.3701;
+	convFactorInductance = 1e9/39.3701;
+	convFactorDelay = 1e12/39.3701;
+
+	QSizePolicy sp(QSizePolicy::Minimum, QSizePolicy::Minimum);
+	sp.setHorizontalStretch(0);
+
+	QPixmap pix(DIAGRAM_WIDTH, DIAGRAM_HEIGHT);	// empty image, derived class will change this
+	pix.fill();
+	diagram = new QLabel();
+	diagram->setPixmap(pix);				
+	//diagram->setSizePolicy( QSizePolicy::Minimum, QSizePolicy::Minimum );
+	diagram->setSizePolicy(sp);
+
+	//comment = new QLabel(QString("Base-class - you shouldn't see this..."));
+
+	parametersLayout = new QGridLayout();		// derived classes will populate this
+	notes = new QTextEdit();
+	notes->setText(tr("Add your notes here..."));
+	//notes->setSizePolicy( QSizePolicy::Minimum, QSizePolicy::Minimum );
+	notes->setSizePolicy(sp);
+	notes->setLineWrapMode(QTextEdit::NoWrap);
+	calcLayout = new QGridLayout();			// derived classes might add to this
+
+	// layout the main widgets
+	QGridLayout *layout = new QGridLayout();
+
+	// fixme this alignment doesn't work...
+	//layout->addWidget(diagram, 0, 0, 1, 1, Qt::AlignTop|Qt::AlignLeft);// upper left corner
+	layout->addWidget(diagram, 0, 0, 1, 1, Qt::AlignTop);// upper left corner
+	//layout->addWidget(comment, 1, 0, 1, 1 );		// mid left 
+	layout->addWidget(notes, 1, 0, 1, 1); 			// bottom  left
+	layout->addLayout(parametersLayout, 0, 1, 1, 1); 	// upper right corner
+	layout->addLayout(calcLayout, 1, 1, 1, 1); 		// bottom right
+	window->setLayout(layout);
+
+	// results of the calculations
+	labelImpedance = new QLabel();
+	labelDiffImpedance = new QLabel();
+	labelCommImpedance = new QLabel();
+	labelEvenImpedance = new QLabel();
+	labelOddImpedance = new QLabel();
+	labelDelay= new QLabel();
+	labelCapacitance = new QLabel();
+	labelInductance = new QLabel();
+	buttonRun = new QPushButton(tr("Run the solver")); 	// derived classes will connect it
+	buttonCancel = new QPushButton(tr("Cancel")); 		// derived classes will connect it
+	connect(buttonRun, SIGNAL(clicked()), this, SLOT(simStart()));
+	connect(buttonCancel, SIGNAL(clicked()), this, SLOT(simCancel()));
+	buttonCancel->hide();
+
+	// animated marquee progress bar shown while calculating
+	progressBar = new QProgressBar();
+	progressBar->setMinimum(0);
+	progressBar->setMaximum(0);
+	progressBar->setValue(-1);
+	progressBar->hide();
+
+	calcLayout->addWidget(buttonRun, 0, 0, 1, 1);
+	calcLayout->addWidget(progressBar, 0, 1, 1, 2);
+	calcLayout->addWidget(buttonCancel, 0, 3, 1, 1);
+	
+	// for single-ended
+	if(conductors == SingleEnded) {
+		calcLayout->addWidget(new QLabel(tr("Impedance")), 1, 0, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Delay")), 2, 0, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Inductance")), 3, 0, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Capacitance")), 4, 0, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Velocity Factor")), 5, 0, 1, 1);
+
+		calcLayout->addWidget(new QLabel(tr("Zo")), 1, 1, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("D")), 2, 1, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("L")), 3, 1, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("C")), 4, 1, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("VF")), 5, 1, 1, 1);
+
+		calcLayout->addWidget(labelImpedance, 1, 2, 1, 1);
+		calcLayout->addWidget(labelDelay, 2, 2, 1, 1);
+		calcLayout->addWidget(labelInductance, 3, 2, 1, 1);
+		calcLayout->addWidget(labelCapacitance, 4, 2, 1, 1);
+		calcLayout->addWidget(labelVelFactor, 5, 2, 1, 1);
+
+		calcLayout->addWidget(new QLabel(tr("ohms")), 1, 3, 1, 1);
+		calcLayout->addWidget(labelDelayUnits, 2, 3, 1, 1);
+		calcLayout->addWidget(labelInductanceUnits, 3, 3, 1, 1);
+		calcLayout->addWidget(labelCapacitanceUnits, 4, 3, 1, 1);
+	}
+	else {
+		// for differential 
+		calcLayout->addWidget(new QLabel(tr("Differential Impedance")), 1, 0, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Delay (odd mode)")), 2, 0, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Odd-mode Impedance")), 3, 0, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Even-mode Impedance")), 4, 0, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Common-mode Impedance")), 5, 0, 1, 1);
+
+		calcLayout->addWidget(new QLabel(tr("Zdiff")), 1, 1, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("D")), 2, 1, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Zodd")), 3, 1, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Zeven")), 4, 1, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("Zcomm")), 5, 1, 1, 1);
+
+		calcLayout->addWidget(labelDiffImpedance, 1, 2, 1, 1);
+		calcLayout->addWidget(labelDelay, 2, 2, 1, 1);
+		calcLayout->addWidget(labelOddImpedance, 3, 2, 1, 1);
+		calcLayout->addWidget(labelEvenImpedance, 4, 2, 1, 1);
+		calcLayout->addWidget(labelCommImpedance, 5, 2, 1, 1);
+
+		calcLayout->addWidget(new QLabel(tr("ohms")), 1, 3, 1, 1);
+		calcLayout->addWidget(labelDelayUnits, 2, 3, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("ohms")), 3, 3, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("ohms")), 4, 3, 1, 1);
+		calcLayout->addWidget(new QLabel(tr("ohms")), 5, 3, 1, 1);
+	}
+
+	// plots generated by ATLC - will add pixmaps when the results are available
+	plotTline = new QLabel();
+	plotPerm = new QLabel();
+	plotTline->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotPerm->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotTline->setMinimumSize(1, 1);
+	plotPerm->setMinimumSize(1, 1);
+	plotTline->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	plotPerm->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	tabPlots = new QTabWidget();
+	tabPlots->setSizePolicy( QSizePolicy::Expanding, QSizePolicy::Expanding );
+	tabPlots->addTab(plotTline, QString(tr("Structure")));
+	tabPlots->addTab(plotPerm, QString(tr("Permitivity")));
+
+	// single-ended
+	plotEfield = new QLabel();
+	plotVoltage = new QLabel();
+	plotEnergy = new QLabel();
+	plotEfield->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotVoltage->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotEnergy->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotEfield->setMinimumSize(1, 1);
+	plotVoltage->setMinimumSize(1, 1);
+	plotEnergy->setMinimumSize(1, 1);
+	plotEfield->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	plotVoltage->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	plotEnergy->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+	// differential
+	plotEfieldEven = new QLabel();
+	plotEfieldOdd = new QLabel();
+	plotVoltageEven = new QLabel();
+	plotVoltageOdd = new QLabel();
+	plotEnergyEven = new QLabel();
+	plotEnergyOdd = new QLabel();
+	plotEfieldEven->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotEfieldOdd->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotVoltageEven->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotVoltageOdd->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotEnergyEven->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotEnergyOdd->setAlignment(Qt::AlignHCenter|Qt::AlignVCenter);
+	plotEfieldEven->setMinimumSize(1, 1);
+	plotEfieldOdd->setMinimumSize(1, 1);
+	plotVoltageEven->setMinimumSize(1, 1);
+	plotVoltageOdd->setMinimumSize(1, 1);
+	plotEnergyEven->setMinimumSize(1, 1);
+	plotEnergyOdd->setMinimumSize(1, 1);
+	plotEfieldEven->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	plotEfieldOdd->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	plotVoltageEven->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	plotVoltageOdd->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	plotEnergyEven->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+	plotEnergyOdd->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
+
+	if(conductors == SingleEnded) {
+		// place plots in tabbed widget
+		tabPlots->addTab(plotEfield, QString(tr("E-field")));
+		tabPlots->addTab(plotVoltage, QString(tr("Voltage")));
+		tabPlots->addTab(plotEnergy, QString(tr("Energy")));
+	}
+	else {
+		tabPlots->addTab(plotEfieldEven, QString(tr("E-field (Even)")));
+		tabPlots->addTab(plotEfieldOdd, QString(tr("E-field (Odd)")));
+		tabPlots->addTab(plotEnergyEven, QString(tr("Energy (Even)")));
+		tabPlots->addTab(plotEnergyOdd, QString(tr("Energy (Odd)")));
+		tabPlots->addTab(plotVoltageEven, QString(tr("Voltage (Even)")));
+		tabPlots->addTab(plotVoltageOdd, QString(tr("Voltage (Odd)")));
+	}
+	calcLayout->addWidget(tabPlots, 6, 0, 1, 4);
+
+	connect(buttonRun, SIGNAL(clicked()), this, SLOT(runSimulation()));
+	connect(w, SIGNAL(writeSettings(QSettings *)), this, SLOT(writeSettings(QSettings*)));
+	connect(w, SIGNAL(readSettings(QSettings *)), this, SLOT(readSettings(QSettings*)));
+	connect(w, SIGNAL(clear()), this, SLOT(clear()));
+
+	// ATLC object which does the real work
+	atlc = new AtlcQt(w);
+	connect(atlc, SIGNAL(atlcSuccess()), this, SLOT(simDone()));
+	connect(atlc, SIGNAL(atlcFailed(QString)), this, SLOT(simFailed(QString)));
+}
+
+void TlineWindow::clear()
+{
+	plotTline->setPixmap(QPixmap());
+	plotPerm->setPixmap(QPixmap());
+	plotEfield->setPixmap(QPixmap());
+	plotEfieldEven->setPixmap(QPixmap());
+	plotEfieldOdd->setPixmap(QPixmap());
+	plotVoltage->setPixmap(QPixmap());
+	plotVoltageEven->setPixmap(QPixmap());
+	plotVoltageOdd->setPixmap(QPixmap());
+	plotEnergy->setPixmap(QPixmap());
+	plotEnergyEven->setPixmap(QPixmap());
+	plotEnergyOdd->setPixmap(QPixmap());
+
+	labelDelay->setText(QString());
+	labelInductance->setText(QString());
+	labelCapacitance->setText(QString());
+	labelImpedance->setText(QString());
+	labelVelFactor->setText(QString());
+	labelDiffImpedance->setText(QString());
+	labelCommImpedance->setText(QString());
+	labelEvenImpedance->setText(QString());
+	labelOddImpedance->setText(QString());
+
+	notes->setText(tr("Add your notes here..."));
+
+	Parameter *p;
+	QString s;
+	foreach(p, params) {
+		p->set(s);
+	}
+}
+
+void TlineWindow::setUnits(int i)
+{
+	enum MainWindow::Units u = (enum MainWindow::Units) i;
+
+	// fixme - make these configurable.  Convert from MKS units
+	// the input dimension units don't matter, since they are all relative
+	// measurements.  ATLC outputs MKS units for these values:
+	if(u == MainWindow::inches) {
+		labelDistanceUnits->setText(tr("mils"));
+		labelCapacitanceUnits->setText(tr("pF/inch"));
+		labelInductanceUnits->setText(tr("nH/inch"));
+		labelDelayUnits->setText(tr("ps/inch"));
+		convFactorCapacitance = 1e12/39.3701;
+		convFactorInductance = 1e9/39.3701;
+		convFactorDelay = 1e12/39.3701;
+	}
+	else {	//mm
+		labelDistanceUnits->setText(tr("mm"));
+		labelCapacitanceUnits->setText(tr("pF/mm"));
+		labelInductanceUnits->setText(tr("nH/mm"));
+		labelDelayUnits->setText(tr("ps/mm"));
+		convFactorCapacitance = 1e12/1000;
+		convFactorInductance = 1e9/1000;
+		convFactorDelay = 1e12/1000;
+	}
+	float d = atlc->getD() * convFactorDelay;
+	float l = atlc->getL() * convFactorInductance;
+	float c = atlc->getC() * convFactorCapacitance;
+	labelDelay->setText(QString().sprintf("%.1f", d));
+	labelInductance->setText(QString().sprintf("%.1f", l));
+	labelCapacitance->setText(QString().sprintf("%.1f", c));
+}
+
+void TlineWindow::setDiagram(QString &fname)
+{
+	// keep the same dimensions
+	//diagram->setPixmap(QPixmap(fname).scaled(diagram->pixmap()->width(), diagram->pixmap()->height(), Qt::IgnoreAspectRatio, Qt::SmoothTransformation ));
+	//diagram->setPixmap(QPixmap(fname).scaledToWidth(diagram->pixmap()->width(), Qt::SmoothTransformation ));
+	//diagram->setPixmap(QPixmap(fname).scaledToWidth(w, Qt::SmoothTransformation ));
+	diagram->setPixmap(QPixmap(fname));
+}
+
+void TlineWindow::displayTline()
+{
+	// This bitmap is ready before the simulation is run, so display it
+	tlinePixmap = QPixmap(atlc->simBitmap());
+	plotTline->setPixmap(tlinePixmap);
+	resizePlot(plotTline, &tlinePixmap);
+}
+
+void TlineWindow::displayResults()
+{
+	float z = atlc->getZo();
+	float d = atlc->getD() * convFactorDelay;
+	float l = atlc->getL() * convFactorInductance;
+	float c = atlc->getC() * convFactorCapacitance;
+	float vf = atlc->getVF();
+	float zdiff = atlc->getZdiff();
+	float zcomm = atlc->getZcomm();
+	float zeven  = atlc->getZeven ();
+	float zodd  = atlc->getZodd ();
+
+	labelImpedance->setText(QString().sprintf("%.1f", z));
+	labelDelay->setText(QString().sprintf("%.1f", d));
+	labelInductance->setText(QString().sprintf("%.1f", l));
+	labelCapacitance->setText(QString().sprintf("%.1f", c));
+	labelVelFactor->setText(QString().sprintf("%0.2f", vf));
+	labelDiffImpedance->setText(QString().sprintf("%.1f", zdiff));
+	labelCommImpedance->setText(QString().sprintf("%.1f", zcomm));
+	labelEvenImpedance->setText(QString().sprintf("%.1f", zeven));
+	labelOddImpedance->setText(QString().sprintf("%.1f", zodd));
+
+	// show the plots
+
+	permPixmap = QPixmap(atlc->permBitmap());
+	plotPerm->setPixmap(permPixmap);
+	resizePlot(plotPerm, &permPixmap);
+
+	if(conductors == SingleEnded) {
+		efieldPixmap = QPixmap(atlc->efieldBitmap());
+		voltagePixmap = QPixmap(atlc->voltageBitmap());
+		energyPixmap = QPixmap(atlc->energyBitmap());
+
+		plotEfield->setPixmap(efieldPixmap);
+		plotVoltage->setPixmap(voltagePixmap);
+		plotEnergy->setPixmap(energyPixmap);
+
+		resizePlot(plotEfield, &efieldPixmap);
+		resizePlot(plotVoltage, &voltagePixmap);
+		resizePlot(plotEnergy, &energyPixmap);
+	}
+	else {
+		efieldEvenPixmap = QPixmap(atlc->efieldEvenBitmap());
+		efieldOddPixmap = QPixmap(atlc->efieldOddBitmap());
+		voltageEvenPixmap = QPixmap(atlc->voltageEvenBitmap());
+		voltageOddPixmap = QPixmap(atlc->voltageOddBitmap());
+		energyEvenPixmap = QPixmap(atlc->energyEvenBitmap());
+		energyOddPixmap = QPixmap(atlc->energyOddBitmap());
+	
+		plotEfieldEven->setPixmap(efieldEvenPixmap);
+		plotEfieldOdd->setPixmap(efieldOddPixmap);
+		plotVoltageEven->setPixmap(voltageEvenPixmap);
+		plotVoltageOdd->setPixmap(voltageOddPixmap);
+		plotEnergyEven->setPixmap(energyEvenPixmap);
+		plotEnergyOdd->setPixmap(energyOddPixmap);
+
+		resizePlot(plotEfieldEven, &efieldEvenPixmap);
+		resizePlot(plotEfieldOdd, &efieldOddPixmap);
+		resizePlot(plotVoltageEven, &voltageEvenPixmap);
+		resizePlot(plotVoltageOdd, &voltageOddPixmap);
+		resizePlot(plotEnergyEven, &energyEvenPixmap);
+		resizePlot(plotEnergyOdd, &energyOddPixmap);
+	}
+}
+
+void TlineWindow::resizePlot(QLabel *label, QPixmap *pixmap)
+{
+	if(!label->pixmap())
+		return;
+
+	QSize scaledSize = label->pixmap()->size();
+	if(scaledSize.width() == 0 && scaledSize.height() == 0)
+		return;
+
+	//qDebug("Size of QLabel: %d, %d.  Size of Pixmap: %d, %d.", 
+		//label->width(), label->height(), pixmap->width(), pixmap->height());
+
+	scaledSize.scale(label->size(), Qt::KeepAspectRatio);
+	if(scaledSize != label->pixmap()->size())
+		label->setPixmap(pixmap->scaled(label->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation));
+}
+
+void TlineWindow::resizeEvent(QResizeEvent *event)
+{
+	// fixme - qt bug?  only the visible tab seems to get resized properly.
+	// hidden ones don't change size. force all to have the same size.
+	int i, currTab = tabPlots->currentIndex();
+	QSize plotSize = tabPlots->currentWidget()->size();
+	for(i = 0; i<tabPlots->count(); i++) {
+		if(i != currTab)
+			tabPlots->widget(i)->resize(plotSize);
+	}
+
+	// resize/rescale plots
+	resizePlot(plotTline, &tlinePixmap);
+	resizePlot(plotPerm, &permPixmap);
+	if(conductors == SingleEnded) {
+		resizePlot(plotEfield, &efieldPixmap);
+		resizePlot(plotVoltage, &voltagePixmap);
+		resizePlot(plotEnergy, &energyPixmap);
+	} 
+	else {
+		resizePlot(plotEfieldEven, &efieldEvenPixmap);
+		resizePlot(plotEfieldOdd, &efieldOddPixmap);
+		resizePlot(plotVoltageEven, &voltageEvenPixmap);
+		resizePlot(plotVoltageOdd, &voltageOddPixmap);
+		resizePlot(plotEnergyEven, &energyEvenPixmap);
+		resizePlot(plotEnergyOdd, &energyOddPixmap);
+	}
+}
+
+// pop up a message box if any of the parameters are invalid
+bool TlineWindow::validateParams()
+{
+	int n = 0;
+	Parameter *p;
+	QString str(tr("Please enter valid parameters for:\n\n"));
+
+	foreach(p, params) {
+		if(!p->valid()) {
+			str += p->name() + "\n";
+			n++;
+		}
+	}
+	if(n) {
+		qDebug("Parameters are not valid!");
+		QMessageBox::warning(this, tr("Invalid Parameters"), str);
+		return false;
+	}
+	return true;
+}
+
+int TlineWindow::drawBitmap()
+{
+	// implemented by derived classes
+	qDebug("TlineWindow::drawBitmap()");	
+	return -1;
+}
+
+void TlineWindow::calcScale(double boardHeight, double tlineWidth)
+{
+	width = w->simWidthPixels();
+	height = w->simHeightPixels();
+
+	// pick a suitable scale factor for the structure
+	// width of the structure should be < 20% of the bitmap width
+	// height of the structure should be < 25% of the bitmap height for microstrips
+	// fixme - height of the structure should be < 80% of the bitmap height for striplines
+	int maxWidthPercentage = w->simWidthPercent();
+	int maxHeightPercentage = w->simHeightPercent();
+	double s1 = simWidthPixels() / tlineWidth * (double)maxWidthPercentage/100.0;
+	double s2 = simHeightPixels() / boardHeight * (double)maxHeightPercentage/100.0;
+	scale_factor = fmin(s1, s2);
+}
+
+void TlineWindow::runSimulation()
+{
+	setUnits(w->simUnits());
+	atlc->reset();
+	if(drawBitmap() == 0) {
+		displayTline();
+		atlc->runSimulation();
+	}
+	else
+		simCancel();
+}
+
+// called when RUN button is clicked.  Derived classes will also connect their
+// own functions
+void TlineWindow::simStart()
+{
+	progressBar->show();
+	buttonCancel->show();
+}
+
+// called when CANCEL button is clicked.  Derived classes will also connect their
+// own functions
+void TlineWindow::simCancel()
+{
+	progressBar->hide();
+	buttonCancel->hide();
+}
+
+// called when ATLC completes successfully
+void TlineWindow::simDone()
+{
+	progressBar->hide();
+	buttonCancel->hide();
+	displayResults();
+}
+
+// called when ATLC fails
+void TlineWindow::simFailed(QString str)
+{
+	progressBar->hide();
+	buttonCancel->hide();
+	QString msg(tr("Simulation Failed\n"));
+	msg += str;
+	QMessageBox::warning(this, tr("Simulation Failed"), msg);
+}
+
+#if 0
+void TlineWindow::closeEvent(QCloseEvent *event)
+{
+}
+#endif
+
+void TlineWindow::readSettings(QSettings *s)
+{
+	Parameter *p;
+	QString val;
+
+	s->beginGroup(name());
+
+	// all the user entered parameters
+	foreach(p, params) {
+		val = s->value(p->label()).toString();
+		p->set(val);
+	}
+	notes->setText(s->value("Notes").toString());
+
+	// calculated values for reference
+	if(conductors == SingleEnded) {
+		labelImpedance->setText(s->value("CALC_Z").toString());
+		labelDelay->setText(s->value("CALC_D").toString());
+		labelInductance->setText(s->value("CALC_L").toString());
+		labelCapacitance->setText(s->value("CALC_C").toString());
+		labelVelFactor->setText(s->value("CALC_VF").toString());
+	}
+	else {
+		labelDiffImpedance->setText(s->value("CALC_Z_DIFF").toString());
+		labelCommImpedance->setText(s->value("CALC_Z_COMM").toString());
+		labelEvenImpedance->setText(s->value("CALC_Z_EVEN").toString());
+		labelOddImpedance->setText(s->value("CALC_Z_ODD").toString());
+		labelDelay->setText(s->value("CALC_D").toString());
+	}
+	s->endGroup();
+
+}
+
+void TlineWindow::writeSettings(QSettings *s)
+{
+	Parameter *p;
+	QString val;
+
+	s->beginGroup(name());
+
+	// all the user entered parameters
+	foreach(p, params) {
+		s->setValue(p->label(), p->text());
+	}
+	s->setValue("Notes", notes->toPlainText());
+
+	// calculated values for reference
+	if(conductors == SingleEnded) {
+		s->setValue("CALC_Z", labelImpedance->text());
+		s->setValue("CALC_D", labelDelay->text());
+		s->setValue("CALC_L", labelInductance->text());
+		s->setValue("CALC_C", labelCapacitance->text());
+		s->setValue("CALC_VF", labelVelFactor->text());
+	}
+	else {
+		s->setValue("CALC_Z_DIFF", labelDiffImpedance->text());
+		s->setValue("CALC_Z_COMM", labelCommImpedance->text());
+		s->setValue("CALC_Z_EVEN", labelEvenImpedance->text());
+		s->setValue("CALC_Z_ODD", labelOddImpedance->text());
+		s->setValue("CALC_D", labelDelay->text());
+	}
+	s->endGroup();
+}
+
+int TlineWindow::simWidthPixels() 
+{ 
+	return w->simWidthPixels(); 
+}
+
+int TlineWindow::simHeightPixels() 
+{ 
+	return w->simHeightPixels(); 
+}
+

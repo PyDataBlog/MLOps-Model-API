@@ -1,0 +1,156 @@
+// +build linux windows
+
+//仅实现Windows和Linux版本
+package task
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"runtime"
+	"time"
+
+	"github.com/czxichen/work-stacks/tools/system"
+)
+
+type task_syscall struct {
+	ctx    context.Context
+	fcn    context.CancelFunc
+	cmd    *exec.Cmd
+	out    *os.File
+	stat   Task_Status
+	finish bool
+}
+
+//退出清理
+func (sys *task_syscall) close() {
+	sys.finish = true
+	select {
+	case <-sys.ctx.Done():
+	default:
+		sys.fcn()
+	}
+	if sys.out != nil {
+		sys.out.Close()
+	}
+}
+
+func (sys *task_syscall) stop() {
+	if sys.cmd.Process != nil {
+		system.KillAll(sys.cmd.Process.Pid)
+	}
+}
+
+//执行task
+func (sys *task_syscall) Run() error {
+	err := sys.cmd.Start()
+	if err != nil {
+		sys.close()
+		return err
+	}
+
+	sys.stat.Status = Task_Code_Running
+	go func() {
+		select {
+		case <-sys.ctx.Done():
+			//执行超时,主动杀死进程
+
+			switch sys.ctx.Err() {
+			case context.DeadlineExceeded:
+				sys.stat.Extend = map[string]string{"Error": "Run out of time"}
+			case context.Canceled:
+				if sys.finish {
+					return
+				}
+				//如果收到指令,作业没有执行完,则主动kill退出
+				sys.stat.Extend = map[string]string{"Error": "Manual stop run"}
+			}
+			sys.stop()
+		}
+	}()
+	return nil
+}
+
+//必须先执行Run才能Wait等待
+func (sys *task_syscall) Wait() {
+	err := sys.cmd.Wait()
+	if !sys.finish {
+		sys.close()
+	}
+
+	sys.stat.End = time.Now().Unix()
+
+	if err != nil {
+		sys.stat.Status = Task_Code_RunError
+	} else {
+		sys.stat.Status = Task_Code_Finished
+	}
+}
+
+//手动杀死任务,子进程也会被kill掉
+func (sys *task_syscall) Stop() {
+	select {
+	case <-sys.ctx.Done():
+	default:
+		sys.fcn()
+	}
+}
+
+//获取task的状态
+func (sys *task_syscall) Status() *Task_Status {
+	return &sys.stat
+}
+
+//创建系统调用task
+func New_Syscall(ctx context.Context, tid, aid string, timeout int64, script *Task_Syscall) (Task, error) {
+	//创建脚本文件,即放要执行的脚本内容
+	execPath := scriptcache + tid + scriptsuffix
+	File, err := os.OpenFile(execPath, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0744)
+	if err != nil {
+		return nil, err
+	}
+	File.WriteString(script.GetScripts())
+	File.Close()
+
+	//创建输出文件,用来保存执行的输出
+	out, err := os.OpenFile(scriptcache+tid+scriptout, os.O_CREATE|os.O_RDWR|os.O_EXCL, 0644)
+	if err != nil {
+		return nil, err
+	}
+
+	var length = len(scriptexec)
+	var commond = make([]string, len(script.Args)+length+1)
+
+	copy(commond[0:], scriptexec)
+	commond[length] = execPath
+	copy(commond[length+1:], script.Args)
+
+	Cmd := exec.Command(commond[0], commond[1:]...)
+	if runtime.GOOS == "linux" && script.RunAs != "" {
+		Cmd.Stdin = tty
+		attr, err := system.GetSysProcAttr(script.RunAs)
+		if err != nil {
+			out.Close()
+			return nil, err
+		}
+		Cmd.SysProcAttr = attr
+	}
+
+	Cmd.Stdout = out
+	Cmd.Stderr = out
+	Cmd.Env = script.Envs
+
+	tsyscall := &task_syscall{
+		cmd:  Cmd,
+		stat: Task_Status{Tid: tid, Aid: aid, Start: time.Now().Unix(), Status: Task_Code_NotRun},
+		out:  out,
+	}
+
+	if timeout > 0 {
+		tsyscall.ctx, tsyscall.fcn = context.WithTimeout(ctx, time.Duration(timeout)*time.Second)
+	} else {
+		tsyscall.ctx, tsyscall.fcn = context.WithCancel(ctx)
+	}
+
+	return tsyscall, nil
+}

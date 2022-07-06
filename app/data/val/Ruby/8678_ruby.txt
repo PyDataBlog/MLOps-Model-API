@@ -1,0 +1,91 @@
+require 'minitest/autorun'
+require_relative 'test_helper'
+
+require 'file_mover/dsl'
+
+class ZipTest < MiniTest::Unit::TestCase
+  include TestHelper
+
+  def ziplist zipfile
+    `zipinfo -1 #{zipfile}`.split
+  end
+
+  def do_zip_test filter, zip
+    with_source_and_sink do |source, sink|
+      files = %w(foo bar)
+      source_pathes = create_file source.dir, files
+
+      found = (source | filter | sink).call 
+      expected = File.join sink.dir, zip
+
+      assert_equal [expected], found
+      assert_file_exist expected
+      assert_file_exist source_pathes
+      assert_equal files, ziplist(expected)
+    end
+  end
+
+  def test_zip
+    do_zip_test FileMover::Zip.new, "foo.zip"
+  end
+
+  def test_zip_dsl
+    do_zip_test :zip, "foo.zip"
+  end
+
+  def test_zip_with_zipname
+    do_zip_test FileMover::Zip.new('mist.zip'), 'mist.zip'
+  end
+
+  def test_zip_with_zipname2
+    do_zip_test FileMover::Zip.new(filename: 'mist.zip'), 'mist.zip'
+  end
+
+  def test_zip_dsl_with_zipname
+    do_zip_test 'mist.zip', 'mist.zip'
+  end
+
+  def test_encrypted_zip_with_zipname
+    do_zip_test FileMover::Zip.new(filename:'mist.zip', passphrase: 'geheim'), 'mist.zip'
+  end
+
+  ########################
+  def do_unzip_test
+    with_source_and_sink do |source, sink|
+      zip_file = 'mist.zip'
+      zip_path = File.join source.dir, zip_file
+      files = %w(foo bar)
+      source_pathes = create_file source.dir, files
+      expected = FileMover::Utils.pathes sink.dir, files
+ 
+      filter = yield zip_path, source_pathes
+
+      found = (source | /\.zip\Z/ | filter | sink).call 
+
+      assert_equal expected, found
+      assert_file_exist expected
+      assert_file_exist zip_path
+    end
+  end
+
+  def test_unzip
+    do_unzip_test do |zip_path, source_pathes|
+      `zip -j #{zip_path} #{source_pathes*' '}`
+      FileMover::Unzip.new
+    end
+  end
+
+  def test_unzip_dsl
+    do_unzip_test do |zip_path, source_pathes|
+      `zip -j #{zip_path} #{source_pathes*' '}`
+      :unzip
+    end
+  end
+
+  def test_encrypted_unzip
+    do_unzip_test do |zip_path, source_pathes|
+      `zip -j -e -Pgeheim #{zip_path} #{source_pathes*' '}`
+      FileMover::Unzip.new(passphrase:'geheim') 
+    end
+  end
+end

@@ -1,0 +1,181 @@
+﻿//-----------------------------------------------------------------------
+// <copyright file="IsolatedStorageServerSettings.cs" company="AFS">
+// Copyright (c) AFS. All rights reserved.
+//
+//    This file is part of Chatbox.
+//
+//    Chatbox is free software: you can redistribute it and/or modify
+//    it under the terms of the GNU Lesser General Public License as published by
+//    the Free Software Foundation, either version 3 of the License, or
+//    any later version.
+//
+//    Chatbox is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+//    GNU Lesser General Public License for more details.
+//
+//    You should have received a copy of the GNU Lesser General Public License
+//    along with Chatbox. If not, see http://www.gnu.org/copyleft/lesser.html
+// </copyright>
+//----------------------------------------------------------------------- 
+
+namespace ChatBox.Engine.Settings
+{
+    using System;
+    using System.IO;
+    using System.IO.IsolatedStorage;
+
+    using ChatBox.DomainObjects.Settings;
+    using ChatBox.Interfaces;
+
+    /// <summary>
+    /// Store settings in isolated storage
+    /// </summary>
+    public class IsolatedStorageServerSettings : IServerSettingsRepository
+    {
+        /// <summary>
+        /// The name of the file to store settings in
+        /// </summary>
+        private const string StorageFileName = "ChatboxServerSettings.xml";
+
+        /// <summary>
+        /// object to lock on
+        /// </summary>
+        private static readonly object locker = new object();
+        
+        /// <summary>
+        /// The cached settings
+        /// </summary>
+        private ServerSettingsData cachedData;
+
+        #region ISettingsRepository Members
+
+        /// <summary>
+        /// Return the settings instance
+        /// </summary>
+        /// <returns>the settings</returns>
+        public ServerSettingsData ReadSettings()
+        {
+            if (this.cachedData == null)
+            {
+                lock (locker)
+                {
+                    this.cachedData = ReadSettingsFromStorage();
+                }
+            }
+
+            return this.cachedData;
+        }
+
+        /// <summary>
+        /// Save the Server Settings 
+        /// </summary>
+        /// <param name="serverSettings">the settings to save</param>
+        public void SaveSettings(ServerSettingsData serverSettings)
+        {
+            this.cachedData = serverSettings;
+
+            lock (locker)
+            {
+                SaveSettingsToStorage(serverSettings);
+            } 
+        }
+
+        #endregion
+
+        #region private
+
+        /// <summary>
+        /// read the settings from Isolated storage
+        /// </summary>
+        /// <returns>the data read</returns>
+        private static ServerSettingsData ReadSettingsFromStorage()
+        {
+            IsolatedStorageFile storage = IsolatedStorageFile.GetUserStoreForAssembly();
+
+            if (!FileExistsInStorage(storage, StorageFileName))
+            {
+                return ServerSettingsDataHelper.Default();
+            }
+
+            ServerSettingsData result;
+
+            using (IsolatedStorageFileStream fileStream = new IsolatedStorageFileStream(
+                    StorageFileName,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    storage))
+            {
+                try
+                {
+                    result = ServerSettingsDataHelper.ReadFromStream(fileStream);
+
+                    if (result == null)
+                    {
+                        result = ServerSettingsDataHelper.Default();
+                    }
+
+                    ServerSettingsDataHelper.ReplaceEmptySettingsWithDefaults(result);
+                }
+                catch (Exception)
+                {
+                    result = ServerSettingsDataHelper.Default();
+                }
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Save the Server Settings to isolated storage
+        /// </summary>
+        /// <param name="serverSettings">the settings to save</param>
+        private static void SaveSettingsToStorage(ServerSettingsData serverSettings)
+        {
+            IsolatedStorageFile storage = IsolatedStorageFile.GetUserStoreForAssembly();
+
+            FileMode mode;
+            if (FileExistsInStorage(storage, StorageFileName))
+            {
+                // it exists, so overwrite all the contents
+                mode = FileMode.Truncate;
+            }
+            else
+            {
+                mode = FileMode.CreateNew;
+            }
+
+            using (IsolatedStorageFileStream fileStream = new IsolatedStorageFileStream(
+                    StorageFileName,
+                    mode,
+                    FileAccess.ReadWrite,
+                    storage))
+            {
+                ServerSettingsDataHelper.WriteToStream(serverSettings, fileStream);
+            }
+        }
+
+        /// <summary>
+        /// Test if the file exisits in isolated storage
+        /// </summary>
+        /// <param name="storage">the storage to look through</param>
+        /// <param name="fileName">the file name</param>
+        /// <returns>true if the file is present</returns>
+        private static bool FileExistsInStorage(IsolatedStorageFile storage, string fileName)
+        {
+            string[] fileNames = storage.GetFileNames(fileName);
+
+            foreach (string testFileName in fileNames)
+            {
+                if (testFileName == fileName)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        #endregion
+    }
+}

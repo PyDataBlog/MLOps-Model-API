@@ -1,0 +1,78 @@
+﻿Class GroupCalcEvent {
+    [string]$ComputerName;
+    [datetime]$EventCreated;
+    [string]$RuleId;
+    [string]$GroupId;
+    [string]$GroupName;
+    [string]$GroupTypeName;
+    [string]$OriginalMessage;
+}
+
+Update-TypeData -TypeName GroupCalcEvent -DefaultDisplayPropertySet ComputerName,EventCreated,GroupName -DefaultDisplayProperty GroupName -DefaultKeyPropertySet GroupName -Force
+
+Function Get-NRKSCOMGroupCalculationEventProperty
+{
+    [OutputType([String])]
+    [CmdletBinding()]
+    Param(
+        [string]$Pattern
+    )
+
+        $PropertyFound = $Event.Message -match $Pattern
+        If ($PropertyFound) {
+            Write-Output $Matches[1]
+        } Else {
+            Write-Output "N/A"             
+        }
+}
+
+Function Get-NRKSCOMGroupCalculationEventGroupName
+{
+    [OutputType([String])]
+    [CmdletBinding()]
+    Param(
+        [string]$GroupId,
+        [string]$GroupTypeName
+
+    )
+
+        $Group = Get-SCOMGroup -Id $GroupId
+        If ($Group) {
+            Write-Output $Group.DisplayName
+        } Else {
+            $Class = Get-SCOMClass -Name $GroupTypeName
+            If ($Class) {
+                Write-Output $Class.DisplayName    
+            } Else {
+                Write-Output "N/A"            
+            }
+        }
+}
+Function Get-NRKSCOMGroupCalculationEvent 
+{
+    [OutputType([GroupCalcEvent])]
+    [CmdletBinding()]
+    Param(
+        [Parameter(Position = 1,Mandatory=$False)]
+        [int32]$Hours = 72
+    )
+
+    $MgmtServers = Get-SCOMManagementServer | Where-Object { $_.DisplayName -match "felles.ds.nrk.no" }
+
+    Foreach ($MgMtServer in $MgmtServers) {
+        $Events = $Null
+        $Events = Get-WinEvent -FilterHashTable @{Logname='Operations Manager';ProviderName='Health Service Modules';Id=31410;Starttime=(Get-Date).AddHours(-$Hours)} -ComputerName $MgMtServer.DisplayName -ErrorAction SilentlyContinue | Sort-Object -Property EventCreated
+        Foreach ($Event in $Events) {
+            $GroupId = $GroupName = $RuleId = $RuleName = $GroupTypeName = $Null
+            $Output = New-Object GroupCalcEvent
+            $Output.ComputerName = $MgMtServer.ComputerName
+            $Output.EventCreated = $Event.TimeCreated
+            $Output.GroupTypeName = Get-NRKSCOMGroupCalculationEventProperty -Pattern "Group type name: (.+)$"         
+            $Output.RuleId = Get-NRKSCOMGroupCalculationEventProperty -Pattern "Rule Id: (.+)`n"
+            $Output.GroupId = Get-NRKSCOMGroupCalculationEventProperty -Pattern "Group Id: (.+)`n"
+            $Output.GroupName = Get-NRKSCOMGroupCalculationEventGroupName -GroupId $Output.GroupId -GroupTypeName $Output.GroupTypeName              
+            $Output.OriginalMessage = $Event.Message
+            Write-Output $Output
+        } # End foreach event
+    }#End foreach MgMtServer
+}

@@ -1,0 +1,1821 @@
+
+
+
+
+
+{-# LANGUAGE DeriveFunctor #-}
+{-# LANGUAGE DeriveFoldable #-}
+{-# LANGUAGE DeriveTraversable #-}
+{-# LANGUAGE DeriveAnyClass #-}
+
+{-# LANGUAGE LambdaCase #-}
+
+{-# LANGUAGE OverloadedStrings #-}
+
+-- {-# LANGUAGE RecordWildCards #-}
+
+{-# LANGUAGE DataKinds #-}
+
+{-# LANGUAGE TemplateHaskell #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE StandaloneDeriving #-}
+
+{-# LANGUAGE CPP #-}
+
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+
+
+#ifndef MIN_VERSION_transformers
+#define MIN_VERSION_transformers(x,y,z) 4
+#endif
+
+
+
+-- -- #ifdef MIN_VERSION_GLASGOW_HASKELL
+-- -- #if MIN_VERSION_GLASGOW_HASKELL(8,0,1,0)
+-- -- -- ghc >= 8.0.1
+-- -- {-# LANGUAGE StandaloneDeriving #-}
+-- -- #else
+-- -- -- older ghc versions, but MIN_VERSION_GLASGOW_HASKELL defined
+-- -- #endif
+-- -- #else
+-- -- -- MIN_VERSION_GLASGOW_HASKELL not even defined yet (ghc <= 7.8.x)
+-- -- #endif
+
+
+
+
+
+
+
+
+
+-- for debugging
+-- {-# LANGUAGE InstanceSigs #-}
+
+
+-- {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+
+
+-- |
+-- Copyright :  (c) Andreas Reuleaux 2015
+-- License   :  BSD2
+-- Maintainer:  Andreas Reuleaux <rx@a-rx.info>
+-- Stability :  experimental
+-- Portability: non-portable
+--
+-- This module provides Pire's syntax,
+-- ie. Pire's flavour of Pi-forall syntax:
+-- expressions, annotations, ... (mutally recursive defs)
+
+
+
+module Pire.Syntax.Expr where
+
+-- import Data.List
+import Control.Monad
+
+
+
+
+#if (MIN_VERSION_transformers(0,5,0)) || !(MIN_VERSION_transformers(0,4,0))
+-- #if (MIN_VERSION_transformers(0,5,0))
+import Data.Functor.Classes
+
+import Data.Eq.Deriving (deriveEq1)
+import Data.Ord.Deriving (deriveOrd1)
+
+import Text.Show.Deriving (deriveShow1)
+
+import Text.Show (showListWith)
+
+
+import Text.Read.Deriving (deriveRead1)
+
+#else
+import Prelude.Extras
+#endif
+
+
+
+import Bound
+import Bound.Name
+import Bound.Scope
+
+import Data.Bifoldable
+import Data.Bifunctor
+import Data.Bitraversable
+
+import Text.Trifecta.Delta (Delta)
+
+
+
+
+import Pire.Syntax.Ws
+import Pire.Syntax.Token
+import Pire.Syntax.Nm
+import Pire.Syntax.Binder
+import Pire.Syntax.Eps
+import Pire.Syntax.Pattern
+
+-- import Pire.Syntax.GetNm()
+
+
+-- import Debug.Trace
+
+
+import Control.Lens
+
+import Data.Typeable hiding (Refl)
+
+
+import Pire.Syntax.NatPrime
+
+
+
+
+
+infixl 9 :@
+
+
+data Expr t a =
+
+  V a
+
+  | Nat' (PossiblyVar t)
+
+
+
+  | Ws_ (Expr t a) (Ws t)
+
+
+  -- -- | WildcardSeen_     (Expr t a)
+  -- -- | WildcardInferred_ Integer 
+
+
+
+  | BndV t (Expr t a)
+
+
+    -- bracketed var, eg. [ v ], originally defined as
+    -- BracketedV_ (BracketOpen...) a Ws (BracketClose...)
+    -- but later needed any kind of expr within brackets anyway, for args ie.
+  | Brackets_ (Token 'BracketOpenTy t) (Expr t a) (Token 'BracketCloseTy t)
+
+
+    -- parenthesized term, useful for printing
+  | Paren (Expr t a)
+  | Paren_ (Token 'ParenOpenTy t)  (Expr t a) (Token 'ParenCloseTy t)
+
+
+
+
+
+  | Type
+  | Type_ t (Ws t)
+
+
+  | (Expr t a) :@ (Expr t a)
+  | ErasedApp (Expr t a) (Expr t a)
+
+
+  | Lam  t       (Scope () (Expr t) a)
+  | Lam_  (Token 'LamTokTy t)  (Binder t) (Token 'DotTy t) (Scope ()          (Expr t) a)
+
+
+    -- defs w/ (original) Name s - they are not really needed, but convenient to have:
+    -- (in the following a prime as in Lam' indicates a Scope w/ (original) Name s)
+
+    -- this would seem a natural def according to the Bound.Name docs:
+    -- -- | Lam'  t      (Scope (Name a ()) (Expr t) a)
+    -- however it gets in the way of automatically deriving Functor, Foldable, and Traversable below
+
+
+    -- this I came up w/ instead - worked for a while
+    -- (but wasn't too sure, if it makes sense in the first place):
+    -- -- | Lam'  t      (Scope (Name t ()) (Expr t) a)
+    -- however, as then discovered, this gets in the way of making Expr bitraversable below,
+    -- which is not only nice to have (eg. for Text2String)
+    -- but essential for our position/range calculations
+
+
+    -- so we resort to using a fixed data type: String (or T.Text or whatever)
+  | Lam'  t      (Scope (Name String ()) (Expr t) a)
+    -- and the corresponding plural version:
+  | Lams' [t]    (Scope (Name String Int) (Expr t) a)
+    -- the caveat is that, that desugaring (so far generic: for any kind of Expr),
+    -- becomes tied to String (or...) that way, ie. if we want to desugar Lams' to Lam' etc.
+    -- (or we would need different versions of desugaring functions, for String, T.Text etc)
+
+
+    -- so Scopes w/ Names are really not that useful (and not really needed anyway),
+    -- they are just convenient to have when starting out w/ Bound.
+    -- That's why they are not used in the following defs of other Exprs
+    -- (in particular there are not white space aware versions of the above: Lam'_, Lams'_ )
+    -- Lam' and Lams' kept here nevertheless, just for experimentation
+
+
+  | ErasedLam t  (Scope () (Expr t) a)
+
+    
+  | ErasedLam_  (Token 'LamTokTy t)  (Binder t) (Token 'DotTy t) (Scope () (Expr t) a)
+
+
+
+    -- desugaring is handled here explicitly,
+    -- ie. a lambda with multiple binders will become a Lams:
+    -- (plural s, white space aware: Lams_), desugared to Lam (Lam_)
+    -- these are superseded by the following LamPAs,
+    -- which cover also the notion of a RuntimeP/ErasedP pattern (P),
+    -- as well as an annotation (A), to sum up:
+    -- Lams are desugared to Lam
+    -- Lams_ to Lam_
+    -- LamPAs to LamPA
+    -- LamPAs_ to LamPA_ - one would think (and maybe LamPA_ should be added),
+    -- but desugaring is really needed only for untie (conversion to PiForall data structures),
+    -- and there we have long thrown away the white space w/ forget
+
+
+  | Lams  [t]        (Scope Int          (Expr t) a)
+  | Lams_ (Token 'LamTokTy t) [Binder t] (Token 'DotTy t) (Scope Int (Expr t) a)
+    
+
+
+  | LamPA Eps t (Annot t a) (Scope () (Expr t) a)
+
+
+
+#if (MIN_VERSION_transformers(0,5,0)) || !(MIN_VERSION_transformers(0,4,0))
+
+
+  | LamPAs [(Eps, t, Annot t a)] (Scope Int (Expr t) a)
+
+
+
+#else
+
+
+
+  | LamPAs [(Eps, t, Annot t a)] (Scope Int (Expr t) a)
+
+
+
+#endif
+
+
+
+  
+  -- need this as well for List 2 Vect: the notion of a yet to be filled in var
+  | LamPAs' [(Eps, PossiblyVar t, Annot t a)] (Scope Int (Expr t) a)
+
+
+
+  | LamPAs_ (Token 'LamTokTy t) [(Eps, Binder t, Annot t a)] (Token 'DotTy t) (Scope Int (Expr t) a)
+
+
+    -- the simplest kind of Pi type
+  | Pi  t         (Expr t a) (Scope () (Expr t) a)
+  | Pi_ (Expr t a) (Token 'ArrowTy t) (Scope () (Expr t) a)
+
+
+
+    -- keep track of pattern (instead of Pi/ErasedPi), similar to LamPA/LamPAs
+    -- pi's are binders (binding type: embed), hence the use of t
+
+    
+    -- get rid of scopes w/ orig Names
+    -- -- | PiP Eps t (Expr t a) (Scope (Name t ()) (Expr t) a)
+  | PiP Eps t (Expr t a) (Scope () (Expr t) a)
+
+
+
+
+    --     -- Pi_ (Ann_ ...)
+    --     -- reuse Ann_ for the binding in Pi_ here, thereby making its def simple
+    --     -- need to keep track maybe, if we actually have seen some parens/colon
+    --     -- idea so far: if not, than the name will start with _: _/_1/_2 etc
+    --     -- maybe use some (new) flag for Ann_ instead
+
+    -- get rid of scope's w/ orig Names
+  -- -- | PiP_ Eps (Expr t a) (Arrow t) (Scope (Name t ()) (Expr t) a)
+  | PiP_ Eps (Expr t a) (Token 'ArrowTy t) (Scope () (Expr t) a)
+
+
+
+    -- just a trifecta delta
+    -- when untied, this will become a Parsec/PiForall Pos
+    -- not to be confused with the data type Pos of Refactor/Range.hs
+
+  | Position Delta (Expr t a)
+
+
+    -- an axiom 'TRUSTME', inhabits all types
+  | TrustMe (Annot t a)
+  | TrustMe_ t (Ws t) (Annot t a)
+
+
+
+    -- unit
+    -- The type with a single inhabitant `One`
+  | TyUnit
+
+  | TyUnit_ t (Ws t)
+    
+
+    -- The inhabitant, written `tt`
+  | LitUnit
+
+  | LitUnit_ t (Ws t)
+    
+    -- boolean expressions
+    -- The type with two inhabitants
+  | TyBool
+
+  | TyBool_ t (Ws t)
+
+
+    -- True and False
+  | LitBool Bool
+    
+  | LitBool_ Bool t (Ws t)
+    
+
+    -- if expression for eliminating booleans
+  | If                     (Expr t a)                      (Expr t a)                      (Expr t a) (Annot t a)
+  | If_ (Token 'IfTokTy t) (Expr t a) (Token 'ThenTokTy t) (Expr t a) (Token 'ElseTokTy t) (Expr t a) (Annot t a)
+
+
+
+
+    -- sigma types
+    -- `{ x : A | B }`
+    -- -- | Sigma (Bind (TName, Embed Term) Term)
+
+  | Sigma                                 t                     (Expr t a)                   (Scope () (Expr t) a)
+  | Sigma_ (Token 'BraceOpenTy t) (Binder t) (Token 'ColonTy t) (Expr t a) (Token 'VBarTy t) (Scope () (Expr t) a) (Token 'BraceCloseTy t)
+    
+
+
+
+
+    -- introduction for sigmas `( a , b )`
+  | Prod                         (Expr t a)                    (Expr t a)                         (Annot t a)
+  | Prod_ (Token 'ParenOpenTy t) (Expr t a) (Token 'CommaTy t) (Expr t a) (Token 'ParenCloseTy t) (Annot t a)
+
+
+
+
+    -- elimination form  `pcase p of (x,y) -> p`
+    -- -- | Pcase Term (Bind (TName, TName) Term) Annot
+    -- rethink if scope is well defined !
+
+
+
+    -- todo: rethink Scope for both Pcase and Pcase_   
+    -- maybe () is not enough ?
+    
+    -- -- | Pcase  (Expr t a) (t, t) (Scope () (Expr t) a) (Annot t a)
+
+  | Pcase  (Expr t a) (t, t) (Scope Int (Expr t) a) (Annot t a)
+
+    
+
+    
+  -- -- | Pcase_ (PcaseTok t) (Expr t a) (Of t)
+  -- --   (ParenOpen t) (Binder t) (Comma t) (Binder t) (ParenClose t)
+  -- --   (Arrow t) (Scope () (Expr t) a) (Annot t a)
+
+    
+  | Pcase_ (Token 'PcaseTokTy t) (Expr t a) (Token 'OfTy t)
+    (Token 'ParenOpenTy t) (Binder t) (Token 'CommaTy t) (Binder t) (Token 'ParenCloseTy t)
+    (Token 'ArrowTy t) (Scope Int (Expr t) a) (Annot t a)
+
+
+
+
+
+    -- -- | Let {-# UNPACK #-} !Int [Scope Int Exp a] (Scope Int Exp a)
+    -- let w/ scope - closer to the def above
+    -- -- | LetS (Scope (Name String ()) Exp a) (Scope (Name String ()) Exp a)
+    -- ! in pi-forall: binding type: embed
+
+  | Let                              t                     (Expr t a)                 (Scope () (Expr t) a)
+    
+  | Let_ (Token 'LetTokTy t) (Binder t) (Token 'EqualTy t) (Expr t a) (Token 'InTy t) (Scope () (Expr t) a)
+    
+
+
+
+
+    -- Equality type  `a = b`
+  | TyEq  (Expr t a)                    (Expr t a)
+  | TyEq_ (Expr t a) (Token 'EqualTy t) (Expr t a)
+
+
+
+
+    -- Proof of equality
+  | Refl (Annot t a)
+
+    -- the whitespace aware version is now just
+    -- Ws_ (Refl (Annot t a)) (Ws t)
+    -- but maybe not a good idea: the ws is before the annot!
+  | Refl_ t (Ws t) (Annot t a)
+
+
+
+    -- equality elimination
+  | Subst                        (Expr t a)                 (Expr t a) (Annot t a)
+  | Subst_ (Token 'SubstTokTy t) (Expr t a) (Token 'ByTy t) (Expr t a) (Annot t a)
+
+
+
+
+    -- witness to an equality contradiction
+  | Contra                         (Expr t a) (Annot t a)
+  | Contra_ (Token 'ContraTokTy t) (Expr t a) (Annot t a)
+
+
+
+
+
+    -- datatypes
+
+    -- type constructors (fully applied)
+  -- -- | TCon t [Expr t a]
+  -- -- | TCon_ (Nm t) [Expr t a]
+
+  | TCon  a         [Expr t a]
+  | TCon_ (Nm t a) [Expr t a]
+
+
+  -- -- | TCon  a          [Expr t a]
+  -- -- | TCon_ (Expr t a) [Expr t a]
+
+
+
+
+    -- term constructors
+  | DCon t [Arg t a] (Annot t a)
+  | DCon_ (Nm1 t) [Arg t a] (Annot t a)
+
+
+
+
+    -- don't want implicit desugaring for nats
+    -- (so keep the orig)
+  | Nat  Integer
+
+  | Nat_ Integer t (Ws t)
+
+
+    -- case analysis
+    -- (fully applied, erased arguments first)
+
+-- -- | Case (Expr t a)  [Match t a] (Annot t a)
+
+  | Case (Expr t a) [Match t a] (Annot t a)
+    
+
+
+
+
+
+  -- -- | Case_ (Token 'CaseTokTy t) (Expr t a) (Token 'OfTy t)
+  -- --   (Maybe (Token 'BraceOpenTy t)) [(Match t a, Maybe (Token 'SemiColonTy t))] (Maybe (Token 'BraceCloseTy t))
+  -- --   (Annot t a)
+
+
+
+  | Case_ (Token 'CaseTokTy t) (Expr t a) (Token 'OfTy t)
+    (Maybe (Token 'BraceOpenTy t)) [(Maybe (Token 'SemiColonTy t), Match t a)] (Maybe (Token 'BraceCloseTy t))
+    (Annot t a)
+
+
+
+
+
+
+
+
+  -- -- | CaseIndented_  (Token 'CaseTokTy t) (Expr t a) (Token 'OfTy t) [Match t a] (Annot t a)
+
+  -- -- | CaseWithBraces_ (Token 'CaseTokTy t) (Expr t a) (Token 'OfTy t)
+  -- --   (Token 'BraceOpenTy t) [(Match t a, Maybe (Token 'SemiColonTy t))] (Token 'BraceCloseTy t)
+  -- --   (Annot t a)
+
+
+
+
+
+
+
+
+
+    -- Annotated terms `( x : A )`
+
+  | Ann (Expr t a) (Expr t a)
+
+    -- originally just
+    --   | Ann_ ParenOpen (Exp_ a) Colon (Exp_ a) ParenClose
+    -- but need to be more specific here:
+    -- have witnessed an annotation / or just inferred it (think of "_ : A"), in parens / brackets
+    --
+    -- todo: rework this comment (only parts still valid)
+    -- can't really make up my mind if the x should be a binder here
+    -- my current take is: no, it's not (there is no Scope involved),
+    -- ie. it's a binder only in the case of a Pi-type à la: (x:A) -> B
+    -- ie. the ...Bnd  variants are used for Pi-types in PiP_...
+    -- and [later]: as I can't make up my mind, if x should be a binder,
+    -- these constructors come in pairs now: one, where it isn't a binder,
+    -- and one where it is
+    
+
+
+    
+    -- reuse Paren_ + Brackets_ for Ann_ as well
+    -- eg.
+    -- Ann_ $ Paren_    (ParenOpen...)  (WitnessedAnnEx_ ...)(ParenClose...)
+    -- Ann_ $ Brackets_ (BracketOpen...)(Witnessed...)       (BracketClose...)
+    -- Ann_ $ InferredAnnBnd_
+
+    -- always make clear however that it's an Ann_ (wrap it in Ann_)
+    -- to not confuse annotations with a simple Paren_ exprs eg.
+    
+
+
+  | WitnessedAnnEx_    (Expr t a) (Token 'ColonTy t) (Expr t a)
+  | InferredAnnBnd_    (Binder t)           (Expr t a)
+  | WitnessedAnnBnd_   (Binder t) (Token 'ColonTy t) (Expr t a)
+  | Ann_               (Expr t a)
+  
+  deriving (Functor,Foldable,Traversable)
+
+
+
+
+
+
+
+
+extract :: Expr t a -> a
+extract (V a) = a
+extract (Ws_ ex _) = extract ex
+extract (Brackets_ _ ex _) = extract ex
+extract _ = error "tried to extract from other than V. Ws_, or Brackets_" 
+
+
+
+
+instance Applicative (Expr t) where
+  pure = V
+  (<*>) = ap
+
+
+
+instance Monad (Expr t) where
+
+  return = V
+
+  
+  Nat' x >>= _ = Nat' x
+
+
+  V a        >>= f = f a
+
+  Ws_ x ws  >>= f = Ws_ (x >>= f) ws
+
+  (x :@ y)      >>= f = (x >>= f) :@ (y >>= f)
+  ErasedApp x y >>= f = ErasedApp (x >>= f) (y >>= f)
+
+
+  Type            >>= _ = Type
+  (Type_  ty ws)  >>= _ = Type_ ty ws
+
+
+  BndV v ex >>= f = BndV v (ex >>= f)
+                      
+
+  Lam n s             >>= f = Lam n (s >>>= f)
+  Lam_ lamtok v dot s >>= f = Lam_ lamtok v dot (s >>>= f)
+
+
+  -- missing ErasedLam / ErasedLam_
+
+
+
+  Lams ns s             >>= f = Lams ns (s >>>= f)
+  Lams_ lamtok ns dot s >>= f = Lams_  lamtok ns dot (s >>>= f)
+
+
+
+
+
+  Lam' n s >>= f = Lam' n (s >>>= f)
+
+
+  Lams' ns s >>= f = Lams' ns (s >>>= f)
+
+
+  LamPA pat n (Annot ann) scope >>= f = LamPA pat n
+                                        (Annot $ (>>= f) <$> ann) (scope >>>= f)
+
+  LamPA _ _ (Annot_ {}) _ >>= _ = error "LamPA w/ Annot_"
+
+
+
+  LamPAs nas s >>= f = LamPAs [ (pat, n, Annot $ (>>= f) <$> ann)
+                              | (pat, n, Annot ann) <- nas] (s >>>= f)
+
+  LamPAs_ lamtok nas dottok s >>= f =
+    LamPAs_ lamtok [ (pat, n, (Annot_ ((>>= f) <$> ann) ws))
+                   | (pat, n, Annot_ ann ws) <- nas] dottok (s >>>= f)
+
+
+  ErasedLam n s             >>= f = ErasedLam n (s >>>= f)
+  ErasedLam_ lamtok v dot s >>= f = Lam_ lamtok v dot (s >>>= f)
+
+
+
+
+  TrustMe (Annot ann)              >>= f = TrustMe (Annot $ (>>= f) <$> ann)
+  TrustMe (Annot_ {}) >>= _ = error "TrustMe w/ Annot_"
+
+
+  TrustMe_ tme ws (Annot_ ann ws') >>= f = TrustMe_ tme ws (Annot_ ((>>= f) <$> ann) ws')
+  TrustMe_ _ _ (Annot {}) >>= _ = error "TrustMe_ w/ Annot"
+
+
+
+  Position p e >>= f = Position p (e >>= f)
+
+
+  Pi  nm ty     sc >>= f = Pi nm (ty >>= f) (sc >>>= f)
+  Pi_ ann arr sc >>= f   = Pi_ (ann >>= f) arr (sc >>>= f)
+
+
+  PiP  eps n e   s >>= f = PiP  eps n (e >>= f) (s >>>= f)
+  PiP_ eps n arr s >>= f = PiP_ eps (n >>= f) arr (s >>>= f)
+
+
+  TyUnit          >>= _ = TyUnit
+  TyUnit_  ty ws  >>= _ = TyUnit_ ty ws
+
+
+  
+  LitUnit         >>= _ = LitUnit
+  LitUnit_ tt ws  >>= _ = LitUnit_ tt ws
+
+  
+  TyBool         >>= _ = TyBool
+  TyBool_ tb ws  >>= _ = TyBool_ tb ws
+
+
+
+  LitBool b        >>= _ = LitBool b
+  LitBool_ b lb ws >>= _ = LitBool_ b lb ws
+
+
+
+
+  Sigma str' ex scope >>= f = Sigma str' (ex >>= f) (scope >>>= f)
+
+  Sigma_ bo str' col ex vb scope bc >>= f =
+    Sigma_ bo str' col (ex >>= f) vb (scope >>>= f) bc
+
+
+
+
+
+  Prod a b (Annot ann) >>= f
+    = Prod (a >>=f ) (b >>= f) (Annot $ (>>= f) <$> ann)
+
+
+  Prod _ _ (Annot_ {}) >>= _ = error "Prod w/ Annot_"
+
+
+
+
+  Prod_ po a cmm b pc (Annot_ ann ws) >>= f =
+    Prod_ po (a >>=f ) cmm (b >>= f) pc (Annot_ ((>>= f) <$> ann) ws)
+
+  Prod_ _ _ _ _ _ (Annot {}) >>= _ = error "Prod_ w/ Annot"
+
+
+
+
+  -- -- elimination form  `pcase p of (x,y) -> p`
+  Pcase ex (s, t) sc (Annot ann) >>= f
+    = Pcase (ex >>=f) (s, t) (sc >>>=f) (Annot $ (>>= f) <$> ann)
+
+  
+
+  Pcase_ pcase ex of' po s comma t pc arr sc (Annot_ ann ws) >>= f =
+    Pcase_ pcase (ex >>= f) of' po s comma t pc arr (sc >>>= f) (Annot_ ((>>= f) <$> ann) ws)
+
+
+
+
+
+  -- Let n bs e >>= f = Let n (map (>>>= f) bs) (e >>>= f)
+  Let n b e              >>= f = Let n (b >>= f) (e >>>= f)
+  Let_ let' n eq b in' e >>= f = Let_ let' n eq (b >>= f) in' (e >>>= f)
+
+
+
+
+  -- matches are binders: thus leave the pattern pat as is
+
+  Case e ms (Annot ann)  >>= f = Case
+                                 (e >>= f)
+                                 [Match (bpattern pat) (s >>>= f) | (Match pat s) <- ms]
+                                 (Annot $ (>>= f) <$> ann)
+    where
+      bpattern (PatVar tt)    = PatVar tt
+      -- bpattern (PatVar tt)    = PatVar $ a2b tt
+
+
+      -- bpattern (PatCon aa ls) = PatCon (a2b aa) [ (bpattern p, eps) | (p, eps) <- ls]
+      bpattern (PatCon aa ls) = PatCon (a2b aa) [ (eps, bpattern p) | (eps, p) <- ls]
+
+
+      -- -- bpattern (PatVar_ nm)    = PatVar_ $ bnm nm
+      bpattern (PatVar_ nm)    = PatVar_ $ nm
+
+      -- bpattern (PatCon_ nm ls) = PatCon_ (bnm nm) [ (bpattern p, eps) | (p, eps) <- ls]
+      bpattern (PatCon_ nm ls) = PatCon_ (bnm nm) [ (eps, bpattern p) | (eps, p) <- ls]
+
+      
+      bpattern (NatPatVar n) = NatPatVar n
+
+  
+
+
+      a2b = extract . f
+
+      bnm (Nm_ aa ws') = Nm_ (a2b aa) ws'
+
+      
+  
+  -- -- Case_ ctok e oftok bo ms bc (Annot_ ann ws)  >>=
+  -- --   f = Case_
+  -- --       ctok
+  -- --       (e >>= f)
+  -- --       oftok
+  -- --       bo
+  -- --       [(Match_ (bpattern pat) arr (s >>>= f), semi)  | (Match_ pat arr s, semi) <- ms]
+  -- --       bc
+  -- --       (Annot_ ((>>= f) <$> ann) ws)
+  -- --   where
+  -- --     bpattern (PatVar tt)    = PatVar tt
+  -- --     -- bpattern (PatVar tt)    = PatVar $ a2b tt
+
+  -- --     bpattern (PatCon aa ls) = PatCon (a2b aa) [ (bpattern p, eps) | (p, eps) <- ls]
+  -- --     -- bpattern (PatCon aa ls) = PatCon aa [ (bpattern p, eps) | (p, eps) <- ls]
+
+  -- --     -- -- bpattern (PatVar_ nm)    = PatVar_ $ bnm nm
+  -- --     bpattern (PatVar_ nm)    = PatVar_ $ nm
+
+  -- --     bpattern (PatCon_ nm ls) = PatCon_ (bnm nm) [ (bpattern p, eps) | (p, eps) <- ls]
+
+  -- --     bpattern (PatInBrackets_ bo'  pat bc') = PatInBrackets_ bo' (bpattern pat) bc'
+
+
+  -- --     bpattern (PatInParens_ po pat pc) = PatInParens_ po (bpattern pat) pc
+
+
+  -- --     bpattern (NatPatVar n) = NatPatVar n
+
+
+  -- --     -- TODO
+  -- --     -- more cases ...
+
+
+  -- --     a2b = extract . f 
+
+  -- --     bnm (Nm_ aa ws') = Nm_ (a2b aa) ws'
+
+
+
+  
+  Case_ ctok e oftok bo ms bc (Annot_ ann ws)  >>=
+    f = Case_
+        ctok
+        (e >>= f)
+        oftok
+        bo
+        [(semi, Match_ (bpattern pat) arr (s >>>= f))  | (semi, Match_ pat arr s) <- ms]
+        bc
+        (Annot_ ((>>= f) <$> ann) ws)
+    where
+      bpattern (PatVar tt)    = PatVar tt
+      -- bpattern (PatVar tt)    = PatVar $ a2b tt
+
+      -- bpattern (PatCon aa ls) = PatCon (a2b aa) [ (bpattern p, eps) | (p, eps) <- ls]
+      bpattern (PatCon aa ls) = PatCon (a2b aa) [ (eps, bpattern p) | (eps, p) <- ls]
+
+
+      -- -- bpattern (PatVar_ nm)    = PatVar_ $ bnm nm
+      bpattern (PatVar_ nm)    = PatVar_ $ nm
+
+      -- bpattern (PatCon_ nm ls) = PatCon_ (bnm nm) [ (bpattern p, eps) | (p, eps) <- ls]
+      bpattern (PatCon_ nm ls) = PatCon_ (bnm nm) [ (eps, bpattern p) | (eps, p) <- ls]
+
+      bpattern (PatInBrackets_ bo'  pat bc') = PatInBrackets_ bo' (bpattern pat) bc'
+
+
+      bpattern (PatInParens_ po pat pc) = PatInParens_ po (bpattern pat) pc
+
+
+      bpattern (NatPatVar n) = NatPatVar n
+
+
+      -- TODO
+      -- more cases ...
+
+
+      a2b = extract . f 
+
+      bnm (Nm_ aa ws') = Nm_ (a2b aa) ws'
+
+
+
+
+
+
+
+  -- CaseIndented_ ctok e oftok ms (Annot_ ann ws)  >>=
+  --   f = CaseIndented_
+  --       ctok
+  --       (e >>= f)
+  --       oftok
+  --       [Match_ pat arr (s >>>= f) | Match_ pat arr s <- ms]
+  --       (Annot_ ((>>= f) <$> ann) ws)
+  
+
+  -- CaseWithBraces_ ctok e oftok bo ms bc (Annot_ ann ws)  >>=
+  --   f = CaseWithBraces_
+  --       ctok
+  --       (e >>= f)
+  --       oftok
+  --       bo
+  --       [(Match_ pat arr (s >>>= f), semi)  | (Match_ pat arr s, semi) <- ms]
+  --       bc
+  --       (Annot_ ((>>= f) <$> ann) ws)
+
+
+
+
+  -- TCon s es  >>= f = TCon s (map (>>= f) es)
+  -- TCon_ s es >>= f = TCon_ s (map (>>= f) es)
+
+
+  TCon  s es  >>= f = TCon (a2b s) (map (>>= f) es)
+    where
+      a2b = extract . f
+
+
+  TCon_ s es >>= f = TCon_ (bnm s) (map (>>= f) es)
+    where
+      a2b = extract . f 
+      bnm (Nm_ aa ws') = Nm_ (a2b aa) ws'
+
+
+
+
+
+  -- -- TCon s es  >>= f = TCon (s >>= f) (map (>>= f) es)
+  -- -- TCon_ s es >>= f = TCon_ (s >>= f) (map (>>= f) es)
+
+
+  DCon s as (Annot ann) >>= f =
+    DCon s [ Arg pat (e >>= f) | (Arg pat e) <- as] (Annot $ (>>= f) <$> ann)
+
+  DCon_ s as (Annot_ ann ws) >>= f =
+    DCon_ s [ Arg pat (e >>= f) | (Arg pat e) <- as] (Annot_ ((>>= f) <$> ann) ws)
+
+
+
+
+  If cond t e (Annot ann) >>= f = If (cond >>= f) (t >>= f) (e >>= f) (Annot $ (>>= f) <$> ann)
+
+  If_ iftok cond thentok t etok e (Annot_ ann ws) >>= f =
+    If_ iftok (cond >>= f) thentok (t >>= f) etok (e >>= f) (Annot_ ((>>= f) <$> ann) ws)
+
+
+
+  Paren e        >>= f = Paren (e >>= f)
+  Paren_ po e pc >>= f = Paren_ po (e >>= f) pc
+
+
+  Nat n            >>= _ = Nat n
+  Nat_ nmbr tok ws >>= _ = Nat_ nmbr tok ws
+
+
+
+  TyEq a b     >>= f = TyEq (a >>= f) (b >>= f)
+  TyEq_ a eq b >>= f = TyEq_ (a >>= f) eq (b >>= f)
+
+
+
+  Subst a b (Annot ann) >>= f = Subst (a >>= f) (b >>= f) (Annot $ (>>= f) <$> ann)
+
+  Subst_ subst a by b (Annot_ ann ws) >>= f =
+    Subst_ subst (a >>= f) by (b >>= f) (Annot_ ((>>= f) <$> ann) ws)
+
+
+
+
+  Contra a (Annot ann)           >>= f = Contra (a >>= f) (Annot $ (>>= f) <$> ann)
+  Contra_ ctok a (Annot_ ann ws) >>= f = Contra_ ctok (a >>= f) (Annot_ ((>>= f) <$> ann) ws)
+
+  
+  Refl (Annot ann)              >>= f = Refl (Annot $ (>>= f) <$> ann)
+  Refl_ rfl ws (Annot_ ann ws') >>= f = Refl_ rfl ws (Annot_ ((>>= f) <$> ann) ws')
+
+
+
+
+  Ann a b >>= f = Ann (a >>= f) (b >>= f)
+
+
+
+
+
+
+  -- exmpl
+  -- lams_ ["x", "y"] $ (V_ "b" $ Ws "{-foo-}")
+  -- lam_ "x" $ (V_ "b" $ Ws "{-foo-}")
+
+
+  Brackets_ bo e bc   >>= f = Brackets_ bo (e >>= f) bc
+
+
+
+
+
+  -- -- WitnessedAnnInParens_    po ex col ty pc >>= f = WitnessedAnnInParens_   po (ex >>= f) col (ty >>= f) pc
+  -- -- WitnessedAnnInParensBnd_ po b  col ty pc >>= f = WitnessedAnnInParensBnd_ po b         col (ty >>= f) pc
+
+
+
+  -- -- WitnessedAnnInBrackets_    bo ex  col ty bc >>= f = WitnessedAnnInBrackets_    bo (ex >>= f) col (ty >>= f) bc
+  -- -- WitnessedAnnInBracketsBnd_ bo bnd col ty bc >>= f = WitnessedAnnInBracketsBnd_ bo bnd        col (ty >>= f) bc
+
+
+
+  -- -- InferredAnn_    ex  ty >>= f = InferredAnn_    (ex >>= f) (ty >>= f)
+  -- -- InferredAnnBnd_ bnd ty >>= f = InferredAnnBnd_ bnd        (ty >>= f)
+
+
+  -- -- InferredAnnInBrackets_    bo ex ty bc >>= f = InferredAnnInBrackets_    bo (ex >>= f) (ty >>= f) bc
+  -- -- InferredAnnInBracketsBnd_ bo ex ty bc >>= f = InferredAnnInBracketsBnd_ bo ex         (ty >>= f) bc
+
+
+
+
+
+
+  -- AnnInParens_    bt po ex col ty pc >>= f = AnnInParens_    bt po (ex >>= f) col (ty >>= f) pc
+  -- AnnInParensBnd_ bt po b  col ty pc >>= f = AnnInParensBnd_ bt po b         col (ty >>= f) pc
+  -- AnnInBrackets_    bt  bo ex  col ty bc >>= f = AnnInBrackets_    bt bo (ex >>= f) col (ty >>= f) bc
+  -- AnnInBracketsBnd_ bt bo bnd col ty bc  >>= f = AnnInBracketsBnd_ bt bo bnd        col (ty >>= f) bc
+
+
+
+
+  WitnessedAnnEx_  ex  col ty >>= f = WitnessedAnnEx_            (ex >>= f) col (ty >>= f)
+  InferredAnnBnd_  bnd ty     >>= f = InferredAnnBnd_  bnd (ty >>= f)
+  WitnessedAnnBnd_ bnd col ty >>= f = WitnessedAnnBnd_ bnd col (ty >>= f)
+  Ann_  ann >>= f = Ann_ (ann >>= f)
+
+
+
+
+instance Bifunctor Expr where
+  bimap = bimapDefault
+
+instance Bifoldable Expr where
+  bifoldMap = bifoldMapDefault
+
+
+-- (silence $ runExceptT $ getModules_ ["samples"] "M") >>= return . (\m -> fromRight' $ (ezipper $ Mod m) >>= lineColumn 6 5 >>= focus) . last . fromRight'
+-- _decls mm
+
+
+instance Bitraversable Expr where
+  {-# INLINE bitraverse #-}
+
+  -- for debugging: require Show b
+  -- bitraverse :: Applicative f => (a -> f c) -> (b -> f d) -> Expr a b -> f (Expr c d)
+  -- bitraverse :: (Applicative f, Show b) => (a -> f c) -> (b -> f d) -> Expr a b -> f (Expr c d)
+  
+  bitraverse f g = bt where
+
+    bt (V a)        = V <$> g a
+
+    
+    bt (Nat' x )        = Nat' <$> traverse f x
+
+
+    bt (Ws_ x ws)        = Ws_ <$> bt x <*> traverse f ws
+
+
+    bt (Brackets_ bo x bc) = Brackets_ <$> traverse f bo <*> bt x <*> traverse f bc
+
+
+
+    bt (Paren x)        = Paren  <$> bt x
+    bt (Paren_ po x pc) = Paren_ <$> traverse f po <*> bt x <*> traverse f pc
+
+
+    bt (Type)        = pure Type
+    bt (Type_ tt ws) = Type_ <$> f tt <*> traverse f ws
+
+
+    bt (l :@ r)        = (:@)      <$> bt l <*> bt r
+    bt (ErasedApp l r) = ErasedApp <$> bt l <*> bt r
+
+
+    bt (BndV v ex)     = BndV <$> f v <*> bt ex
+
+
+
+    bt (Nat n)          = Nat  <$> pure n
+    bt (Nat_ n ntxt ws) = Nat_ <$> pure n <*> f ntxt <*> traverse f ws 
+  
+
+
+    bt (Lam p b)     = Lam <$> f p <*> bitraverseScope f g b
+
+
+
+    bt (Lam_ lamtok binder dot sc) =
+      Lam_ <$> traverse f lamtok <*> traverse f binder <*> traverse f dot <*> bitraverseScope f g sc
+
+
+    -- bt (Lam' p b)     = Lam' <$> f p <*> bitraverseScope f g b
+
+    bt (ErasedLam p b)     = ErasedLam <$> f p <*> bitraverseScope f g b
+
+    -- bt (Lams ts b)     = Lams <$> traverse (traverse f) ts <*> bitraverseScope f g b
+    bt (Lams ts b)     = Lams <$> traverse f ts <*> bitraverseScope f g b
+
+
+    bt (LamPA eps bnd annot sc)     =
+      LamPA <$> pure eps <*> f bnd <*> bitraverseAnnot f g annot <*> bitraverseScope f g sc
+
+
+    bt (LamPAs ps sc) =
+      LamPAs <$> btTripleList ps <*> bitraverseScope f g sc
+      where
+        btTriple (eps, nm, annot) = (,,) <$> pure eps <*> f nm <*> bitraverseAnnot f g annot
+        btTripleList trs = traverse btTriple trs
+
+  
+    bt (LamPAs' ps sc) =
+      LamPAs' <$> btTripleList ps <*> bitraverseScope f g sc
+      where
+        btTriple (eps, nm, annot) = (,,) <$> pure eps <*> traverse f nm <*> bitraverseAnnot f g annot
+        btTripleList trs = traverse btTriple trs
+
+
+
+
+
+
+    bt (LamPAs_ lamtok ps dot sc) =
+      LamPAs_ <$> traverse f lamtok <*> btTripleList ps <*> traverse f dot <*> bitraverseScope f g sc
+      where
+        btTriple (eps, binder, annot) = (,,) <$> pure eps <*> traverse f binder <*> bitraverseAnnot f g annot
+        btTripleList trs = traverse btTriple trs
+
+
+    bt (Lams_  {}) = error "bt: Lams__"
+
+
+    bt (If a b c annot) =
+      If <$> bt a <*> bt b <*> bt c <*> bitraverse f g annot
+
+
+    bt (If_ iftok a thentok b elsetok c annot) =
+      If_ <$> traverse f iftok <*> bt a <*> traverse f thentok <*> bt b
+      <*> traverse f elsetok <*> bt c <*> bitraverse f g annot
+
+
+
+
+    bt (Position d b)       = Position d <$> bt b
+
+    bt (Pi nm ty sc)        = Pi <$> f nm <*> bt ty <*> bitraverseScope f g sc
+    bt (Pi_ ex arr sc)      = Pi_ <$> bt ex <*> traverse f arr <*> bitraverseScope f g sc
+    bt (PiP eps nm ty sc)   = PiP <$> pure eps <*> f nm <*> bt ty <*> bitraverseScope f g sc
+    bt (PiP_ eps ex arr sc) = PiP_ <$> pure eps <*> bt ex <*> traverse f arr <*> bitraverseScope f g sc
+
+
+    bt (Ann ex ty) = Ann <$> bt ex <*> bt ty
+    bt (WitnessedAnnEx_  ex colon ty)  = WitnessedAnnEx_  <$> bt ex <*> traverse f colon <*> bt ty
+    bt (InferredAnnBnd_  bnd ty)       = InferredAnnBnd_  <$> traverse f bnd <*> bt ty
+    bt (WitnessedAnnBnd_ bnd colon ty) = WitnessedAnnBnd_ <$> traverse f bnd <*> traverse f colon <*> bt ty  
+    bt (Ann_ ex)                       = Ann_ <$> bt ex
+
+
+  
+    -- -- bt (TCon tt exprs)  = TCon <$> f tt <*> traverse bt exprs
+    -- -- bt (TCon_ nm exprs) = TCon_ <$> traverse f nm <*> traverse bt exprs
+    
+    bt (TCon  aa exprs) = TCon  <$> g aa <*> traverse bt exprs
+    bt (TCon_ nm exprs) = TCon_ <$> bitraverseNm f g nm <*> traverse bt exprs
+
+
+
+
+    bt (DCon tt args annot)  = DCon  <$> f tt          <*> traverse (bitraverseArg f g) args <*> bitraverseAnnot f g annot
+    bt (DCon_ nm args annot) = DCon_ <$> traverse f nm <*> traverse (bitraverseArg f g) args <*> bitraverseAnnot f g annot
+
+
+    -- better way of debugging ? - unfortunately we don't have Show b...
+
+    -- bt other = error $ "bt: " ++ (show $ other)
+    -- bt other = trace (show other) $ error $ "bt: "
+
+
+
+
+
+
+    bt (TrustMe annot)        = TrustMe  <$>                            bitraverse f g annot 
+    bt (TrustMe_ tt ws annot) = TrustMe_ <$> f tt <*> traverse f ws <*> bitraverse f g annot
+
+  
+  
+
+    -- -- bt (TyUnit   {}) = error "bt: TyUnit"
+    -- -- bt (TyUnit_  {}) = error "bt: TyUnit_"
+
+    bt (TyUnit) = pure TyUnit
+    bt (TyUnit_  tt ws) = TyUnit_ <$> f tt <*> traverse f ws
+
+
+  
+    bt (LitUnit)         = pure LitUnit
+    bt (LitUnit_  tt ws) = LitUnit_ <$> f tt <*> traverse f ws
+
+
+
+    bt (LitBool b)         = LitBool  <$> pure b 
+    bt (LitBool_ b tok ws) = LitBool_ <$> pure b <*> f tok <*> traverse f ws 
+
+
+    bt TyBool           = pure TyBool
+    bt (TyBool_ tok ws) = TyBool_ <$> f tok <*> traverse f ws
+
+
+    bt (Lam'  {}) = error "bt: Lam'"
+    bt (Lams' {}) = error "bt: Lams'"
+
+
+
+
+    bt (Subst ex1 ex2 annot) = Subst <$> bt ex1 <*> bt ex2 <*> bitraverse f g annot
+    bt (Subst_ subst ex1 by ex2 annot) =
+      Subst_ <$> traverse f subst <*> bt ex1 <*> traverse f by <*> bt ex2 <*> bitraverse f g annot
+
+
+
+
+  -- --   -- witness to an equality contradiction
+  -- -- | Contra (Expr t a) (Annot t a)
+  -- -- | Contra_ (ContraTok t) (Expr t a) (Annot t a)
+
+
+    bt (Contra ex annot)            = Contra  <$>                          bt ex <*> bitraverse f g annot
+    bt (Contra_ contratok ex annot) = Contra_ <$> traverse f contratok <*> bt ex <*> bitraverse f g annot
+
+
+
+
+
+  
+
+
+    bt (Sigma nm ex sc) = Sigma <$> f nm <*> bt ex <*> bitraverseScope f g sc
+
+  
+    bt (Sigma_ bo bndr col ex vbar sc bc) = Sigma_
+                                            <$> traverse f bo
+                                            <*> traverse f bndr
+                                            <*> traverse f col
+                                            <*> bt ex
+                                            <*> traverse f vbar
+                                            <*> bitraverseScope f g sc
+                                            <*> traverse f bc
+    
+
+    bt (TyEq ex1 ex2) = TyEq <$> bt ex1 <*> bt ex2
+    bt (TyEq_ ex1 eq ex2) = TyEq_ <$> bt ex1 <*> traverse f eq <*> bt ex2
+
+
+
+
+    bt (Refl annot) = Refl <$> bitraverseAnnot f g annot
+    bt (Refl_ tt ws annot) = Refl_ <$> f tt <*> traverse f ws <*> bitraverseAnnot f g annot
+  
+
+
+
+    bt (Prod ex1 ex2 annot)              = Prod <$>                    bt ex1                      <*> bt ex2                   <*> bitraverse f g annot 
+    bt (Prod_ po ex1 comma ex2 pc annot) = Prod_ <$> traverse f po <*> bt ex1 <*> traverse f comma <*> bt ex2 <*> traverse f pc <*> bitraverse f g annot 
+
+
+
+    -- -- bt (Let bs ss)    = Let <$> traverse (bitraverse f g) bs <*> bitraverseScope f g ss
+
+    
+    bt (Let nm ex sc) = Let <$> f nm <*> bt ex <*> bitraverseScope f g sc
+                        
+    bt (Let_ lettok bndr eq ex intok sc) = Let_ <$> traverse f lettok
+                                           <*> traverse f bndr
+                                           <*> traverse f eq
+                                           <*> bt ex
+                                           <*> traverse f intok
+                                           <*> bitraverseScope f g sc
+
+
+
+
+
+    bt (Pcase scrut (x, a) sc annot) = Pcase <$> bt scrut <*> ((,) <$> f x <*> f a) <*> bitraverseScope f g sc <*> bitraverseAnnot f g annot
+
+    bt (Pcase_ pcase ex of' po s comma t pc arr sc annot) =  Pcase_
+                                                             <$> traverse f pcase
+                                                             <*> bt ex
+                                                             <*> traverse f of'
+                                                             <*> traverse f po
+                                                             <*> traverse f s
+                                                             <*> traverse f comma
+                                                             <*> traverse f t
+                                                             <*> traverse f pc
+                                                             <*> traverse f arr
+                                                             <*> bitraverseScope f g sc
+                                                             <*> bitraverse f g annot
+
+      
+
+    
+    bt (Case ex matches annot) = Case <$> bitraverseExpr f g ex <*> traverse (bitraverseMatch f g) matches <*> bitraverseAnnot f g annot
+
+
+
+
+    -- -- bt (Case_ casetok ex oftok mayopen matches mayclose annot) =
+    -- --   Case_
+    -- --   <$> traverse f casetok
+    -- --   <*> bitraverseExpr f g ex
+    -- --   <*> traverse f oftok
+    -- --   <*> traverse (traverse f) mayopen
+    -- --   <*> btPairs matches
+    -- --   <*> traverse (traverse f) mayclose
+    -- --   <*> bitraverseAnnot f g annot
+    -- --   where
+    -- --     btPair (match, maysemi) = (,) <$> bitraverseMatch f g match <*> traverse (traverse f) maysemi
+    -- --     btPairs ps = traverse btPair ps
+
+
+
+    bt (Case_ casetok ex oftok mayopen matches mayclose annot) =
+      Case_
+      <$> traverse f casetok
+      <*> bitraverseExpr f g ex
+      <*> traverse f oftok
+      <*> traverse (traverse f) mayopen
+      <*> btPairs matches
+      <*> traverse (traverse f) mayclose
+      <*> bitraverseAnnot f g annot
+      where
+        btPair (maysemi, match) = (,) <$> traverse (traverse f) maysemi <*> bitraverseMatch f g match
+        btPairs ps = traverse btPair ps
+
+
+
+
+
+
+
+    -- -- bt (CaseIndented_ casetok ex oftok matches annot) =
+    -- --   CaseIndented_
+    -- --   <$> traverse f casetok
+    -- --   <*> bitraverseExpr f g ex
+    -- --   <*> traverse f oftok
+    -- --   <*> traverse (bitraverseMatch f g) matches 
+    -- --   <*> bitraverseAnnot f g annot
+
+
+    -- -- bt (CaseWithBraces_ casetok ex oftok bo matches bc annot) =
+    -- --   CaseWithBraces_
+    -- --   <$> traverse f casetok
+    -- --   <*> bitraverseExpr f g ex
+    -- --   <*> traverse f oftok
+    -- --   <*> traverse f bo
+    -- --   <*> btPairs matches
+    -- --   <*> traverse f bc
+    -- --   <*> bitraverseAnnot f g annot
+    -- --   where
+    -- --     btPair (match, maysemi) = (,) <$> bitraverseMatch f g match <*> traverse (traverse f) maysemi
+    -- --     btPairs ps = traverse btPair ps
+  
+
+
+
+
+
+
+
+bitraverseExpr :: Applicative f => (a -> f c) -> (b -> f d) -> Expr a b -> f (Expr c d)
+bitraverseExpr = bitraverse
+
+
+-- for the sake of writing this in the least verbose manner:
+-- using record wild cards for data constructors that are not declared with record fields here,
+-- works fine, but is not allowed according to 
+-- https://downloads.haskell.org/~ghc/latest/docs/html/users_guide/syntax-extns.html
+-- hope this will not break in the future
+
+wsAware :: Expr t a -> Bool
+wsAware (V _) = False
+
+wsAware (Ws_ {}) = True
+
+wsAware (x :@ _) = wsAware x
+wsAware (ErasedApp x _) = wsAware x
+wsAware (Position _ x) = wsAware x
+
+
+
+wsAware (Lam  {})  = False
+wsAware (Lam_ {}) = True
+
+
+wsAware (Lam' {}) = False
+
+wsAware (Lams' {}) = False
+
+
+wsAware (LamPA {})  = False
+-- doesn't exist
+-- wsAware (LamPA_ {}) = True
+
+wsAware (LamPAs  {})  = False
+wsAware (LamPAs_ {}) = True
+
+
+wsAware (PiP  {})  = False
+wsAware (PiP_ {}) = True
+
+
+wsAware (Sigma  {})  = False
+wsAware (Sigma_ {}) = True
+
+
+wsAware (If  {})  = False
+wsAware (If_ {}) = True
+
+
+wsAware (Prod  {})  = False
+wsAware (Prod_ {}) = True
+
+
+
+wsAware (Case  {})  = False
+-- -- wsAware (Case_ {}) = True
+
+-- -- wsAware (CaseIndented_ {}) = True
+-- -- wsAware (CaseWithBraces_ {}) = True
+
+
+wsAware (Pcase  {})  = False
+wsAware (Pcase_ {}) = True
+
+
+
+wsAware (Nat_ {}) = True
+wsAware (Nat  {})  = False
+
+
+
+
+wsAware (TCon  {})  = False
+wsAware (TCon_ {}) = True
+
+
+
+wsAware (TyEq  {})  = False
+wsAware (TyEq_ {}) = True
+
+
+
+wsAware (Ann {})  = False
+wsAware (WitnessedAnnEx_ {}) = True
+wsAware (InferredAnnBnd_ {}) = True
+wsAware (WitnessedAnnBnd_ {}) = True
+wsAware (Ann_ {}) = True
+
+
+
+
+
+
+
+-- no catch all so far: let it break
+
+
+
+
+
+-- -- an 'Annot' is optional type information
+
+data Annot t a = Annot (Maybe (Expr t a))
+               | Annot_ (Maybe (Expr t a)) (Ws t)
+               deriving (Functor,Foldable,Traversable)
+
+
+
+
+instance Applicative (Annot t) where
+  pure = Annot . Just . V
+  (<*>) = ap
+
+
+
+-- todo: think about the other cases
+-- or maybe better make Annot/Annot_ newtypes and automatically derive Monad, Applicative
+-- Monad really needed ?
+
+instance Monad (Annot t) where
+  return = Annot . Just . V
+  Annot (Nothing) >>= _ = Annot (Nothing)
+
+
+
+instance Bifunctor Annot where
+  bimap = bimapDefault
+
+instance Bifoldable Annot where
+  bifoldMap = bifoldMapDefault
+
+
+instance Bitraversable Annot where
+  bitraverse f g (Annot mayex)     = Annot  <$> traverse (bitraverseExpr f g) mayex
+  bitraverse f g (Annot_ mayex ws) = Annot_ <$> traverse (bitraverseExpr f g) mayex <*> traverse f ws
+
+
+
+
+bitraverseAnnot :: Applicative f => (a -> f c) -> (b -> f d) -> Annot a b -> f (Annot c d)
+bitraverseAnnot = bitraverse
+
+
+
+
+data Match t a =
+
+  Match  (Pattern t a)                    (Scope Int (Expr t) a)
+  | Match_ (Pattern t a) (Token 'ArrowTy t) (Scope Int (Expr t) a)
+
+  deriving (Functor,Foldable,Traversable)    
+
+
+
+
+
+
+instance Bifunctor Match where
+  bimap = bimapDefault
+
+instance Bifoldable Match where
+  bifoldMap = bifoldMapDefault
+
+
+instance Bitraversable Match where
+
+
+  bitraverse f g (Match pattern sc) = Match <$> (bitraverse f g pattern) <*> bitraverseScope f g sc
+
+
+  bitraverse f g (Match_ pattern arr sc) =
+    Match_ <$> bitraverse f g pattern <*> traverse f arr <*> bitraverseScope f g sc
+  
+
+
+
+
+bitraverseMatch :: Applicative f => (a -> f c) -> (b -> f d) -> Match a b -> f (Match c d)
+bitraverseMatch = bitraverse
+
+
+
+-- an argument is tagged with whether it should be erased
+
+data Arg t a =
+  Arg Eps (Expr t a)
+  deriving (Functor,Foldable,Traversable)
+
+
+instance Bifunctor Arg where
+  bimap = bimapDefault
+
+instance Bifoldable Arg where
+  bifoldMap = bifoldMapDefault
+
+
+instance Bitraversable Arg where
+  bitraverse f g (Arg eps ex) = Arg <$> pure eps <*> bitraverseExpr f g ex
+
+
+bitraverseArg :: Applicative f => (a -> f c) -> (b -> f d) -> Arg a b -> f (Arg c d)
+bitraverseArg = bitraverse
+
+
+
+
+-- some lenses for common tasks: get the binders etc
+
+
+-- exmpls
+-- (nopos $ parse expr_ "\\ a b c . f a b" ) ^. bndrs
+
+
+bndrs :: Lens' (Expr t a) [Binder t]
+bndrs = lens getter setter
+  where
+    getter = (\case {
+                 ; (Pcase_ _ _ _ _ b _ b2 _ _ _ _) -> [b, b2]
+                 ; (Lam_ _ b _ _)                 -> [b]
+                 ; (Let_ _ b _ _ _ _)             -> [b]
+                 ; (Sigma_ _ bndr _ _ _ _ _)      -> [bndr]
+                 ; (WitnessedAnnBnd_ bndr _ _ )   -> [bndr]
+                 ; (InferredAnnBnd_  bndr _ )     -> [bndr]
+                 ; (PiP_ _ ex _ _)                -> getter ex
+                 ; (Paren_ _ ex _ )               -> getter ex
+                 ; (Brackets_ _ ex _ )            -> getter ex
+                 ; (Ann_ ex)                      -> getter ex
+                 ; (LamPAs_ _ triples _ _)        -> (^. _2) <$> triples
+                 
+                   -- ...
+                 ; _ -> error "bndrs > getter: missing Expr"
+
+
+                 })
+    -- haven't tried the setter yet, exmples?
+    setter =  (\e newbs -> case e of {
+                  ; Pcase_ pcasetok ex oftok po _ comma _ pc arr sc annot -> Pcase_ pcasetok ex oftok po (newbs !! 0) comma (newbs !! 1) pc arr sc annot
+                  ; Lam_ lamtok _ dot sc                                  -> Lam_ lamtok (newbs !! 0) dot sc
+                  ; Let_ lettok _ eq ex in' sc                            -> Let_ lettok (newbs !! 0) eq ex in' sc 
+                  ; Sigma_ bo _ colon ex vbar sc bc                       -> Sigma_ bo (newbs !! 0) colon ex vbar sc bc
+                  ; WitnessedAnnBnd_ _ col ex                             -> WitnessedAnnBnd_ (newbs !! 0) col ex
+                  ; InferredAnnBnd_ _ ex                                  -> InferredAnnBnd_ (newbs !! 0) ex
+                  ; PiP_ eps ex arr sc                                    -> PiP_ eps (setter ex newbs) arr sc
+                  ; Paren_ po ex pc                                       -> Paren_ po (setter ex newbs) pc
+                  ; Brackets_ bo ex bc                                    -> Brackets_ bo (setter ex newbs) bc
+                  ; Ann_ ex                                               -> Ann_ (setter ex newbs)
+                                                                             -- OK ?
+                  ; LamPAs_ lamtok triples dot sc                         -> LamPAs_ lamtok [(eps, newbs !! y, annot) | (eps, _, annot) <- triples, y <- [0..]] dot sc 
+
+                  -- ...
+                  ; other -> other
+
+                  })
+
+
+
+-- instance MkVisible t => GetNm (Expr t a) t where
+--   name' (InferredAnnBnd_   bndr  _)   = name' bndr
+--   name' (WitnessedAnnBnd_  bndr  _ _) = name' bndr
+--   name' (WitnessedAnnEx_  ex _ _)     = name' ex
+--   name' (Ws_ ex _) = name' ex
+--   -- name' (V x)      = x 
+--   name' (Ann_ ex) =      name' ex
+--   name' (Paren_  _ ex _) = name' ex
+--   name' (Brackets_ _ ex _) = name' ex
+
+
+
+
+-- at the bottom of the file
+-- http://stackoverflow.com/questions/20876147/haskell-template-haskell-and-the-scope
+
+
+#if (MIN_VERSION_transformers(0,5,0)) || !(MIN_VERSION_transformers(0,4,0))
+-- #if MIN_VERSION_transformers(0,5,0)
+
+-- instance Eq t => Eq1 ((,,) Eps t) where
+--   liftEq eq (someEps, someT, more) (otherEps, otherT, other)        = eq someEps otherEps && eq someT otherT && eq more other
+
+-- instance Eq t => Eq1 (Expr t) where
+--   liftEq eq (Lam n sc)  (Lam n' sc')     = n == n' && liftEq eq sc sc'
+
+
+
+-- data Triple t a = Triple Eps  t (Annot t a)
+-- deriveEq1 ''Triple
+
+
+-- need Eq1 for triples as well
+-- defined here in a similar fashion as Eq for (,) in
+-- https://hackage.haskell.org/package/base-4.9.0.0/docs/src/Data.Functor.Classes.html
+
+
+
+class Eq3 g where
+    liftEq3 :: (a -> b -> Bool) -> (c -> d -> Bool) -> (e -> f -> Bool) -> g a c e -> g b d f -> Bool
+
+
+
+instance Eq3 (,,) where
+    liftEq3 e1 e2 e3 (x1, y1, z1) (x2, y2, z2) = e1 x1 x2 && e2 y1 y2 && e3 z1 z2
+
+
+instance (Eq a, Eq b) => Eq1 ((,,) a b) where
+    liftEq = liftEq3 (==) (==)
+
+
+-- 
+
+
+class (Eq3 g) => Ord3 g where
+    liftCompare3 :: (a -> b -> Ordering) -> (c -> d -> Ordering) -> (e -> f -> Ordering) ->    g a c e -> g b d f -> Ordering
+
+instance Ord3 (,,) where
+    liftCompare3 comp1 comp2 comp3 (x1, y1, z1) (x2, y2, z2) =    comp1 x1 x2 `mappend` comp2 y1 y2 `mappend` comp3 z1 z2
+
+
+instance (Ord a, Ord b) => Ord1 ((,,) a b) where
+    liftCompare = liftCompare3 compare compare
+
+
+--
+
+
+class Show3 f where
+
+    liftShowsPrec3 :: (Int -> a -> ShowS) -> ([a] -> ShowS) -> (Int -> b -> ShowS) -> ([b] -> ShowS) -> (Int -> c -> ShowS) -> ([c] -> ShowS) -> Int -> f a b c -> ShowS
+
+
+    liftShowList3 :: (Int -> a -> ShowS) -> ([a] -> ShowS) -> (Int -> b -> ShowS) -> ([b] -> ShowS) -> (Int -> c -> ShowS) -> ([c] -> ShowS) -> [f a b c] -> ShowS
+
+
+    liftShowList3 sp1 sl1 sp2 sl2 sp3 sl3 =
+        showListWith (liftShowsPrec3 sp1 sl1 sp2 sl2 sp3 sl3 0)
+
+
+instance Show3 (,,) where
+    liftShowsPrec3 sp1 _ sp2 _ sp3 _ _ (x, y, z) =
+        showChar '(' . sp1 0 x . showChar ',' . sp2 0 y . showChar ',' . sp3 0 z . showChar ')'
+
+
+instance (Show a, Show b) => Show1 ((,,) a b) where
+    liftShowsPrec = liftShowsPrec3 showsPrec showList showsPrec showList
+
+
+
+deriveEq1 ''Expr
+deriveOrd1 ''Expr
+deriveShow1 ''Expr
+-- deriveRead1 ''Expr
+
+
+
+deriving instance (Eq t, Eq a)     => Eq (Expr t a)
+-- deriving instance (Ord t, Ord a, Typeable t)   => Ord (Expr t a)
+deriving instance (Ord t, Ord a)   => Ord (Expr t a)
+
+deriving instance (Show t, Show a) => Show (Expr t a)
+-- deriving instance (Read t, Read a) => Read (Expr t a)
+
+
+#else
+
+
+instance Eq t => Eq1   (Expr t)
+
+instance (Ord t, Typeable t) => Ord1  (Expr t)
+-- instance Ord t => Ord1  (Expr t)
+
+instance Show t => Show1 (Expr t)
+
+-- instance Read t => Read1 (Expr t)
+
+
+deriving instance (Eq t, Eq a)     => Eq (Expr t a)
+
+deriving instance (Ord t, Ord a, Typeable t)   => Ord (Expr t a)
+-- deriving instance (Ord t, Ord a)   => Ord (Expr t a)
+
+
+deriving instance (Show t, Show a) => Show (Expr t a)
+-- deriving instance (Read t, Read a, Read Delta, Read (PossiblyVar t)) => Read (Expr t a)
+
+
+
+
+#endif
+
+
+
+
+
+#if (MIN_VERSION_transformers(0,5,0)) || !(MIN_VERSION_transformers(0,4,0))
+-- #if (MIN_VERSION_transformers(0,5,0))
+deriveEq1 ''Annot
+deriveOrd1 ''Annot
+deriveShow1 ''Annot
+-- deriveRead1 ''Annot
+
+
+
+deriving instance (Eq t, Eq a)     => Eq (Annot t a)
+
+deriving instance (Ord t, Ord a)   => Ord (Annot t a)
+-- deriving instance (Ord t, Ord a, Typeable t)   => Ord (Annot t a)
+
+deriving instance (Show t, Show a) => Show (Annot t a)
+-- deriving instance (Read t, Read a) => Read (Annot t a)
+
+#else
+instance Eq t => Eq1   (Annot t)
+-- instance (Ord t, Typeable t) => Ord1  (Annot t)
+-- instance Ord t => Ord1  (Annotr t)
+instance Show t => Show1 (Annot t)
+-- instance Read t => Read1 (Annotr t)
+
+deriving instance (Eq t, Eq a)     => Eq (Annot t a)
+deriving instance (Ord t, Ord a, Typeable t)   => Ord (Annot t a)
+-- deriving instance (Ord t, Ord a)   => Ord (Annot t a)
+deriving instance (Show t, Show a) => Show (Annot t a)
+
+#endif
+
+
+
+
+#if (MIN_VERSION_transformers(0,5,0)) || !(MIN_VERSION_transformers(0,4,0))
+-- #if (MIN_VERSION_transformers(0,5,0))
+deriveEq1 ''Arg
+deriveOrd1 ''Arg
+deriveShow1 ''Arg
+-- deriveRead1 ''Arg
+
+deriving instance (Eq t, Eq a)     => Eq (Arg t a)
+
+deriving instance (Ord t, Ord a)   => Ord (Arg t a)
+-- deriving instance (Ord t, Ord a, Typeable t)   => Ord (Arg t a)
+
+deriving instance (Show t, Show a) => Show (Arg t a)
+-- deriving instance (Read t, Read a) => Read (Arg t a)
+#else
+instance Eq t => Eq1   (Arg t)
+-- instance (Ord t, Typeable t) => Ord1  (Arg t)
+-- instance Ord t => Ord1  (Argr t)
+instance Show t => Show1 (Arg t)
+-- instance Read t => Read1 (Argr t)
+
+deriving instance (Eq t, Eq a)     => Eq (Arg t a)
+deriving instance (Ord t, Ord a, Typeable t)   => Ord (Arg t a)
+-- deriving instance (Ord t, Ord a)   => Ord (Arg t a)
+deriving instance (Show t, Show a) => Show (Arg t a)
+
+#endif
+
+
+
+
+
+#if (MIN_VERSION_transformers(0,5,0)) || !(MIN_VERSION_transformers(0,4,0))
+-- #if (MIN_VERSION_transformers(0,5,0))
+deriveEq1 ''Match
+deriveOrd1 ''Match
+deriveShow1 ''Match
+-- deriveRead1 ''Match
+
+deriving instance (Eq t, Eq a)     => Eq (Match t a)
+
+deriving instance (Ord t, Ord a)   => Ord (Match t a)
+-- deriving instance (Ord t, Ord a, Typeable t)   => Ord (Match t a)
+
+deriving instance (Show t, Show a) => Show (Match t a)
+-- deriving instance (Read t, Read a) => Read (Match t a)
+#else
+instance Eq t => Eq1   (Match t)
+instance (Ord t, Typeable t) => Ord1  (Match t)
+-- instance Ord t => Ord1  (Match t)
+instance Show t => Show1 (Match t)
+-- instance Read t => Read1 (Match t)
+
+deriving instance (Eq t, Eq a)     => Eq (Match t a)
+deriving instance (Ord t, Ord a, Typeable t)   => Ord (Match t a)
+-- deriving instance (Ord t, Ord a)   => Ord (Match t a)
+deriving instance (Show t, Show a) => Show (Match t a)
+
+#endif
+

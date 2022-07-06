@@ -1,0 +1,1 @@
+cmd_drivers/media/usb/gspca/gspca_benq.o := ../tools/arm-bcm2708/arm-bcm2708hardfp-linux-gnueabi/bin/arm-bcm2708hardfp-linux-gnueabi-ld -EL    -r -o drivers/media/usb/gspca/gspca_benq.o drivers/media/usb/gspca/benq.o 

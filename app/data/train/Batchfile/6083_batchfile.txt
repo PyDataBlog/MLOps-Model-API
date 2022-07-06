@@ -1,0 +1,1 @@
+cmd_drivers/video/rockchip/screen/lcd.h := cmp -s drivers/video/rockchip/screen/lcd_LG_LP097X02.c drivers/video/rockchip/screen/lcd.h || cp drivers/video/rockchip/screen/lcd_LG_LP097X02.c drivers/video/rockchip/screen/lcd.h

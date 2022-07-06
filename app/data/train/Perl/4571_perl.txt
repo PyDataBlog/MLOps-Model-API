@@ -1,0 +1,403 @@
+package CSN::Controller::Account;
+use Mojo::Base 'Mojolicious::Controller';
+use String::Random;
+use Crypt::PBKDF2;
+use Text::Trim qw(trim);
+use HTML::Escape;
+use JSON;
+use Try::Tiny;
+
+sub dashboard {
+  my $c = shift;
+
+  my $page = $c->param('page') || 1;
+  my $activities_rs = $c->model('Recentactivityperobserver')->search({
+    observer_id => $c->session('account_id')
+  }, {
+    page => $page,
+    rows => 50,
+    order_by => { -desc => [ 'timestamp_activity', 'activity_id' ] }
+  });
+  my @activities = $activities_rs->all;
+  my @recent_visitors = $c->stash('account')->visitors->all;
+  my @followeds = $c->stash('account')->followed->all;
+  
+  $c->render(activities => \@activities, pager => $activities_rs->pager, recent_visitors => \@recent_visitors, followeds => \@followeds);
+}
+
+sub search_username {
+  my $c = shift;
+
+  my $field_name = 'username';
+  my $search_term = $c->param('term') || "";
+  my @matching_values = $c->model('Account')->search({
+      $field_name => {-like => $search_term."%"}
+    }, {
+      select => ['account_id', $field_name],
+      order_by => { -asc => [ $field_name, 'account_id' ] }
+    })->all;
+  
+  my @json = map { {id => $_->account_id, text => $_->$field_name} } @matching_values;
+  $c->render(json => { results => \@json });
+}
+
+sub follow_profile {
+  my $c = shift;
+  
+  my $account = $c->model('Account')->find($c->param('account_id'));
+  
+  if(not defined $account) {
+      $c->render(json => {
+        error => 'unknown profile'
+      });
+    return;
+  }
+  
+  try {
+    $c->model('Profilefollow')->update_or_create({account_id => $c->session('account_id'), followed => $c->param('account_id')});
+    $c->render(json => {
+      result => 'following'
+    });
+  }catch {
+    $c->render(json => {
+      error => 'query failed'
+    });
+  };
+}
+
+sub unfollow_profile {
+  my $c = shift;
+  
+  my $account = $c->model('Account')->find($c->param('account_id'));
+  
+  if(not defined $account) {
+      $c->render(json => {
+        error => 'unknown profile'
+      });
+    return;
+  }
+  
+  my $follow_rs = $c->model('Profilefollow')->find({account_id => $c->session('account_id'), followed => $c->param('account_id')});
+  if (defined $follow_rs) {
+    try {
+      $follow_rs->delete;
+      $c->render(json => {
+        result => 'unfollowed'
+      });
+    }catch {
+      $c->render(json => {
+        error => 'query failed'
+      });
+    };
+    
+    return;
+  }
+  
+  $c->render(json => {
+    result => 'unfollowd'
+  });
+}
+
+sub search_field {
+  my $c = shift;
+
+  my $field_id = $c->param('field');
+  my $search_term = $c->param('term') || "";
+  
+  my $field = $c->model('Profilefield')->find($field_id);
+  if (!defined $field) {
+    $c->render(json => { results => [] });
+  }
+  
+  my @json = [];
+  
+  if ($field->data_type ~~ [qw(select select_multi)]) {
+    my @matching_values = $c->model('Profilefieldoption')->search({
+        field_id => $field_id,
+      }, {
+        select => 'language_key',
+        order_by => { -asc => 'language_key' }
+      })->all;
+    # beacause we use i18n, we need to search in perl and not in psql
+    @json = map { $c->loc($_->language_key) =~ /^$search_term/i ? ( {id => $_->language_key, text => $c->loc($_->language_key)} ) : () } @matching_values;
+  }else {
+    my @matching_values = $c->model('Profilefieldvalue')->search({
+        field_id => $field_id,
+        value => {-like => $search_term."%"}
+      }, {
+        select => 'value',
+        group_by => 'value',
+        order_by => { -asc => 'value' }
+      })->all;
+    @json = map { {id => $_->value, text => $_->value} } @matching_values;
+  }
+  
+  $c->render(json => { results => \@json });
+}
+
+sub list_profiles {
+  my $c = shift;
+
+  my $page = $c->param('page') || 1;
+  my $accounts_rs = $c->model('Account')->search(undef, {
+    page => $page,
+    rows => 50,
+    order_by => { -desc => [ 'date_last_login', 'last_heartbeat', 'account_id' ] }
+  });
+  my @accounts = $accounts_rs->all;
+  
+  $c->render(accounts => \@accounts, pager => $accounts_rs->pager);
+}
+
+sub edit_profile {
+  my $c = shift;
+  
+  my @pleft  = $c->model('Profilefield')->search({ block => 'left'  }, { order_by => { -asc => 'position' }});
+  my @pright = $c->model('Profilefield')->search({ block => 'right' }, { order_by => { -asc => 'position' }});
+  my $profilefields = { left => \@pleft, right => \@pright };
+  
+  $c->render(profile => $c->stash('account'), profilefields => $profilefields);
+}
+
+sub save_profile {
+  my $c = shift;
+  
+  if (!defined $c->param('pk') || trim($c->param('pk')) eq "") {
+    $c->render(json => {result => 'invalid request'});
+    return;
+  }
+  
+  my $field = $c->model('Profilefield')->find($c->param('pk'));
+  if (!defined $field) {
+    $c->render(json => {result => 'not found'});
+    return;
+  }
+  
+  my $value_clean = trim($c->param('value'));
+  my $values = $c->every_param('value[]');
+  
+  my $format_clean = trim($c->param('format'));
+  if (defined $format_clean && $format_clean eq "") {
+    $format_clean = undef;
+  }
+  
+  my $currentfieldvalue = $c->model('Profilefieldvalue')->search({field_id => $field->field_id, account_id => $c->session('account_id')});
+  if (defined $currentfieldvalue) {
+    $currentfieldvalue->delete;
+  }
+  
+  if($values < 2 && (!defined $value_clean || $value_clean eq "")) {
+    $c->render(json => {result => 'deleted'});
+    return;
+  }
+  
+  my $saved = 0;
+  foreach my $value (@{$values}, $value_clean) {
+    if (!defined $value) {
+      next;
+    }
+    
+    my $newfieldvalue = $c->model('Profilefieldvalue')->create({
+      value => trim($value),
+      format => $format_clean,
+      field => {
+        field_id => $field->field_id
+      },
+      account => {
+        account_id => $c->session('account_id')
+      }
+    });
+    if (defined $newfieldvalue) {
+      $saved = 1;
+    }
+  }
+  
+  if ($saved) {
+    $c->render(json => {result => 'saved'});
+    return;
+  }
+  
+  $c->render(json => {result => 'error'});
+}
+
+sub show_profile {
+  my $c = shift;
+
+  my $account = $c->model('Account')->find($c->param('account_id'));
+  
+  if(not defined $account) {
+    $c->flash_message('warning', $c->loc('flash_warning_user_unknown'));
+    $c->redirect_to($c->url_for('/profiles'));
+    return;
+  }
+  
+  my @pleft = $c->model('Profilefield')->search({ block => 'left' }, { order_by => { -asc => 'position' }});
+  my @pright = $c->model('Profilefield')->search({ block => 'right' }, { order_by => { -asc => 'position' }});
+  my $profilefields = { left => \@pleft, right => \@pright };
+  
+  if($c->session('account_id') ne $c->param('account_id')) {
+    # inform profile owner about visitor
+    my $activity_id = $c->model('Activityevent')->create({
+      account_id => $c->session('account_id'),
+      event => 'event_visited_you',
+      data => encode_json [ $c->session('account_id'), $c->stash('account')->username ]
+    })->activity_id;
+    $c->model('Activityrecipient')->create({activity_id => $activity_id, recipient_id => $c->param('account_id')});
+    
+    # update visitor history
+    try {
+      $c->model('Profilevisitor')->update_or_create({account_id => $c->param('account_id'), visitor => $c->session('account_id')});
+    };
+    
+    # publish websocket notification
+    my $ws_notification = encode_json {
+      'event' => 'visitor_notification',
+      'data' => {
+        loc => 'ws_event_visited_you',
+        loc_params => [ $c->session('account_id'), $c->stash('account')->username ]
+      }};
+    $c->redis->publish($c->redis_uid . ":global:user:" . $c->param('account_id') => $ws_notification);
+  }
+  
+  $c->render(profile => $account, profilefields => $profilefields);
+}
+
+sub list_settings {
+  my $c = shift;
+  $c->render();
+}
+
+sub list_vouchers {
+  my $c = shift;
+
+  my $page = $c->param('page') || 1;
+  my $account_rs = $c->stash('account');
+  
+  # do we need to create vouchers ?
+  if (not $account_rs->vouchers_created) {
+    # User must be registered more days than users where active in the last 7 days
+    my $active_users = $c->model('Account')->search({
+      date_last_login => { '>=' => \"NOW() - INTERVAL '7' DAY" }
+    })->count;
+    if (int($account_rs->date_registered->delta_days(DateTime->now())->in_units('days')) > $active_users) {
+      # TODO: Better use md5 on microseconds + rand to avoid collisions ?
+      my $rand_gen = String::Random->new;
+      map {
+        $c->model('Voucher')->create({
+          account_id => $account_rs->account_id,
+          code => $rand_gen->randregex('[0-9a-f]{33}')
+        });
+      } 0..4;
+      $account_rs->update({vouchers_created => 'true'});
+    } 
+  }
+  
+  my $invitees_rs = $account_rs->invitees(undef, {
+    page => $page,
+    rows => 50,
+    order_by => { -desc => [ 'date_last_login', 'last_heartbeat' ] }
+  });
+  my @invitees = $invitees_rs->all;
+  my $inviter = $account_rs->invited_by;
+  my @vouchers = $account_rs->vouchers->all;
+  
+  $c->render(inviter => $inviter, vouchers => \@vouchers, invitees => \@invitees, pager => $invitees_rs->pager);
+}
+
+sub change_password {
+  my $c = shift;
+  
+  if ($c->param('password') ne $c->param('password_retyped')) {
+    $c->stash_message('warning', $c->loc('flash_warning_passwords_missmatch'));
+  }elsif (! $c->_check_current_password($c->session->{account_id}, $c->param('password_current'))) {
+    $c->stash_message('warning', $c->loc('flash_warning_current_password_wrong'));
+  }elsif (! $c->_check_new_password($c->param('password'))) {
+    $c->stash_message('warning', $c->loc('flash_warning_password_invalid'));
+  }else {
+    if($c->_change_password($c->param('password'))) {
+      $c->redirect_to($c->url_for('/settings'));
+      return 1;
+    }else {
+      $c->stash_message('warning', $c->loc('flash_warning_unknown_error'));
+    }
+  }
+  
+  $c->render('account/list_settings');
+}
+
+sub save_settings {
+  my $c = shift;
+  
+  # validate theme key
+  my $theme = escape_html($c->param('theme'));
+  if(!($theme ~~ @{$c->app->config->{available_themes}})) {
+    $theme = $c->app->config->{default_settings}->{theme};
+  }
+  
+  # validate language
+  my $language = escape_html($c->param('language'));
+  if(!defined $c->validate_lang($language)) {
+    $language = $c->config->{$c->app->mode}->{languages}->[0]->{key};
+  }
+  
+  my $new_settings = encode_json {
+    theme => $theme,
+    notify_boards => escape_html($c->param('notify_boards')),
+    notify_messages => escape_html($c->param('notify_messages')),
+    notify_visits => escape_html($c->param('notify_visits')),
+    language => $language
+  };
+  
+  # reset language if necessary
+  if($c->session('language') ne $language) {
+    delete $c->session->{language};
+  }
+  
+  $c->stash('account')->update({settings => $new_settings});
+  
+  $c->redirect_to($c->url_for('/settings'));
+}
+
+sub _check_new_password {
+  my ($c, $pass) = @_;
+  return length($pass) > 7;
+}
+
+sub _check_current_password {
+  my ($c, $account_id, $pass) = @_;
+
+  my $pbkdf2 = Crypt::PBKDF2->new(
+    hash_class => 'HMACSHA1', # this is the default
+    iterations => 1000,       # so is this
+    output_len => 20,         # and this
+    salt_len => 4,            # and this.
+  );
+
+  my $account_rs = $c->model('Account')->find($account_id);
+  if(! defined $account_rs) {
+    return;
+  };
+
+  if(!$pbkdf2->validate($account_rs->password, $pass)) {
+    return;
+  }
+
+  return 1;
+}
+
+sub _change_password {
+  my ($c, $pass) = @_;
+
+  my $pbkdf2 = Crypt::PBKDF2->new(
+    hash_class => 'HMACSHA1', # this is the default
+    iterations => 1000,       # so is this
+    output_len => 20,         # and this
+    salt_len => 4,            # and this.
+  );
+
+  my $hashed_pass = $pbkdf2->generate($pass);
+
+  return $c->stash('account')->update({password => $hashed_pass});
+}
+
+1;

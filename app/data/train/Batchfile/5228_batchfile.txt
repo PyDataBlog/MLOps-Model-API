@@ -1,0 +1,1 @@
+cmd_drivers/media/dvb-frontends/au8522_decoder.ko := ../tools/arm-bcm2708/arm-bcm2708hardfp-linux-gnueabi/bin/arm-bcm2708hardfp-linux-gnueabi-ld -EL -r  -T ./scripts/module-common.lds --build-id  -o drivers/media/dvb-frontends/au8522_decoder.ko drivers/media/dvb-frontends/au8522_decoder.o drivers/media/dvb-frontends/au8522_decoder.mod.o

@@ -1,0 +1,159 @@
+#!/usr/bin/python
+import os
+import sys
+import argparse
+import requests
+import subprocess
+import shutil
+
+class bcolors:
+    HEADER = '\033[90m'
+    OKBLUE = '\033[94m'
+    OKGREEN = '\033[92m'
+    WARNING = '\033[93m'
+    FAIL = '\033[91m'
+    ENDC = '\033[0m'
+
+class Console:
+
+    def __init__(self):
+        self.verbose = False
+
+    def log(self, string):
+        if self.verbose:
+            print string
+
+
+
+console = Console()
+
+
+def filter_no_console(line):
+    if 'console' in line:
+        return False
+    return True
+
+def consolidate(input_filename, output_filename, filter_functions=None):
+
+    # read all filenames from input file
+    filenames = [line.rstrip('\n') for line in open(input_filename)]
+
+    # concat all lines in each file to the output file
+    with open(output_filename, 'w') as outfile:
+        for filename in filenames:
+            if filename.startswith('#') or len(filename) <= 0:
+                continue
+
+            console.log(bcolors.HEADER + filename + bcolors.ENDC)
+            with open(filename) as infile:
+                # write a header
+                outfile.write("/*\n* " + filename + "\n*/\n")
+                # write contents
+                for index, line in enumerate(infile):
+                    # apply filter functions
+                    if isinstance(filter_functions, list) and len(filter_functions) > 0:
+                        add_line = True
+                        for filter_function in filter_functions:
+                            if not filter_function(line):
+                                add_line = False
+                                break
+
+                        if add_line:
+                            outfile.write(line)
+                        else:
+                            console.log('- line ' + str(index) + ': ' + bcolors.FAIL + line.lstrip().rstrip() + bcolors.ENDC)
+                    # no filters
+                    else:
+                        outfile.write(line)
+                # newline
+                outfile.write("\n")
+
+
+def compression_level_to_string(optimization_level):
+    if optimization_level >= 3:
+        compliation_level = 'ADVANCED_OPTIMIZATIONS'
+    elif optimization_level >= 2:
+        compliation_level = 'SIMPLE_OPTIMIZATIONS'
+    else:
+        compliation_level = 'WHITESPACE_ONLY'
+    return compliation_level
+
+
+def get_minified_filename(filename):
+    return os.path.splitext(filename)[0] + '.min.js'
+
+
+def compress_local(filename, optimization_level, compiler_path):
+    # java -jar compiler.jar --js hello.js --js_output_file hello-compiled.js
+    console.log('compiling with ' + compiler_path)
+
+    subprocess.call(['java',
+                     '-jar', compiler_path,
+                     '--js', filename,
+                     '--js_output_file', filename,
+                     '--compilation_level', compression_level_to_string(optimization_level)
+    ])
+
+    console.log(bcolors.OKGREEN + filename + ' created' + bcolors.ENDC)
+
+
+def compress_remote(filename, optimization_level):
+    SERVICE_URL = 'http://closure-compiler.appspot.com/compile'
+
+    console.log('compiling with google closure API: ' + SERVICE_URL)
+
+    with open(filename, 'r') as file:
+        javascript = file.read()
+
+    data = {
+        'js_code': javascript,
+        'output_format': 'text',
+        'output_info': 'compiled_code',
+        'compilation_level': compression_level_to_string(optimization_level)
+    }
+    headers = {
+        'Content-type': 'application/x-www-form-urlencoded'
+    }
+    r = requests.post(SERVICE_URL, data=data, headers=headers)
+
+    result = r.text
+
+    with open(filename, 'w') as outfile:
+        outfile.write(result)
+
+    console.log(bcolors.OKGREEN + filename + ' created' + bcolors.ENDC)
+
+def main(argv):
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-v, --verbose', dest='verbose', default=False, action='store_true', help='detailed program output')
+    parser.add_argument('-i, --input', required=True, dest='input_file', type=str, help='input file (required), containing one filename per line to compile')
+    parser.add_argument('-o, --output', dest='output_file', default='output.js', type=str, help='output file')
+    parser.add_argument('-c, --compression', default=0, dest='compress', type=int, help='compression level of output file\n0: no compression\n1: strip whitespace\n2: simple\n3: advanced')
+    parser.add_argument('--compiler', default=None, dest='compiler_path', type=str, help='path to closure compiler jar file. If not specified, online closure API will be used instead')
+    parser.add_argument('--filter-console', default=False, dest='no_console', help='strips console calls', action='store_true')
+    args = parser.parse_args()
+
+    console.verbose = args.verbose
+
+    filters=[]
+
+    if args.no_console:
+        filters.append(filter_no_console)
+
+    output_filename = args.output_file
+
+    consolidate(input_filename=args.input_file, output_filename=output_filename, filter_functions=filters)
+
+    min_output_filename = get_minified_filename(output_filename)
+
+    if(args.compress > 0):
+        if(args.compiler_path is not None):
+            compress_local(min_output_filename, optimization_level=args.compress, compiler_path=args.compiler_path)
+        else:
+            compress_remote(min_output_filename, optimization_level=args.compress)
+    else:
+        # no compression was done, but we still want *.min.js
+        shutil.copyfile(output_filename, min_output_filename)
+
+if __name__ == "__main__":
+    main(sys.argv[1:])

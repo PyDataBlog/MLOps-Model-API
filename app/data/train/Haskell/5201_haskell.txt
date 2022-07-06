@@ -1,0 +1,121 @@
+{-# LANGUAGE DataKinds             #-}
+{-# LANGUAGE DeriveAnyClass        #-}
+{-# LANGUAGE DeriveGeneric         #-}
+{-# LANGUAGE DuplicateRecordFields #-}
+{-# LANGUAGE FlexibleContexts      #-}
+{-# LANGUAGE OverloadedStrings     #-}
+{-# LANGUAGE ScopedTypeVariables   #-}
+{-# LANGUAGE TypeOperators         #-}
+{-# LANGUAGE TypeSynonymInstances  #-}
+
+module Service.User where
+
+import           Base
+import           Model
+
+import qualified Data.Text            as T
+import           Database.Persist
+import           Database.Persist.Sql
+import           Servant
+
+data RegisterRequest = RegisterRequest
+  { username :: Text
+  , password :: Text
+  } deriving (Show, Generic, ToSchema, FromJSON, ToJSON)
+
+data LoginRequest = LoginRequest
+  { signature :: Text
+  , tokenType :: Maybe TokenType
+  } deriving (Show, Generic, ToSchema, FromJSON, ToJSON)
+
+data UserResponse = UserResponse
+  { userId     :: ID
+  , createTime :: UTCTime
+  , username   :: Text
+  , roleType   :: RoleType
+  } deriving (Show, Generic, ToSchema, FromJSON, ToJSON)
+
+-- Normal API
+type UserApi = CheckUserToken :>                                                 Get             '[JSON]  UserResponse
+          :<|>                                ReqBody '[JSON] RegisterRequest :> PostCreated     '[JSON]     NoContent
+          :<|>                   "tokens"  :> ReqBody '[JSON]    LoginRequest :> Post            '[JSON] TokenResponse
+          :<|> CheckUserToken :> "tokens"  :> QueryParam "key"           Text :> Put             '[JSON] TokenResponse
+          :<|> CheckUserToken :> "tokens"  :>                                    DeleteNoContent '[JSON]     NoContent
+          :<|> CheckUserToken :> "tickets" :> QueryParams "type"   TicketType :> Post            '[JSON] TokenResponse
+userService :: ServerT UserApi App
+userService  = getUser
+          :<|> register
+          :<|> login
+          :<|> refresh
+          :<|> revokeToken
+          :<|> checkoutTicket
+
+-- Administration API
+type UserAdminApi = CheckAdminToken :> Capture "userId" ID :> Get     '[JSON] UserResponse
+               :<|> CheckAdminToken :>                        GetPage '[JSON] UserResponse
+userAdminService :: ServerT UserAdminApi App
+userAdminService  = getUserById
+               :<|> getUsers
+
+-- Public API
+type UserOpenApi = CheckTicket :> "user-info" :> Get '[JSON] UserResponse
+userOpenService :: ServerT UserOpenApi App
+userOpenService = getUser
+
+getUser :: Token -> App UserResponse
+getUser token = getUserById token (tokenUser token)
+
+getUserById :: Token -> ID -> App UserResponse
+getUserById _ id = let go (Just u) = return $ toUserResponse id u
+                       go Nothing  = throwM $ User_NotFound  id
+                   in withLogName "user" $ runTrans (get $ toSqlKey id) >>= go
+
+toUserResponse :: ID -> EntityUser -> UserResponse
+toUserResponse id u = UserResponse id (entityUserCreateTime u) (entityUserName u) (entityUserType u)
+
+getUsers :: Token -> PageableApp UserResponse
+getUsers _ p s    = fmap to <$> runTrans (selectPageList [] p s)
+  where to entity = toUserResponse (fromSqlKey $ entityKey entity) (entityVal entity)
+
+register :: RegisterRequest -> App NoContent
+register (RegisterRequest username password) = do
+  checkName username
+  checkPassword password
+  salt       <- liftIO $ randomHex 16
+  id         <- runTrans $ do -- Create User
+    now      <- getNow
+    let user  = EntityUser username salt (hmacSha256 salt password) RoleUser now Nothing
+    entityId <- insert user `catchAll` throwM
+    when (fromSqlKey entityId == 1) $
+      update entityId [EntityUserType =. RoleAdmin, EntityUserUpdateTime =. Just now]
+    return $ fromSqlKey entityId
+  return NoContent `thenNotify` UserEvent UserRegister id (Just username)
+
+login :: LoginRequest -> App TokenResponse
+login (LoginRequest s t)  = do
+  checkBasicAuth s
+  let (username,password) = T.breakOn ":" s
+      getUser             = runTrans $ getBy (EntityUserUniqueName username) >>= convert
+      convert  Nothing    = throwM AuthenticationException
+      convert (Just user) = return (fromSqlKey $ entityKey user, entityVal user)
+      tokenType           = fromMaybe TokenUser t
+      toToken  (id, user) | checkPassword user && canSign tokenType (entityUserType user)
+                                               = signToken id tokenType [] `thenNotify` UserEvent UserLogin id (Just username)
+                          | otherwise          = throwM AuthenticationException
+      checkPassword user  = hmacSha256 (entityUserSalt user) (T.tail password) == entityUserPassword user
+  getUser >>= toToken
+
+toTokenType :: Token -> TokenType
+toTokenType = tokenType
+
+refresh :: Token -> Maybe Text -> App TokenResponse
+refresh token mayK = if isNothing mayK
+                     && tokenRefreshSecret token /= fromJust mayK
+                     && isOnce (toTokenType token)
+                     then throwM AuthenticationException
+                     else do revokeToken token
+                             signToken (tokenUser token) (toTokenType token) (tokenClaims token)
+                              `thenNotify` UserEvent UserRefresh (tokenUser token) Nothing
+
+checkoutTicket :: Token -> [TicketType] -> App TokenResponse
+checkoutTicket token = signToken (tokenUser token) Ticket

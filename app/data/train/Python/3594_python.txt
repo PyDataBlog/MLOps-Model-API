@@ -1,0 +1,131 @@
+import asyncore, socket, logging, time, asynchat, os 
+from hdfs_space_common import get_tree_from_cache, get_child_node, TreeNode
+
+FORMAT = '%(asctime)-15s: %(levelname)s %(module)s - %(funcName)s: %(message)s'
+logging.basicConfig(format=FORMAT, level=logging.WARNING)
+
+class ChatHandler(asynchat.async_chat):
+	def __init__(self, sock):
+		asynchat.async_chat.__init__(self, sock = sock)
+
+		self.ibuffer = []
+		self.obuffer = ''
+		self.set_terminator("\n")
+
+	def collect_incoming_data(self, data):
+		self.ibuffer.append(data)
+		logging.info('Received data "%s"' % data)
+
+	def found_terminator(self):
+		self.handle_request()
+
+	def handle_request(self):
+		data = self.ibuffer.pop(0)
+		#Data should be like:
+		#metric:path|user|size
+		# OR
+		#db:new_path
+		command = data.split(":")[0]
+		if command == 'metric':
+			metric_args = data.split(":")[1].split('|')
+			hdfs_path = metric_args[0] if len(metric_args) > 0 else "/"
+			user_name = metric_args[1] if len(metric_args) > 1 else "ALL"
+			metric = metric_args[2] if len(metric_args) > 2 else "size"
+
+			logging.debug('metric_args: %s' % metric_args) 
+			logging.debug('hdfs_path: %s' % hdfs_path) 
+			logging.debug('user_name: %s' % user_name) 
+			logging.debug('metric: %s' % metric) 
+
+			result = 0
+			if user_name == "ALL" and metric == 'size':
+				
+				logging.warning('Rather using this script try command "hdfs dfs -du /"')
+
+			elif user_name == "ALL" and metric == 'amount':
+				logging.info('Calculating the metric')
+
+				result = get_child_node(file_tree, hdfs_path).get_amount_for_all()
+				
+			else:
+				if metric == "size":
+					logging.info('Calculating the metric')
+
+					result = get_child_node(file_tree, hdfs_path).get_size_by_user(user_name)
+
+				elif metric == "amount":
+					logging.info('Calculating the metric')
+
+					result = get_child_node(file_tree, hdfs_path).get_amount_by_user(user_name)
+
+				else:
+					logging.warning("The metric %s not implemented yet" % metric)
+
+			logging.info('The result is ready: %s. Pushing it to back' % result)
+			self.push(str(result))
+			return
+
+
+		elif command == 'db':
+			file_path = data.split(":")[1]
+
+			if os.path.exists(file_path):
+				global file_tree
+				file_tree = get_tree_from_cache(file_path)
+				os.rename(file_path,MetricServer.db_path)
+				logging.info('File %s remaned to %s' % (file_path, MetricServer.db_path))
+				self.push('OK')
+			else:
+				logging.warning('File %s could not be found. Doing nothing' % file_path)
+				self.push('FAIL')
+
+		else:
+			logging.warning("The command %s not implemented yet")
+			self.push('FAIL')
+
+
+class MetricServer(asyncore.dispatcher):
+
+	sock_path = '/tmp/hdfs_space.sock'
+	db_path = '/tmp/hdfs_space.data'
+
+	def __init__(self):
+		asyncore.dispatcher.__init__(self)
+		self.create_socket(socket.AF_UNIX, socket.SOCK_STREAM)
+		self.set_reuse_addr()
+		self.bind(self.sock_path)
+
+		logging.info('Starting metric-server')
+		self.listen(5)
+
+		global file_tree
+		
+		try:
+			file_tree = get_tree_from_cache(self.db_path)
+		except KeyError as e:
+			file_tree = TreeNode('')
+	def handle_accept(self):
+		pair = self.accept()
+		if pair is not None:
+			sock, addr = pair
+			logging.info('Incoming connection')
+			handler = ChatHandler(sock)
+
+	def handle_close(self):
+		self.close()
+		logging.info('The socket is closed')
+
+	def handle_expt(self):
+		logging.info("OOB detected for %s" % self)
+
+if __name__ == '__main__':
+	
+	file_tree = None 
+	server = MetricServer()
+
+	try: 
+		asyncore.loop()
+	finally:
+		if os.path.exists(server.sock_path):
+			os.unlink(server.sock_path)
+

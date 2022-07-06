@@ -1,0 +1,870 @@
+﻿Imports Visomes.MySQL
+Imports Visomes.Validation
+Imports Visomes.SGV.Core
+
+Public Class PesquisaExterno
+
+    Private CONDICAO_INICIAL_SERVICO As String = "es.status = 1 AND MONTH(es.dtCadastro) = '" & Core.CurrentDate.Month.ToString() & "' " & "AND YEAR(es.dtCadastro) = YEAR(CURRENT_DATE())"
+    Private CONDICAO_INICIAL_OCORRENCIA As String = "eo.status = 1 AND MONTH(eo.dtCadastro) = '" & Core.CurrentDate.Month.ToString() & "' " & "AND YEAR(eo.dtCadastro) = YEAR(CURRENT_DATE())"
+    Private data As New Visomes.Extras.Date()
+    Private print As New Visomes.Extras.Export
+    Private valid As New Validating()
+    Private Shared queryServico As String
+    Private Shared queryOcorrencia As String
+    Private servico As ExternoServico
+    Private ocorencia As ExternoOcorrencia
+    Private aba As Abas
+    Private block As Boolean
+
+    Public Enum Abas As Integer
+        SERVICO = 0
+        OCORRENCIA
+    End Enum
+
+#Region "Property"
+    Public ReadOnly Property AbaSelecionada() As Abas
+        Get
+            Return Me.aba
+        End Get
+    End Property
+
+    ''' <summary>
+    ''' RETORNA A ÚLTIMA QUERY DE PESQUISA
+    ''' </summary>
+    ''' <value></value>
+    ''' <remarks></remarks>
+    Public Shared ReadOnly Property LastQueryOcorrencia() As String
+        Get
+            Return queryOcorrencia
+        End Get
+    End Property
+
+    ''' <summary>
+    ''' RETORNA A ÚLTIMA QUERY DE PESQUISA
+    ''' </summary>
+    ''' <value></value>
+    ''' <remarks></remarks>
+    Public Shared ReadOnly Property LastQueryServico() As String
+        Get
+            Return queryServico
+        End Get
+    End Property
+
+#End Region
+
+    Public Sub New(ByVal aba As Abas)
+        InitializeComponent()
+        Me.aba = aba
+        queryServico = String.Empty
+        queryOcorrencia = String.Empty
+        RemoveAba(aba)
+    End Sub
+
+    Public Sub New(ByVal init As String, ByVal aba As Abas)
+        InitializeComponent()
+        Me.aba = aba
+        Select Case aba
+            Case Abas.SERVICO
+                If Not String.IsNullOrEmpty(queryServico) Then
+                    Me.CONDICAO_INICIAL_SERVICO = PesquisaExterno.queryServico
+                Else
+                    Me.CONDICAO_INICIAL_SERVICO = "es.status = 1 AND MONTH(es.dtCadastro) = '" & Core.CurrentDate.Month.ToString() & "' " & "AND YEAR(es.dtCadastro) = YEAR(CURRENT_DATE())"
+                End If
+            Case Abas.OCORRENCIA
+                If Not String.IsNullOrEmpty(queryOcorrencia) Then
+                    Me.CONDICAO_INICIAL_OCORRENCIA = PesquisaExterno.queryOcorrencia
+                Else
+                    Me.CONDICAO_INICIAL_OCORRENCIA = "eo.status = 1 AND MONTH(eo.dtCadastro) = '" & Core.CurrentDate.Month.ToString() & "' " & "AND YEAR(eo.dtCadastro) = YEAR(CURRENT_DATE())"
+                End If
+        End Select
+        RemoveAba(aba)
+    End Sub
+
+    Private Sub RemoveAba(ByVal aba As Abas)
+        Dim iAba As Integer = CInt(aba)
+        Dim countAba As Integer = Me.tbcExterno.Controls.Count
+        Dim i As Integer = 0
+        While i < countAba
+            If i <> iAba Then
+                Me.tbcExterno.Controls.RemoveAt(i)
+                iAba -= 1
+                countAba -= 1
+            Else
+                i += 1
+            End If
+        End While
+    End Sub
+
+    Private Sub frmPesquisaCliente_Load(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles MyBase.Load
+        Me.block = True
+        ControleAcesso()
+        CarreListas()
+        Me.block = False
+    End Sub
+
+    Private Sub tic_Tick(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tic.Tick
+        tic.Enabled = False
+    End Sub
+
+    Private Sub ControleAcesso()
+        If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoServicoListar) And Me.aba = Abas.SERVICO Then
+            CarregaServico(CONDICAO_INICIAL_SERVICO)
+            Me.Text = "Módulo Externo - Lista de Serviços Externos"
+        Else
+            Me.tbcExterno.Controls.Remove(Me.tbpServico)
+        End If
+        If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoOcorrenciaListar) And Me.aba = Abas.OCORRENCIA Then
+            CarregaOcorrencia(CONDICAO_INICIAL_OCORRENCIA)
+            Me.Text = "Módulo Externo - Lista de Ocorrências Externos"
+        Else
+            Me.tbcExterno.Controls.Remove(Me.tbpOcorrencia)
+        End If
+    End Sub
+
+#Region "Carregamento"
+
+    Private Sub CarregaServico(ByVal strCondicao As String)
+        dgvServico.DataSource = ExternoServico.CarregaGrid(strCondicao)
+        With Me.dgvServico()
+            .Columns(0).HeaderText = ""
+            .Columns(1).HeaderText = "Orçamento"
+            .Columns(2).HeaderText = "OS"
+            .Columns(3).HeaderText = "Cliente"
+            .Columns(4).HeaderText = "Técnico"
+            .Columns(5).HeaderText = "Cadastro"
+            .Columns(6).HeaderText = "Início"
+            .Columns(7).HeaderText = "Final"
+            .Columns(8).HeaderText = "Situação"
+            .Columns(9).Visible = False 'status
+            .Columns(10).Visible = False
+            .Columns(10).HeaderText = "Atraso"
+            .Columns(0).DefaultCellStyle.Format = "D5"
+            For Each itemChecked In chklOutros.CheckedItems
+                If itemChecked.ToString.Equals("1 - DOCUMENTAÇÃO EM ATRASO") Then .Columns(10).Visible = True
+            Next
+        End With
+        ResumoGrid()
+    End Sub
+
+    Private Sub CarregaOcorrencia(ByVal strCondicao As String)
+        dgvOcorrencia.DataSource = ExternoOcorrencia.CarregaGrid(strCondicao)
+        With Me.dgvOcorrencia()
+            .Columns(0).HeaderText = ""
+            .Columns(1).HeaderText = "ID Serviço"
+            .Columns(2).HeaderText = "OS"
+            .Columns(3).HeaderText = "Cliente"
+            .Columns(4).HeaderText = "Técnico"
+            .Columns(5).HeaderText = "Cadastro"
+            .Columns(6).HeaderText = "Início"
+            .Columns(7).HeaderText = "Final"
+            .Columns(8).Visible = False
+            .Columns(0).DefaultCellStyle.Format = "D5"
+        End With
+        ResumoGrid()
+    End Sub
+
+    Private Sub ResumoGrid()
+        Dim strResumo As String = String.Empty
+        Dim totalServico As Integer = 0
+        Dim totalOcorrencia As Integer = 0
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                For Each row As DataGridViewRow In dgvServico.Rows
+                    totalServico += 1
+                Next
+                strResumo = String.Format("Total: {0:N0}", totalServico)
+            Case "tbpOcorrencia"
+                For Each row As DataGridViewRow In dgvOcorrencia.Rows
+                    totalOcorrencia += 1
+                Next
+                strResumo = String.Format("Total: {0:N0}", totalOcorrencia)
+        End Select
+        lblResumoGrid.Text = strResumo
+    End Sub
+
+    Private Sub CarreListas()
+        Me.chklSituacaoServico.Items.AddRange(ExternoServico.CarregaSituacoes())
+    End Sub
+
+#End Region
+
+#Region "CheckBox"
+    ''' <summary>
+    ''' DATA DE CAD 
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub chkDt_CheckedChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles chkDt.CheckedChanged
+        If chkDt.Checked Then
+            grpDt.Enabled = True
+        Else
+            grpDt.Enabled = False
+        End If
+    End Sub
+
+    ''' <summary>
+    ''' DATA DE CAD 
+    ''' </summary>
+    ''' <remarks></remarks>
+    Private Sub chkDt2_CheckedChanged(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles chkDt2.CheckedChanged
+        If chkDt2.Checked Then
+            grpDt2.Enabled = True
+        Else
+            grpDt2.Enabled = False
+        End If
+    End Sub
+
+#End Region
+
+#Region "Validação"
+    Private Sub txtCodOrc_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles txtCodOrc.KeyPress, txtCodOS.KeyPress
+        If e.KeyChar = Convert.ToChar(Keys.Enter) Then PesquisarServico()
+    End Sub
+
+    Private Sub txtCodCli_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles _
+    txtCodCli.KeyPress, txtCodEmpresa.KeyPress, txtCodSupervisor.KeyPress, txtCodTecnico.KeyPress, txtIDServico.KeyPress
+        valid.InputInteiro(sender, e)
+        If e.KeyChar = Convert.ToChar(Keys.Enter) Then PesquisarServico()
+    End Sub
+
+    Private Sub txtCodCli2_KeyPress(ByVal sender As System.Object, ByVal e As System.Windows.Forms.KeyPressEventArgs) Handles _
+    txtCodCliente2.KeyPress, txtCodEmpresa2.KeyPress, txtCodSupervisor2.KeyPress, txtCodTecnico2.KeyPress, txtCodOcorencia.KeyPress
+        valid.InputInteiro(sender, e)
+        If e.KeyChar = Convert.ToChar(Keys.Enter) Then PesquisarOcorrencia()
+    End Sub
+
+    Private Sub btnBuscEmpresa_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscEmpresa.Click
+        Dim frm As New ListEmpresa()
+        If frm.ShowDialog() = Windows.Forms.DialogResult.OK Then txtCodEmpresa.Text = frm.GetRow.Cells(0).Value.ToString
+        frm.Dispose()
+    End Sub
+
+    Private Sub btnBuscEmpresa2_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscEmpresa2.Click
+        Dim frm As New ListEmpresa()
+        If frm.ShowDialog() = Windows.Forms.DialogResult.OK Then txtCodEmpresa2.Text = frm.GetRow.Cells(0).Value.ToString
+        frm.Dispose()
+    End Sub
+
+    Private Sub btnBuscaCli_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscaCliente.Click
+        Dim frm As New ListCliente()
+        If frm.ShowDialog = Windows.Forms.DialogResult.OK Then txtCodCli.Text = frm.GetRow.Cells(0).Value.ToString()
+        frm.Dispose()
+    End Sub
+
+    Private Sub btnBuscaCli2_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscaCliente2.Click
+        Dim frm As New ListCliente()
+        If frm.ShowDialog = Windows.Forms.DialogResult.OK Then txtCodCliente2.Text = frm.GetRow.Cells(0).Value.ToString()
+        frm.Dispose()
+    End Sub
+
+    Private Sub btnLimpar_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnLimpar.Click
+        CleanFields(CType(pnlProposta, Control))
+    End Sub
+
+    Private Sub btnLimpar2_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnLimpar2.Click
+        CleanFields(CType(pnlProposta, Control))
+    End Sub
+
+    Private Sub btnSair_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnSair.Click
+        ViewInicial.CloseMdiChildren(Me)
+    End Sub
+
+    Private Sub btnReload_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnReload.Click
+        CarregaServico(CONDICAO_INICIAL_SERVICO)
+    End Sub
+
+    Private Sub btnReload2_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnReload2.Click
+        CarregaOcorrencia(CONDICAO_INICIAL_OCORRENCIA)
+    End Sub
+
+    Private Sub btnBuscaSup_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscaSupervisor.Click
+        Dim frm As New ListFuncionario(" f.status=1 ")
+        If frm.ShowDialog = Windows.Forms.DialogResult.OK Then txtCodSupervisor.Text = frm.GetRow.Cells(0).Value.ToString
+        frm.Dispose()
+    End Sub
+
+    Private Sub btnBuscaSup2_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscaSup2.Click
+        Dim frm As New ListFuncionario(" f.status=1 ")
+        If frm.ShowDialog = Windows.Forms.DialogResult.OK Then txtCodSupervisor2.Text = frm.GetRow.Cells(0).Value.ToString
+        frm.Dispose()
+    End Sub
+
+    Private Sub btnBuscaTec_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscaTecnico.Click
+        Dim frm As New ListFuncionario(" f.status=1 ")
+        If frm.ShowDialog = Windows.Forms.DialogResult.OK Then txtCodTecnico.Text = frm.GetRow.Cells(0).Value.ToString
+        frm.Dispose()
+    End Sub
+
+    Private Sub btnBuscaTec2_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnBuscaTecnico2.Click
+        Dim frm As New ListFuncionario(" f.status=1 ")
+        If frm.ShowDialog = Windows.Forms.DialogResult.OK Then txtCodTecnico2.Text = frm.GetRow.Cells(0).Value.ToString
+        frm.Dispose()
+    End Sub
+
+#End Region
+
+#Region "Query"
+    Private Sub btnPesquisar_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnPesquisar.Click
+        PesquisarServico()
+    End Sub
+
+    Private Sub btnPesquisar2_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles btnPesquisar2.Click
+        PesquisarOcorrencia()
+    End Sub
+
+    Private Sub PesquisarOcorrencia()
+        Dim b As Boolean = False
+        Dim strCondicao As New System.Text.StringBuilder(" TRUE ")
+
+        'ID 
+        If Not String.IsNullOrEmpty(txtCodOcorencia.Text) Then
+            strCondicao.Append(" AND eo.id = '" & txtCodOcorencia.Text & "'")
+            b = True
+        End If
+
+        'ID OS
+        If Not String.IsNullOrEmpty(txtCodOS2.Text) Then
+            strCondicao.Append(" AND es.idOs LIKE '%" & txtCodOS2.Text & "%'")
+            b = True
+        End If
+
+        'ID CLIENTE
+        If Not String.IsNullOrEmpty(txtCodCliente2.Text) Then
+            strCondicao.Append(" AND es.idCliente = " & txtCodCliente2.Text & "")
+            b = True
+        End If
+
+        'ID EMPRESA
+        If Not String.IsNullOrEmpty(txtCodEmpresa2.Text) Then
+            strCondicao.Append(" AND o.idEmpresa = " & txtCodEmpresa2.Text & "")
+            b = True
+        End If
+
+        'TECNICO
+        If Not String.IsNullOrEmpty(txtCodTecnico2.Text) Then
+            strCondicao.Append(" AND es.idFuncionario = '" & txtCodTecnico2.Text & "'")
+            b = True
+        End If
+
+        'SUPERVISOR
+        If Not String.IsNullOrEmpty(txtCodSupervisor2.Text) Then
+            strCondicao.Append(" AND f.idSupervisor = '" & txtCodSupervisor2.Text & "'")
+            b = True
+        End If
+
+        'STATUS
+        If Me.cboStatus2.SelectedIndex > -1 Then
+            If Me.cboStatus2.SelectedIndex = 0 Then strCondicao.Append(" AND eo.status=1 ")
+            If Me.cboStatus2.SelectedIndex = 1 Then strCondicao.Append(" AND eo.status=0 ")
+            b = True
+        End If
+
+        'PERÍODO DE TEMPO
+        If chkDt2.Checked Then
+            Dim dtInicial As String = String.Empty
+            Dim dtFinal As String = String.Empty
+            dtInicial = data.ConvertToInternacionalDate(dtpInicial2.Value.ToShortDateString)
+            dtFinal = data.ConvertToInternacionalDate(dtpFinal2.Value.ToShortDateString)
+            strCondicao.Append(" AND es.dtCadastro BETWEEN '" & dtInicial & "' AND '" & dtFinal & "' ")
+            b = True
+        End If
+
+        If b Then
+            CarregaOcorrencia(strCondicao.ToString())
+            queryOcorrencia = strCondicao.ToString()
+        Else
+            CarregaOcorrencia(CONDICAO_INICIAL_OCORRENCIA)
+        End If
+    End Sub
+
+    Private Sub PesquisarServico()
+        Dim b As Boolean = False
+        Dim strCondicao As New System.Text.StringBuilder(" TRUE ")
+
+        'ID 
+        If Not String.IsNullOrEmpty(txtIDServico.Text) Then
+            strCondicao.Append(" AND es.idServico = '" & txtIDServico.Text & "'")
+            b = True
+        End If
+
+        'ID ORÇAMENTO
+        If Not String.IsNullOrEmpty(txtCodOrc.Text) Then
+            strCondicao.Append(" AND es.idOrcamento LIKE '%" & txtCodOrc.Text & "%'")
+            b = True
+        End If
+
+        'ID OS
+        If Not String.IsNullOrEmpty(txtCodOS.Text) Then
+            strCondicao.Append(" AND es.idOs LIKE '%" & txtCodOS.Text & "%'")
+            b = True
+        End If
+
+        'ID CLIENTE
+        If Not String.IsNullOrEmpty(txtCodCli.Text) Then
+            strCondicao.Append(" AND es.idCliente = " & txtCodCli.Text & "")
+            b = True
+        End If
+
+        'ID EMPRESA
+        If Not String.IsNullOrEmpty(txtCodEmpresa.Text) Then
+            strCondicao.Append(" AND o.idEmpresa = " & txtCodEmpresa.Text & "")
+            b = True
+        End If
+
+        'TECNICO
+        If Not String.IsNullOrEmpty(txtCodTecnico.Text) Then
+            strCondicao.Append(" AND es.idFuncionario = '" & txtCodTecnico.Text & "'")
+            b = True
+        End If
+
+        'SUPERVISOR
+        If Not String.IsNullOrEmpty(txtCodSupervisor.Text) Then
+            strCondicao.Append(" AND f.idSupervisor = '" & txtCodSupervisor.Text & "'")
+            b = True
+        End If
+
+        'STATUS
+        If Me.cboStatus.SelectedIndex > -1 Then
+            If Me.cboStatus.SelectedIndex = 0 Then strCondicao.Append(" AND es.status=1 ")
+            If Me.cboStatus.SelectedIndex = 1 Then strCondicao.Append(" AND es.status=0 ")
+            b = True
+        End If
+
+        'SITUACAO
+        If chklSituacaoServico.CheckedItems.Count > 0 Then
+            strCondicao.Append(" AND (")
+            For Each itemChecked In chklSituacaoServico.CheckedItems
+                strCondicao.Append("es.situacao =  '" & itemChecked.ToString & "' Or ")
+            Next
+            strCondicao.Append(")")
+            strCondicao.Replace(" Or )", ")")
+            b = True
+        End If
+
+        'OUTROS
+        If chklOutros.CheckedItems.Count > 0 Then
+            strCondicao.Append(" AND (")
+            For Each itemChecked In chklOutros.CheckedItems
+                Select Case itemChecked.ToString
+                    Case "1 - DOCUMENTAÇÃO EM ATRASO"
+                        strCondicao.Append("idServico IN (SELECT idServico FROM sgv.externo_servico WHERE dtEnvioDoc IS NULL AND ADDDATE(dtFinal, INTERVAL 5 DAY) < CURRENT_DATE() AND status=1) Or ")
+                    Case "2 - ADIANTAMENTO PENDENTE"
+                        strCondicao.Append("idServico IN (SELECT idServico FROM sgv.externo_adiantamento WHERE vlr - (vlrAcertoNF + vlrAcertoRS) > 0) Or ")
+                End Select
+            Next
+            strCondicao.Append(")")
+            strCondicao.Replace(" Or )", ")")
+            b = True
+        End If
+
+        'PERÍODO DE TEMPO
+        If chkDt.Checked Then
+            Dim dtInicial As String = String.Empty
+            Dim dtFinal As String = String.Empty
+            dtInicial = data.ConvertToInternacionalDate(dtpInicial.Value.ToShortDateString)
+            dtFinal = data.ConvertToInternacionalDate(dtpFinal.Value.ToShortDateString)
+            strCondicao.Append(" AND es.dtCadastro BETWEEN '" & dtInicial & "' AND '" & dtFinal & "' ")
+            b = True
+        End If
+
+        If b Then
+            CarregaServico(strCondicao.ToString())
+            queryServico = strCondicao.ToString()
+        Else
+            CarregaServico(CONDICAO_INICIAL_SERVICO)
+        End If
+
+    End Sub
+
+#End Region
+
+#Region "DataGridView"
+    Private Sub dgvServico_CellDoubleClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellEventArgs) Handles dgvServico.CellDoubleClick
+        If e.RowIndex > -1 And Not Me.block And e.ColumnIndex > -1 Then
+            Me.block = True
+            Dim servico As New ExternoServico(CInt(dgvServico.CurrentRow.Cells(0).Value))
+            Dim frm As New CadServicoExterno(servico, servico.IsOpen())
+            ViewInicial.CloseMdiChildren(Me)
+            frm.MdiParent = ViewInicial
+            frm.Show()
+        End If
+    End Sub
+
+    Private Sub dgvOcorrencia_CellDoubleClick(ByVal sender As System.Object, ByVal e As System.Windows.Forms.DataGridViewCellEventArgs) Handles dgvOcorrencia.CellDoubleClick
+        If e.RowIndex > -1 And Not Me.block And e.ColumnIndex > -1 Then
+            Me.block = True
+            Dim ocorrencia As New ExternoOcorrencia(CInt(dgvOcorrencia.CurrentRow.Cells(0).Value.ToString()))
+            Dim frm As New CadOcorrenciaExterno(ocorrencia, ocorrencia.IsOpen())
+            ViewInicial.CloseMdiChildren(Me)
+            frm.MdiParent = ViewInicial
+            frm.Show()
+        End If
+    End Sub
+
+
+#End Region
+
+#Region "MenuContexto"
+
+    Private Sub CelulaToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles CelulaToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico" : My.Computer.Clipboard.SetText(Me.dgvServico.CurrentCell.Value.ToString())
+            Case "tbpOcorrencia" : My.Computer.Clipboard.SetText(Me.dgvOcorrencia.CurrentCell.Value.ToString())
+        End Select
+    End Sub
+
+    Private Sub cmsCli_Opening(ByVal sender As System.Object, ByVal e As System.ComponentModel.CancelEventArgs) Handles cms.Opening
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                tsmDemeritos.Visible = False
+                If dgvServico.RowCount = 0 Then
+                    ImprimirToolStripMenuItem.Enabled = False
+                    EditarToolStripMenuItem.Enabled = False
+                    InativarToolStripMenuItem.Enabled = False
+                    ExportarCSVToolStripMenuItem.Enabled = False
+                    ConfirmarServiçoToolStripMenuItem.Enabled = False
+                    ExecutarServiçoToolStripMenuItem.Enabled = False
+                    ReprogramarToolStripMenuItem.Enabled = False
+                    tsmOcorrencia.Enabled = False
+                Else
+                    If dgvServico.CurrentRow.Cells(8).Value.Equals("PRÉ-AGENDADO") Then
+                        ConfirmarServiçoToolStripMenuItem.Enabled = True
+                        ExecutarServiçoToolStripMenuItem.Enabled = False
+                        ReprogramarToolStripMenuItem.Enabled = False
+                    ElseIf dgvServico.CurrentRow.Cells(8).Value.Equals("CONFIRMADO") Then
+                        ConfirmarServiçoToolStripMenuItem.Enabled = False
+                        ExecutarServiçoToolStripMenuItem.Enabled = True
+                        ReprogramarToolStripMenuItem.Enabled = False
+                    ElseIf dgvServico.CurrentRow.Cells(8).Value.Equals("EM EXECUÇÃO") Then
+                        ConfirmarServiçoToolStripMenuItem.Enabled = False
+                        ExecutarServiçoToolStripMenuItem.Enabled = False
+                        ReprogramarToolStripMenuItem.Enabled = True
+                    Else
+                        ConfirmarServiçoToolStripMenuItem.Enabled = False
+                        ExecutarServiçoToolStripMenuItem.Enabled = False
+                        ReprogramarToolStripMenuItem.Enabled = False
+                    End If
+                    If CBool(dgvServico.CurrentRow.Cells(9).Value) Then
+                        InativarToolStripMenuItem.Enabled = True
+                    Else
+                        InativarToolStripMenuItem.Enabled = False
+                        ConfirmarServiçoToolStripMenuItem.Enabled = False
+                        ExecutarServiçoToolStripMenuItem.Enabled = False
+                        ReprogramarToolStripMenuItem.Enabled = False
+                    End If
+                    ImprimirToolStripMenuItem.Enabled = True
+                    EditarToolStripMenuItem.Enabled = True
+                    ExportarCSVToolStripMenuItem.Enabled = True
+                    tsmOcorrencia.Enabled = True
+                End If
+
+            Case "tbpOcorrencia"
+                tsmControleFaturamento.Visible = False
+                ConfirmarServiçoToolStripMenuItem.Visible = False
+                ExecutarServiçoToolStripMenuItem.Visible = False
+                ReprogramarToolStripMenuItem.Visible = False
+                tsmOcorrencia.Visible = False
+                GerênciaToolStripMenuItem.Visible = False
+                If dgvOcorrencia.RowCount = 0 Then
+                    ImprimirToolStripMenuItem.Enabled = False
+                    EditarToolStripMenuItem.Enabled = False
+                    InativarToolStripMenuItem.Enabled = False
+                    ExportarCSVToolStripMenuItem.Enabled = False
+                Else
+                    ImprimirToolStripMenuItem.Enabled = True
+                    EditarToolStripMenuItem.Enabled = True
+                    InativarToolStripMenuItem.Enabled = CBool(dgvOcorrencia.CurrentRow.Cells(8).Value)
+                    ExportarCSVToolStripMenuItem.Enabled = True
+                End If
+        End Select
+    End Sub
+
+    Private Sub EditarToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles EditarToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                Dim servico As New ExternoServico(CInt(dgvServico.CurrentRow.Cells(0).Value))
+                Dim frm As New CadServicoExterno(servico, servico.IsOpen())
+                ViewInicial.CloseMdiChildren(Me)
+                frm.MdiParent = ViewInicial
+                frm.Show()
+            Case "tbpOcorrencia"
+                Dim ocorrencia As New ExternoOcorrencia(CInt(dgvOcorrencia.CurrentRow.Cells(0).Value))
+                Dim frm As New CadOcorrenciaExterno(ocorencia, ocorencia.IsOpen())
+                ViewInicial.CloseMdiChildren(Me)
+                frm.MdiParent = ViewInicial
+                frm.Show()
+        End Select
+    End Sub
+
+    Private Sub InativarToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles InativarToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoServicoInativar) Then
+                    Me.servico = New ExternoServico(CInt(Me.dgvServico.CurrentRow.Cells(0).Value))
+                    If MessageBox.Show(String.Format("Deseja realmente inativar o Servico {0} do Sistema?", Me.servico.IDServico), _
+                                       Core.STR_NOME_SISTEMA, MessageBoxButtons.YesNo, MessageBoxIcon.Hand) = Windows.Forms.DialogResult.Yes Then
+                        If Me.servico.Inativar() Then
+                            MessageBox.Show("Serviço Inativado com sucesso!", Core.STR_NOME_SISTEMA)
+                            CarregaServico(PesquisaExterno.LastQueryServico)
+                        End If
+                    End If
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+            Case "tbpOcorrencia"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoOcorrenciaInativar) Then
+                    Me.ocorencia = New ExternoOcorrencia(CInt(Me.dgvOcorrencia.CurrentRow.Cells(0).Value))
+                    If MessageBox.Show(String.Format("Deseja realmente inativar a Ocorrência {0} do Sistema?", Me.ocorencia.ID), _
+                                       Core.STR_NOME_SISTEMA, MessageBoxButtons.YesNo, MessageBoxIcon.Hand) = Windows.Forms.DialogResult.Yes Then
+                        If Me.ocorencia.Inativar() Then
+                            MessageBox.Show("Ocorrência Inativado com sucesso!", Core.STR_NOME_SISTEMA)
+                            CarregaOcorrencia(PesquisaExterno.LastQueryOcorrencia)
+                        End If
+                    End If
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub ConfirmarServiçoToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ConfirmarServiçoToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoServicoConfirmar) Then
+                    Me.servico = New ExternoServico(CInt(Me.dgvServico.CurrentRow.Cells(0).Value))
+                    If MessageBox.Show(String.Format("Deseja realmente Confirmar o Servico {0} do Sistema?", Me.servico.IDServico), Core.STR_NOME_SISTEMA, MessageBoxButtons.YesNo, MessageBoxIcon.Information) = Windows.Forms.DialogResult.Yes Then
+                        Dim funcionario As New Funcionario(Me.servico.IdFuncionario)
+                        Dim strAviso As New System.Text.StringBuilder()
+                        If funcionario.CNHVencimento.Value.Subtract(Core.CurrentDate()).Days < 0 Then strAviso.Append(String.Format("- A CNH do funcionário(a) {0} está vencida " & vbCrLf, funcionario.NomeCompleto))
+                        If funcionario.ASO.Subtract(Core.CurrentDate()).Days < 0 Then strAviso.Append(String.Format("- A ASO do funcionário(a) {0} está vencida " & vbCrLf, funcionario.NomeCompleto))
+                        For Each id As Integer In EPIFuncionario.GetListIDByFuncionario(funcionario.ID)
+                            Dim epi As New EPIFuncionario(id)
+                            If epi.Vencimento.Subtract(Core.CurrentDate()).Days < 0 Then strAviso.Append(String.Format("- O(A) {0} do funcionário(a) {1} está vencido(a) " & vbCrLf, epi.EPI.Descricao, funcionario.NomeCompleto))
+                        Next
+                        If strAviso.Length > 0 Then MessageBox.Show(strAviso.ToString(), Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Information)
+                        For Each num As Integer In ExternoServico.GetListServicoByTecnicoAndData(Me.servico.IdFuncionario, Me.servico.Inicial, Me.servico.Final)
+                            If num = Me.servico.IDServico Then Continue For
+                            MessageBox.Show(String.Format("Atenção! O técnico(a) {0} já está agendado(a) nesse período no servico {1}.", funcionario.NomeCompleto, num), STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Exclamation)
+                        Next
+                        If Me.servico.Confirmar() Then
+                            MessageBox.Show("Serviço Confirmado com sucesso!", Core.STR_NOME_SISTEMA)
+                            CarregaServico(PesquisaExterno.LastQueryServico)
+                        End If
+                    End If
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub ExecutarServiçoToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ExecutarServiçoToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoServicoExecutar) Then
+                    Me.servico = New ExternoServico(CInt(Me.dgvServico.CurrentRow.Cells(0).Value))
+                    If MessageBox.Show(String.Format("Deseja realmente Executar o Servico {0} do Sistema?", Me.servico.IDServico), Core.STR_NOME_SISTEMA, MessageBoxButtons.YesNo, MessageBoxIcon.Information) = Windows.Forms.DialogResult.Yes Then
+                        If Me.servico.Executar() Then
+                            MessageBox.Show("Serviço Executar com sucesso!", Core.STR_NOME_SISTEMA)
+                            CarregaServico(PesquisaExterno.LastQueryServico)
+                        End If
+                    End If
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub ConcluirServiçoToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ReprogramarToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoServicoConcluir) Then
+                    Me.servico = New ExternoServico(CInt(Me.dgvServico.CurrentRow.Cells(0).Value))
+                    If MessageBox.Show(String.Format("Deseja realmente Concluir o Servico {0} do Sistema?", Me.servico.IDServico), Core.STR_NOME_SISTEMA, MessageBoxButtons.YesNo, MessageBoxIcon.Information) = Windows.Forms.DialogResult.Yes Then
+                        If Me.servico.Concluir() Then
+                            MessageBox.Show("Serviço Concluir com sucesso!", Core.STR_NOME_SISTEMA)
+                            CarregaServico(PesquisaExterno.LastQueryServico)
+                        End If
+                    End If
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub ImprimirToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ImprimirToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico" : Extras.PrintDGV.Print(Me.dgvServico, "Lista de Clientes " & lblResumoGrid.Text)
+            Case "tbpOcorrencia" : Extras.PrintDGV.Print(Me.dgvOcorrencia, "Lista de Clientes " & lblResumoGrid.Text)
+        End Select
+    End Sub
+
+    Private Sub ExportarCSVToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ExportarCSVToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico" : print.ExportToCSV(dgvServico, sfd)
+            Case "tbpOcorrencia" : print.ExportToCSV(dgvOcorrencia, sfd)
+        End Select
+    End Sub
+
+    Private Sub LançarFaltasToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmAusencias.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoAusencia) Then
+                    Dim frm As New CadAusenciasExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub CronogramaToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmCronograma.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoCronograma) Then
+                    Dim frm As New frmCronogramaExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub DescontosToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmDescontos.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoDesconto) Then
+                    Dim frm As New CadDescontoExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub ReembolsosToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles ReembolsosToolStripMenuItem.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoReembolso) Then
+                    Dim frm As New CadReembolsoExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub PagamentoPJToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmPJ.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoPgPJ) Then
+                    Dim frm As New CadPagamentoPJExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub GerenciaDeCaToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmGerenciaCartoes.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoCartao) Then
+                    Dim frm As New CadGerenciaCartaoExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub OcorrênciaToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmOcorrencia.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoOcorrenciaAdd) Then
+                    Dim frm As New CadOcorrenciaExterno(Me.dgvServico.CurrentRow.Cells(2).Value.ToString(), CInt(Me.dgvServico.CurrentRow.Cells(0).Value))
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub GerênciaDeAdiantamentoToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmGerenciaDeAdiantamento.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoAndiantamento) Then
+                    Dim frm As New ViewGerenciaAdiantamentoExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub ReembolsoToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmDiaria.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoReembolso) Then
+                    Dim frm As New ViewGerenciaReembolsoExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub PremioToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmPremio.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                If Core.Usuario.HasAccess(Usuario.TypeAcess.ExternoPremio) Then
+                    Dim frm As New CadPremioExterno()
+                    ViewInicial.CloseMdiChildren(Me)
+                    frm.MdiParent = ViewInicial
+                    frm.Show()
+                Else
+                    MessageBox.Show(STR_ERRO_PRIVILEGIO, Core.STR_NOME_SISTEMA, MessageBoxButtons.OK, MessageBoxIcon.Hand)
+                End If
+        End Select
+    End Sub
+
+    Private Sub ControleDeEnvioDeOSAoFAtuToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmControleFaturamento.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpServico"
+                Dim frmData As New ViewDataRelatorio()
+                If frmData.ShowDialog() = Windows.Forms.DialogResult.OK Then
+                    Dim frm As New PrintControleEnvioFaturamentoExterno(CDate(frmData.DataInicial), CDate(frmData.DataFinial))
+                    frm.Show()
+                End If
+        End Select
+    End Sub
+
+    Private Sub DeméritosPorTécnicoToolStripMenuItem_Click(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles tsmDemeritos.Click
+        Select Case tbcExterno.SelectedTab.Name
+            Case "tbpOcorrencia"
+                Dim frm As New ViewExecutante()
+                If frm.ShowDialog() = Windows.Forms.DialogResult.OK Then
+                    Dim frm3 As New PrintDemeritosExterno(frm.Matricula)
+                    frm3.Show()
+                End If
+        End Select
+    End Sub
+#End Region
+
+End Class

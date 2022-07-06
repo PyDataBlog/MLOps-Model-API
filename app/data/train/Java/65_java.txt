@@ -1,0 +1,273 @@
+package sbahjsic.runtime;
+
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.Map;
+import java.util.Set;
+
+import sbahjsic.core.Warnings;
+import sbahjsic.core.Warnings.Level;
+import sbahjsic.runtime.Operator.BiOperator;
+import sbahjsic.runtime.Operator.UnOperator;
+import sbahjsic.runtime.Operator.VarargOperator;
+import sbahjsic.runtime.type.AnyType;
+import sbahjsic.runtime.type.SVoid;
+
+/** Describes a Sbahjsic type.
+ * 
+ * <p>For all subclasses, there must only exist one instance. To enforce
+ * this, this class implements final {@code equals()} and {@code hashCode()}
+ * methods as they are defined in {@code Object}.*/
+public abstract class Type {
+	
+	private final Map<String, Operator> operators = new HashMap<>();
+	private final Set<Type> supertypes = new HashSet<>();
+	private final Set<String> fields = new HashSet<>();
+	private final Map<String, Method> methods = new HashMap<>();
+	private int priority = 0;
+	
+	protected Type() {
+		// Fixes a bug where AnyType tried to add AnyType.INSTANCE, which
+		// was null at that point, to its own supertypes
+		if(!getClass().equals(AnyType.class)) {
+			addSupertype(AnyType.INSTANCE);
+		}
+	}
+	
+	/** Registers a new supertype for this type.
+	 * @param supertype the new supertype*/
+	public final void addSupertype(Type supertype) {
+		
+		if(getSupertypes().contains(supertype) || supertype.getSupertypes().contains(this)) {
+			throw new RecursiveTypedefException(this.toString());
+		}
+		
+		if(this != supertype) {
+			supertypes.add(supertype);
+		}
+	}
+	
+	/** Removes a supertype from this type if it exists.
+	 * @param supertype the supertype to remove*/
+	public final void removeSupertype(Type supertype) {
+		supertypes.remove(supertype);
+	}
+	
+	/** Registers an unary operator for this type.
+	 * @param op the operator to register
+	 * @param func a function that applies this operator*/
+	public final void addUnOperator(String op, UnOperator func) {
+		operators.put(op, Operator.unaryOperator(func));
+	}
+	
+	/** Registers a binary operator for this type.
+	 * @param op the operator to register
+	 * @param func a function that applies this operator*/
+	public final void addBiOperator(String op, BiOperator func) {
+		operators.put(op, Operator.binaryOperator(func));
+	}
+	
+	/** Adds an operator that can accept one or two arguments.
+	 * @param op the operator
+	 * @param unary the unary operator
+	 * @param binary the binary operator*/
+	protected final void addDoubleOperator(String op, UnOperator unary, BiOperator binary) {
+		operators.put(op, (con, args) -> {
+			if(args.length == 1)
+				return unary.apply(con, args[0]);
+			else if(args.length == 2)
+				return binary.apply(con, args[0], args[1]);
+			
+			throw new OperatorCallException("Called with " + args.length + 
+					" arguments, expected 1 or 2");
+		});
+	}
+	
+	/** Registers a vararg operator for this type.*/
+	public void addVarargOperator(String op, VarargOperator func) {
+		operators.put(op, Operator.varargOperator(func));
+	}
+	
+	/** Adds a field to this type.
+	 * @param field the field to add*/
+	protected final void addField(String field) {
+		fields.add(field);
+	}
+	
+	/** Returns a specific operator of this type.
+	 * @param op the operator to search
+	 * @return the operator matching {@code op}
+	 * @throws OperatorCallException if {@code op} isn't defined*/
+	public final Operator getOperator(String op) {
+		if(operators.containsKey(op)) {
+			return operators.get(op);
+		}
+		
+		Operator operator = operatorLookup(op);
+		
+		if(operator == null) {
+			throw new OperatorCallException("Operator " + op + " not defined on type " + getName());
+		}
+		
+		return operator;
+	}
+	
+	private final Operator operatorLookup(String op) {
+		for(Type supertype : supertypes) {
+			if(supertype.operators.containsKey(op)) {
+				return supertype.operators.get(op);
+			}
+		}
+		
+		for(Type supertype : supertypes) {
+			Operator operator = supertype.operatorLookup(op);
+			if(operator != null) { return operator; }
+		}
+		
+		return null;
+	}
+	
+	/** Returns a set of all defined operators of this type.
+	 * @return a set of the defined operators of this type*/
+	public final Set<String> getDefinedOperators() {
+		Set<String> ops = new HashSet<>();
+		ops.addAll(operators.keySet());
+		
+		for(Type supertype : getSupertypes()) {
+			ops.addAll(supertype.getDefinedOperators());
+		}
+		
+		return ops;
+	}
+	
+	/** Returns a set of the supertypes of this type.
+	 * @return a set of the supertypes of this type*/
+	public final Set<Type> getSupertypes() {
+		Set<Type> types = new HashSet<>();
+		types.addAll(supertypes);
+		
+		for(Type supertype : supertypes) {
+			types.addAll(supertype.getSupertypes());
+		}
+		
+		return types;
+	}
+	
+	/** Returns the fields declared for this type.
+	 * @return a set of fields declared for this type*/
+	public final Set<String> getFields() {
+		Set<String> allFields = new HashSet<>();
+		allFields.addAll(fields);
+		
+		for(Type supertype : getSupertypes()) {
+			allFields.addAll(supertype.getFields());
+		}
+		
+		return allFields;
+	}
+	
+	/** Adds a method to this type.
+	 * @param name the name of the method
+	 * @param method the method*/
+	public final void addMethod(String name, Method method) {
+		methods.put(name, method);
+	}
+	
+	/** Returns all methods defined for this type.
+	 * @return all methods defined for this type*/
+	public final Set<String> getMethods() {
+		Map<String, Method> allMethods = new HashMap<>();
+		allMethods.putAll(methods);
+		
+		for(Type supertype : getSupertypes()) {
+			allMethods.putAll(supertype.methods);
+		}
+		
+		return allMethods.keySet();
+	}
+	
+	/** Returns a method of this type.
+	 * @param name the name of the method
+	 * @return the method
+	 * @throws MethodCallException if the method isn't defined for this type*/
+	public final Method getMethod(String name) {
+		if(methods.containsKey(name)) {
+			return methods.get(name);
+		}
+		
+		Method method = methodLookup(name);
+		
+		if(method == null) {
+			throw new MethodCallException("Method " + name + " not defined for type " + getName());
+		}
+		
+		return method;
+	}
+	
+	private final Method methodLookup(String name) {
+		for(Type supertype : supertypes) {
+			if(supertype.methods.containsKey(name)) {
+				return supertype.methods.get(name);
+			}
+		}
+		
+		for(Type supertype : supertypes) {
+			Method method = supertype.methodLookup(name);
+			if(method != null) { return method; }
+		}
+		
+		return null;
+	}
+	
+	/** Returns the name of this type.
+	 * @return the name of this type*/
+	public abstract String getName();
+	
+	/** Casts a value to this type.
+	 * @param object the value to cast
+	 * @return the casted value*/
+	public SValue cast(SValue object) {
+		Warnings.warn(Level.ADVICE, "Undefined cast from " + object.getType() + " to " + this);
+		return object;
+	}
+	
+	/** Returns whether this type is the subtype of some other type. That is
+	 * true if this type or any if its supertypes is the other type.
+	 * @param other the other type
+	 * @return whether this type is the subtype of the other type */
+	public boolean isSubtype(Type other) {
+		return this.equals(other) || getSupertypes().contains(other);
+	}
+	
+	/** Constructs an instance of this type
+	 * @param context the RuntimeContext
+	 * @param args the arguments passed to the constructor*/
+	public SValue construct(RuntimeContext context, SValue...args) {
+		Warnings.warn(Level.NOTIFICATION, "Cannot instantiate " + getName());
+		return SVoid.VOID;
+	}
+	
+	/** Returns the priority of this type, used to determine which operand
+	 * should choose the implementation of a binary operator. Defaults to zero.*/
+	public int priority() { return priority; }
+	
+	/** Sets the priority for this type.*/
+	public void setPriority(int p) {
+		priority = p;
+	}
+	
+	@Override
+	public final boolean equals(Object o) {
+		return super.equals(o);
+	}
+	
+	@Override
+	public final int hashCode() {
+		return super.hashCode();
+	}
+	
+	@Override
+	public final String toString() {
+		return getName();
+	}
+}

@@ -1,0 +1,133 @@
+package page
+
+import (
+	"github.com/simbory/storm/cms/storm-cms/handlers"
+	"github.com/simbory/mego"
+	"strings"
+	"github.com/simbory/storm/data"
+	"encoding/json"
+	"html/template"
+)
+
+type typeEdit struct {
+	handlers.LoginFilter
+}
+
+func (edit *typeEdit) Get(ctx *mego.HttpCtx) interface{} {
+	idStr := ctx.Request().URL.Query().Get("id")
+	cmsCtx := handlers.GetCmsCtx(ctx)
+	viewData := map[string]interface{}{}
+	var viewFile string
+	if strings.HasPrefix(idStr, "/") {
+		idStr = strings.TrimRight(idStr, "/")
+		if idStr == "" {
+			idStr = "/"
+		}
+		entries := cmsCtx.Storage.GetTypesByDir(idStr)
+		var dataType []data.NodeType
+		var subDir = map[string]SubDir{}
+		for _, nodeType := range entries {
+			if nodeType.Dir() == idStr {
+				dataType = append(dataType, nodeType)
+			} else {
+				dir := strings.Trim(nodeType.Dir()[len(idStr):], "/")
+				if len(dir) == 0 {
+					continue
+				}
+				index := strings.Index(dir, "/")
+				var dirName string
+				if index < 0 {
+					dirName = dir
+				} else {
+					dirName = dir[0:index]
+				}
+				subDir[dirName] = SubDir{
+					Name: dirName,
+					ID:   strSuffix(idStr, "/") + dirName,
+					Icon: "folder",
+				}
+			}
+		}
+		var subEntries []interface{}
+		if len(dataType) > 0 {
+			for _, dt := range dataType {
+				subEntries = append(subEntries, &SubDir{
+					ID: dt.ID(),
+					Name: dt.Name(),
+					Icon: dt.Icon(),
+				})
+			}
+		}
+		for _, dir := range subDir {
+			subEntries = append(subEntries, dir)
+		}
+		if idStr == "/" {
+			viewData["entry"] = map[string]interface{}{
+				"ID":   "/",
+				"Name": "Node Types",
+				"Dir":  "/",
+			}
+		} else {
+			viewData["entry"] = map[string]interface{}{
+				"ID":   idStr,
+				"Name": idStr[strings.LastIndex(idStr, "/")+1:],
+				"Dir":  idStr,
+			}
+		}
+		viewData["children"] = subEntries
+		viewFile = "node-type/edit-dir"
+	} else {
+		id := data.ID(idStr)
+		if id.Invalid() {
+			return nil
+		}
+		dataType := cmsCtx.Storage.GetTypeByID(id)
+		if dataType == nil {
+			return nil
+		}
+		viewData["entry"] = dataType
+		viewData["json"] = template.JS(dataType.JSON())
+		viewFile = "node-type/edit-type"
+	}
+	return ctx.ViewResult(viewFile, viewData)
+}
+
+func (edit *typeEdit) Post(ctx *mego.HttpCtx) interface{} {
+	var entry = curEntry(ctx)
+	if entry == nil {
+		return nil
+	}
+	editing,err := data.GetStorage("master").TypeEditing("Simbory")
+	if err != nil {
+		panic(err)
+	}
+	jsonStr := ctx.Request().FormValue("json")
+	if len(jsonStr) == 0 {
+		return nil
+	}
+	rawType := &data.RawType{}
+	err = json.Unmarshal([]byte(jsonStr), rawType)
+	if err != nil {
+		panic(err)
+	}
+	err = editing.UpdateNodeType(entry.ID(), rawType)
+	if err != nil {
+		panic(err)
+	}
+	return edit.Get(ctx)
+}
+
+func strSuffix(str, suffix string) string {
+	if !strings.HasSuffix(str, suffix) {
+		return strings.Join([]string{str, suffix}, "")
+	}
+	return str
+}
+
+func curEntry(ctx *mego.HttpCtx) data.NodeType {
+	var entryId= data.ParseID(ctx.Request().URL.Query().Get("id"))
+	if entryId.Invalid() {
+		return nil
+	}
+	return handlers.GetCmsCtx(ctx).Storage.GetTypeByID(entryId)
+}

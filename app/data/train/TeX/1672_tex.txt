@@ -1,0 +1,181 @@
+\documentclass[UTF8,nofonts]{ctexart}
+
+\setCJKmainfont[BoldFont=STHeiti,ItalicFont=STKaiti]{STKaiti}
+\setCJKsansfont[BoldFont=STHeiti]{STXihei}
+\setCJKmonofont{STFangsong}
+
+\usepackage[letterpaper,left=1in,top=1in]{geometry}
+\usepackage{multirow}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{amssymb}
+\usepackage[titlenotnumbered,lined,linesnumbered]{algorithm2e}
+
+\begin{document}
+
+% Title
+\section*{稀疏矩阵的存储格式和方程组的直接解法}
+
+若矩阵$A\in\mathbb{R}^{n \times n}$中很少一部分元素非零（如非零元素个数为$O(n)$），则称其为[label]稀疏矩阵[/label]，而其对应的线性方程组称为[label]稀疏线性方程组[/label]。本文主要介绍稀疏矩阵的[label]存储格式[/label]，以及稀疏矩阵方程组的[label]直接解法[/label]。后续将重点讨论大型稀疏矩阵的[label]LU分解[/label]和[label]QR分解[/label]。
+
+\subsection*{稀疏矩阵的存储格式}
+
+考虑$5 \times  5$阶稀疏矩阵$A$：
+
+\[
+A=
+\begin{pmatrix}
+a_{11} & 0 & a_{13} & 0 & 0 \\
+a_{21} & a_{22} & 0 & a_{24} & 0 \\
+0 & a_{32} & a_{33} & 0 & a_{35} \\
+0 & a_{42} & 0 & a_{44} & 0 \\
+0 & 0 & 0 & a_{54} & a_{55}
+\end{pmatrix}
+\]
+
+indent 使用数组$\boldsymbol{a}$存放[label]非零元[/label]；数组$\boldsymbol{ia}$存放每一行B第一个非零元在数组$\boldsymbol{a}$中的位置，且其最后一个元素减$1$为非零元的B个数；数组$\boldsymbol{ja}$存放每个非零元的[label]列标[/label]。因此，对于上述矩阵$A$，其存储格式为：
+
+\begin{align*}
+\boldsymbol{a} &= [a_{11},a_{13},a_{21},a_{22},a_{24},a_{32},a_{33},a_{35},a_{42},a_{44},a_{54},a_{55}] \\
+\boldsymbol{ia} &= [1,3,6,9,11,13] \\
+\boldsymbol{ja} &= [1,3,1,2,4,2,3,5,2,4,4,5]
+\end{align*}
+
+indent 另外，为了避免因为添加非零元（消元过程中产生的“[label]填入[/label]”的非零元）带来的B额外数组操作，通常先估计稀疏矩阵每行B最多非零元个数，并以此生成矩阵$\boldsymbol{a}$和$\boldsymbol{ja}$，并在插入完所有非零元后，再对它们进行B压缩。因此，上面的例子中矩阵$\boldsymbol{a}$和$\boldsymbol{ja}$最初的大小为$3 \times 5$。
+
+另一方面，对于这种形式的存储方式，不同的访问方式效率也是不同的。按行访问的话，效率很高，因为$A$的第$i$行即为$\boldsymbol{a}[\boldsymbol{ia}[i]]$和$\boldsymbol{a}[\boldsymbol{ia}[i+1]-1]$之间的元素；反之，按列访问的话，效率则会很低，所以通常会先计算矩阵$A$的[label]转置矩阵[/label]的存储格式。
+
+给定矩阵$n \times n$阶矩阵$A=(a_{ij})$，将$A$的第$i$行第一个非零元的[label]列指标[/label]和第$j$列的第一个非零元的行指标分别记为$f_i$和$l_i$：
+
+\begin{align*}
+f_i=f_i(A)=&\min\{j|a_{ij} \neq 0\} \\
+l_i=l_i(A)=&\min\{i|a_{ij} \neq 0\}
+\end{align*}
+
+indent 以及$A$的[label]包[/label]定义为[label]指标集合[/label]：
+
+\[
+Env(A)=\Big\{(i,j)|f_i \leq j \leq i\text{ or }l_j \leq i < j\Big\}
+\]
+
+indent 关于包的一个重要性质是：若$A$可以分解为$A=LU$，其中$L$为单位下三角矩阵，$U$为上三角矩阵，则有：
+
+\[Env(L+U)=Env(A)\]
+
+\subsection*{稀疏方程组的直接解法}
+
+[label]Gauss消去法[/label]和[label]直接三角分解法[/label]是解大型稀疏线性方程组的有效方法。需要注意的是，消去过程中的每一步都有可能产生B新的非零元，称之为“填入”（Fill-in），为此需要尽可能B最小化填入量，并把每一步填入的量定义为[label]局部填入量[/label]。
+
+\subsubsection*{预处理法}
+
+
+考察如下两个矩阵$M$和$N$的第一步消去：
+
+\[
+M^{(1)}=\begin{pmatrix}
+\ast & \ast & \ast & \ast & \ast \\
+\ast & \ast & & & \\
+\ast & & \ast & & \\
+\ast & & & \ast & \\
+\ast & & & & \ast
+\end{pmatrix}\xrightarrow{k=1}
+M^{(2)}=\begin{pmatrix}
+\ast & \ast & \ast & \ast & \ast \\
+& \ast & \ast & \ast & \ast \\
+& \ast & \ast & \ast & \ast \\
+& \ast & \ast & \ast & \ast \\
+& \ast & \ast & \ast & \ast
+\end{pmatrix}
+\]
+
+\[
+N^{(1)}=\begin{pmatrix}
+\ast & & & & \ast \\
+& \ast & & & \ast \\
+& & \ast & & \ast \\
+& & & \ast & \ast \\
+\ast & \ast & \ast & \ast & \ast
+\end{pmatrix}\xrightarrow{k=1}
+N^{(2)}=\begin{pmatrix}
+\ast & & & & \ast \\
+& \ast & & & \ast \\
+& & \ast & & \ast \\
+& & & \ast & \ast \\
+& \ast & \ast & \ast & \ast
+\end{pmatrix}
+\]
+
+可以发现，$M$的消元产生了很多填入，而$N$则没有。由于$N=PMP^T$，其中$P$为[label]排列矩阵[/label]，也就是说适当地对$M$进行[label]行列重排[/label]能减少填入量，B包也变得尽可能小。
+
+另一种减少填入量的方法是将矩阵$A$转换为[label]块下三角[/label]或[label]块上三角[/label]矩阵。如找到两个排列矩阵$P$和$Q$，使得：
+
+\[
+PAQ=U\equiv\begin{pmatrix}
+U_{11} & U_{12} & \cdots & U_{1p} \\
+& U_{22} & \cdots & U_{2p} \\
+& & \ddots & \vdots \\
+& & & U_{pp}
+\end{pmatrix}
+\]
+
+indent 则方程组$A\boldsymbol{x}=\boldsymbol{b}$，令$Q\boldsymbol{y}=\boldsymbol{x}$，则其等价于：
+
+\[PA(Q\boldsymbol{y})=PA\boldsymbol{x}=P\boldsymbol{b}=\boldsymbol{c}=(PAQ)\boldsymbol{y}=U\boldsymbol{y}\]
+
+indent 换言之，由$P\boldsymbol{b}=\boldsymbol{c}$和$U\boldsymbol{y}=\boldsymbol{c}$，计算得到$\boldsymbol{y}$，再由$Q\boldsymbol{y}=\boldsymbol{x}$计算得到$\boldsymbol{x}$，其中：
+
+\[
+U_{ii}\boldsymbol{y}_i=\boldsymbol{c}_i-\sum_{j=i+1}^{p}U_{ij}y_{j},\quad i=p,p-1,\cdots,1
+\]
+
+\subsubsection*{主元策略}
+
+上述两种方法发生在消元过程B前，也就是所谓的[label]预处理法[/label]，而[label]主元策略[/label]发生在消元B过程中，通过适当地选取主元使得每步消元的填入最小。设完成第$k-1$次消元后得到矩阵$A^{(k)}$，及其右下角$(n-k+1)\times(n-k+1)$阶子矩阵$A_{22}^{(k)}$：
+
+\[
+A^{(k)}=\begin{pmatrix}
+\ddots & \cdots & \cdots & \cdots & \cdots & \\
+\cline{3-6}
+\vdots & a^{(k)}_{kk} & \multicolumn{4}{|c|}{\multirow{1}{*}{$\boldsymbol{r}_1$}} \\
+\cline{2-6}
+\vdots & \multicolumn{1}{|c|}{\multirow{4}{*}{$\boldsymbol{c}_1$}} & & & & \\
+\vdots & \multicolumn{1}{|c|}{} & & & & \\
+\vdots & \multicolumn{1}{|c|}{} & & & & \\
+\vdots & \multicolumn{1}{|c|}{} & & & & \\
+\cline{2-2}
+\end{pmatrix}
+\]
+
+indent 其中，$\boldsymbol{c}_1=\left(a_{k+1,k}^{(k)},\cdots,a_{nk}^{(k)}\right)^T$，$\boldsymbol{r}_1=\left(a_{k,k+1}^{(k)},\cdots,a_{kn}^{(k)}\right)^T$。为保证第$k$次消元填入量最小，规定$nr_i$为子矩阵$A_{22}^{(k)}$中第$i$行非零元的个数，$nc_j$为子矩阵$A_{22}^{(k)}$中第$j$列非零元的个数。B主元策略就是在子矩阵$A_{22}^{(k)}$中寻找一个非零元$a_{ij}^{(k)}$，使得$(nr_i-1)(nc_j-1)$的值最小，并以此$a_{ij}^{(k)}$作为第$k$次消元的主元。
+
+[alert type="error"]B注意：主元策略B往往不能保证数值稳定性，因此需要在局部填入量较少和主元较大之间做平衡。[/alert]
+
+
+% H2, H3
+\subsection*{dsfsdt}
+%[latex mode=1]
+%[+preamble]
+%\usepackage[titlenotnumbered,lined,linesnumbered]{algorithm2e}
+\let\oldnl\nl
+\newcommand{\nonl}{\renewcommand{\nl}{\let\nl\oldnl}}
+%[/preamble]
+%\quicklatex{size=14}
+\TitleOfAlgo{BLAS-3 Gaussian Elimination with Partial Pivoting}
+\begin{algorithm}[H]
+\For{$l\gets 1$ \KwTo $n-1$}{
+$k\gets (l-1)b+1$\;
+factorize $PA^{(l)}=LU$ using BLAS-2\;
+store $L$ and $U$ in $A$\;
+left multiply $A(1:n,k+b:n)$ by $P$\;
+$A(k:k+b-1,k+b:n)\gets T^{-1}A(k:k+b-1,k+b:n)$\;
+\nonl\Indp where $T$ is the unit-lower-trian of $A(k:k+b-1,k:k+b-1)$\;
+\DontPrintSemicolon\Indm$A(k+b:n,k+b:n)\gets A(k+b:n,k+b:n)$\;
+\PrintSemicolon\nonl\Indp$-A(k+b:n,k:k+b-1)A(k:k+b-1,k+b:n)$\;
+}
+\end{algorithm}
+%[/latex]
+
+% H4
+% \subsubsection*{}
+
+\end{document}

@@ -1,0 +1,29 @@
+from rknfilter.targets import BaseTarget
+from rknfilter.db import Resource, Decision, CommitEvery
+from rknfilter.core import DumpFilesParser
+
+class StoreTarget(BaseTarget):
+    def __init__(self, *args, **kwargs):
+        super(StoreTarget, self).__init__(*args, **kwargs)
+        self._dump_files_parser = DumpFilesParser()
+
+    def process(self):
+        commit = CommitEvery(self._session)
+        for content, decision, domains, urls, ips, _ in self._dump_files_parser.get_data():
+            # TODO: move to models?
+            resource = Resource.get_or_create(self._session, rkn_id=content['rkn_id'])
+            if resource.id is None:
+                resource.include_date = content['include_date']
+                resource.entry_type = content['entry_type']
+                resource.urgency_type = content['urgency_type']
+                resource.block_type = content['block_type']
+                resource.decision = Decision(
+                    date=decision['decision_date'],
+                    org=decision['decision_org'],
+                    num=decision['decision_num']
+                )
+            resource.sync_m2m_proxy('domains_list', domains)
+            resource.sync_m2m_proxy('urls_list', urls)
+            resource.sync_m2m_proxy('ips_list', ips)
+            commit()
+        commit(force=True)

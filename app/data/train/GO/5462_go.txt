@@ -1,0 +1,151 @@
+package tickets
+
+import (
+	"time"
+
+	"github.com/composit/slowmo/api"
+	"github.com/composit/slowmo/cli/pkg/client"
+	"github.com/composit/slowmo/cli/pkg/display"
+	"github.com/composit/slowmo/cli/pkg/ui"
+	"github.com/pkg/errors"
+)
+
+//Time is a block of time assigned to a ticket
+type Time struct {
+	ID          int64      `json:"id,omitempty"`
+	TicketID    int64      `json:"ticket_id,omitempty"`
+	Description string     `json:"ticket_description,omitempty"`
+	StartedAt   *time.Time `json:"started_at,omitempty"`
+	BrokeAt     *time.Time `json:"broke_at,omitempty"`
+	EndedAt     *time.Time `json:"ended_at,omitempty"`
+}
+
+//Start creates a new time with a StartedAt value of the current time
+func Start(c client.TimeClient, u ui.Interactor, ticketID int64, t *time.Time) error {
+	tm := api.Time{
+		TicketId:  ticketID,
+		StartedAt: t.UnixNano(),
+	}
+
+	if err := c.CreateTime(tm); err != nil {
+		return errors.Wrap(err, "API error")
+	}
+
+	u.Displayf("Ticket started at %s\n", display.TimeStr(t, u.Location()))
+
+	return nil
+}
+
+//Stop sets a time's EndedAt value to the current time
+func Stop(c client.TimeClient, u ui.Interactor, timeID int64, t *time.Time) error {
+	tm := api.Time{
+		Id:      timeID,
+		EndedAt: t.UnixNano(),
+	}
+
+	if err := c.UpdateTime(tm); err != nil {
+		return errors.Wrap(err, "failed updating time")
+	}
+
+	u.Displayf("Time stopped at %s\n", display.TimeStr(t, u.Location()))
+
+	return nil
+}
+
+//Break sets a time's BrokeAt value to the current time
+func Break(c client.TimeClient, u ui.Interactor, timeID int64, t *time.Time) error {
+	tm := api.Time{
+		Id:      timeID,
+		BrokeAt: t.UnixNano(),
+	}
+
+	if err := c.UpdateTime(tm); err != nil {
+		return errors.Wrap(err, "API error")
+	}
+
+	u.Displayf("Time broke at %s\n", display.TimeStr(t, u.Location()))
+
+	return nil
+}
+
+//ListTimes lists the open times (without end time) associated with a user
+func ListTimes(c client.TimeClient, u ui.Interactor) error {
+	//TODO indicate if you are querying for times with _any_ end time or _no_ end time
+	q := api.TimeQuery{
+		OmitEnded: true,
+	}
+	r, err := c.GetTimes(q)
+	if err != nil {
+		return errors.Wrap(err, "API error")
+	}
+
+	times := []Time{}
+	for _, a := range r {
+		times = append(times, aToTime(a))
+	}
+
+	for _, t := range times {
+		u.Displayf("%d - %d - %s\n", t.ID, t.TicketID, t.Description)
+		if t.StartedAt != nil {
+			u.Displayf("Started: %s\n", display.TimeStr(t.StartedAt, u.Location()))
+		}
+		if t.BrokeAt != nil {
+			u.Displayf("Broke: %s\n", display.TimeStr(t.BrokeAt, u.Location()))
+		}
+		if t.EndedAt != nil {
+			u.Displayf("Ended: %s\n", display.TimeStr(t.EndedAt, u.Location()))
+		}
+	}
+
+	return nil
+}
+
+func aToTime(a api.Time) Time {
+	t := Time{
+		ID:          a.Id,
+		TicketID:    a.TicketId,
+		Description: a.Description,
+	}
+
+	if a.StartedAt > 0 {
+		s := time.Unix(0, a.StartedAt)
+		t.StartedAt = &s
+	}
+
+	if a.BrokeAt > 0 {
+		b := time.Unix(0, a.BrokeAt)
+		t.BrokeAt = &b
+	}
+
+	if a.EndedAt > 0 {
+		e := time.Unix(0, a.EndedAt)
+		t.EndedAt = &e
+	}
+
+	return t
+}
+
+func timeToA(t Time) api.Time {
+	a := api.Time{
+		Id:          t.ID,
+		TicketId:    t.TicketID,
+		Description: t.Description,
+		StartedAt:   0,
+		BrokeAt:     0,
+		EndedAt:     0,
+	}
+
+	if t.StartedAt != nil {
+		a.StartedAt = t.StartedAt.UnixNano()
+	}
+
+	if t.BrokeAt != nil {
+		a.BrokeAt = t.BrokeAt.UnixNano()
+	}
+
+	if t.EndedAt != nil {
+		a.EndedAt = t.EndedAt.UnixNano()
+	}
+
+	return a
+}

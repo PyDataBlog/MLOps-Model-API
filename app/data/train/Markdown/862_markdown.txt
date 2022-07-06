@@ -1,0 +1,2 @@
+# ambuttu.sh
+ambuttu

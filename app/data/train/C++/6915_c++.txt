@@ -1,0 +1,205 @@
+/* Copyright 2014-2016 Maurice Laveaux
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *   http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+#include "opengl/OpenglContext.h"
+#include "opengl/Opengl.h"
+
+#include "core/Configuration.h"
+#include "core/Log.h"
+
+namespace 
+{
+    using oglr::LogType;
+
+    static const char* GLContext_name = "GLContext";
+
+    void __stdcall debugLog(
+        GLenum source,
+		GLenum type,
+        GLuint id,
+		GLenum severity,
+        GLsizei length,
+        const GLchar* message,
+        const GLvoid* userParam)
+    {
+		std::string debugSource;
+
+		switch (source) {
+		case GL_DEBUG_SOURCE_API:
+			debugSource = "Opengl API";
+			break;
+		case GL_DEBUG_SOURCE_WINDOW_SYSTEM:
+			debugSource = "Window System";
+			break;
+		case GL_DEBUG_SOURCE_SHADER_COMPILER:
+			debugSource = "Shader Compiler";
+			break;
+		case GL_DEBUG_SOURCE_THIRD_PARTY:
+			debugSource = "Third Party";
+			break;
+		case GL_DEBUG_SOURCE_APPLICATION:
+			debugSource = "Application";
+			break;
+		case GL_DEBUG_SOURCE_OTHER:
+			debugSource = "Other";
+			break;
+		}
+
+		std::string debugType;
+		
+		switch (type) {
+		case GL_DEBUG_TYPE_ERROR:
+			break;
+		case GL_DEBUG_TYPE_DEPRECATED_BEHAVIOR:
+			break;
+		case GL_DEBUG_TYPE_UNDEFINED_BEHAVIOR:
+			break;
+		case GL_DEBUG_TYPE_PORTABILITY:
+			break;
+		case GL_DEBUG_TYPE_PERFORMANCE:
+			break;
+		case GL_DEBUG_TYPE_OTHER:
+			break;
+		}
+
+		LogType logType = LogType::Information;
+
+
+		// ARB_debug_output : Each debug output message is associated with one of these severity levels.
+		// However NVIDIA also returns 33387 which is not even defined in this table so just ignore that.
+		if (severity == 33387) {
+			return;
+		}
+
+        switch (severity) {
+        case GL_DEBUG_SEVERITY_HIGH:
+            logType = LogType::Fatal;
+            break;
+        case GL_DEBUG_SEVERITY_MEDIUM:
+            logType = LogType::Error;
+            break;
+        case GL_DEBUG_SEVERITY_LOW:
+            logType = LogType::Information;
+            break;
+		default:
+			assert(false); // Cases must be exhaustive.
+        }
+	
+		
+		// The highest severity has the lowest value.
+        if (severity < GL_DEBUG_SEVERITY_LOW) {
+            oglr::Logger::stream(logType, debugSource) << message;
+        }
+    }
+}
+
+namespace oglr {
+
+OpenglContext::OpenglContext() :
+	m_depthEnabled(false)
+{
+    // Initialize the extension wrangler to load extensions
+	glewExperimental = GL_TRUE; 
+    GLuint error = glewInit();
+    if (error != GLEW_OK) {
+		Logger::stream(LogType::Fatal, GLContext_name) << "glewInit() failed with " << error;
+    }
+
+#ifdef DEBUG_BUILD
+    if (GLEW_ARB_debug_output) {
+        // Set the ARB_Debug_Output
+        glDebugMessageCallbackARB(debugLog, nullptr);
+    }
+    else {
+		Logger::stream(LogType::Information, GLContext_name) << "ARB_Debug_Output extension is not available.";
+    }
+#endif // DEBUG_BUILD
+
+	// Somehow glewInit generates an error, but that is not reported by the return value.
+	glGetError();
+}
+
+void OpenglContext::setDepthTest(bool enabled)
+{
+	if (enabled != m_depthEnabled) {
+		m_depthEnabled = enabled;
+		
+		if (enabled) {
+			glEnable(GL_DEPTH_TEST);
+		}
+		else {
+			glDisable(GL_DEPTH_TEST);
+		}
+	}
+}
+
+void OpenglContext::setWireframe(bool enabled)
+{
+	if (enabled != m_wireframeEnabled) {
+		m_wireframeEnabled = enabled;
+
+		if (enabled) {
+			glPolygonMode(GL_FRONT_AND_BACK, GL_LINE);
+		}
+		else {
+			glPolygonMode(GL_FRONT_AND_BACK, GL_FILL);
+		}
+	}
+}
+
+void OpenglContext::setTwoSided(bool enabled)
+{
+	if (enabled != m_twoSidedEnabled) {
+		m_twoSidedEnabled = enabled;
+
+		if (enabled) {
+			glEnable(GL_CULL_FACE);
+		}
+		else {
+			glDisable(GL_CULL_FACE);
+		}
+	}
+}
+
+void OpenglContext::setFramebuffer(FrameBuffer* framebuffer)
+{
+	if (framebuffer == nullptr) {
+		OGLR_CHECKGLERROR(glBindFramebuffer(GL_FRAMEBUFFER, 0));
+	}
+	else {
+		framebuffer->use();
+	}
+}
+
+void OpenglContext::clearColor(float r, float g, float b, float a)
+{
+	// Clear the current swap buffer
+	glClearColor(r, g, b, a);
+
+	glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+}
+
+Shader::Ptr OpenglContext::createVertexShader(const char* strResourceName, const std::vector<char>& sourceCode)
+{
+	return Shader::Ptr(new Shader(GL_VERTEX_SHADER, strResourceName, sourceCode));
+}
+
+Shader::Ptr OpenglContext::createFragmentShader(const char* strResourceName, const std::vector<char>& sourceCode)
+{
+	return Shader::Ptr(new Shader(GL_FRAGMENT_SHADER, strResourceName, sourceCode));
+}
+
+
+} // oglr namespace

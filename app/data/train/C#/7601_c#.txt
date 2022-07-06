@@ -1,0 +1,117 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Data.Entity.Migrations;
+using System.Linq;
+using System.Threading.Tasks;
+using System.Web;
+using System.Web.Mvc;
+using System.Web.Routing;
+using System.Web.Security;
+using Microsoft.AspNet.Identity.Owin;
+using Snapplicator.Areas.Install.Models;
+using Snapplicator.Models;
+using Snapplicator.Services;
+
+namespace Snapplicator.Areas.Install.Controllers
+{
+    public class InstallController : Controller
+    {
+        private readonly ISettingService _settingService;
+        private readonly IUserService _userService;
+
+        public InstallController(ISettingService settingService, IUserService userService)
+        {
+            _settingService = settingService;
+            _userService = userService;
+        }
+
+        public ActionResult AlreadyInstalled()
+        {
+            return null;
+        }
+
+        public ActionResult Step1()
+        {
+            if (_userService.GetUsers().Any())
+                return RedirectToAction("AlreadyInstalled");
+
+            return View();
+        }
+
+        [HttpPost]
+        public async Task<ActionResult> Step1(Step1Model model)
+        {
+            if (_userService.GetUsers().Any())
+                return RedirectToAction("AlreadyInstalled");
+
+            if (ModelState.IsValid)
+            {
+                _settingService.UpdateValueByKey("WebsiteName", model.WebsiteName);
+
+                var user = new User { UserName = model.AdminUsername, Email = model.AdminEmailAddress, TimeCreated = DateTime.Now, TimeUpdated = DateTime.Now };
+                var result = await UserManager.CreateAsync(user, model.AdminPassword);
+                if (result.Succeeded)
+                {
+                    await SignInManager.SignInAsync(user, isPersistent: false, rememberBrowser: false);
+
+                    if(!Roles.RoleExists("Admin"))
+                        Roles.CreateRole("Admin");
+
+                    // I've run into some issues with wiped databases where the AddUserToRole()
+                    // call areas out.
+                    if(!Roles.IsUserInRole(model.AdminUsername, "Admin"))
+                        Roles.AddUserToRole(model.AdminUsername, "Admin");
+
+                    return RedirectToAction("Step2", "Install");
+                }
+            }
+
+            return View(model);
+        }
+
+        // Right now, this just runs the DB seed and doesn't present anything
+        // in the UI to the user
+        public ActionResult Step2()
+        {
+            var seeder = new DataSeeder(new SnapplicatorContext());
+
+            seeder.SeedAll();
+
+            return RedirectToAction("Complete", "Install");
+        }
+
+        public ActionResult Complete()
+        {
+            return View();
+        }
+
+        // TODO: A bunch of stuff from the boilerplate AccountController is below. This should be moved
+        // into UserService and the above refactored.
+        private ApplicationSignInManager _signInManager;
+        private ApplicationUserManager _userManager;
+
+        public ApplicationSignInManager SignInManager
+        {
+            get
+            {
+                return _signInManager ?? HttpContext.GetOwinContext().Get<ApplicationSignInManager>();
+            }
+            private set
+            {
+                _signInManager = value;
+            }
+        }
+
+        public ApplicationUserManager UserManager
+        {
+            get
+            {
+                return _userManager ?? HttpContext.GetOwinContext().GetUserManager<ApplicationUserManager>();
+            }
+            private set
+            {
+                _userManager = value;
+            }
+        }
+    }
+}

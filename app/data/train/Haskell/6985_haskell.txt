@@ -1,0 +1,286 @@
+{-# LANGUAGE OverloadedStrings #-}
+
+import System.Directory
+import System.Time
+import System.IO
+import qualified Data.List as L
+import Text.ParserCombinators.Parsec
+import Text.Blaze.Html5 as H
+import Text.Blaze.Html5.Attributes as A
+import Text.Blaze.Html.Renderer.Pretty
+import qualified Text.Blaze.Internal as I
+import Text.Pandoc
+import Text.Pandoc.Readers.Markdown
+import Control.Monad
+
+data Entry = Entry {
+      entryUrl :: String,
+      entryDate :: CalendarTime,
+      entryTitle :: String,
+      entryTags :: String,
+      entryBody :: String}
+             deriving (Eq, Show)
+
+instance Ord Entry where
+    compare e1 e2 = compare (entryDate e1) (entryDate e2)
+
+
+metadata :: String -> Parser String
+metadata s = do
+  string ("<!--- " ++ s ++ ": ") 
+  manyTill anyChar (try (string " -->"))
+
+entryParser :: Parser [String]
+entryParser = do
+  u <- metadata "url" 
+  spaces
+  d <- metadata "date"
+  spaces
+  ti <- metadata "title"
+  spaces
+  ta <- metadata "tags"
+  spaces
+  b <- manyTill anyChar eof
+  return [u, d, ti, ta, b]
+
+dateParser :: Parser CalendarTime
+dateParser = do
+  d <- manyTill digit (char '/')
+  m <- manyTill digit (char '/')
+  y <- many digit
+  let defaultDate = CalendarTime 2012 January 1 0 0 0 0 Sunday 0 "GMT" 0 False
+  let dt = defaultDate {ctYear = 2000 + read y
+                       , ctMonth = toEnum (read m - 1)
+                       , ctDay = read d}
+  return $ toUTCTime $ toClockTime dt
+
+date :: String -> CalendarTime
+date s = case parse dateParser "Error parsing date string" s of
+           Left e -> error $ show e
+           Right d -> d
+
+ymd :: CalendarTime -> String
+ymd cal = let yyyy = show $ ctYear cal
+              m = show (1 + (fromEnum $ ctMonth cal))
+              d = show $ ctDay cal
+              mm = if L.length m == 1 then '0' : m else m
+              dd = if L.length d == 1 then '0' : d else d
+          in yyyy ++ "-" ++ mm ++ "-" ++ dd
+
+rfc882 :: Entry -> String
+rfc882 e = let cal = entryDate e
+               dow = (take 3 $ show $ ctWDay cal) ++ ", "
+               day = (show $ ctDay cal) ++ " "
+               mon = (take 3 $ show $ ctMonth cal) ++ " "
+               year = (show $ ctYear cal) ++ " "
+           in dow ++ day ++ mon ++ year ++ "20:00:00 GMT"
+
+expireDate :: Entry -> String
+expireDate e = let cal = entryDate e
+                   cty = ctYear cal
+                   d = cal {ctYear = cty + 1}
+               in rfc882 $ e {entryDate = d}
+
+publishedOn :: Entry -> String
+publishedOn e = let cal = entryDate e
+                    month = (show $ ctMonth cal) ++ " "
+                    day = (show $ ctDay cal) ++ ", "
+                    year = show $ ctYear cal
+                in month ++ day ++ year
+
+absoluteUrl :: Entry -> String
+absoluteUrl e = "http://www.adrienhaxaire.org/" ++ entryUrl e ++ ".html"
+
+entry :: String -> Entry
+entry s = case parse entryParser "Error in entry string" s of
+            Left e -> error $ show e
+            Right [u, d, ti, ta, b] -> Entry u (date d) ti ta (markdownToHtml b)
+
+markdownToHtml :: String -> String
+markdownToHtml s = let md = readMarkdown defaultParserState {stateStrict = True} s
+                   in writeHtmlString defaultWriterOptions md
+
+htmlHead :: String -> Markup
+htmlHead t = do
+  H.head $ do
+    meta ! httpEquiv "content-type" ! content "text/html; charset=UTF-8"
+    meta ! name "google-site-verification" ! content "6vhHz6JpHz2tcB6ElSHx7ev3bzmZo-skd2iRRHiwCjw"
+    meta ! name "keywords" ! content "adrien haxaire, adrienhaxaire, existence et applications"
+    link ! type_ "text/css" ! rel "stylesheet" ! media "all" ! href "base.css"
+    H.title $ toHtml ("Existence et Applications" ++ t)
+
+
+entryHead :: Entry -> Markup
+entryHead e = do
+  H.head $ do
+    meta ! httpEquiv "content-type" ! content "text/html; charset=UTF-8"
+    meta ! httpEquiv "Last-Modified" ! content (toValue $ show $ rfc882 e)
+    meta ! httpEquiv "expires" ! content (toValue $ show $ expireDate e)
+    meta ! name "google-site-verification" ! content "6vhHz6JpHz2tcB6ElSHx7ev3bzmZo-skd2iRRHiwCjw"
+    meta ! name "keywords" ! content "adrien haxaire, adrienhaxaire, existence et applications"
+    meta ! name "keywords" ! content (toValue $ show $ entryTitle e)
+    meta ! name "keywords" ! content (toValue $ show $ entryTags e)
+    link ! type_ "text/css" ! rel "stylesheet" ! media "all" ! href "base.css"
+    H.title $ toHtml ("Existence et Applications | " ++ entryTitle e)
+
+htmlBody :: Html -> Markup
+htmlBody contents = H.body $ do
+                      entete
+                      contents
+                      htmlFooter
+                      googleAnalytics
+
+entete :: Markup
+entete = do
+  H.div ! A.id "entete" $ do
+            h1 $ a ! href "/" $ "Existence et Applications"
+            H.div ! A.id "nav" $ do
+                            a ! href "/" $ "home"
+                            a ! href "archive.html" $ "archive"
+                            a ! href "rss.xml" $ "rss"
+                            a ! href "about.html" $ "about"
+
+htmlTemplate :: String -> Html -> Html
+htmlTemplate pageTitle contents = docTypeHtml ! lang "en" $ do
+                                    htmlHead pageTitle
+                                    htmlBody contents
+
+entryTemplate :: Entry -> Html
+entryTemplate e = docTypeHtml ! lang "en" $ do
+                    entryHead e
+                    htmlBody $ entryContents e
+
+entryContents :: Entry -> Html
+entryContents e = do 
+  H.div ! A.id "contents" ! A.class_ "container" $ I.preEscapedString (entryBody e ++ "\n<p> " ++ publishedOn e ++ "</p>\n")
+  comments e
+
+markdownEntries :: IO [String]
+markdownEntries = do 
+  es <- getDirectoryContents "entries/" 
+  return $ L.map (\x -> "entries/" ++ x) (filterMarkdown es)
+      where 
+        filterMarkdown = L.delete "." . L.delete ".." . L.filter (L.isSuffixOf ".md")
+
+writeEntry :: Entry -> IO ()
+writeEntry e = writeFile filename (renderHtml $ entryTemplate e)
+    where
+      filename = "public/" ++ entryUrl e ++ ".html"
+
+entries :: IO [Entry]
+entries = liftM (L.map entry) (markdownEntries >>= mapM readFile)
+
+updateEntries :: [Entry] -> IO ()
+updateEntries = mapM_ writeEntry
+
+updateIndex :: [Entry] -> IO ()
+updateIndex es = let filename = "public/index.html"
+                     contents = entryContents $ maximum es
+                 in writeFile filename (renderHtml $ htmlTemplate "" contents)
+
+updateArchive :: [Entry] -> IO ()
+updateArchive es = let filename = "public/archive.html"
+                       contents = archiveContents es
+                   in writeFile filename (renderHtml $ htmlTemplate " | Archive" contents)
+
+archiveContents :: [Entry] -> Html
+archiveContents es = let ses = reverse $ L.sort es
+                     in do 
+                       H.div ! A.id "contents" ! A.class_ "container" $ do 
+                          p "Previous posts:"
+                          forM_ ses archiveLine
+
+archiveLine :: Entry -> Markup
+archiveLine e = do 
+  p $ do 
+    a ! href (toValue $ absoluteUrl e) $ toHtml (entryTitle e)
+    toHtml (", " ++ (publishedOn e))
+
+rss :: [Entry] -> String
+rss es = let ses = reverse $ L.sort es
+             lastBuild = rfc882 $ maximum ses
+             rssItems = foldl1 (++) $ L.map rssItem ses
+         in "<?xml version=\"1.0\" encoding=\"ISO-8859-1\" ?>\n"
+                ++ "<rss version=\"2.0\" xmlns:atom=\"http://www.w3.org/2005/Atom\">\n"
+                ++ "  <channel>"
+                ++ "    <title>Existence et Applications</title>\n"
+                ++ "    <link>http://www.adrienhaxaire.org</link>\n"
+                ++ "    <description>Adrien Haxaire's Existence et Applications blog</description>\n"
+                ++ "    <lastBuildDate>" ++ lastBuild ++ "</lastBuildDate>\n"
+                ++ "    <atom:link href=\"http://www.adrienhaxaire.org/rss.xml\" rel=\"self\" type=\"application/rss+xml\" />"
+                ++ rssItems
+                ++ "  </channel>\n"
+                ++ "</rss>"
+ 
+rssItem :: Entry -> String
+rssItem e = "    <item>\n"
+            ++ "      <title>" ++ entryTitle e++ "</title>\n"
+            ++ "      <link>" ++ absoluteUrl e ++ "</link>\n"
+            ++ "      <guid>" ++ absoluteUrl e ++ "</guid>\n"
+            ++ "      <pubDate>" ++ rfc882 e ++ "</pubDate>\n"
+            ++ "      <description><![CDATA[" ++ entryBody e ++ "]]></description>\n"
+            ++ "    </item>\n"
+
+updateRSS :: [Entry] -> IO ()
+updateRSS es = writeFile "public/rss.xml" $ rss es
+  
+sitemap :: [Entry] -> String
+sitemap es = let lastmod = ymd $ entryDate $ maximum es
+                 sitemapUrls = foldl1 (++) $ L.map sitemapUrl es
+             in "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+                    ++ "<urlset xmlns=\"http://www.sitemaps.org/schemas/sitemap/0.9\">\n"
+                    ++ "<url>\n  <loc>http://www.adrienhaxaire.org</loc>\n"
+                           ++ "  <lastmod>" ++ lastmod ++ "</lastmod>\n</url>\n"
+                    ++ "<url>\n  <loc>http://www.adrienhaxaire.org/about.html</loc>\n"
+                           ++ "  <lastmod>" ++ lastmod ++ "</lastmod>\n</url>\n"
+                    ++ "<url>\n  <loc>http://www.adrienhaxaire.org/archive.html</loc>\n"
+                           ++ "  <lastmod>" ++ lastmod ++ "</lastmod>\n</url>\n"
+                    ++ sitemapUrls
+                    ++ "</urlset>"
+
+sitemapUrl :: Entry -> String
+sitemapUrl e = "<url>\n"
+               ++ "  <loc>" ++ absoluteUrl e ++ "</loc>\n"
+               ++ "  <lastmod>" ++ (ymd $ entryDate e) ++ "</lastmod>\n"
+               ++ "  <changefreq>never</changefreq>"
+               ++ "</url>\n"
+                   
+updateSitemap :: [Entry] -> IO ()
+updateSitemap es = writeFile "public/sitemap.xml" $ sitemap es
+
+googleAnalytics :: Html
+googleAnalytics = script ! type_ "text/javascript" $ "var _gaq = _gaq || [];\n      _gaq.push(['_setAccount', 'UA-13136595-1']);\n      _gaq.push(['_trackPageview']);\n      (function() {\n      var ga = document.createElement('script'); ga.type = 'text/javascript'; ga.async = true;\n      ga.src = ('https:' == document.location.protocol ? 'https://ssl' : 'http://www') + '.google-analytics.com/ga.js';\n      var s = document.getElementsByTagName('script')[0]; s.parentNode.insertBefore(ga, s);\n      })();"
+
+htmlFooter :: Html
+htmlFooter =  H.div ! A.id "licence" $ I.preEscapedString "<a rel=\"license\" href=\"http://creativecommons.org/licenses/by-nd/3.0/\"><img alt=\"Creative Commons License\" style=\"border-width:0\" src=\"http://i.creativecommons.org/l/by-nd/3.0/88x31.png\" /></a><br /><span xmlns:dct=\"http://purl.org/dc/terms/\" href=\"http://purl.org/dc/dcmitype/Text\" property=\"dct:title\" rel=\"dct:type\">Existence et Applications</span> by Adrien Haxaire</a> is licensed under a <a rel=\"license\" href=\"http://creativecommons.org/licenses/by-nd/3.0/\">Creative Commons Attribution-NoDerivs 3.0 Unported License</a>.<br />Find more on <a href=\"http://twitter.com/adrienhaxaire\">Twitter</a> and <a href=\"https://plus.google.com/109821515852278704885?rel=author\">Google</a>."
+
+
+comments :: Entry -> Html
+comments e = do 
+  H.div ! A.id "comments" ! A.class_ "container" $ do
+             h2 "Comments"
+             H.div ! A.id "disqus_thread" $ ""
+             script ! type_ "text/javascript" $ disqus e
+             noscript $ I.preEscapedString "Please enable JavaScript to view the <a href=\"http://disqus.com/?ref_noscript\">comments powered by Disqus.</a>"
+             a ! href "http://disqus.com" ! A.class_ "dsq-brlink" $ I.preEscapedString "comments powered by <span class=\"logo-disqus\">Disqus</span>"
+
+disqus :: Entry -> Html
+disqus e = toHtml $ "var disqus_shortname = 'adrienhaxaire';\n"
+           ++ "                var disqus_identifier = '" ++ entryUrl e ++ "'\n"
+           ++ "                var disqus_url = '" ++ absoluteUrl e ++ "';\n"
+           ++ "                var disqus_title = '" ++ entryTitle e ++ "';\n"
+           ++ "                (function() {var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;"
+           ++ "                             dsq.src = 'http://' + disqus_shortname + '.disqus.com/embed.js'; "
+           ++ "                             (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);})();"
+
+
+
+main :: IO () 
+main = do
+  es <- entries
+  updateEntries es
+  updateIndex es
+  updateArchive es
+  updateRSS es
+  updateSitemap es
+

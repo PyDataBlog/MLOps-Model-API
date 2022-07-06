@@ -1,0 +1,1 @@
+C:\Data\tools\sonar\sonar-scanner-2.8\bin\sonar-scanner.bat -Dsonar.verbose=true -Dsonar.login=c7c254cb661fa3c69f6ec2dc34dcf14f8845c836

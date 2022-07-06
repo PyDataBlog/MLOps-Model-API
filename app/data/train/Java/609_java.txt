@@ -1,0 +1,117 @@
+package com.rockey.emonitor.jms.controller;
+
+import java.util.Enumeration;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+import javax.servlet.http.HttpServletRequest;
+import javax.servlet.http.HttpServletResponse;
+
+import org.apache.commons.logging.Log;
+import org.apache.commons.logging.LogFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.web.servlet.ModelAndView;
+import org.springframework.web.servlet.mvc.AbstractController;
+
+import com.rockey.emonitor.jms.component.AppList;
+import com.rockey.emonitor.jms.component.EmonitorContext;
+import com.rockey.emonitor.jms.component.FilterList;
+import com.rockey.emonitor.jms.model.LogMessage;
+import com.rockey.emonitor.jms.service.MessageService;
+import com.rockey.emonitor.jms.util.Base64;
+import com.rockey.emonitor.jms.util.Util;
+import com.rockey.emonitor.model.AppFilter;
+
+public  class MessageController extends AbstractController{
+	private static final Log log = LogFactory.getLog(MessageController.class);
+ 
+	@Autowired
+	private MessageService messageService;
+	
+	@Autowired
+	private EmonitorContext runtimeContext;
+	
+	@Autowired
+	private AppList appListComponent;
+	
+	@Autowired
+	private FilterList filterListComponent;
+	
+	private String key;
+	
+	public String getKey() {
+		return key;
+	}
+	public void setKey(String key) {
+		this.key = key;
+	}
+	@Override
+	protected ModelAndView handleRequestInternal(HttpServletRequest request,
+			HttpServletResponse response) throws Exception {
+		request.setCharacterEncoding("utf-8");
+		log.info("requestURL =[ " + request.getRequestURI() + "?" + request.getQueryString() + " ]");
+		
+		if (!runtimeContext.isReadyProcess()) {
+			log.error("EmonitorContext not init complete ! please wait...");
+			return null;
+		}
+			
+		try {
+			List<String> appList = appListComponent.getAppList();
+			Map<String, List<AppFilter>> filterMap = filterListComponent.getFilterMap();
+			Map<String,String> params = new HashMap<String,String>();
+			
+			// 打印参数列表			
+			@SuppressWarnings("unchecked")
+			Enumeration<String> names = request.getParameterNames();
+			if(names.hasMoreElements())
+			{
+			   while (names.hasMoreElements()) {
+			    String paramName = (String) names.nextElement();
+			    String paramValue = request.getParameter(paramName);
+			    //将所有参数转为大写
+			    params.put(paramName.toUpperCase(), paramValue);
+			    
+			    log.info("Request Parameter：" + paramName + "=" + paramValue);
+			   }			   
+			}
+			
+			//获取消息
+			String message = params.get("MESSAGE");
+			if (message!= null && !message.isEmpty()) {
+				message = new String(Base64.decode(message.getBytes("UTF-8")),"UTF-8");
+			}
+			log.info("client IP :" + request.getRemoteAddr() + ", message = " + message);
+			
+			LogMessage logMessage = Util.createMessageFromXml(message);
+			
+			//密钥检测
+			String sign = Util.ComputeHash(logMessage, this.key);
+			if (logMessage.getSign().equals(sign)) {
+				if (!appList.isEmpty() && appList.contains(logMessage.getApplicationID())) {//应用合法检测
+					if (!filterMap.isEmpty() && filterMap.containsKey(logMessage.getApplicationID())) {//过滤器检测
+						List<AppFilter> fiterList = filterMap.get(logMessage.getApplicationID());
+						for (AppFilter filter : fiterList) {
+							if (logMessage.getTitle().contains(filter.getContent())) {
+								log.info("告警标题包含过滤信息[" + filter.getContent() + "],信息将会被过滤。");
+								return null;
+							}
+							if (logMessage.getBody().contains(filter.getContent())) {
+								log.info("告警内容包含过滤信息[" + filter.getContent() + "],信息将会被过滤。");
+								return null;
+							}
+						}
+					}
+					messageService.sendAlertMessage(logMessage);
+				} else {
+					log.error("invalid applicationId (" + logMessage.getApplicationID() + ") ....");
+				}
+			}
+			
+		} catch (Exception e) {
+			log.error("MessageController err", e);
+		}
+		return null;
+	} 
+}

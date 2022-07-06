@@ -1,0 +1,51 @@
+# Widget Type: Number & Secondary Stat
+# Widget Size: 2x2
+# Widget Method: Push
+
+
+
+Write-Progress -Activity "Databases" -status "Collecting Databases info"
+#$Databases = Get-mailboxdatabase -IncludePreExchange2013 -Status -ErrorAction SilentlyContinue
+#$Databases = Get-MailboxDatabase -IncludePreExchange2013 -Status -ErrorAction SilentlyContinue | Select-Object Name,@{N="DatabaseSize";E={$([math]::round($_.DatabaseSize.Tobytes() /1Gb, 2))}},@{N="AvailableNewMailboxSpace";E={$([math]::round($_.AvailableNewMailboxSpace.Tobytes() /1Gb, 2))}}
+$sb = {(Get-MailboxDatabase -IncludePreExchange2013 -Status -ErrorAction SilentlyContinue | Select-Object Name,@{N="DatabaseSize";E={$([math]::round($_.DatabaseSize.Tobytes() /1Gb, 2))}},@{N="AvailableNewMailboxSpace";E={$([math]::round($_.AvailableNewMailboxSpace.Tobytes() /1Gb, 2))}})}
+$Databases = Invoke-Command -Session $session -ScriptBlock $sb 
+
+
+# Set up the holder for our JSON data that we're going to create
+$dataJSON = ""
+
+foreach ($Database in $Databases)
+{
+             $dbname = $($Database.name)
+             $dbsize = $($Database.databasesize)
+             $mbxcount = $((get-mailbox -database $Database.name).count)
+             if ($mbxcount -lt 1) {
+               $mbxnumber = 1
+             } else {
+               $mbxnumber = $mbxcount
+             }
+             $availablespace = $($Database.AvailableNewMailboxSpace)
+
+$tempJSON = @"
+    {"name": "DBNAME","dbsize": DBSIZE,"dbmbx": MBXCOUNT,"availablenewmailboxspace": AVAILABLESPACE},
+"@
+
+$tempJSON = $tempJSON.Replace("DBNAME",$dbname)
+$tempJSON = $tempJSON.Replace("DBSIZE",$dbsize)
+$tempJSON = $tempJSON.Replace("MBXCOUNT",$mbxnumber)
+$tempJSON = $tempJSON.Replace("AVAILABLESPACE",$availablespace)
+
+$dataJSON += $tempJSON
+}
+
+#Construct a here-string with the required json format
+$jsonstream = @"
+[
+   DATAHERE
+]
+"@
+ 
+$jsonstream = $jsonstream.Replace("DATAHERE",$($dataJSON.TrimEnd(",")))
+#write json file
+$file = ".\databases.json"
+$jsonstream | Out-File $file -Encoding default

@@ -1,0 +1,1 @@
+cmd_sound/usb/built-in.o :=  /home/jashaswee/vibex2/X2_ROW_L_OpenSource/arm-linux-androideabi-4.9/bin/arm-linux-androideabi-ld -EL    -r -o sound/usb/built-in.o sound/usb/snd-usb-audio.o sound/usb/snd-usbmidi-lib.o sound/usb/misc/built-in.o sound/usb/usx2y/built-in.o sound/usb/caiaq/built-in.o sound/usb/6fire/built-in.o 

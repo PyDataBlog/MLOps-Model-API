@@ -1,0 +1,456 @@
+;/**
+;  HOT- æàðà
+;
+;  Âûâîäà ÷åðåç Usart ïîõîæå íåò
+;*/
+;NOTE:	çàêîììåíòèð áëîê èñêëþ÷åíèÿ ïîêàçàíèé T=85
+#include <../headers/hot.inc>
+mObject_var	_v2_HOT
+
+home_data	res	0
+
+;// îáúÿâëåíû åùå â KPUP íî òàì îíè íå èñïîëüçóþòñÿ
+DSFLAG		res		1
+			;		DSFLAG,0 - H-Init is successful
+			;		DSFLAG,1 - H-Last cicle is start( íå áûëî çàïóùåíî òåìïåð ïðåîáðàçîâ)
+			;		DSFLAG,2 - H-Normal Work,L-first mal
+			;		DSFLAG,3 - Âðåìÿ èñòåêëî
+			;		DSFLAG,4 - H- DS- äðåáåçã (íåèñïðàâíîñòü) ëèíèè DS (ïðèíÿòà T=85, CRC=CRC_DS)
+			;		DSFLAG,5 - H- DS- ãîòîâ äëÿ îáùåíèÿ ïîñëå òåìïåðàòóðíîãî ïðåîáðàçîâàíèÿ(3-é ïðîõîä ï\ïðîãðàììû)
+			;		DSFLAG,6 - H- îøèáêà ïðè¸ìà äàííûõ îò DS
+			;+060910 DSFLAG,7 - Çàïðîñ çàïóñêà òàéìåðà
+DSTEMP		res		1	; ñàìà òåìïåðàòóðà ->L avaData(_HOT)->M assiveUp+20(_BUM)->Resp_UM1+20(_INFO)->Mass2(_INFO)-> to PC
+;/// 
+
+DSLoop		res		1
+CTDS		res 	1
+
+;// ïîõîæå âîò ýòà ïåðåìåííàÿ õðàíèò çíà÷åíèå òåìïåðàòóðû
+;//   è èç íåå ïîõîæå ýòî çíà÷åíèå óõîäèò çà ãðàíèöû ìîäóëÿ
+LavaData	res 	1  
+  ;//  movff	DSTEMP,LavaData ;  + 12	;+310110
+  ;_HOT_GET_DS1821:	mObject_sel	THIS	movf	LavaData,w
+
+DSbyte		res 	9
+ctERR_DS	res		1		; ñ÷¸ò÷èê ERROR DS - ïðè ñ÷¸òå äî4 ôîðìèðóåòñÿ çàäåðæêà îêîëî 4ñåê
+							; äëÿ ïåðåäà÷è çíà÷åíèÿ 0 ãðàäóñîâ íàðóæó
+ByteCount   res     1       ; Ñ÷åò÷èê áàéò äàííûõ
+BitCount    res     1       ; Ñ÷åò÷èê áèò â áàéòå
+DataByte    res     1       ; Áàéò äàííûõ
+CRC         res     1       ; Âðåìåííîå çíà÷åíèå CRC
+
+;
+xxxx idata
+	waveFormTemper	res	1	; 0000_00ss
+	hot_readOnly_zero	res	1; î÷åíü âàæíî ÷òî òîëüêî äëÿ ÷òåíèÿ
+
+;/// /// ///
+;///
+;/// Íà÷àëî êîäà
+Obj_HOT	code
+
+;// Èíèöèàëèçàöèÿ
+_HOT_SET_Ini:
+		mObject_sel	THIS
+		movlw	b'10001110'		;íà÷àëüíîå ñîñò ôëàãà: îïðåäåë èíèöèàë(,bit<0>) è çàïóùåíî ïðåîáðàç òåìï (bit<1>)
+		movwf	DSFLAG			;DS1820PAR
+		clrf	ctERR_DS		; +040310 ñáðîñ ñ÷¸ò÷èêà ERROR DS
+		
+		; !!Îäèí äëÿ âñåõ îïåðàòîðîâ ïîëîæèòåëüíîãî âåòâëåíèÿ
+		banksel	waveFormTemper
+		clrf	hot_readOnly_zero
+		
+		mObject_sel	THIS
+	return
+
+;/// /// ///
+;///
+;/// ï/ï óïðàâëåíèÿ è ñíÿòèÿ òåìïåðàòóðíûõ äàííûõ ñ DS1820PAR
+;// ïîõîæå çàïóñêàåòñÿ â òàéìåðå, ÷åðåç ïðîìåæóòêè âðåìåíè
+;_B UM_SETdw_Temper
+;	_v#v(HERE)_T ASK_HLTuw_DataRefreshWait;(void/void)<<<DataRefreshWait
+;		_C LK_HLTuw_Tick; îáðàáîò÷èê ïðåðûâàíèÿ òàéìåðà
+_HOT_SET_DS1821:
+_DSread
+_DSini_status
+
+		mObject_sel	THIS
+		btfsc	DSFLAG,0	;INI flag resetting		
+			;ïðîâåðêà îòñóòñâèÿ èíèöèàëèçàöè DS (îò 2-10ìñ - äî 5ñåê)
+		bra		out_DSini_status 
+		clrf	DSTEMP		;èíäèêàöèÿ T=0 C
+
+		incf	ctERR_DS,f	;+040310	èíêðåìåíò ñ÷¸ò÷èêà îøèáîê 
+		movlw	4			;+040310
+		cpfslt	ctERR_DS	;+040310  	áûëà 4 ðàçà îøèáêà?
+
+		movff	DSTEMP,	LavaData ;  + 12	;+310110
+
+out_DSini_status:
+
+		btfsc	DSFLAG,3	; ++060910
+		bra		_Testo
+		btfsc	DSFLAG,1	;0- áûëî çàïóùåíî òåìïåðàòóðíîå ïðåîáðàçîâàíèå
+		bra		_Tstart
+		return
+_Testo
+		btfsc	DSFLAG,1	;0- áûëî çàïóùåíî òåìïåðàòóðíîå ïðåîáðàçîâàíèå
+		bra		_Tstart
+		btfsc	DSFLAG,5
+		bra		_DSyes		;DS- ãîòîâ äëÿ îáùåíèÿ ïîñëå òåìïåðàòóðíîãî ïðåîáðàçîâàíèÿ(3-é ïðîõîä ï\ïðîãðàììû)
+		call	_DSini
+		btfss	DSFLAG,0
+		return
+		bsf		DSFLAG,5	;1-DS ãîòîâ äëÿ îáùåíèÿ ïîñëå òåìïåðàòóðíîãî ïðåîáðàçîâàíèÿ
+		return
+
+_DSyes 
+		DelayUs	30;25
+		movlw	0xCC		;command	îáðàùåíèÿ ê DS1820
+		call	_DSWbyte
+		DelayUs	30;25
+		movlw	0xBE		;command	÷òåíèÿ t èç DS1820
+		call	_DSWbyte
+		DelayUs	13; 10		;~20mKs-óìåíüøèòü?
+
+		call	_DS_R9byte		;ïðè¸ì 9áàéòîâ îò DS è âû÷èñëåíèå êîíòð ñóììû
+		cpfseq	DSbyte+8		;ïðîâåðêà êîíòð ñóììû
+		bra		lbl_DSfalse_crc	;CRC NOT=DSbyte+8
+		movff	DSbyte,DSTEMP
+
+		nop						;çäåñü åù¸ 1ðàç ðàç ñ÷èòàòü t, äëÿ ïðîâåðêè ïðàâèëüíîñòè ïðè¸ìà
+
+		rrncf	DSTEMP		;äåëèì íà 2 òåïåðü òî÷íîòü t=1 ãðàäóñ Ñ
+		bcf		DSTEMP,7
+
+lbl_85:						;èñêëþ÷àåì T=85, êàê âîçìîæíóþ îøèáêó äàò÷èêà DS:
+		movlw	85			
+		cpfseq	DSTEMP
+		bra		lbl_85OUT
+		bsf		DSFLAG,4		;H- äðåáåçã ëèíèè DS
+			incf	ctERR_DS	;+040310	èíêðåìåíò ñ÷¸ò÷èêà îøèáîê 
+		clrf	DSTEMP			;T=0 C
+			bra		lbl_out_DSyes2			;+040310
+lbl_85OUT:	
+		bcf	DSFLAG,4
+
+		bra		lbl_out_DSyes
+
+lbl_DSfalse_crc:
+		incf	ctERR_DS		;+040310						
+		clrf	DSTEMP			;T=0 C
+		bsf		DSFLAG,6		;îøèáêà ïðè¸ìà îò DS
+		bra		lbl_DS_in_Lava
+lbl_out_DSyes:
+		clrf	ctERR_DS		;+040310
+lbl_out_DSyes2:
+		bcf		DSFLAG,6		;not îøèáêà ïðè¸ìà îò DS
+
+lbl_DS_in_Lava:	;çàïèñü çíà÷åíèÿ Ò, ðàçðåøåíèå/çàïðåò ïîêàçàòü T=0			(äîáàâëåí è äîïîëíåí+040310)
+
+		btfsc	DSFLAG,4		;H- äðåáåçã ëèíèè DS ?
+		bra		lbl_ctERR
+		btfss	DSFLAG,6		;H-îøèáêà ïðè¸ìà îò DS?
+		movff	DSTEMP,	LavaData ;+ 12 ;èçìåðåííîå çíà÷åíèå òåìïåðàòóðû íàðóæó
+lbl_ctERR:
+		movlw		4			;+040310
+		cpfslt		ctERR_DS	;+040310  	áûëà 4 ðàçà îøèáêà?
+		movff	DSTEMP,LavaData ;+ 12			;+310110	 äà, ðàçðåøàåì ïîêàçàòü T=0 ïîñëå 4-õ îøèáîê ïîäðÿä
+
+		bsf		DSFLAG,1
+		bcf	DSFLAG,5		;0-DS íå ãîòîâ äëÿ îáùåíèÿ ïîñëå òåìïåðàòóðíîãî ïðåîáðàçîâàíèÿ(íåò_DSini)
+		return
+
+_Tstart						;ñòàðò ïðåîáðàçîâàíèÿ t â DS1820par
+		mObject_sel	THIS	
+		call	_DSini
+		btfss	DSFLAG,0
+		return
+		DelayUs	30;25
+		movlw	0xCC		;command
+		call	_DSWbyte
+		DelayUs	30;25		;â äàëüíåéøåì ìîæíî óìåíüøèòü çàä
+		movlw	0x44		;command òåìïåðàòóðíîãî ïðåîáðàçîâàíèÿ â DS1820
+		call	_DSWbyte
+		bsf		TTX_port
+
+		bcf		TTX_tris
+
+		bcf		DSFLAG,1	;âûñòàâèëè ôëàã ïðåîáðàç - çàïóùåíî
+
+		bcf		DSFLAG,7	;âûñòàâèëè ôëàã çàïðîñ òàéìåðà
+		bcf		DSFLAG,3	;++ 060910
+
+		return
+
+_DSRbyte					;DS1821 BYTE Read Sub-Programm
+		clrf	DSTEMP
+		movlw	0x08
+		movwf	DSLoop
+_DSLoopr
+		bcf		TTX_tris
+		bcf		TTX_port
+		DelayUs	3;2			;Really x2
+
+		bcf		INTCON,GIEH
+		bsf		TTX_tris
+		DelayUs	12; 8
+		btfsc	TTX_port
+
+		bsf		DSTEMP,7
+
+		bsf		INTCON,GIEH
+
+		dcfsnz	DSLoop,f
+		return				;Byte Reading is finished
+		nop
+		nop
+		DelayUs	25 ;20 ;10 ;20 ÏÎÏÐÎÁÎÂÀÒÜ!
+		rrncf	DSTEMP,f
+		bra		_DSLoopr
+
+_DSWbyte					;DS1821 BYTE Write Sub-Programm
+		movwf	DSTEMP
+
+		movlw	0x09	;òàê è íàäî 9
+
+		movwf	DSLoop
+_DSLoopw
+		dcfsnz	DSLoop,f
+		return
+
+		bcf		INTCON,GIEH
+
+		bcf		TTX_tris
+		bcf		TTX_port
+		DelayUs	3; 2
+		btfsc	DSTEMP,0	;Sending H?
+		bsf		TTX_tris	;Yes, H
+		DelayUs	75 ;60		;Send Slot Time
+		bsf		TTX_tris
+
+		bsf		INTCON,GIEH
+
+		DelayUs	3; 2		;Pause 
+		rrncf	DSTEMP,f
+		bra		_DSLoopw
+
+_DSini						;DS1821 INI Sub-Programm
+		bcf		DSFLAG,0	;INI flag resetting
+		bcf		TTX_tris
+		bcf		TTX_port
+		DelayUs	250; 200	;Really ~500mkS
+		DelayUs	250; 200
+		bsf		TTX_tris
+		DelayUs	21; 15
+		movlw	50
+		movwf	CTDS
+_DSW
+		DelayUs	2;1
+		dcfsnz	CTDS,f
+		return
+		btfsc	TTX_port
+		bra		_DSW
+
+		movlw	200
+		movwf	CTDS
+_DSW2
+		DelayUs	2;1
+		dcfsnz	CTDS,f
+		return
+		btfss	TTX_port
+		bra		_DSW2
+		bsf		DSFLAG,0	;INI is successful
+		return
+
+_DS_R9byte		;ïðè¸ì 9 áàéòîâ îò DS, âû÷èñëåíèå CRC
+		call	_DSRbyte
+		MOVFF	DSTEMP,DSbyte
+		DelayUs	25 ; 20
+		call	_DSRbyte
+		MOVFF	DSTEMP,DSbyte+1
+		DelayUs	25 ; 20
+		call	_DSRbyte
+		MOVFF	DSTEMP,DSbyte+2
+		DelayUs	25 ; 20
+		call	_DSRbyte
+		MOVFF	DSTEMP,DSbyte+3
+		DelayUs	25 ; 20
+		call	_DSRbyte
+		MOVFF	DSTEMP,DSbyte+4
+		DelayUs	25 ; 20
+		call	_DSRbyte
+		MOVFF	DSTEMP,DSbyte+5
+		DelayUs	25 ; 20
+		call	_DSRbyte
+		MOVFF	DSTEMP,DSbyte+6
+		DelayUs	25 ; 20
+		call	_DSRbyte
+		MOVFF	DSTEMP,DSbyte+7
+		DelayUs	25 ; 20
+		call	_DSRbyte
+		MOVFF	DSTEMP,	DSbyte+8
+
+		lfsr	0, 	DSbyte ;0x50		;àäðåñ _DSRbyte
+		movlw	0x08			;êîë áàéòîâ äëÿ âû÷èñëåíèÿ CRC
+;		call	CalcCRC8		;âû÷èñëåíèå CRC, return CRC in W
+
+
+;   *********************************************************************
+;   *                                                                   *
+;   *                   Ïðîöåäóðà: CalcCRC8                             *
+;   *                                                                   *
+;   *    Ïðîöåññîð: PIC16.                                              *
+;   *    Ïàðàìåòðû: W = ÷èñëî áàéò äàííûõ.                              *
+;   *               FSR = àäðåñ áóôåðà äàííûõ.                          *
+;   *               IRB = áàíêè áóôåðà äàííûõ.                          *
+;   *      Âîçâðàò: W = CRC8.                                           *
+;   *     Îïèñàíèå: Âû÷èñëåíèå CRC8 îñíîâàíî íà öèêëè÷åñêîì ïîëèíîìå    *
+;   *               âèäà X8+X5+X4+X1 (ñì. äîêóìåíò DA LLAS AN27). CRC8   *
+;   *               âû÷èñëÿåòñÿ äëÿ óêàçàííîãî â W ÷èñëà áàéòîâ äàííûõ, *
+;   *               ðàñïîëîæåííûõ â áóôåðå, íàõîäÿùåìñÿ â ïàìÿòè äàííûõ *
+;   *               ïî àäðåñó, óêàçàííîìó â ðåãèñòðå FSR â áàíêå,       *
+;   *               îïðåäåëÿåìîì áèòîì IRB. Ðåçóëüòàò âîçâðàùàåòñÿ â W. *
+;   *               Ïðîöåäóðà íàïèñàíà â ïåðåìåùàåìûõ êîäàõ è ìîæåò     *
+;   *               áûòü ðàçìåùåíà â ëþáîé ñòðàíèöå ïàìÿòè ïðîãðàìì.    *
+;   *               Ëîêàëüíûå ïåðåìåííûå ðàçìåùàþòñÿ â îâåðëåéíîé       *
+;   *               ñåêöèè äëÿ ëþáîãî áàíêà ïàìÿòè äàííûõ.              *
+;   *      Èñòîðèÿ: 26.11.2006 - ÷èñëîâàÿ ìàñêà CRC çàìåíåíà            *
+;   *               îïðåäåëåíèåì "#d efine CRC_POLY 0x18".               *
+;   *                                                                   *
+;   *********************************************************************
+
+CalcCRC8:
+        movwf   ByteCount       ; Ñîõðàíåíèå äëèíû ñîîáùåíèÿ
+        movlw   0x00            ; Èíèöèàëèçàöèÿ CRC áûëî FF !!! -äëÿ îïðåä íóëåâîé ïîñëåäîâàòåëüíîñòè äàííûõ
+        movwf   CRC
+CalcNextByte                    ; Âíåøíèé öèêë ïî áàéòàì äàííûõ
+        movlw   8               ; Èíèöèàëèçàöèÿ âíóòðåííåãî öèêëà äëÿ 8
+        movwf   BitCount        ;   áèò â ñ÷åò÷èêå áèò
+        movf   POSTINC0,w       ; SLAVA 051010 Âûáîðêà î÷åðåäíîãî áàéòà äàííûõ
+        movwf   DataByte        ;   è åãî çàïîìèíàíèå
+CalcNextBit                     ; Âíóòðåííèé öèêë ïî áèòàì áàéòà
+        movf   CRC,w            ; Âûäåëåíèå ìëàäøåãî áèòà CRC
+        andlw   0x01
+        xorwf   DataByte, F     ; DataByte.0 = íîâîå CRC.0
+        btfss   DataByte, 0     ; Ïåðåõîä, åñëè íàäî èíâåðòèðîâàòü áèòû 4 è 5 â CRC
+        goto    ShftCRC        ; Ïåðåõîä, åñëè íå íàäî èíâåðòèðîâàòü áèòû 4 è 5 â CRC
+
+        movlw   CRC_POLY        ; Èíâåðòèðîâàíèå áèòîâ 4 è 5 â CRC
+        xorwf   CRC, F
+ShftCRC
+        rrcf     DataByte, F     ; Ñäâèã âñåé CRC
+        rrcf     CRC, F
+
+        decfsz  BitCount, F     ; Äåêðåìåíò è ïðîâåðêà ñ÷åò÷èêà áèò
+        goto    CalcNextBit     ; Öèêë, åñëè íå âñå áèòû áàéòà îáðàáîòàíû
+
+        decfsz  ByteCount, F    ; Äåêðåìåíò è ïðîâåðêà ñ÷åò÷èêà áàéò
+        goto    CalcNextByte    ; Öèêë, åñëè íå âñå áàéòû äàííûõ îáðàáîòàíû
+
+        movf   	CRC,w           ; Âîçâðàò ðåçóëüòàòà ÷åðåç W
+        return
+
+;/// /// ///
+;///
+;/// Åùå íàáîð êàêèõ-òî ôóíêöèé
+_HOT_GET_DS1821:
+		mObject_sel	THIS
+		movf	LavaData,w
+	return
+
+;
+_HOT_ASK_DS1821NeedTime:
+		mObject_sel	THIS
+		btfss	DSFLAG,7
+		retlw	TRUE
+		retlw	FALSE
+;
+_HOT_CLR_DS1821NeedTime:
+		mObject_sel	THIS
+		bsf		DSFLAG,7
+	return
+;
+_HOT_SET_DS1821TimeOver:
+		mObject_sel	THIS
+		bsf		DSFLAG,3
+	return
+
+
+; igor
+; ïðîâåðèòü íà îòêàç òåìïåðàòóðû
+_v0_hot_getTermAlrmMask;(void/w)
+
+	; ñäâèãàåì äèàãðàììó
+	banksel	waveFormTemper
+	rlncf	waveFormTemper, f	; ñäâèãàåì âëåâî è ïèøåì îáðàòíî 
+	movlw	0x03	; 0000_0011 - î÷èùàåì
+	andwf	waveFormTemper, f	; ÷èñòûé ôðîíò
+		; â 0-áèòå îáðàçóåòñÿ íîëü - îòêàçà íå áûëî
+
+	mObject_sel	THIS
+	; ïðîâåðêà íà îòêàç ïî òåìïåðàòðóå
+	movlw	TERM_THRESHOLD
+	cpfsgt	LavaData	; f > w
+	bra		temperAlrmNoAdded	; âñå õîðîøî, åñëè ïðåâûñåëî, íóæíî ýòî ïåðåñêî÷èòü
+
+	; îòêàç áûë
+	; ìàñêèðóåì è äîáàâëÿåì â êîíåö
+	banksel	waveFormTemper
+	bsf	waveFormTemper, 0	; 0000_00x1
+
+	; çàãîòîâêà äëÿ îòêàçà
+	movlw	b'00010000'
+	bra		temperAlrmWasAdded
+
+temperAlrmNoAdded:
+	movlw	0
+temperAlrmWasAdded:
+	mRETURN
+
+
+
+; ïðîâåðêà ôðîíòà
+; waveFormTemper = 0,1,2,3
+;mEXTENDS	_v2_HOT,	_v?,	hot_public_testTempFront;(void/w)
+hot_public_testTempFront;(void/w)
+	banksel	waveFormTemper
+
+	; switch (waveFormTemper) {
+	; Íåèçìåííûå ñîñòîÿíèÿ
+	; íåò è íå áûëî îòêàçà 0000_0000
+	movlw	0x00
+	cpfseq	waveFormTemper
+		TSTFSZ	hot_readOnly_zero	; áóäåò íåâåðíîå! è íå ïåðåñêî÷åò
+			retlw NO_EVENT
+
+	; áûë îòêàç è îí ñîõðàíèëñÿ 0000_0011
+	movlw	0x03
+	cpfseq	waveFormTemper
+		TSTFSZ	hot_readOnly_zero
+			retlw NO_EVENT
+
+; Event occure
+	; ïðîâåðêà ïîëîæèòåëüíîãî ôðîíòà 0000_0001
+	movlw	0x01
+	cpfseq	waveFormTemper
+		TSTFSZ	hot_readOnly_zero
+			retlw EVENT_UP
+
+	; ïðîâåðêà ñïàäà 0000_0010
+	movlw	0x02
+	cpfseq	waveFormTemper
+		TSTFSZ	hot_readOnly_zero
+			mSlideTo	hot_prv_tAlrFalled;()
+	;}
+	retlw	NO_EVENT
+; Êîíåö êîäà
+hot_prv_tAlrFalled;()
+	;bcf 	INTCON,	GIE		;disable irq âîò òàê âîò. èíòåðåñíî âûõîä ëè..
+#ifdef Z_T_ALR_FALL
+	;movlw	0x13
+	;mCall setZ1
+#endif
+	mCall	onDisappearTemperAlrm;(void/void)
+	retlw EVENT_DOWN
+end

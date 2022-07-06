@@ -1,0 +1,159 @@
+;Andrew Burger
+;****************
+
+.model	small
+.stack	100h
+.code
+main	proc
+	mov	ax, @code
+	mov	ds, ax
+
+jmp DATASKIP
+
+;Define your data here
+
+OldISR9		dd	?
+last_press	db	?
+
+;Code for main program
+;**************************************************
+
+DATASKIP:
+;install MyISR9
+
+	;get INT9 vector
+	mov ax,3509h
+	int 21h
+
+	;save INT9 vector
+	mov word ptr [OldISR9], bx
+	mov word ptr [OldISR9+2], es
+
+	;set INT9 vector --> MyISR9
+	mov ax, 2509h
+	mov dx, offset MyISR9
+	int 21h
+
+;wait for a key, echo it - Q or ESC to exit loop
+
+	;get key
+	ANOTHERKEY:
+	mov ah,1
+	int 21h
+
+	;check for Q or ESC
+	cmp al,51h
+	jz QUITLOOP
+	cmp al,1Bh
+	jz QUITLOOP
+	jmp ANOTHERKEY
+
+	QUITLOOP:
+
+;uninstall MyISR9
+
+	;set vector back to OldISR9
+	mov ax, 2509h
+	mov dx, word ptr [OldISR9]
+	mov ds, word ptr [OldISR9+2]
+	int 21h
+
+;**************************************************
+;End of code for main program
+	mov	ax, 4C00h
+	int	21h
+	ret
+main	endp
+
+
+;Code for Interrupt Handler
+;**************************************************
+MyISR9	proc
+
+	;disable interrupts and save flags & registers
+	cli
+	pushf
+	push ax
+	push ds
+
+	;set up data segment
+	mov ax, cs
+	mov ds, ax
+
+	;Code to get the current scan code from the keyboard.
+	in al, 60h
+
+	;Keyboard Scan Codes
+	; QWERTYUIOP:	10h-19h
+	; ASDFGHJKL:	1Eh-26h
+	; ZXCVBNM:	2Ch-32h
+
+	;if not keyboard scan code, jump to old hander
+
+	;less than 10h
+	cmp al, 10h
+	jb OLDHANDLER
+
+	;between 19h & 1Eh (1Ah-1Dh)
+	cmp al, 1Ah
+	jz OLDHANDLER
+	cmp al, 1Bh
+	jz OLDHANDLER
+	cmp al, 1Ch
+	jz OLDHANDLER
+	cmp al, 1Dh
+	jz OLDHANDLER
+
+	;between 26h & 2Ch (27h-2Bh)
+	cmp al, 27h
+	jz OLDHANDLER
+	cmp al, 28h
+	jz OLDHANDLER
+	cmp al, 29h
+	jz OLDHANDLER
+	cmp al, 2Ah
+	jz OLDHANDLER
+	cmp al, 2Bh
+	jz OLDHANDLER
+
+	;greater than 32h
+	cmp al, 32h
+	ja OLDHANDLER
+
+	;check last_press to determine if key is sent to old routine
+	cmp al, last_press
+	jz SAMEKEY
+
+	;key =! last_press
+	mov last_press, al
+
+	;go to old interrupt routine (restore regs & flags & interrupts)
+	OLDHANDLER:
+	pop ds
+	pop ax
+	popf
+	sti
+	jmp cs:[OldISR9]
+
+	SAMEKEY:
+	;Acknowledge keyboard interrupt: key not sent to old routine
+	in	al, 61h
+	or	al, 80h
+	out	61h, al
+	and	al, 7Fh
+	out	61h, al
+	mov	al, 20h
+	out	20h, al
+
+	;restore regs & flags and enable interrupts
+	pop ds
+	pop ax
+	popf
+	sti
+	iret
+
+MyISR9	endp
+;**************************************************
+;End of Code for Interrupt Handler
+
+end	main

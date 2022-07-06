@@ -1,0 +1,240 @@
+use ::NailResult;
+use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
+use rand::{self, Rng};
+use ssh::CompressionAlgorithm::{Xz, Zlib, NoComp};
+use ssh::EncryptionAlgorithm::{TripleDesCbc, BlowfishCbc, Twofish256Cbc, Twofish192Cbc,
+                               Twofish128Cbc, Aes256Cbc, Aes192Cbc, Aes128Cbc, Serpent256Cbc,
+                               Serpent192Cbc, Serpent128Cbc, Arcfour, IdeaCbc, Cast128Cbc, NoEnc};
+use ssh::KeyExchangeAlgorithm::{Curve25519Sha256, ExchangeSha1, ExchangeSha256, FourteenSha1, OneSha1};
+use ssh::MacAlgorithm::{HmacMd5, HmacMd5NinetySix, HmacSha1, HmacSha1NinetySix, NoMac};
+use ssh::ServerHostKeyAlgorithm::{PgpSignDss, PgpSignRsa, SshDss, SshEd25519, SshRsa};
+use std::default::Default;
+use std::io::Cursor;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct KeyExchangeInit {
+    id: u32,
+    cookie: [u8; 16],
+    kex_algorithms: Vec<String>,
+    server_host_key_algorithms: Vec<String>,
+    encryption_algorithms_client_to_server: Vec<String>,
+    encryption_algorithms_server_to_client: Vec<String>,
+    mac_algorithms_client_to_server: Vec<String>,
+    mac_algorithms_server_to_client: Vec<String>,
+    compression_algorithms_client_to_server: Vec<String>,
+    compression_algorithms_server_to_client: Vec<String>,
+    languages_client_to_server: Vec<String>,
+    languages_server_to_client: Vec<String>,
+    first_kex_packet_follows: bool,
+    reserved: u32,
+}
+
+impl Default for KeyExchangeInit {
+    fn default() -> KeyExchangeInit {
+        // Setup the cookie (16 random bytes).
+        let mut cookie = [0; 16];
+        let mut rng = rand::thread_rng();
+        for x in &mut cookie {
+            *x = rng.gen::<u8>();
+        }
+
+        // Setup the default key exchange algorithms.  Order is important here.
+        let mut kex_algos = Vec::new();
+        kex_algos.push(Curve25519Sha256.to_string());
+        kex_algos.push(ExchangeSha256.to_string());
+
+        // Setup teh default server host key algorithms. Order is important.
+        let mut shk_algos = Vec::new();
+        shk_algos.push(SshEd25519.to_string());
+        shk_algos.push(SshRsa.to_string());
+
+        // Setup the default encryption client-to-server algorithms. Order is important.
+        let mut enc_c2s_algos = Vec::new();
+        enc_c2s_algos.push(Aes256Cbc.to_string());
+        enc_c2s_algos.push(Twofish256Cbc.to_string());
+        enc_c2s_algos.push(Serpent256Cbc.to_string());
+        enc_c2s_algos.push(Aes192Cbc.to_string());
+        enc_c2s_algos.push(Twofish192Cbc.to_string());
+        enc_c2s_algos.push(Serpent192Cbc.to_string());
+        enc_c2s_algos.push(Aes128Cbc.to_string());
+        enc_c2s_algos.push(Twofish128Cbc.to_string());
+        enc_c2s_algos.push(Serpent128Cbc.to_string());
+        enc_c2s_algos.push(Cast128Cbc.to_string());
+        enc_c2s_algos.push(IdeaCbc.to_string());
+        enc_c2s_algos.push(BlowfishCbc.to_string());
+        enc_c2s_algos.push(TripleDesCbc.to_string());
+        enc_c2s_algos.push(Arcfour.to_string());
+        enc_c2s_algos.push(NoEnc.to_string());
+
+        // Setup the default encryption server-to-client algorithms.
+        let enc_s2c_algos = enc_c2s_algos.clone();
+
+        // Setup the default mac client-to-server algorithms.
+        let mut mac_c2s_algos = Vec::new();
+        mac_c2s_algos.push(HmacSha1.to_string());
+        mac_c2s_algos.push(HmacSha1NinetySix.to_string());
+        mac_c2s_algos.push(HmacMd5.to_string());
+        mac_c2s_algos.push(HmacMd5NinetySix.to_string());
+        mac_c2s_algos.push(NoMac.to_string());
+
+        // Setup the default mac server-to-client algorithms.
+        let mac_s2c_algos = mac_c2s_algos.clone();
+
+        // Setup the default compression client-to-server algorithms.
+        let mut comp_c2s_algos = Vec::new();
+        comp_c2s_algos.push(Xz.to_string());
+        comp_c2s_algos.push(Zlib.to_string());
+        comp_c2s_algos.push(NoComp.to_string());
+
+        // Setup the default compression server-to-client algorithms.
+        let comp_s2c_algos = comp_c2s_algos.clone();
+
+        KeyExchangeInit {
+            id: 20,
+            cookie: cookie,
+            kex_algorithms: kex_algos,
+            server_host_key_algorithms: shk_algos,
+            encryption_algorithms_client_to_server: enc_c2s_algos,
+            encryption_algorithms_server_to_client: enc_s2c_algos,
+            mac_algorithms_client_to_server: mac_c2s_algos,
+            mac_algorithms_server_to_client: mac_s2c_algos,
+            compression_algorithms_client_to_server: comp_c2s_algos,
+            compression_algorithms_server_to_client: comp_s2c_algos,
+            languages_client_to_server: Vec::new(),
+            languages_server_to_client: Vec::new(),
+            first_kex_packet_follows: false,
+            reserved: 0,
+        }
+    }
+}
+
+impl KeyExchangeInit {
+    pub fn into_bytes(self) -> NailResult<Vec<u8>> {
+        let mut kex_packet = Vec::new();
+        try!(kex_packet.write_u32::<BigEndian>(self.id));
+        kex_packet.extend_from_slice(&self.cookie);
+        try!(write_name_list(&mut kex_packet, &self.kex_algorithms));
+        try!(write_name_list(&mut kex_packet, &self.server_host_key_algorithms));
+        try!(write_name_list(&mut kex_packet,
+                             &self.encryption_algorithms_client_to_server));
+        try!(write_name_list(&mut kex_packet,
+                             &self.encryption_algorithms_server_to_client));
+        try!(write_name_list(&mut kex_packet, &self.mac_algorithms_client_to_server));
+        try!(write_name_list(&mut kex_packet, &self.mac_algorithms_server_to_client));
+        try!(write_name_list(&mut kex_packet,
+                             &self.compression_algorithms_client_to_server));
+        try!(write_name_list(&mut kex_packet,
+                             &self.compression_algorithms_server_to_client));
+        try!(write_name_list(&mut kex_packet, &self.languages_client_to_server));
+        try!(write_name_list(&mut kex_packet, &self.languages_server_to_client));
+        if self.first_kex_packet_follows {
+            kex_packet.push(0)
+        } else {
+            kex_packet.push(1)
+        }
+
+        try!(kex_packet.write_u32::<BigEndian>(self.reserved));
+        Ok(kex_packet)
+    }
+
+    pub fn from_bytes(bytes: Vec<u8>) -> NailResult<KeyExchangeInit> {
+        let mut iter = bytes.into_iter();
+
+        // Get the Message Type Byte
+        let idv = iter.by_ref().take(4).collect::<Vec<u8>>();
+        let mut rdr = Cursor::new(&idv);
+        let id = try!(rdr.read_u32::<BigEndian>());
+
+        // Get the cookie
+        let mut cookie = [0; 16];
+        for (b, x) in iter.by_ref().take(16).zip(cookie.iter_mut()) {
+            *x = b;
+        }
+
+        let kex_algs = try!(read_name_list(&mut iter));
+        let shk_algs = try!(read_name_list(&mut iter));
+        let enc_c2s_algs = try!(read_name_list(&mut iter));
+        let enc_s2c_algs = try!(read_name_list(&mut iter));
+        let mac_c2s_algs = try!(read_name_list(&mut iter));
+        let mac_s2c_algs = try!(read_name_list(&mut iter));
+        let comp_s2c_algs = try!(read_name_list(&mut iter));
+        let comp_c2s_algs = try!(read_name_list(&mut iter));
+        let lang_c2s_algs = try!(read_name_list(&mut iter));
+        let lang_s2c_algs = try!(read_name_list(&mut iter));
+
+        let first_kex_packet_follows = if let Some(fkpf) = iter.by_ref().next() {
+            fkpf == 0
+        } else {
+            false
+        };
+
+        let mut reserved_cursor = Cursor::new(iter.by_ref().take(4).collect::<Vec<u8>>());
+        let reserved = try!(reserved_cursor.read_u32::<BigEndian>());
+
+        Ok(KeyExchangeInit {
+            id: id,
+            cookie: cookie,
+            kex_algorithms: kex_algs,
+            server_host_key_algorithms: shk_algs,
+            encryption_algorithms_client_to_server: enc_c2s_algs,
+            encryption_algorithms_server_to_client: enc_s2c_algs,
+            mac_algorithms_client_to_server: mac_c2s_algs,
+            mac_algorithms_server_to_client: mac_s2c_algs,
+            compression_algorithms_client_to_server: comp_c2s_algs,
+            compression_algorithms_server_to_client: comp_s2c_algs,
+            languages_client_to_server: lang_c2s_algs,
+            languages_server_to_client: lang_s2c_algs,
+            first_kex_packet_follows: first_kex_packet_follows,
+            reserved: reserved,
+        })
+    }
+
+    pub fn kex_algorithms(&self) -> &Vec<String> {
+        &self.kex_algorithms
+    }
+}
+
+fn read_name_list<I: Iterator<Item = u8>>(iter: &mut I) -> NailResult<Vec<String>> {
+    let mut outv = Vec::new();
+    let mut name_list_cursor = Cursor::new(iter.by_ref().take(4).collect::<Vec<u8>>());
+    let name_list_len = try!(name_list_cursor.read_u32::<BigEndian>());
+    outv.extend(iter.by_ref().take(name_list_len as usize));
+    let name_list = String::from_utf8_lossy(&outv);
+    let names: Vec<String> = name_list.split(',').map(|x| x.to_string()).collect();
+    Ok(names)
+}
+
+#[cfg_attr(feature="clippy", allow(cast_possible_truncation))]
+fn write_name_list(packet: &mut Vec<u8>, name_list: &[String]) -> NailResult<()> {
+    let joined = name_list.join(",");
+    let len = joined.len();
+    try!(packet.write_u32::<BigEndian>(len as u32));
+    packet.extend(joined.bytes());
+    Ok(())
+}
+
+#[cfg(test)]
+mod test {
+    use std::default::Default;
+    use super::KeyExchangeInit;
+
+    #[test]
+    fn kex_default() {
+        let kex: KeyExchangeInit = Default::default();
+        assert!(kex.id == 20);
+        assert!(kex.cookie.len() == 16);
+        assert!(!kex.first_kex_packet_follows);
+        assert!(kex.reserved == 0);
+    }
+
+    #[test]
+    #[cfg_attr(feature="clippy", allow(indexing_slicing, use_debug))]
+    fn kex_from_bytes() {
+        let kex: KeyExchangeInit = Default::default();
+        if let Ok(kex_bytes) = kex.into_bytes() {
+            assert!(&kex_bytes[0..4] == [0, 0, 0, 20]);
+        } else {
+            assert!(false)
+        }
+    }
+}

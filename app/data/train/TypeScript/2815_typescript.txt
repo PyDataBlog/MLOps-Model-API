@@ -1,0 +1,108 @@
+import { Component, OnInit } from '@angular/core';
+import { ActivatedRoute, Params, Router } from '@angular/router';
+import { User } from '../user.service';
+import { Course } from '../../../course/course.service';
+import { AppState, UPLOAD_URL } from '../../../app.service';
+import { AppStore } from '../../../app.store';
+import { CalendarChartConfig } from '../../../chart/calendar-chart/calendar-chart.config';
+import { StatService } from '../../../statistic/stat.service';
+import { APIService } from '../../../shared/services/api.service';
+import { Thread } from '../../../thread/thread.service';
+
+import * as _ from 'underscore';
+import * as moment from 'moment';
+
+@Component({
+  selector: 'user-dashboard', 
+	styleUrls: [ './user-dashboard.component.scss' ],
+	templateUrl: './user-dashboard.component.html'
+})
+
+
+
+export class UserDashboardComponent implements OnInit{
+  public calendarChartConfig : Array<CalendarChartConfig>;
+  public statsByMonth;
+  public myCourses : Course[] = [];
+  private myQuestions : Thread[] = [];
+  public enableEdit : boolean = false;
+
+  user : User;
+  stats;
+  userStats = [];
+  
+  constructor(public api: APIService, public route: ActivatedRoute, public router : Router, public appState : AppState, public statService : StatService, public store : AppStore) {
+    this.user = this.route.snapshot.parent.data['user'];
+    this.api.findMany({_id : {$in : this.user.courses}}, 'course')
+      .subscribe((courses : Course[]) => {
+        this.myCourses = courses;
+      })
+    this.api.findMany({child_to : {$in : this.user.courses}, creator : this.user}, 'thread')
+      .subscribe((threads : Thread[]) => {
+        this.myQuestions = threads;
+      })
+    this.getStats(this.user._id);
+  }
+  ngOnInit() : void {
+    this.store
+      .changes
+      .pluck('user')
+      .filter((user: User) => user !== undefined)
+      .subscribe((user: User) => {
+        if(user._id == this.user._id){
+            this.enableEdit = true;
+        }
+      })
+  }
+  getStats(id) : void {
+    let request = {
+      query : { 'actor.id': id }, 
+      groupBy : '$date',
+      limit : 999999999,
+      sortBy : 'dateAsc'
+    }
+    this.statService.getStats(request)
+      .subscribe(res => {
+        this.stats = res;
+        this.stats = _.sortBy(res, function(stat:any){
+          stat['date'] = moment(stat._id).add(-1, 'months').toDate();
+          return stat['date'];
+        })
+        let calendarConfigData : CalendarChartConfig = {
+          settings : {
+            fill: 'rgba(1,67,163, 1)',
+            interpolation: 'monotone'
+          }, dataset: this.stats.map(data => {
+            return { date: data.date, actors: data.actors, verbs : data.verbs, objects : data.objects, count : data.count};
+          })
+        }
+        this.calendarChartConfig = new Array<CalendarChartConfig>();
+        this.calendarChartConfig.push(calendarConfigData);
+        this.setup();
+      })
+  }
+  setup() : void{
+    let self = this;
+    _.each(this.stats, function(elem){
+      _.each(elem['root'], function(e){
+        self.userStats.push(e);
+      })
+    })
+    this.userStats = _.union(self.userStats);
+    this.statsByMonth = this.setStatsByMonth(this.userStats);
+  }
+  setStatsByMonth(data) : any{
+    let statsByMonth = [];
+    let groupedData = _.groupBy(data, function(elem:any){
+      return moment(elem.date).format('MMMM YYYY');
+    })
+    _.each(Object.keys(groupedData), function(key:any, index){
+      statsByMonth.push({data: groupedData[key], month: key})
+    })
+    return statsByMonth;
+  }
+  onSelect(event , course : Course) : void {
+    event.preventDefault();
+    this.router.navigate(['/course', course._id]); 
+  }
+}

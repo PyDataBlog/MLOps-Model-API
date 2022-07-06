@@ -1,0 +1,210 @@
+﻿' ******************************************************************************
+' ** 
+' **  Yahoo! Managed
+' **  Written by Marius Häusler 2011
+' **  It would be pleasant, if you contact me when you are using this code.
+' **  Contact: YahooFinanceManaged@gmail.com
+' **  Project Home: http://code.google.com/p/yahoo-finance-managed/
+' **  
+' ******************************************************************************
+' **  
+' **  Copyright 2011 Marius Häusler
+' **  
+' **  Licensed under the Apache License, Version 2.0 (the "License");
+' **  you may not use this file except in compliance with the License.
+' **  You may obtain a copy of the License at
+' **  
+' **    http://www.apache.org/licenses/LICENSE-2.0
+' **  
+' **  Unless required by applicable law or agreed to in writing, software
+' **  distributed under the License is distributed on an "AS IS" BASIS,
+' **  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+' **  See the License for the specific language governing permissions and
+' **  limitations under the License.
+' ** 
+' ******************************************************************************
+
+
+Namespace YahooManaged.Search.Diverse.API
+
+
+    Public Class SiteExplorerResponse
+        Inherits Base.Response
+
+        Private mTotal As Integer
+
+        Public Overloads ReadOnly Property Result As SearchResult()
+            Get
+                Return CType(MyBase.Result, SearchResult())
+            End Get
+        End Property
+        Public ReadOnly Property TotalResultsAvailable As Integer
+            Get
+                Return mTotal
+            End Get
+        End Property
+
+        Friend Sub New(ByVal conn As Base.ConnectionInfo, ByVal results() As SearchResult, ByVal total As Integer)
+            MyBase.New(conn, results)
+            mTotal = total
+        End Sub
+
+    End Class
+
+    Public Class SiteExplorerDownloadCompletedEventArgs
+        Inherits Base.DownloadCompletedEventArgs
+
+        Private mUrl As Uri = Nothing
+        Private mOptions As ResultCountOptions = Nothing
+
+        Public Overloads ReadOnly Property Response As SiteExplorerResponse
+            Get
+                Return CType(MyBase.Response, SiteExplorerResponse)
+            End Get
+        End Property
+        Public ReadOnly Property Url As Uri
+            Get
+                Return mUrl
+            End Get
+        End Property
+        Public ReadOnly Property Options As ResultCountOptions
+            Get
+                Return mOptions
+            End Get
+        End Property
+
+        Friend Sub New(ByVal userArgs As Object, ByVal resp As SiteExplorerResponse, ByVal url As Uri, ByVal opt As ResultCountOptions)
+            MyBase.New(userArgs, resp)
+            mUrl = url
+            mOptions = opt
+        End Sub
+
+    End Class
+
+
+    Public Class SiteExplorerDownload
+        Inherits Base.Download
+
+        ''' <summary>
+        ''' Raises if an asynchronous download of quotes data completes.
+        ''' </summary>
+        ''' <param name="sender">The event raising object</param>
+        ''' <param name="ea">The event args of the asynchronous download</param>
+        ''' <remarks></remarks>
+        Public Event AsyncDownloadCompleted(ByVal sender As Base.Download, ByVal ea As SiteExplorerDownloadCompletedEventArgs)
+
+        Private mXmlParser As New XMLParser
+        Private mOptions As New ResultCountOptions
+        Public Property Options() As ResultCountOptions
+            Get
+                Return mOptions
+            End Get
+            Set(ByVal value As ResultCountOptions)
+                mOptions = value
+            End Set
+        End Property
+
+
+        Public Function DownloadInLinks(ByVal url As String) As SiteExplorerResponse
+            Return Me.DownloadInLinks(New Uri(url))
+        End Function
+        Public Function DownloadInLinks(ByVal url As Uri) As SiteExplorerResponse
+            Dim opt As New ResultCountOptions(mOptions)
+            Dim urll = Me.DownloadURL(url, "inlinks", opt)
+            Return Me.ToResponse(MyBase.DownloadStream(urll))
+        End Function
+
+        Public Function DownloadPageData(ByVal url As String) As SiteExplorerResponse
+            Return Me.DownloadPageData(New Uri(url))
+        End Function
+        Public Function DownloadPageData(ByVal url As Uri) As SiteExplorerResponse
+            Dim opt As New ResultCountOptions(mOptions)
+            Return Me.ToResponse(MyBase.DownloadStream(Me.DownloadURL(url, "pages", opt)))
+        End Function
+
+
+
+        Public Sub DownloadAsyncInLinks(ByVal url As String, Optional ByVal userArgs As Object = Nothing)
+            Me.DownloadAsyncInLinks(New Uri(url), userArgs)
+        End Sub
+        Public Sub DownloadAsyncInLinks(ByVal url As Uri, Optional ByVal userArgs As Object = Nothing)
+            Dim args As New AsyncDownloadArgs(userArgs, url, New ResultCountOptions(mOptions))
+            MyBase.DownloadStreamAsync(Me.DownloadURL(args.Url, "inlinks", args.Options), args)
+        End Sub
+
+        Public Sub DownloadAsyncPageData(ByVal url As String, Optional ByVal userArgs As Object = Nothing)
+            Me.DownloadAsyncPageData(New Uri(url), userArgs)
+        End Sub
+        Public Sub DownloadAsyncPageData(ByVal url As Uri, Optional ByVal userArgs As Object = Nothing)
+            Dim args As New AsyncDownloadArgs(userArgs, url, New ResultCountOptions(mOptions))
+            MyBase.DownloadStreamAsync(Me.DownloadURL(args.Url, "pages", args.Options), args)
+        End Sub
+
+
+
+        ''' <summary>
+        ''' Default constructor
+        ''' </summary>
+        ''' <remarks></remarks>
+        Public Sub New()
+        End Sub
+
+
+        Private Sub DownloadAsync_Completed(ByVal sender As Base.Download, ByVal e As Base.StreamDownloadCompletedEventArgs) Handles MyBase.AsyncStreamDownloadCompleted
+            If e IsNot Nothing AndAlso e.UserArgs IsNot Nothing AndAlso e.UserArgs.GetType Is GetType(AsyncDownloadArgs) Then
+                Dim dlArgs As AsyncDownloadArgs = DirectCast(e.UserArgs, AsyncDownloadArgs)
+                Dim args As New SiteExplorerDownloadCompletedEventArgs(dlArgs.UserArgs, Me.ToResponse(e.Response), dlArgs.Url, dlArgs.Options)
+                RaiseEvent AsyncDownloadCompleted(Me, args)
+            End If
+        End Sub
+
+        Private Function DownloadURL(ByVal url As Uri, ByVal table As String, ByVal opt As ResultCountOptions) As String
+            If url IsNot Nothing Then
+                Return mHelper.YqlUrl("*"c, "search.siteexplorer." & table, "query=""" & url.ToString & """", opt, False)
+            Else
+                Throw New NotSupportedException("An empty url will not be supported.")
+            End If
+        End Function
+
+
+        Private Function ToResponse(ByVal resp As Base.StreamResponse) As SiteExplorerResponse
+            Dim results As New List(Of SearchResult)
+            Dim total As Integer
+            Dim xmlDoc = mHelper.GetXmlDocument(resp.Result)
+            If xmlDoc IsNot Nothing Then
+                Dim totalNode As XmlNode = xmlDoc.SelectSingleNode("//query/meta/data/totalResultsAvailable")
+                If totalNode IsNot Nothing Then total = Convert.ToInt32(totalNode.InnerText)
+
+                Dim mainLst As XmlNodeList = xmlDoc.GetElementsByTagName("Result")
+                For Each node As XmlNode In mainLst
+                    Dim s As SearchResult = mXmlParser.ToSearchResult(node)
+                    If s IsNot Nothing Then results.Add(s)
+                Next
+            End If
+            mHelper.CloseStream(resp.Result)
+            Return New SiteExplorerResponse(resp.Connection, results.ToArray, total)
+        End Function
+
+
+        Private Class AsyncDownloadArgs
+            Inherits Base.DownloadEventArgs
+            Public Options As ResultCountOptions
+            Public Url As Uri
+            Public Sub New(ByVal userArgs As Object, ByVal u As Uri, ByVal opt As ResultCountOptions)
+                MyBase.New(userArgs)
+                Me.Url = u
+                Me.Options = opt
+            End Sub
+        End Class
+
+    End Class
+
+
+
+
+
+
+
+
+
+End Namespace

@@ -1,0 +1,202 @@
+#!/usr/bin/perl
+
+# index-ead.pl - put EAD content into SOLR
+
+# Eric Lease Morgan <emorgan@nd.edu>
+# September 30, 2010 - first investigations
+# October    4, 2010 - began extracting urls
+# October   11, 2010 - processed all previously transformed EAD files
+# October   12, 2010 - added optimize, autocommit, format, and intelligent language
+# November  18, 2010 - added escape_entities and escaped title; "Happy Birthday, Douglas"
+# March      9, 2011 - configured for james
+# April      6, 2011 - tweaked for new location of EAD files
+# January    4, 2012 - batch loaded documents and got huge speed boost
+
+
+# configure
+use constant CACHE       => '/home/emorgan/sandbox/crra/ead-incoming/';
+use constant DB          => '/home/emorgan/sandbox/crra/crra-scripts/etc/libraries.db';
+use constant DESCRIPTION => 'View finding aid in Portal display';
+use constant EAD2SOLR    => '/home/emorgan/sandbox/crra/crra-scripts/etc/ead2solr.xsl';
+use constant FORMAT      => 'Archival material';
+use constant LANGUAGE    => 'Unknown';
+use constant OPTIMIZE    => 10000;
+use constant EAD         => '/var/www/html/zoia/sandbox/crra-data/ead-xml/';
+use constant SOLR        => 'http://localhost:8080/solr/biblio';
+use constant TYPE        => 'ead';
+use constant WEBROOT     => 'http://www.catholicresearch.net/data/ead/html/';
+
+# require
+use strict;
+use WebService::Solr;
+use XML::LibXML;
+use XML::LibXSLT;
+use XML::XPath;
+require '/home/emorgan/sandbox/crra/crra-scripts/lib/subroutines.pl';
+
+# initialize
+my $parser = XML::LibXML->new;
+my $xslt   = XML::LibXSLT->new;
+my $solr   = WebService::Solr->new( SOLR );
+
+# process each library in the database
+my $libraries = &read_institutions( DB );
+foreach my $key ( sort keys %$libraries ) {
+
+	# sanity check; only process libraries with EAD files
+	my $institution = $$libraries{ $key }->[ 0 ];
+	my $library     = $$libraries{ $key }->[ 1 ];
+	my $root        = $$libraries{ $key }->[ 3 ];
+	next if ( ! $root );
+
+	# delete old data
+	print "Deleting EAD records for $institution...\n";
+	$solr->delete_by_query( "id:$key" . TYPE . "_*" );
+
+	# process each file in this library's EAD cache
+	my $directory = EAD;
+	opendir( DIRECTORY, $directory );
+	while ( my $filename = readdir( DIRECTORY )) {
+	
+		# only want xml files, and files matching the current key
+		next if ( $filename !~ /xml$/ );
+		next if ( $filename !~ /^$key/ );
+		
+		# temporary hack used to index a particular EAD file --ELM
+		#next if ( $filename !~ /una-swd.xml$/ );
+
+		# create the ead filename
+		my $ead = "$directory$filename";
+		print $ead, "\n";
+		
+		# get the language
+		my $xpath = XML::XPath->new( filename => $ead );
+		my $language = $xpath->findvalue(' /ead/archdesc/did/langmaterial/language' );
+		if ( ! $language ) { $language = LANGUAGE }
+
+		# extract all the "records"
+		print "Processing $ead...\n";
+		my $source     = $parser->parse_file( $ead )       or die "Can't load EAD: $!\n";
+		my $style      = $parser->parse_file( EAD2SOLR )   or die "Can't load XSL: $!\n";
+		my $stylesheet = $xslt->parse_stylesheet( $style ) or die "Can't parse style: $!\n";
+		my $results    = $stylesheet->transform( $source ) or die "Can't transform EAD: $!\n";	
+		
+		# get, parse, and process each record; seems too slow
+		$xpath      =  XML::XPath->new( xml => $stylesheet->output_string( $results ));
+		my $records =  $xpath->findnodes( '//record' );
+		$filename   =~ s/xml$/html/;
+		my $index   = 0;
+		my @docs    = ();
+		foreach my $record ( $records->get_nodelist ) {
+					
+			# increment and optimize
+			#$index++;
+			#if ( $index == OPTIMIZE ) {
+			#
+			#	print "Optimizing...\n";
+			#	$solr->optimize;
+			#	
+			#	# reset
+			#	$index = 0;
+			#	
+			#}
+			
+			# extract/build metadata
+			my $anchor               = $record->findvalue( 'id' );
+			my $id                   = $key . TYPE . '_' . $anchor;
+			my $title                = $record->findvalue( 'title' );
+			my $title_auth           = $title;
+			my $title_full           = $title;
+			my $title_fullStr        = $title;
+			my $title_full_unstemmed = $title;
+			my $title_short          = $title;
+			my $title_sort           = $title;
+			my $date                 = $record->findvalue( 'date' );
+			my $format               = FORMAT;
+			my $institution          = $institution;
+			my $library              = $library;
+			my $type                 = TYPE;
+			my $language             = LANGUAGE;
+			my $remote_url           = &escape_entities( $record->findvalue( 'url' ));
+			my $remote_description   = $record->findvalue( 'url/@description' );
+			my $local_url            = WEBROOT . "$filename#$anchor";
+			my $local_description    = DESCRIPTION;
+			my $xml_title            = &escape_entities( $title );
+			my $crra_scopecontent    = 'This is the scopecontent';
+			my $crra_bioghist        = 'This is bioghist';
+			my $fullrecord           = "<record><id>$id</id><title>$xml_title</title><date>$date</date><url description='$remote_description'>$remote_url</url><url description='$local_description'>$local_url</url></record>";
+						
+			# echo
+			print "                anchor = $anchor\n";
+			print "                    id = $id\n";
+			print "                 title = $title\n";
+			#print "            title_auth = $title_auth\n";
+			#print "            title_full = $title_full\n";
+			#print "         title_fullStr = $title_fullStr\n";
+			#print "  title_full_unstemmed = $title_full_unstemmed\n";
+			#print "           title_short = $title_short\n";
+			#print "            title_sort = $title_sort\n";
+			print "                  date = $date\n";
+			print "           institution = $institution\n";
+			print "              library  = $library\n";
+			print "           record type = $type\n";
+			print "              language = $language\n";
+			print "                format = $format\n";
+			print "            fullrecord = $fullrecord\n";
+			print "\n";
+
+
+=cut
+			# populate solr fields
+			my $solr_id                   = WebService::Solr::Field->new( 'id'                    => "$id" );
+			my $solr_title                = WebService::Solr::Field->new( 'title'                 => "$title" );
+			my $solr_title_auth           = WebService::Solr::Field->new( 'title_auth'            => "$title_auth" );
+			my $solr_title_full           = WebService::Solr::Field->new( 'title_full'            => "$title_full" );
+			my $solr_title_fullStr        = WebService::Solr::Field->new( 'title_fullStr'         => "$title_fullStr" );
+			my $solr_title_full_unstemmed = WebService::Solr::Field->new( 'title_full_unstemmed'  => "$title_full_unstemmed" );
+			my $solr_title_short          = WebService::Solr::Field->new( 'title_short'           => "$title_short" );
+			my $solr_title_sort           = WebService::Solr::Field->new( 'title_sort'            => "$title_sort" );
+			my $solr_date                 = WebService::Solr::Field->new( 'publishDate'           => "$date" );
+			my $solr_format               = WebService::Solr::Field->new( 'format'                => "$format" );
+			my $solr_institution          = WebService::Solr::Field->new( 'institution'           => "$institution" );
+			my $solr_building             = WebService::Solr::Field->new( 'building'              => "$library" );
+			my $solr_fullrecord           = WebService::Solr::Field->new( 'fullrecord'            => "$fullrecord" );
+			my $solr_type                 = WebService::Solr::Field->new( 'recordtype'            => "$type" );
+			my $solr_language             = WebService::Solr::Field->new( 'language'              => "$language" );
+			my $solr_crra_scopecontent    = WebService::Solr::Field->new( 'crra_scopecontent_str' => "$crra_scopecontent" );
+			my $solr_crra_bioghist        = WebService::Solr::Field->new( 'crra_bioghist_str'     => "$crra_bioghist" );
+		
+			# fill a solr document with simple fields
+			my $doc = WebService::Solr::Document->new;
+			$doc->add_fields( $solr_crra_bioghist, $solr_crra_scopecontent, $solr_id, $solr_title, $solr_title_auth, $solr_title_full, $solr_title_fullStr, $solr_title_full_unstemmed, $solr_title_short, $solr_title_sort, $solr_date, $solr_format, $solr_institution, $solr_building, $solr_fullrecord, $solr_type, $solr_language );
+		
+			# add the doc to the list of docs
+			push @docs, $doc;
+=cut
+
+		}
+			
+=cut
+		# save; our reasone de exitance
+		print "Adding documents...\n";
+		$solr->add( \@docs );
+=cut
+		
+	}
+	
+=cut
+	# optimize
+	print "Optimizing...\n";
+	$solr->optimize;
+
+=cut
+
+	# be polite
+	closedir( DIRECTORY );
+	
+}
+
+
+# done
+print "Done.\n";
+exit;

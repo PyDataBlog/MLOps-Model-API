@@ -1,0 +1,107 @@
+'use strict';
+
+const _ = require('underscore');
+const Handlebars = require('handlebars');
+const moment = require('moment');
+const VPREmulatorModel = require('./vprEmulatorModel');
+const toFMDateTime = require('../vdmUtils').toFMDateTime;
+
+class VPRPatientEmulator extends VPREmulatorModel {
+    template() {
+        return [
+            "<results version='{{vprDataVersion}}' timeZone='-0500' >",
+            "<demographics total='{{total}}' >",
+            '<patient>',
+            "<bid value='{{bid}}' />",
+            "<dob value='{{toDate dateOfBirth}}' />",
+            '{{{getFacilities}}}',
+            "<familyName value='{{toFamilyName name}}' />",
+            "<fullName value='{{name}}' />",
+            "<gender value='{{toGender sex}}' />",
+            "<givenNames value='{{toGivenName name}}' />",
+            "<id value='{{patientId}}' />",
+            "<inpatient value='{{getInpatient}}' />",
+            "<lrdfn value='{{getLrdfn}}' />",
+            "<sc value='{{sc}}' />",
+            "<ssn value='{{socialSecurityNumber}}' />",
+            "<veteran value='{{veteran}}' />",
+            '</patient>',
+            '</demographics>',
+            '</results>',
+        ];
+    }
+
+    compileTemplate(mvdmForm) {
+        Handlebars.registerHelper('toDate', date => toFMDateTime(date.value));
+
+        Handlebars.registerHelper('toFamilyName', name => name.substring(0, name.indexOf(',')));
+
+        Handlebars.registerHelper('toGender', (sex) => {
+            const map = {
+                MALE: 'M',
+                FEMALE: 'F',
+            };
+            return map[sex];
+        });
+
+        Handlebars.registerHelper('toGivenName', name => name.substring(name.indexOf(',') + 1, name.length));
+
+        Handlebars.registerHelper('getInpatient', () => {
+            if (mvdmForm.currentAdmission) {
+                return 'true';
+            }
+            return 'false';
+        });
+
+        Handlebars.registerHelper('getLrdfn', () => {
+            if (_.has(mvdmForm, 'laboratoryReference')) {
+                return mvdmForm.laboratoryReference.id.split('-')[1];
+            }
+            return 0;
+        });
+
+        Handlebars.registerHelper('getFacilities', () => {
+            /*
+             * Facilities visited by the Patient
+             *
+             * In the general case there may be many facilities (MPI can be called). For an
+             * isolate VISTA, there will be at most one, this VISTA.
+             *
+             * TODO: replace with a Javascript Utility or a computed property in Patient
+             */
+            const dateStr = moment().format('YYYY-MM-DD');
+            return `${'<facilities>' +
+                "<facility code='050' name='SOFTWARE SERVICE' latestDate='"}${toFMDateTime(dateStr)}' domain='FOIA.DOMAIN.EXT' />` +
+                '</facilities>';
+        });
+
+        mvdmForm.bid = `C${mvdmForm.socialSecurityNumber.substring(5, 9)}`;
+        mvdmForm.patientId = mvdmForm.id.replace('2-', '');
+        mvdmForm.sc = mvdmForm.isServiceConnected ? 1 : 0;
+        mvdmForm.veteran = mvdmForm.isVeteran ? 1 : 0;
+
+        const temp = Handlebars.compile(this.template().join(''));
+        const res = temp(mvdmForm);
+        return res;
+    }
+
+    getOnePatientDetail(res) {
+        if (res === 'error') {
+            return `<results version='${this.vprDataVersion}' timeZone='-0500' ><demographics total='0' ></demographics></results>`;
+        }
+        res.vprDataVersion = this.vprDataVersion;
+        res.total = 1;
+        const result = this.compileTemplate(res);
+        return result.replace(/"/g, '\'');
+    }
+
+    toReturnValue(invokeResult) {
+        return this.getOnePatientDetail(invokeResult);
+    }
+
+    transformIEN(ien) {
+        return `2-${ien}`;
+    }
+}
+
+module.exports = VPRPatientEmulator;

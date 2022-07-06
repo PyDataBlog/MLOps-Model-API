@@ -1,0 +1,117 @@
+requirevars 'defaultDB' 'input_global_tbl' 'y' 'alpha' ;
+attach database '%{defaultDB}' as defaultDB;
+
+------------------------------------------------------------------------------------
+-- Merge local_counts
+drop table if exists global_counts1;
+create temp table global_counts1 as
+select  colname, val, classval, null as S1, null as S2, sum(quantity) as quantity
+from %{input_global_tbl}
+where colname  in (select code from defaultDB.globalmetadatatbl where categorical = 1 )
+group by colname, classval,val;
+
+insert into global_counts1
+select  colname, val, classval, sum(S1) as S1, sum(S2) as S2, sum(quantity) as quantity
+from %{input_global_tbl}
+where colname  in (select code from defaultDB.globalmetadatatbl where categorical = 0 )
+group by colname, classval,val;
+
+--------------------------------------------------------------------------------------------------------
+-- For each categorical column: Add 0 for the classval that does not exist. --CHECK!!!!
+
+insert into global_counts1
+select c1 as colname, c2 as val, uniqueclassval as classval, null as S1, null as S2, 0 as quantity
+from ( select *from( setschema  'c1,c2,uniqueclassval' from select jsplit(c1), uniqueclassval
+       from (select distinct c1 from (select jmerge(colname,val) as c1 from global_counts1) )
+       cross join
+       (select distinct(classval) as uniqueclassval from global_counts1)))
+where colname in (select code from defaultDB.globalmetadatatbl  where categorical= 1);
+
+drop table if exists global_counts;
+create temp table global_counts as
+select colname, val, classval, S1, S2, max(quantity) as quantity
+from global_counts1
+group by colname,classval,val;
+drop table if exists global_counts1;
+
+-- For each categorical column: Add Laplace smoothing (https://en.wikipedia.org/wiki/Additive_smoothing)
+update  global_counts
+set quantity = quantity + %{alpha}
+where colname in (select code from defaultDB.globalmetadatatbl  where categorical= 1 and code <> '%{y}')
+and  0 in (select min(quantity) from global_counts);
+
+-------------------------------------------------------------------------------------------------
+-- For each non categorical column: compute avg and std for each classval
+drop table if exists statistics;
+create temp table statistics as
+select colname, classval, cast(S1 as float)/cast(quantity as float) as average ,
+       SQROOT( FARITH('/', '-', '*', quantity, S2, '*', S1, S1, '*', quantity, '-', quantity, 1))  as sigma
+from global_counts
+where colname  in (select code from defaultDB.globalmetadatatbl  where categorical= 0)
+group by colname, classval;
+
+-----------------------------------------------------------------------------------------------
+-- Compute Naive Bayes ---
+--1. Compute class prior probabilities (classname, classval, probability)
+drop table if exists global_probabilities;
+create temp table global_probabilities (colname text,val text, classval text ,average real,sigma real,probability real);
+
+insert into global_probabilities
+select '%{y}', val, val, null , null , cast(classquantity as float)/cast(totalquantity as float)
+from (select val, sum(quantity) as classquantity from global_counts where colname='%{y}' group by val),
+     (select sum(quantity) as totalquantity from global_counts where colname='%{y}');
+
+--2. Compute likelihoods for categorical variables
+insert into global_probabilities
+select colname,val, classval, null ,null , cast(quantity as float)/cast(classquantity +  %{alpha} * novals  as float)
+from (select colname, val, classval,quantity from global_counts),
+     (select val as classval1, sum(quantity) as classquantity from global_counts where colname ='%{y}' group by val),
+     (select colname as colname1, count( distinct val) as novals from global_counts group by colname)
+where classval = classval1
+and colname =colname1
+and colname in (select code from defaultDB.globalmetadatatbl  where categorical= 1 and code <> '%{y}');
+
+--3. Compute likelihoods for non categorical variables
+insert into global_probabilities
+select colname,null , classval, average, sigma, null
+from statistics
+where colname in (select code from defaultDB.globalmetadatatbl  where categorical= 0)
+and colname <> '%{y}';
+
+--select * from defaultDB.global_probabilities;
+var 'resulttable' from  select * from (totabulardataresourceformat title:NAIVE_BAYES_TABLE types:text,text,text,real,real,real
+select colname,val,classval,average,sigma,probability from global_probabilities);
+
+--select '{"result": [' || '%{resulttable}' || ']}';
+
+var 'var1' from select code from globalmetadatatbl where categorical = 0  order by code limit 1 ;
+var 'var2' from select code from globalmetadatatbl where categorical = 0  order by code limit 2 offset 1;
+var 'var3' from select code from globalmetadatatbl where categorical = 0  order by code limit 2 offset 2;
+
+var 'q1' from
+select case when '%{var1}' in (select code from globalmetadatatbl) and '%{var2}' in (select code from globalmetadatatbl) and  '%{var3}' not in (select code from globalmetadatatbl)
+then (select create_complex_query("","select * from (highchartbubble title:NAIVE_BAYES_TRAINING_OUTPUT
+select ?.average,  ??.average, ?.sigma*?.sigma+??.sigma*??.sigma as noofpoints
+from (select average, classval, sigma from global_probabilities where colname = '?') as ?,
+     (select average, classval, sigma from global_probabilities where colname = '??') as ??
+where ?.classval = ??.classval);", "," , "" , '%{var1}','%{var2}'))
+else (select create_complex_query("","select * from (highchartbubble title:NAIVE_BAYES_TRAINING_OUTPUT
+select 1,1,1);", "," , "" , 'A'))
+end;
+
+var 'q2' from
+select case when '%{var1}' in (select code from globalmetadatatbl)  and '%{var2}' in (select code from globalmetadatatbl)  and  '%{var3}' in (select code from globalmetadatatbl)
+then (select create_complex_query("","select * from (highchartscatter3d title:NAIVE_BAYES_TRAINING_OUTPUT
+  select ?.average, ??.average, ???.average as noofpoints
+  from (select average, classval, sigma from global_probabilities where colname = '?') as ?,
+       (select average, classval, sigma from global_probabilities where colname = '??') as ??,
+       (select average, classval, sigma from global_probabilities where colname = '???') as ???
+  where ?.classval = ??.classval and ?.classval = ???.classval);", "," , "" , '%{var1}','%{var2}','%{var3}'))
+else (select create_complex_query("","select * from (highchartscatter3d title:NAIVE_BAYES_TRAINING_OUTPUT
+  select 1,1);", "," , "" , 'A'))
+end;
+
+var 'resulthighchartbubble' from  %{q1};
+var 'resulthighchartscatter3d' from %{q2};
+
+select '{"result": ['||'%{resulttable}'||','||'%{resulthighchartbubble}'||','||'%{resulthighchartscatter3d}'||']}';

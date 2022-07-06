@@ -1,0 +1,1168 @@
+/*
+ * 3dhtml Core Library
+ * http://3dhtml.netzministerium.de
+ * Version 1.1, 27/02/2002
+ *
+ * Copyright (c) 2001, 2002 by Till Nagel and René Sander
+ * Written by Till Nagel <till@netzministerium.de> and René Sander <rene@netzministerium.de>
+ * Performance optimization by Fabian Guisset.
+ *
+ * Distributed under the terms of the GNU Lesser General Public.
+ * (See http://3dhtml.netzministerium.de/licence.txt for details)
+ */
+ 
+// For more scripts like this visit IceBox:
+// i.eire-media.com
+
+// flag to print debug messages
+var DEBUG_3DHTML = false;
+
+// the default offset values - where the origin O(0, 0, 0) lies.
+var OFFSET_X_3DHTML = 300;
+var OFFSET_Y_3DHTML = 300;
+var OFFSET_Z_3DHTML = 0;
+
+// the default scene model
+
+
+/*
+ * Point3D
+ * A single point in 3-dimensional space.
+ * This is used to represent the models' points.
+ *
+ */
+
+/*
+ * Point3D
+ * Constructs a Point3D.
+ *
+ * Parameters
+ *   int x - the x position
+ *   int y - the y position
+ *   int z - the z position
+ *   int materialId - the material id
+ *     (reference to the material array of the parent model)
+ *
+ * Returns
+ *   a new Point3D object
+ */
+function Point3D(x, y, z, materialId) {
+
+	// set point position
+	this.x = x;
+	this.y = y;
+	this.z = z;
+	// w coordinate
+	this.w = 1;
+
+	// if no material sub id has been submitted, use 0
+	this.materialId = materialId ? materialId : 0;
+
+	return this;
+}
+
+Point3D.prototype.transform = Point3DTransform;
+Point3D.prototype.homogenize = Point3DHomogenize;
+Point3D.prototype.refresh = Point3DRefresh;
+Point3D.prototype.duplicate = Point3DDuplicate;
+Point3D.prototype.setPosition = Point3DSetPosition;
+Point3D.prototype.toString = Point3DToString;
+
+/*
+ * Point3D.transform
+ * Transforms the point with the given matrix.
+ *
+ * Parameters
+ *   Matrix matrix - the matrix to transform the point with
+ *
+ */
+function Point3DTransform(matrix) {
+	var aX = this.x;
+	var aY = this.y;
+	var aZ = this.z;
+	var aW = this.w;
+
+	this.x = aX * matrix.a00 + aY * matrix.a01 + aZ * matrix.a02 + aW * matrix.a03;
+	this.y = aX * matrix.a10 + aY * matrix.a11 + aZ * matrix.a12 + aW * matrix.a13;
+	this.z = aX * matrix.a20 + aY * matrix.a21 + aZ * matrix.a22 + aW * matrix.a23;
+	this.w = aX * matrix.a30 + aY * matrix.a31 + aZ * matrix.a32 + aW * matrix.a33;
+}
+
+/*
+ * Point3D.homogenize
+ * Homogenizes the point.
+ *
+ */
+function Point3DHomogenize() {
+
+	// if not yet homogenized
+	if (this.w != 1) {
+		this.x /= this.w;
+		this.y /= this.w;
+		this.z /= this.w;
+		this.w = 1;
+	}
+}
+
+/*
+ * Point3D.refresh
+ * This handler is called when the point is drawn.
+ *
+ */
+function Point3DRefresh() { }
+
+/*
+ * Point3D.duplicate
+ * Duplicates this Point3D.
+ *
+ * Returns
+ *   The new Point3D
+ */
+function Point3DDuplicate() {
+	return new Point3D(this.x, this.y, this.z, this.materialId);
+}
+
+/*
+ * Point3D.setPosition
+ * Sets the position of this Point3D.
+ *
+ * Parameters
+ *   int x - the x position
+ *   int y - the y position
+ *   int z - the z position
+ *
+ */
+function Point3DSetPosition(x, y, z) {
+	this.x = x;
+	this.y = y;
+	this.z = z;
+	this.w = 1;
+}
+
+
+/*
+ * Point3D.toString
+ * Returns a string representation of the point.
+ *
+ * Returns
+ *   A string of the format (x, y, z, w)
+ *
+ */
+function Point3DToString() {
+ 	return "(" + this.x + ", " + this.y + ", " + this.z + ", " + this.w + ")";
+}
+
+
+// ---------------------------------------------------------------------------
+
+Model.prototype.createPointCode = ModelCreatePointCode;
+Model.prototype.assignLayers = ModelAssignLayers;
+Model.prototype.transform = ModelTransform;
+
+Model.prototype.draw = ModelDraw;
+Model.prototype.show = ModelShow;
+Model.prototype.hide = ModelHide;
+
+Model.prototype.setPoints = ModelSetPoints;
+Model.prototype.setPivot = ModelSetPivot;
+
+Model.prototype.duplicate = ModelDuplicate;
+Model.prototype.copyPointsFrom = ModelCopyPointsFrom;
+Model.prototype.copyPointLayerRefsFrom = ModelCopyPointLayerRefsFrom;
+
+Model.prototype.storePointValues = ModelStorePointValues;
+Model.prototype.restorePointValues = ModelRestorePointValues;
+
+Model.prototype.linkTo = ModelLinkTo;
+
+Model.prototype.getPointInWorldCoordinates = ModelGetPointInWorldCoordinates;
+Model.prototype.getCompleteSgMatrix = ModelGetCompleteSgMatrix;
+
+Model.prototype.toString = ModelToString;
+
+/*
+ * Model
+ * A collection of points that make up a model
+ *
+ */
+
+/*
+ * Model
+ * Constructs a new model at (0,0,0) without any points.
+ *
+ * Parameters
+ *   String id - The name of the model
+ *   Material material - The mandatory material (materialId = 0)
+ *
+ * Returns
+ *   Model - the new model object
+ *
+ */
+function Model(id, material) {
+	// sets object properties
+	this.id = id;
+	this.points = new Array();
+	this.storedPointValues = new Array();
+
+	this.visibility = true;
+
+	// creates new pivot (origin in model coordinates system)
+	this.pivot = new Point3D(0, 0, 0);
+	// creates new parentPivot (origin in parent coordinate system)
+	// used to transform the points from model coordinate system to parent coordinate system
+	//  e.g. to the world coordinate system
+	//       this.parentPivot = new Point3D(100, 0, 0);
+	//  e.g. link to other objects
+	//       this.parentPivot = otherModel.points[ pointIndex ];
+	this.parentModel = null;
+	this.parentPointIndex = null;
+	// a scene graph matrix to store the transformations
+	this.sgMatrix = rawMatrix;
+
+	// creates an array to store the material objects
+	this.materials = new Array();
+	// sets the first material
+	this.materials[0] = material;
+
+	// links the model to the default scene
+	//   therefore every model has this default scene
+	//   which is not drawable and marks the end of the scene graph.
+	if (this.id != "defaultScene3dhtml") {
+		this.linkTo(defaultScene3dhtmlModel, 0);
+	}
+
+	return this;
+}
+
+
+
+/*
+ * Model.createPointCode
+ * Writes all layers into the document (and also stores references
+ * to the DIVs in the respective Point3D objects)
+ * The naming convention used for the DIV elements:
+ * pnt + {model-ID} + {point-ID}
+ *
+ * IMPLEMENTATION NOTES
+ * The HTML is written directly within the method, preceeding
+ * the initialization of the corresponding points with their
+ * respective layer references. This is not left to the user.
+ *
+ */
+function ModelCreatePointCode() {
+	var s = "";
+	var i = 0;
+
+	var length = this.points.length;
+
+	// creates HTML code for all points
+	for (i = 0; i < length; i++) {
+		// DIV with unique id
+		s += '<div id="p' + this.id + i + '" style="position:absolute;z-Index:0">';
+
+		// the DIV content is determined by the material element assigned to the point.
+		// adds the material's body to the output string if the material exists
+		m = this.materials[this.points[i].materialId];
+		// if point has a materialId not defined in the material collection of the model
+		// the point is not visible, i.e. an empty layer.
+		s += m ? m : "";
+
+		// closes the DIV
+		s += "</div>\n";
+	}
+
+	// writes the divs into the document
+	document.write(s);
+
+	// Netscape 4.x cannot access the layers we've just written instantly.
+	// Assigns layer references for the written points
+	// (except for Netscape where this has to be done manually in the onLoad-handler)
+  if (!ns) { this.assignLayers(); }
+}
+
+/*
+ * Model.assignLayers
+ * Assigns layer references for all points of the model.
+ *
+ */
+function ModelAssignLayers() {
+
+	if (!this.layersAssigned) {
+		var i = 0;
+		var length = this.points.length;
+
+		// assigns layer references to the respective point objects
+		for (i = 0; i < length; i++) {
+			this.points[i].lyr = new LyrObj( "p" + this.id + i );
+		}
+
+		this.layersAssigned = true;
+	}
+}
+
+
+/*
+ * Model.transform
+ * Transforms the model with the given matrix.
+ *
+ * Parameters
+ *   Matrix matrx - the transformation matrix (e.g. a rotation matrix)
+ *
+ */
+function ModelTransform(matrix) {
+	var i = 0;
+	var length = this.points.length;
+
+	// transforms each single point
+	for (i = 0; i < length; i++) {
+		this.points[i].transform(matrix);
+		this.points[i].homogenize();
+	}
+	// transforms the pivot
+	// see pivotTest3d_neuer.html
+	//this.pivot.transform(matrix);
+	//this.pivot.homogenize();
+
+
+	// adds the transformation to the scene graph
+	// #1 premultiplication
+	// var tmpMatrix = matrix.getCopy();
+	// Avoid a matrix copy
+	// tmpMatrix.compose(this.sgMatrix);
+	// this.sgMatrix = tmpMatrix;
+	this.sgMatrix = matrix.composeNoModification(this.sgMatrix);
+
+	// #1 postmultiplication
+	//this.sgMatrix.compose(matrix);
+}
+
+
+
+/*
+ * Model.draw
+ * Draws the points of the model (ie positioning the point layers on the screen).
+ *
+ */
+function ModelDraw() {
+	// don't draw invisible models to speed up performance
+	// all child objects will be drawn correctly, though.
+	if (!this.visibility) return;
+
+	// model-coordinates to world-coordinates mapping
+	var completeSgMatrix = this.parentModel.getCompleteSgMatrix();
+	//var completeSgMatrix = this.getCompleteSgMatrix();
+	//var completeSgMatrix = this.parentModel.sgMatrix;
+
+	//alert(this + "\nsgMatrix=\n" + this.sgMatrix + "\nparent: " + this.parentModel + "\nparent.sgMatrix:\n" + this.parentModel.sgMatrix + "\ncompleteSgMatrix:\n" + completeSgMatrix);
+
+	this.storePointValues();
+
+	var pivotMatrix = rawMatrix.translateNoModification(this.pivot.x,this.pivot.y,this.pivot.z);
+
+	// var m2wMatrix = new Matrix();
+	// m2wMatrix.compose(completeSgMatrix);
+	// m2wMatrix.compose(pivotMatrix);
+      var tempMatrix = rawMatrix.composeNoModification(completeSgMatrix);
+      tempMatrix = tempMatrix.composeNoModification(pivotMatrix);
+	this.transform(tempMatrix);
+
+	//alert(this + "\nsgMatrix=\n" + this.sgMatrix + "\nparent: " + this.parentModel + "\nparent.sgMatrix:\n" + this.parentModel.sgMatrix + "\ncompleteSgMatrix:\n" + completeSgMatrix);
+
+	var length = this.points.length;
+
+	// draws all points
+	for (dw = 0; dw < length; dw++) {
+		p = this.points[dw];
+
+		// sets the layer properties
+		p.lyr.setPos("left", p.x);
+		p.lyr.setPos("top", p.y);
+		p.lyr.setzIndex(p.z + OFFSET_Z_3DHTML);
+
+		// refreshs the material if method is available
+		m = this.materials[p.materialId];
+		if (m && m.refresh) m.refresh(p);
+	}
+
+	// discards the wc model instead of backtransforming
+	//   (other approach: transform back in model coordinates: this.transform(-m2wMatrix);)
+	this.restorePointValues();
+}
+
+
+
+/*
+ * Model.show
+ * Shows the model by setting all of its points visible
+ *
+ */
+function ModelShow() {
+	p = this.points;
+	var length = p.length;
+
+	for (i = 0; i < length; i++) {
+		p[i].lyr.show();
+	}
+
+	this.visibility = true;
+}
+
+
+
+/*
+ * Model.hide
+ * Hides the model by setting all of its points invisible
+ *
+ */
+function ModelHide() {
+	p = this.points;
+	var length = p.length;
+
+	for (i = 0; i < length; i++) {
+		p[i].lyr.hide();
+	}
+
+	this.visibility = false;
+}
+
+
+/*
+ * Model.linkTo
+ * Assigns a parent model to this model.
+ * Links this model as child to the parentModel to build a scene graph
+ * All children will be drawn from their parent model.
+ *
+ * Parameters
+ *   Model parentModel - the model to link to
+ *   int pointIndex - the index of the parent model's point that this model is linked to.
+ *   NOTE: THE pointIndex PARAMETER IS NOT USED AT THE MOMENT
+ *
+ */
+function ModelLinkTo(parentModel, pointIndex) {
+	// stores the new parent model reference
+	this.parentModel = parentModel;
+
+	/*
+	// uses the point (points[pointIndex]) to translate the child object
+	// so the point is the child object's new pivot.
+	// (if no point parameter the the pivot of the parent model is used)
+	if (pointIndex) {
+		var pivm = new Matrix();
+		with (this.parentModel.points[pointIndex]) {
+			pivm.translate(x, y, z); // translates with the point positions of the moment (all following trans won't work)
+		}
+		this.transform(pivm);
+	}
+	//this.parentPointIndex = pointIndex; // old: not in use anymore
+	*/
+}
+
+
+
+/*
+ * Model.setPoints
+ * Sets the points array of the model.
+ *
+ * Parameters
+ *   Point3D[] newPoints - an array containing the new model points
+ *
+ */
+function ModelSetPoints(newPoints) {
+	this.points = newPoints;
+
+	//this.storePointValues();
+}
+
+
+
+/*
+ * Model.setPivot
+ * Sets the model's pivot.
+ *
+ * Parameters
+ *   Point3D pivot - the new pivot
+ *
+ */
+function ModelSetPivot(pivot) {
+	// sets the pivot
+	// will be used to translate at Model.draw();
+	this.pivot = pivot;
+
+	/*
+	// other approach:
+	// renders new point coordinates (calculates pivot into the points)
+	var length = this.points.length;
+	for (i = 0; i < length; i++) {
+		this.points[i].x = pivot.x - this.points[i].x;
+		this.points[i].y = pivot.y - this.points[i].y
+		this.points[i].z = pivot.z - this.points[i].z
+	}
+	*/
+}
+
+
+
+/*
+ * Model.copyPointsFrom
+ * Copies the points from the source model into this model.
+ * To preserve the layer reference this method just copies
+ * the position attributes.
+ *
+ * Parameters
+ *   Model source - The model to copy the points from
+ *
+ */
+function ModelCopyPointsFrom( source ) {
+	var p = source.points;
+	var length = p.length;
+	for ( var i = 0; i < length; i++ ) {
+		this.points[i].x = p[i].x;
+		this.points[i].y = p[i].y;
+		this.points[i].z = p[i].z;
+		this.points[i].w = p[i].w;
+	}
+}
+
+
+
+/*
+ * Model.copyPointLayerRefsFrom
+ * Copies the layer references from the source model into this model.
+ * Combined with copyPointsFrom it is used to create the scene graph.
+ *
+ * Parameters
+ *   Model source - the source Model
+ *
+ */
+function ModelCopyPointLayerRefsFrom( source ) {
+	var p = source.points;
+	var length = p.length;
+	for ( var i = 0; i < length; i++ ) {
+		//this.points[i].lyr = p[i].lyr;
+	}
+}
+
+
+
+/*
+ * Model.duplicate
+ * Duplicates a model.
+ *
+ * Parameters
+ *   String newId - the id of the new model.
+ *
+ * Returns
+ *   Model - the dup model.
+ */
+function ModelDuplicate( newId ) {
+	// if there is no newId create a new one
+	// (known bug: duplicating the same model twice
+	// without specifying a newId results in two
+	// objects with same id)
+	if (newId == null) newId = this.id + "Dup";
+
+	m = new Model(newid, new Material(""));
+
+	// deepcopy model.points into m.points
+	var length = this.points.length;
+	for ( var i = 0; i < length; i++ ) {
+		m.points[i] = this.points[i];
+	}
+
+	// deepcopy model.materials into m.naterials
+	for (i = 0; i < length; i++) {
+		m.materials[i] = this.materials[i];
+	}
+
+	m.pivot = new Point3D(this.pivot);
+
+	return m;
+}
+
+
+
+/*
+ * Model.storePointValues
+ * Stores the values of the points to restore them later.
+ *
+ */
+function ModelStorePointValues() {
+	var i = 0;
+	var length = this.points.length;
+	for (i = 0; i < length; i++ ) {
+		this.storedPointValues[i] = this.points[i].duplicate();
+	}
+
+	this.sgMatrixCopy = this.sgMatrix;
+
+	//this.sgMatrixCopy.setMatrixValues(this.sgMatrix);
+}
+
+
+
+/*
+ * Model. restorePointValues
+ * Restores values of stored points.
+ *
+ */
+function ModelRestorePointValues() {
+	var i = 0;
+	var length = this.points.length;
+	for (i = 0; i < length; i++ ) {
+		this.points[i].x = this.storedPointValues[i].x;
+		this.points[i].y = this.storedPointValues[i].y;
+		this.points[i].z = this.storedPointValues[i].z;
+	}
+
+	this.sgMatrix = this.sgMatrixCopy;
+}
+
+
+
+/*
+ * Model.getPointInWorldCoordinates
+ * Returns one of the model's points (specified by pointIndex, the point
+ * number) in world coordinates. This does not alter the actual point.
+ *
+ * Parameters
+ *   int pointIndex - the index number of the point to convert
+ *
+ * Returns
+ *   Point3D - The point in world coordinates
+ *
+ */
+function ModelGetPointInWorldCoordinates( pointIndex ) {
+	var pwc = new Point3D();
+
+	pwc.x = this.points[pointIndex].x;
+	pwc.y = this.points[pointIndex].y;
+	pwc.z = this.points[pointIndex].z;
+	pwc.w = this.points[pointIndex].w;
+
+	//var pmid = (this.parentModel != null) ? this.parentModel.id : "null";
+	//alert(this.id + ".getPointInWC()\n parentModel=" + pmid + "\n expr=" + (this.parentModel != null) + "\n ppi=" + this.parentPointIndex);
+	if (this.parentModel != null) {
+		var ppwc = this.parentModel.getPointInWorldCoordinates( this.parentPointIndex );
+		pwc.x += ppwc.x;
+		pwc.y += ppwc.y;
+		pwc.z += ppwc.z;
+		pwc.w += ppwc.w;
+	}
+
+	return pwc;
+}
+
+
+
+/*
+ * Model.getCompleteSgMatrix
+ * X
+ *
+ * Returns
+ *   Matrix - the scene graph matrix
+ *
+ */
+function ModelGetCompleteSgMatrix() {
+	var completeSgMatrix = this.sgMatrix;
+
+	if (this.parentModel != null) {
+		completeSgMatrix = this.parentModel.getCompleteSgMatrix();
+
+		//completeSgMatrix.compose(this.sgMatrix);
+
+		var tmpMatrix = completeSgMatrix.getCopy();
+		tmpMatrix.compose(this.sgMatrix);
+		completeSgMatrix = tmpMatrix;
+	}
+
+	return completeSgMatrix;
+}
+
+
+/*
+ * Model.toString
+ * This returns a string of the format
+ * {modelId}
+ * @{pivot}
+ * {list of materials}
+ * {list of points}
+ *
+ * Returns
+ *   String - a string representation of the model.
+ */
+function ModelToString() {
+	var s = "";
+
+	// concatenates main attributes of the model
+	s += this.id + "\n";
+	s += "@" + this.pivot + "\n";
+	s += this.materials + "\n";
+
+	for (i = 0; i < this.points.length; i++) {
+		s += this.points[i].toString() + "\n";
+	}
+
+	return s;
+}
+
+
+// ---------------------------------------------------------------------------
+
+
+/*
+ * Matrix
+ * A matrix object used to define transformations.
+ *
+ */
+
+/**
+ * Matrix
+ * Constructs a 4x4 Matrix you will need to transform points.
+ * Preconfigured as identity matrix, i.e.
+ *   1 0 0 0
+ *   0 1 0 0
+ *   0 0 1 0
+ *   0 0 0 1
+ *
+ * Returns
+ *   a new Matrix object
+ */
+function Matrix() {
+	// sets identity matrix
+	this.a01 = this.a02 = this.a03 = 0;
+	this.a10 = this.a12 = this.a13 = 0;
+	this.a20 = this.a21 = this.a23 = 0;
+	this.a30 = this.a31 = this.a32 = 0;
+	this.a00 = this.a11 = this.a22 = this.a33 = 1;
+
+	return this;
+}
+
+Matrix.prototype.rotateX = MatrixRotateX;
+Matrix.prototype.rotateY = MatrixRotateY;
+Matrix.prototype.rotateZ = MatrixRotateZ;
+Matrix.prototype.scale = MatrixScale;
+Matrix.prototype.translate = MatrixTranslate;
+Matrix.prototype.translateNoModification = MatrixTranslateNoModification;
+
+Matrix.prototype.compose = MatrixCompose;
+Matrix.prototype.composeNoModification = MatrixComposeNoModification;
+
+Matrix.prototype.getCopy = MatrixGetCopy;
+Matrix.prototype.setMatrixValues = MatrixSetMatrixValues;
+
+Matrix.prototype.toString = MatrixToString;
+
+
+/*
+ * Matrix.rotateX
+ * Rotates along the x-axis with phi degree.
+ *
+ * Parameters
+ *   float phi - the radiant value to rotate with
+ *
+ */
+function MatrixRotateX(phi) {
+	var myMatrix = new Matrix();
+
+	myMatrix.a00 = 1; myMatrix.a01 =  myMatrix.a02 =  myMatrix.a03 = 0;
+	myMatrix.a10 = 0; myMatrix.a11 = Math.cos(phi); myMatrix.a12 = -Math.sin(phi); myMatrix.a13 = 0;
+	myMatrix.a20 = 0; myMatrix.a21 = Math.sin(phi); myMatrix.a22 = Math.cos(phi); myMatrix.a23 = 0;
+	myMatrix.a30 = myMatrix.a31 = myMatrix.a32 = 0; myMatrix.a33 = 1;
+
+	// old
+	//this.compose(myMatrix);
+
+	// new
+	myMatrix.compose(this);
+	this.setMatrixValues(myMatrix);
+}
+
+
+/*
+ * Matrix.rotateY
+ * Rotates along the y-axis with phi degree.
+ *
+ * Parameters
+ *   float phi - the radiant value to rotate with
+ *
+ */
+function MatrixRotateY(phi) {
+	var myMatrix = new Matrix();
+
+	myMatrix.a00 = Math.cos(phi); myMatrix.a01 = 0; myMatrix.a02 = Math.sin(phi); myMatrix.a03 = 0;
+	myMatrix.a10 = myMatrix.a13 = myMatrix.a12 = 0; myMatrix.a11 = 1;
+	myMatrix.a20 = -Math.sin(phi); myMatrix.a21 = 0; myMatrix.a22 = Math.cos(phi); myMatrix.a23 = 0;
+	myMatrix.a30 = myMatrix.a31 = myMatrix.a32 = 0; myMatrix.a33 = 1;
+
+	myMatrix.compose(this);
+	this.setMatrixValues(myMatrix);
+}
+
+
+/*
+ * Matrix.rotateZ
+ * Rotates along the z-axis with phi degree.
+ *
+ * Parameters
+ *   float phi - the radiant value to rotate with
+ *
+ */
+function MatrixRotateZ(phi) {
+	var myMatrix = new Matrix();
+
+	myMatrix.a00 = Math.cos(phi); myMatrix.a01 = -Math.sin(phi); myMatrix.a02 = 0; myMatrix.a03 = 0;
+	myMatrix.a10 = Math.sin(phi); myMatrix.a11 = Math.cos(phi); myMatrix.a12 = 0; myMatrix.a13 = 0;
+	myMatrix.a20 = myMatrix.a21 = 0; myMatrix.a22 = 1; myMatrix.a23 = 0;
+	myMatrix.a30 = myMatrix.a31 = myMatrix.a32 = 0; myMatrix.a33 = 1;
+
+	myMatrix.compose(this);
+	this.setMatrixValues(myMatrix);
+}
+
+
+/*
+ * Matrix.scale
+ * Scale with the scale factors.
+ *
+ * Parameters
+ *   float sx - the x scale factor
+ *   float sy - the y scale factor
+ *   float sz - the z scale factor
+ *
+ */
+function MatrixScale(sx, sy, sz) {
+	var myMatrix = new Matrix();
+
+	myMatrix.a00 = sx; myMatrix.a01 = myMatrix.a02 = myMatrix.a03 = 0;
+	myMatrix.a10 = 0; myMatrix.a11 = sy; myMatrix.a12 = myMatrix.a13 = 0;
+	myMatrix.a20 = myMatrix.a21 = 0; myMatrix.a22 = sz; myMatrix.a23 = 0;
+	myMatrix.a30 = myMatrix.a31 = myMatrix.a32 = 0; myMatrix.a33 = 1;
+
+	myMatrix.compose(this);
+	this.setMatrixValues(myMatrix);
+}
+
+
+/*
+ * Matrix.translate
+ * Translate with the translation values.
+ *
+ * Parameters
+ *   float dx - the x value to translate with
+ *   float dy - the y value to translate with
+ *   float dz - the z value to translate with
+ *
+ */
+function MatrixTranslate(dx, dy, dz) {
+	var myMatrix = new Matrix();
+
+	myMatrix.a00 = 1; myMatrix.a01 = myMatrix.a02 = 0; myMatrix.a03 = dx;
+	myMatrix.a10 = 0; myMatrix.a11 = 1; myMatrix.a12 = 0; myMatrix.a13 = dy;
+	myMatrix.a20 = myMatrix.a21 = 0; myMatrix.a22 = 1; myMatrix.a23 = dz;
+	myMatrix.a30 = myMatrix.a31 = myMatrix.a32 = 0; myMatrix.a33 = 1;
+
+	myMatrix.compose(this);
+	this.setMatrixValues(myMatrix);
+}
+
+function MatrixTranslateNoModification(dx, dy, dz) {
+	var myMatrix = new Matrix();
+
+	myMatrix.a00 = 1; myMatrix.a01 = myMatrix.a02 = 0; myMatrix.a03 = dx;
+	myMatrix.a10 = 0; myMatrix.a11 = 1; myMatrix.a12 = 0; myMatrix.a13 = dy;
+	myMatrix.a20 = myMatrix.a21 = 0; myMatrix.a22 = 1; myMatrix.a23 = dz;
+	myMatrix.a30 = myMatrix.a31 = myMatrix.a32 = 0; myMatrix.a33 = 1;
+
+	myMatrix = myMatrix.composeNoModification(this);
+
+      return myMatrix;
+}
+
+/*
+ * Matrix.compose
+ * Composes this matrix with the given matrix m
+ *
+ * Parameters
+ *   Matrix m - the matrix to compose with
+ *
+ */
+function MatrixCompose(m) {
+	var r, c;
+	var myMatrix = new Matrix();
+
+	// matrices multiplication
+	for(r = 0; r < 4; r++)
+		for(c = 0; c < 4; c++) {
+			myMatrix["a" + r + c] =
+				this["a" + r + "0"] * m["a0" + c]
+				+ this["a" + r + "1"] * m["a1" + c]
+				+ this["a" + r + "2"] * m["a2" + c]
+				+ this["a" + r + "3"] * m["a3" + c];
+		}
+
+	// copies the new matrix to this
+	for(r = 0; r < 4; r++) {
+		for(c = 0; c < 4; c++) {
+			this["a" + r + c] = myMatrix["a" + r + c];
+		}
+	}
+}
+
+/*
+ * Matrix.composeNoModification
+ * Composes this matrix with the given matrix m, but do not modify "this".
+ * Return a copy instead.
+ *
+ * Parameters
+ *   Matrix m - the matrix to compose with
+ *
+ * Returns
+ *   Matrix myMatrix - the copy of the composed matrix.
+ */
+
+function MatrixComposeNoModification(m) {
+	var r, c;
+	var myMatrix = new Matrix();
+
+	// matrices multiplication
+	for(r = 0; r < 4; r++)
+		for(c = 0; c < 4; c++) {
+			myMatrix["a" + r + c] =
+				this["a" + r + "0"] * m["a0" + c]
+				+ this["a" + r + "1"] * m["a1" + c]
+				+ this["a" + r + "2"] * m["a2" + c]
+				+ this["a" + r + "3"] * m["a3" + c];
+		}
+
+	return myMatrix;
+}
+
+
+/*
+ * Matrix.setMatrixValues
+ * Sets the values of this matrix to the values of the sourceMatrix.
+ * (Ergo it copies them)
+ *
+ * Parameters
+ *   Matrix sourceMatrix - the matrix to copy the values from
+ */
+function MatrixSetMatrixValues(sourceMatrix) {
+	with (sourceMatrix) {
+		this.a00 = a00; this.a01 = a01; this.a02 = a02; this.a03 = a03;
+		this.a10 = a10; this.a11 = a11; this.a12 = a12; this.a13 = a13;
+		this.a20 = a20; this.a21 = a21; this.a22 = a22; this.a23 = a23;
+		this.a30 = a30; this.a31 = a31; this.a32 = a32; this.a33 = a33;
+	}
+}
+
+
+/*
+ * Matrix.getCopy
+ * Copies the values of this matrix to a new one and returns it.
+ *
+ * Returns
+ *   Matrix - a new Matrix with values copied from this Matrix.
+ *
+ */
+function MatrixGetCopy() {
+	var destMatrix = new Matrix();
+	with (destMatrix) {
+		a00 = this.a00; a01 = this.a01; a02 = this.a02; a03 = this.a03;
+		a10 = this.a10; a11 = this.a11; a12 = this.a12; a13 = this.a13;
+		a20 = this.a20; a21 = this.a21; a22 = this.a22; a23 = this.a23;
+		a30 = this.a30; a31 = this.a31; a32 = this.a32; a33 = this.a33;
+	}
+	return destMatrix;
+}
+
+
+/*
+ * Matrix.toString
+ * Returns a string representation of the matrix
+ *
+ * Returns
+ *   a string representation of the Matrix object,
+ *   e.g.
+ *    1 0 0 0
+ *    0 1 0 0
+ *    0 0 1 0
+ *    0 0 0 1
+ *
+ */
+function MatrixToString() {
+	var tab = "\t";
+	return this.a00 + tab + this.a01 + tab + this.a02 + tab + this.a03 + "\n" +
+		this.a10 + tab + this.a11 + tab + this.a12 + tab + this.a13 + "\n" +
+		this.a20 + tab + this.a21 + tab + this.a22 + tab + this.a23 + "\n" +
+		this.a30 + tab + this.a31 + tab + this.a32 + tab + this.a33 + "\n";
+}
+
+
+
+// ---------------------------------------------------------------------------
+
+
+/*
+ * Material
+ * A material has a body, basically containing a string with HTML code
+ * (which will make up the content of a point's DIV). Additionally it
+ * has a JavaScript statement - the refresh() method - that is called
+ * when drawing the points, so the material appearance can be changed
+ * by changing what is happening in the DIV.
+ *
+*/
+
+/*
+ * Material
+ * Constructs a Material.
+ *
+ * Parameters
+ *   String body - an HTML snippet (e.g. '<font color=red>+</font>')
+ *   Function refresh - the function to call if model was drawn
+ *
+ * Returns
+ *   Material - The new Material object
+ *
+ */
+function Material(body, refresh) {
+	this.body = body;
+
+	// stores reference to the specified refresh method
+	this.refresh = refresh;
+
+	return this;
+}
+
+Material.prototype.toString = MaterialToString;
+
+/*
+ * Material.toString
+ * Returns the string representation of this Material.
+ *
+ * Returns
+ *   String - the Material's body
+ *
+ */
+function MaterialToString() {
+	return this.body;
+}
+
+
+// ---------------------------------------------------------------------------
+
+
+/*
+ * Modulator
+ * This is basically an object encapsulating a function of some sort. It can
+ * be used to influence parameters such as the scaling of a model, its movement
+ * or the color of a point.
+ *
+ * For an example, see implementation of MouseModulator.js.
+ *
+ */
+
+/**
+ * Modulator
+ * Constructs a Modulator.
+ *
+ * Returns
+ *   a new Modulator object
+ */
+function Modulator() {
+	this.matrix = new Matrix();
+
+	this.getMatrix = ModulatorGetMatrix;
+	this.animate = ModulatorAnimate;
+
+	return this;
+}
+
+
+/*
+ * Modulator.getMatrix
+ *
+ * Returns
+ *   the modulator's internal matrix
+ */
+function ModulatorGetMatrix() {
+	return this.matrix;
+}
+
+
+/*
+ * Modulator.animate
+ * The (empty) default implementation of the animate method,
+ * which is used in modulators to update their internal matrix.
+ *
+ */
+function ModulatorAnimate() {
+}
+
+
+// ---------------------------------------------------------------------------
+
+/*
+ * Helper functions
+ *
+ */
+
+/*
+ * normalize
+ * Normalizes a value to project it to a given range.
+ * Example: v=5, source=[1, 10], destination=[1, 5]
+ *          result = 2.22
+ *
+ * Parameters
+ *   float v - the value to project (within source range)
+ *   float sMin - the min value of the source range
+ *   float sMax - the max value of the source range
+ *   float dMin - the min value of the destination range
+ *   float dMax - the max value of the destination range
+ *
+ * Returns
+ *   float - The normalized value
+ */
+function normalize(v, sMin, sMax, dMin, dMax) {
+	return Math.min(Math.max( ((dMax - dMin) / (sMax - sMin)) * ((v - sMin) + dMin), dMin), dMax);
+}
+
+
+/*
+ * degToRad
+ * Converts degree value to radiant value.
+ *
+ * Parameters
+ *   float v - The degree value
+ *
+ * Returns
+ *   float - The rad value
+ */
+function degToRad(v) {
+	return v / (360 / (2 * Math.PI));
+}
+
+
+/*
+ * radToDeg
+ * Converts radiant value to degree value.
+ *
+ * Parameters
+ *   float v - The rad value
+ *
+ * Returns
+ *   float - The degree value
+ */
+function radToDeg(v) {
+	return v * (360 / (2 * Math.PI));
+}
+
+var rawMatrix = new Matrix();
+var defaultScene3dhtmlModel = new Model("defaultScene3dhtml");
+defaultScene3dhtmlModel.setPoints( new Array( new Point3D(0, 0, 0) ) );
+// translates the default scene model to its start position
+// e.g. use constants or calculate center of the screen
+var ds3dhtmlMatrix=new Matrix();
+ds3dhtmlMatrix.translate(OFFSET_X_3DHTML, OFFSET_Y_3DHTML, OFFSET_Z_3DHTML);
+defaultScene3dhtmlModel.transform(ds3dhtmlMatrix);
+

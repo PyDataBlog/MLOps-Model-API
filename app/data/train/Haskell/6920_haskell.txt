@@ -1,0 +1,60 @@
+{-# LANGUAGE OverloadedStrings #-}
+import RSSBuffer
+
+import Database.Redis -- hedis
+import Network.Curl.Download -- download-curl, sudo apt-get libcurl4-openssl-dev
+import Text.XML.Light -- xml
+
+import qualified Data.List as L
+import Control.Monad.IO.Class
+import Data.Maybe
+import Data.Monoid
+import Debug.Trace
+
+import Control.Concurrent
+import Control.Concurrent.MVar
+
+import qualified Data.ByteString.UTF8 as T
+import qualified Data.ByteString as BS
+
+main :: IO ()
+main = do
+  conn <- connect defaultConnectInfo
+  mvar <- newMVar conn
+  mapM_ (\x -> forkIO (updateFeed mvar x >> return ())) allFeeds
+
+updateFeed :: MVar Connection -> Feed -> IO (Either Reply Integer)
+updateFeed mvar (Feed idx _ url format) = do
+  (Right xml) <- openAsXML url
+  let (Just rss) = extractTree format xml
+  let (h, es) = extractFeed format rss
+  let newEs = L.reverse es
+  readMVar mvar >>= \conn ->
+    runRedis conn $ do
+      set (feedMeta idx) $ foldl (\c x -> mappend c $ T.fromString . showElement $ x) "" h
+      -- failed pattern matches are the least of my concerns
+      (Right top) <- lrange (feedElems idx) 0 100
+      let newCont = newArticles format top newEs
+      -- liftIO . print . uniqId . head . onlyElems . parseXML $ fromJust top
+      -- liftIO . print $ (map uniqId newCont)
+      -- liftIO . print $ (map uniqId old)
+      lpush (feedElems idx) $ map (T.fromString . showElement) newCont
+
+extractFeed :: FeedType -> Element -> ([Element], [Element])
+extractFeed Atom xs = (filterFeed "entry" (/=) xs, filterFeed "entry" (==) xs)
+extractFeed RSS xs = (filterFeed "item" (/=) xs, filterFeed "item" (==) xs)
+
+filterFeed str o xs = filterChildrenName (\(QName n _ _) -> o n str) xs
+
+extractTree Atom xml = treeFind "feed" xml
+extractTree RSS xml = treeFind "rss" xml
+
+treeFind str xml = L.find (\(Element (QName n _ _) _ _ _) -> n == str) $ onlyElems xml
+
+-- find where the feed is up to
+-- we want everything AFTER the first element that matches the break pred
+-- TODO: several feeds have not been following the "linear time" concept. :(
+newArticles :: FeedType -> [BS.ByteString] -> [Element] -> [Element]
+newArticles ft ts = filter (\x -> (uniqId ft x) `notElem` items)
+                        where
+                          items = map ((uniqId ft) . head . onlyElems . parseXML) ts

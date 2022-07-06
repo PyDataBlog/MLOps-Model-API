@@ -1,0 +1,1 @@
+cmd_drivers/mtd/devices/mtdram.ko := ld -r -m elf_i386 -T /home/madhwang/Development/linuxSource/linux-2.6.34.7/scripts/module-common.lds --build-id -o drivers/mtd/devices/mtdram.ko drivers/mtd/devices/mtdram.o drivers/mtd/devices/mtdram.mod.o

@@ -1,0 +1,881 @@
+#-------------------------------------------------------------------------------------------------------
+# Name         : monachat.pm - Object oriented interface for monachat
+# Description  : Perl object oriented interface for monachat
+# Dependencies : Encode, IO::Socket::INET, IO::Socket::Socks, IO::Select, LWP::UserAgent
+# Version      : 1.0
+# License      : GPL 3.0
+# Author       : American man... (nishinishi9999 at gmail dot com)
+#-------------------------------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------------------------------
+# Exported constants
+#
+#   - CONNECT_REGEX
+#   - CONNECT_ID_REGEX
+#   - ENTER_ID_REGEX
+#   - EXIT_REGEX
+#   - COMMENT_REGEX
+#   - UINFO_REGEX
+#   - ROOM_C_N_REGEX
+#   - COUNT_C_N_REGEX
+#   - SET_STAT_REGEX
+#   - SET_X_Y_SCL_REGEX
+#   - IGNORE_REGEX
+#   - RSET_REGEX
+#   - SET_CMD_REGEX
+#   - ENTER_REGEX
+#   - CONNECTION_TIMEOUT
+#
+#-------------------------------------------------------------------------------------------------------
+
+#-------------------------------------------------------------------------------------------------------
+# Methods
+#
+#   - Constructor
+#       - new
+#
+#   - Basic getters/setters
+#       - name / id / character / status / trip / ihash / r / g / b / x / y / scl
+#
+#   - Configuration getters/setters
+#        - addr / port / attrib / server / room / proxy / site / timeout / debug / version
+#
+#   - Utility functions
+#       - send
+#       - change_(name/character/trip/rgb/x/y/scl/x_y_scl)
+#       - relogin / change_room / reenter / can_read / data / rgb / x_y_scl
+#
+#   - Network functions
+#       - connect / connect_proxy / disconnect / enter_room
+#       - is_down / is_connected / can_ping / ping / read_socket
+#
+#   - Signals
+#       - login / exit_room / comment / change_status / ignore
+#
+#   - Proxy functions
+#       - proxies_left / next_proxy / get_proxy_list
+#
+#-------------------------------------------------------------------------------------------------------
+
+package monachat;
+
+use strict;
+use warnings;
+use diagnostics;
+
+use Encode qw{encode decode};
+
+use IO::Socket::INET;
+use IO::Socket::Socks;
+use IO::Select;
+
+use LWP::UserAgent;
+
+{
+    use vars qw{@ISA @EXPORT};
+    no strict 'refs';
+
+    use Exporter;
+    @ISA = qw{Exporter};
+    
+    @EXPORT = grep { $_ =~ /REGEX|CONNECTION_TIMEOUT/ } keys %{__PACKAGE__.'::'};
+}
+
+
+#---- Constants ----------------------------------------------------------------------------------------------------
+
+use constant
+    {
+        CONNECT_REGEX      => '^\+connect id=\d{1,5}$',                   ### $1: id
+        CONNECT_ID_REGEX   => '^<CONNECT id="(\d+)" \/>$',                ### $1: id
+        ENTER_ID_REGEX     => '^<ENTER id="(.+?)" \/>$',                  ### $1: id
+        EXIT_REGEX         => '^<EXIT id="(.+?)" \/>',                    ### $1: id
+        COMMENT_REGEX      => '^<COM.+?cmt="(.+?)".+?id="(.+?)".+?\/>$',  ### $1: comment, $2: id
+        UINFO_REGEX        => '^<UINFO name="(.*?)" id="(\d{1,5})" \/>$', ### $1: name,    $2: id
+        ROOM_C_N_REGEX     => '^<ROOM c="(.+?)" n="(.+?)" \/>$',          ### $1: count,   $2: number
+        COUNT_C_N_REGEX    => '^<COUNT c="(.+?)" n="(.+?)"\s?\/?>$',      ### $1: count,   $2: number
+        SET_STAT_REGEX     => '^<SET stat="(.*?)" id="(.+?)" \/>$',       ### $1: status,  $2: id
+        SET_CMD_REGEX      => '^<SET cmd="(.+?)" id="(\d{1,5}) \/>',      ### $1; command, $2: id
+
+        ### $1: x, $2: scl, $3: id, $4: y
+        SET_X_Y_SCL_REGEX  => '^<SET x="(.*?)" scl="(.*?)" id="(\d{1,5})" y="(.*?)" \/>$',
+
+        ### $1: ignorer ihash, $2: on|off, $3: ignored id
+        IGNORE_REGEX       => '^<IG ihash="(.{10})" stat="(.+)" id="(\d{1,5})" \/>$',
+
+        ### $1: command, $2: parameter, $3: id
+        RSET_REGEX         => '^<RSET cmd="(.+?)" param="(.+)" id="(\d{1,5})" \/>$',
+
+        ### c/x
+        ### $1: ENTER|USER $2: r, $3: name, $4: id|trip|ihash, $5: stat, $6: g, $7: character, $8: b, $9: y,
+        ### $10: x, $11: scl
+        ENTER_REGEX        => '^<(ENTER|USER)\s r="(.*?)"\s name="(.*?)"\s(.+?)stat="(.*?)"\s g="(.*?)"\s'
+                            . 'type="(.*?)"\s b="(.*?)"\s y="(.*?)"\s x="(.*?)"\s scl="(.*?)"\s\/>$',
+
+        CONNECTION_TIMEOUT => 'Connection timeout..'
+        
+    };
+
+### <ROOM> </ROOM> <COUNT> </COUNT> <EXIT />
+# /^<SET cmd="ev".+?\/>/
+
+use constant SERVER =>
+    {
+        iriguchi     => ["MONA8094",    9095],
+        atochi       => ["ANIKI8080",   9092],
+        ooheya       => ["MONABIG8093", 9093],
+        chibichato   => ["ANIMAL8098",  9090],
+        moa          => ["MOA8088",     9092],
+        chiikibetsu  => ["AREA8089",    9095],
+        wadaibetsu   => ["ROOM8089",    9090],
+        tateyokoheya => ["MOXY8097",    9093],
+        cool         => ["COOL8099",    9090],
+        kanpu        => ["kanpu8000",   9094],
+        monafb       => ["MOFB8000",    9090]
+    };
+
+
+#---- Global variables ---------------------------------------------------------------------------------------------
+
+my $socket    = ''; ### Remote socket object
+my $select    = ''; ### IO::Select object
+my $lastping  = 0;  ### Last time a ping was made
+
+my @proxyaddr = (); ### List of proxy addresses
+my @proxyport = (); ### List of proxy ports
+
+my %ignore    = (); ### List of ignored users
+
+
+#---- Functions ----------------------------------------------------------------------------------------------------
+
+#-----------------------------------------------------------------------------------------
+# Description : new() - monachat class constructor
+# Takes       : $data (hashref) - Hash with key-value pairs containing constructor data
+# Returns     : Blessed object
+#-----------------------------------------------------------------------------------------
+sub new
+    {
+        my $class = __PACKAGE__;
+        my $data  = shift;
+        
+    
+        my %user =
+            (
+                ### Settings
+                name   => $data->{'name'}    || 'Wednesday',
+                id     => $data->{'id'}      || 0,
+                char   => $data->{'char'}    || 'nezumi',
+                status => $data->{'status'}  || 'normal',
+                trip   => $data->{'trip'}    || '',
+                ihash  => $data->{'ihash'}   || '',
+                r      => $data->{'r'}       || 100,
+                g      => $data->{'g'}       || 100,
+                b      => $data->{'b'}       || 100,
+                x      => $data->{'x'}       || 200,
+                y      => $data->{'y'}       || 400,
+                scl    => $data->{'scl'}     || 100,
+                
+                ### Network settings
+                attrib => $data->{'attrib'}  || 'no',
+                addr   => $data->{'addr'}    || '153.122.46.192',
+                port   => $data->{'port'}    || 9095,
+                server => $data->{'server'}  || 'iriguchi',
+                room   => $data->{'room'}    || 200,
+                proxy  => $data->{'proxy'}   || 0,
+                site   => $data->{'site'}    || 1,
+                to     => $data->{'timeout'} || 0.4,
+                debug  => $data->{'debug'}   || 1,
+                socks  => $data->{'socks'}   || 4,
+                
+                ### Session settings
+                handle_name    => $data->{'handle_name'}    || 1,
+                handle_stat    => $data->{'handle_status'}  || 1,
+                handle_comment => $data->{'handle_comment'} || 1,
+                handle_ihash   => $data->{'handle_ihash'}   || 1,
+                main_server    => $data->{'main_server'}    || 1,
+                
+                ### Nested hashes
+                default => {},
+                ignore  => {}
+            );
+        
+        %{$user{'default'}} = %user;
+
+        return bless(\%user, $class);
+    }
+
+#---- Basic getters-setters ----------------------------------------------------------------------------------------------
+
+sub name
+    {
+        my($self, $name) = @_;
+        
+        if(defined $name)
+            {
+                $name = substr($name, 0, 20) if $self->handle_name();
+                
+                $self->{'name'} = $name;
+            }
+        else
+            {
+                return $self->{'name'};
+            }
+    }
+    
+sub status
+    {
+        my($self, $status) = @_;
+        
+        if(defined $status)
+            {
+                $status = substr($status, 0, 20) if $self->handle_status(); #####
+                
+                $self->{'status'} = $status;
+            }
+        else
+            {
+                return $self->{'status'};
+            }
+    }
+            
+sub ihash
+    {
+        my($self, $ihash) = @_;
+        
+        if(defined $ihash)
+            {
+                $ihash = substr($ihash, 4) if $self->handle_ihash();
+                
+                $self->{'ihash'} = $ihash;
+            }
+        else
+            {
+                return $self->{'ihash'};
+            }
+    }
+
+sub id        { my($self, $id)    = @_; defined $id    ? $self->{'id'}    = $id    : return $self->{'id'};    }
+sub character { my($self, $char)  = @_; defined $char  ? $self->{'char'}  = $char  : return $self->{'char'};  }
+sub trip      { my($self, $trip)  = @_; defined $trip  ? $self->{'trip'}  = $trip  : return $self->{'trip'};  }
+sub r         { my($self, $r)     = @_; defined $r     ? $self->{'r'}     = $r     : return $self->{'r'};     }
+sub g         { my($self, $g)     = @_; defined $g     ? $self->{'g'}     = $g     : return $self->{'g'};     }
+sub b         { my($self, $b)     = @_; defined $b     ? $self->{'b'}     = $b     : return $self->{'b'};     }
+sub x         { my($self, $x)     = @_; defined $x     ? $self->{'x'}     = $x     : return $self->{'x'};     }
+sub y         { my($self, $y)     = @_; defined $y     ? $self->{'y'}     = $y     : return $self->{'y'};     }
+sub scl       { my($self, $scl)   = @_; defined $scl   ? $self->{'scl'}   = $scl   : return $self->{'scl'};   }
+
+sub toggle_scl { my $self = shift; $self->scl( $self->scl() == 100 ? -100 : 100 ); }
+
+sub ignore
+    {
+        my($self, $ihash, $n) = @_;
+        
+        if(defined $n)
+            {
+                $self->{'ignore'}->{$ihash} = $n;
+            }
+        else
+            {
+                return $self->{'ignore'}->{$ihash};
+            }
+    }
+
+
+#---- Configuration getters-setters --------------------------------------------------------------------------------
+
+sub addr    { my($self, $addr)  = @_; defined $addr   ? $self->{'addr'}   = $addr  : return $self->{'addr'};   }
+sub port    { my($self, $port)  = @_; defined $port   ? $self->{'port'}   = $port  : return $self->{'port'};   }
+sub attrib  { my($self, $n)     = @_; defined $n      ? $self->{'attrib'} = $n     : return $self->{'attrib'}; }
+sub room    { my($self, $room)  = @_; defined $room   ? $self->{'room'}   = $room  : return $self->{'room'};   }
+sub proxy   { my($self, $n)     = @_; defined $n      ? $self->{'proxy'}  = $n     : return $self->{'proxy'};  }
+sub site    { my($self, $site)  = @_; defined $site   ? $self->{'site'}   = $site  : return $self->{'site'};   }
+sub timeout { my($self, $to)    = @_; defined $to     ? $self->{'to'}     = $to    : return $self->{'to'};     }
+sub debug   { my($self, $n)     = @_; defined $n      ? $self->{'debug'}  = $n     : return $self->{'debug'};  }
+sub version { my($self, $socks) = @_; defined $socks  ? $self->{'socks'}  = $socks : return $self->{'socks'};  }
+
+sub toggle_attrib  { my $self = shift; $self->attrib ( !$self->attrib() ); }
+sub toggle_proxy   { my $self = shift; $self->proxy  ( !$self->proxy()  ); }
+sub toggle_debug   { my $self = shift; $self->debug  ( !$self->debug() );  }
+sub toggle_site    { my $self = shift; $self->site   ( $self->site()    == 1 ? 2 : 1 ); }
+sub toggle_version { my $self = shift; $self->version( $self->version() == 4 ? 5 : 4 ); }
+
+
+#---- Session config getters-setters -------------------------------------------------------------------------------
+
+sub handle_name    { my($self, $n) = @_; defined $n ? $self->{'handle_name'}    = $n : return $self->{'handle_name'};    }
+sub handle_status  { my($self, $n) = @_; defined $n ? $self->{'handle_stat'}    = $n : return $self->{'handle_stat'};    }
+sub handle_ihash   { my($self, $n) = @_; defined $n ? $self->{'handle_ihash'}   = $n : return $self->{'handle_ihash'};   }
+sub handle_comment { my($self, $n) = @_; defined $n ? $self->{'handle_comment'} = $n : return $self->{'handle_comment'}; }
+sub main_on_server { my($self, $n) = @_; defined $n ? $self->{'main_server'}    = $n : return $self->{'main_server'};    }
+
+
+#----------------------------------------------------------------
+# Description : server() - $self->{'server'} getter/setter
+# Takes       : $self (objref), $server (scalar) - SERVER key
+# Get         : Server name
+# Set         : Server key, default port
+#----------------------------------------------------------------
+sub server
+    {
+        my($self, $server) = @_;
+        
+        if(defined $server)
+            {
+                $self->{'room'} = 'main' if $self->main_on_server();
+            
+                $self->{'server'} = $server;
+                $self->{'port'}   = SERVER->{$server}->[1];
+            }
+        else
+            {
+                return SERVER->{$self->{'server'}}->[0];
+            }
+    }
+
+
+#---- Utility functions --------------------------------------------------------------------------------------------
+
+#---------------------------------------------------------------------------------------
+# Description : send() - Sends a utf8 encoded message with \0 termination to monachat
+# Takes       : $self (objref), $send (scalar) - Message to send
+# Returns     : Nothing
+#---------------------------------------------------------------------------------------
+sub send
+    {
+        my($self, $send) = @_;
+        
+        print "Send: ".encode('cp932', $send)."\n";
+        
+        print $socket encode('utf8', $send)."\0";
+    }
+
+
+#--------------------------------------------------------------------------------------------
+# Description : change_(name/character/trip/rgb/x/y/scl/x_y_scl) - Change data and relogin
+# Takes       : $self (objref), $name/$character/trip... (scalar) - Data to change
+# Returns     : Nothing
+#--------------------------------------------------------------------------------------------
+sub change_name
+    {
+        my($self, $name) = @_;
+        
+        $self->name($name);
+        
+        $self->reenter();
+    }
+
+sub change_character
+    {
+        my($self, $character) = @_;
+        
+        $self->character($character);
+        
+        $self->reenter();
+    }
+
+sub change_trip
+    {
+        my($self, $trip) = @_;
+        
+        $self->trip($trip);
+        
+        $self->reenter();
+    }
+
+sub change_rgb
+    {
+        my($self, $r, $g, $b) = @_;
+        
+        $self->r($r);
+        $self->g($g);
+        $self->b($b);
+        
+        $self->reenter();
+    }
+
+sub change_proxy
+    {
+        my $self = shift;
+        
+        $self->toggle_proxy();
+        
+        $self->relogin();
+    }
+
+sub default
+    {
+        my $self = shift;
+        
+        $self->data
+            (
+                $self->{'default'}->{'name'},
+                $self->{'default'}->{'char'},
+                $self->{'default'}->{'status'},
+                $self->{'default'}->{'trip'},
+                $self->{'default'}->{'r'},
+                $self->{'default'}->{'g'},
+                $self->{'default'}->{'b'},
+                $self->{'default'}->{'x'},
+                $self->{'default'}->{'y'},
+                $self->{'default'}->{'scl'}
+            );
+        
+        $self->relogin();
+    }
+
+
+#---------------------------------------------------------------------------------------------
+# Description : relogin()/change_room()/reenter() - Utility functions to enter_room() and exit_room()
+#               relogin()     - Login again and reenter room
+#               change_room() - Exits a room and entes another
+#               reenter()     - Exits a room and enters it again
+#
+# Takes       : relogin()     - $self (objref)
+#               change_room() - $self (objref), $room (scalar) - Room to move to
+#               reenter_()    - $self (objref)
+#
+# Returns     : Nothing
+#---------------------------------------------------------------------------------------------
+
+#### Add disconnect
+sub relogin
+    {
+        my $self = shift;
+        
+        $self->disconnect();
+        
+        sleep $self->timeout();
+        
+        $self->connect();
+        $self->enter_room();
+    }
+
+sub change_room
+    {
+        my($self, $room) = @_;
+        
+        $self->room($room);
+        
+        $self->exit_room();
+        $self->enter_room();
+    }
+
+sub reenter
+    {
+        my $self = shift;
+        
+        $self->exit_room();
+        $self->enter_room();
+    }
+
+
+#--------------------------------------------------------------------------
+# Description : can_read() - monachat interface to $select->can_read($t)
+# Takes       : $self (objref), $t (scalar) - Timeout
+# Returns     : $select->can_read($t) return
+#--------------------------------------------------------------------------
+sub can_read
+    {
+        my($self, $t) = (shift, shift||0);
+        return $select->can_read($t);
+    }
+
+
+#------------------------------------------------------------------------------
+# Description : data() - Get-only utility function for getting all user data
+# Takes       : $self (objref)
+# Returns     : Array with user data
+# Notes       : Can't set id and ihash with setter
+#------------------------------------------------------------------------------
+sub data
+    {
+        my $self = shift;
+        my @data = @_;
+        
+        if(@data)
+            {
+                $self->name     (shift @data),
+                $self->character(shift @data),
+                $self->status   (shift @data),
+                $self->trip     (shift @data),
+                $self->r        (shift @data),
+                $self->g        (shift @data),
+                $self->b        (shift @data),
+                $self->x        (shift @data),
+                $self->y        (shift @data),
+                $self->scl      (shift @data)
+            }
+        else
+            {
+                return
+                    (
+                        $self->name(),
+                        $self->id(),
+                        $self->character(),
+                        $self->status(),
+                        $self->trip(),
+                        $self->ihash(),
+                        $self->r(),
+                        $self->g(),
+                        $self->b(),
+                        $self->x(),
+                        $self->y(),
+                        $self->scl()
+                    );
+            }
+    }
+
+
+#------------------------------------------------------------------------
+# Description : rgb() - Utility function for r(), g() and b()
+# Takes       : $self (objref), $r $g $b (scalars) - r, g and b values
+# Returns     : Array containing rgb values if accessed as a getter
+#------------------------------------------------------------------------
+sub rgb
+    {
+        my($self, $r, $g, $b) = @_;
+        
+        if(defined $r and defined $g and defined $b)
+            {
+                $self->r($r);
+                $self->g($g);
+                $self->b($b);
+            }
+        else
+            {
+                return($self->r(), $self->g(), $self->b());
+            }
+    }
+
+
+#------------------------------------------------------------------------------
+# Description : x_y_scl() - Utility function to x(), y() and scl()
+# Takes       : $self (objref), $x $y $scl (scalars) - x, y and scl values
+# Returns     : Array containing x, y and scl values if accessed as a getter
+#------------------------------------------------------------------------------
+sub x_y_scl
+    {
+        my($self, $x, $y, $scl) = @_;
+        
+        if(defined $x and defined $y and defined $scl)
+            {
+                $self->x($x);
+                $self->y($y);
+                $self->scl($scl);
+            }
+        else
+            {
+                return($self->x(), $self->y(), $self->scl());
+            }
+    }
+
+
+#--- Network functions ---------------------------------------------------------------------------------------------
+
+#----------------------------------------------------------------------------------------------------------
+# Description           : connect() - Open a IO::Socket::INET socket to monachat and send a login signal
+# Sets global variables : $socket, $select, $lastping
+# Takes                 : $self (objref)
+# Returns               : Nothing
+#----------------------------------------------------------------------------------------------------------
+sub connect
+    {
+        my $self = shift;
+        
+        $self->connect_proxy() and return if $self->proxy();
+        
+        $socket = IO::Socket::INET->new
+            (
+                PeerAddr => $self->addr(),
+                PeerPort => $self->port(),
+                Proto    => 'tcp'
+            ) or die "Couldn't connect: $!\n";
+            
+        $select = IO::Select->new($socket);
+
+        $self->login();
+        
+        ### Reset ping timer
+        $lastping = time();
+    }
+
+#-----------------------------------------------------------------------------------------------------------------
+# Description           : connect_proxy() - Open a IO::Socket::Socks socket to monachat and send a login signal
+# Sets global variables : $socket, $select, $lastping
+# Takes                 : $self (objref)
+# Returns               : Nothing
+#-----------------------------------------------------------------------------------------------------------------
+sub connect_proxy
+    {
+        my $self = shift;
+        
+        #### while not defined $socket / while $self->not_connected()
+        while()
+            {
+                $self->get_proxy_list() if $self->proxies_left() == 0;
+                my($addr, $port) = $self->next_proxy();
+                
+                $socket = IO::Socket::Socks->new
+                    (
+                        ProxyAddr    => $addr,
+                        ProxyPort    => $port,
+                        ConnectAddr  => $self->addr(),
+                        ConnectPort  => $self->port(),
+                        SocksDebug   => $self->debug(),
+                        Timeout      => $self->timeout(),
+                        SocksVersion => ($self->site() == 2 ? 5 : $self->version()) #### It's hard to add more sites
+                    ) or warn "$SOCKS_ERROR\n" and redo;
+                
+                last;
+            }
+
+        $select = IO::Select->new($socket);
+        
+        $self->login();
+        
+        ### Reset ping timer
+        $lastping = time();
+    }
+
+
+#----------------------------------------------------------------------------------
+# Description : disconnect() - Stop reading and writing from socket and close it
+# Takes       : Nothing
+# Returns     : Nothing
+#----------------------------------------------------------------------------------
+sub disconnect
+    {
+        $socket->shutdown(2);
+        $socket->close();
+    }
+
+
+#-------------------------------------------------------------------
+# Description : enter_room() - Send a ENTER signal to monachat
+# Takes       : $self (objref), $room (scalar) - Room to enter to
+# Returns     : Nothing
+#-------------------------------------------------------------------
+sub enter_room
+    {
+        my $self = shift;
+        
+        ### So that they are easier to write        
+        my $full_room = $self->room() eq 'main' ? $self->server() : $self->server().'/'.$self->room();
+        
+        my($name, undef, $character, $status, $trip, undef, $r, $g, $b, $x, $y, $scl) = $self->data();
+        
+        ### Format enter signal
+        my $enter = qq{<ENTER room="$full_room" umax="0" type="$character" name="$name" x="$x" };
+        $enter   .= qq{trip="$trip" } if $trip ne '';
+        $enter   .= qq{attrib="no" }  if $self->room() eq 'main';
+        $enter   .= qq{y="$y" r="$r" g="$g" b="$b" scl="$scl" stat="$status" />};
+        
+        $self->send($enter);
+    }
+
+
+#---------------------------------------------------------------------------------
+# Description : is_down() - Check if a socket is still connected to monachat
+# Takes       : $self (objref), $read (scalar) - Variable returned from sysread
+# Returns     : 1 if it's down, 0 if up
+#---------------------------------------------------------------------------------
+sub is_down
+    {
+        my($self, $read) = @_;
+        #print "is_down: '$read'\n";
+        
+        return (defined $read and $read eq '') ? 1 : 0;
+    }
+
+
+#---------------------------------------------------------------------------------
+# Description : is_connected() - Check if a socket is connected to monachat
+# Takes       : $self (objref)
+# Returns     : 1 if it's up, 0 if down
+#---------------------------------------------------------------------------------
+sub is_connected
+    {
+        ...
+    }
+    
+
+#------------------------------------------------------------------------------------------------
+# Description : can_ping() - Check if enough time has passed so that a ping signal can be sent
+#               ping()     - Send a ping signal
+#
+# Takes       : Nothing
+# Returns     : Nothing
+#------------------------------------------------------------------------------------------------
+sub can_ping { return time() - $lastping >= 20 ? 1 : 0; }
+
+sub ping
+    {
+        my $self = shift;
+        
+        $self->send('<NOP />');
+        
+        $lastping = time();
+    }
+    
+#-----------------------------------------------------------------------------------------
+# Description : read_socket() - Read from socket with a timeout of $t seconds
+# Takes       : $self (objref), $t (scalar) - Timeout, $c (scalar) - Characters to read
+# Returns     : $read on success, undef on error
+#-----------------------------------------------------------------------------------------
+sub read_socket
+    {
+        my($self, $t, $c) = (shift, shift||0.2, shift||20000);
+        my $read = '';
+        
+        return undef if !$select->can_read($t);
+        sysread($socket, $read, $c);
+        
+        return (defined $read and $read ne '') ? $read  :
+               (defined $read and $read eq '') ? 'down' :
+               not defined $read               ? undef  :
+                                                 die "Unkonwn status.\n";
+    }
+
+
+#---- Signals ------------------------------------------------------------------------------------------------------
+
+sub login         { my $self = shift; $self->send('MojaChat'); }
+sub exit_room     { my $self = shift; $self->send( '<EXIT no="'.$self->id().'" />' ); }
+
+sub comment
+    {
+        my($self, $comment) = @_;
+        
+        $comment = substr($comment, 0, 40) if $self->handle_comment(); #### 40 ?
+        
+        $self->send( qq{<COM cmt="$comment" />} );
+    }
+
+sub change_x
+    {
+        my($self, $x) = @_;
+        
+        $self->x($x);
+        
+        $self->send( '<SET x="'.$self->x().'" scl="'.$self->scl().'" y="'.$self->y().'" />' );
+    }
+
+sub change_y
+    {
+        my($self, $y) = @_;
+        
+        $self->y($y);
+        
+        $self->send( '<SET x="'.$self->x().'" scl="'.$self->scl().'" y="'.$self->y().'" />' );
+    }
+
+sub change_scl
+    {
+        my($self, $scl) = @_;
+        
+        $self->toggle_scl();
+        
+        $self->send( '<SET x="'.$self->x().'" scl="'.$self->scl().'" y="'.$self->y().'" />' );
+    }
+
+sub change_x_y_scl
+    {
+        my($self, $x, $y, $scl) = @_;
+        
+        $self->x($x);
+        $self->y($y);
+        $self->scl($scl);
+        
+        $self->send( '<SET x="'.$self->x().'" scl="'.$self->scl().'" y="'.$self->y().'" />' );
+    }
+
+sub change_status
+    {
+        my($self, $status) = @_;
+        
+        $self->status($status);
+        $self->send( '<SET stat="'.$self->status().'" />' );
+    }
+
+sub toggle_ignore
+    {
+        my($self, $ihash) = @_;
+        
+        $self->ignore
+            (
+                $ihash,
+                (not defined $self->{'ignore'}->{$ihash} or $self->{'ignore'}->{$ihash} == 0) ? 1 : 0
+            );
+        
+        $self->send( '<IG ihash="'.$ihash.'" stat="'.($self->ignore($ihash) == 1 ? 'on' : 'off').'" />' );
+    }
+
+
+#---- Proxy functions ----------------------------------------------------------------------------------------------
+
+#---------------------------------------------------------------------------------------------
+# Description           : proxies_left() - Get size of @proxyaddr array
+#                         next_proxy()   - Get array containing next proxy address and port
+#
+# Sets global variables : next_proxy() - @proxyaddr, @proxyport
+#
+# Takes                 : Nothing
+# Returns               : Nothing
+#---------------------------------------------------------------------------------------------
+sub proxies_left { return scalar @proxyaddr; }
+sub next_proxy   { return(shift(@proxyaddr), shift(@proxyport)); }
+
+
+#----------------------------------------------------------------------------------------------------
+# Description           : get_proxy_list() - Download proxy list and recognize addresses and ports
+# Sets global variables : @proxyaddr, @proxyport
+# Takes                 : $self (objref)
+# Returns               : Nothing
+#----------------------------------------------------------------------------------------------------
+sub get_proxy_list
+    {
+        my $self = shift;
+        
+        ### Initialize user agent
+        my $ua = LWP::UserAgent->new();
+        $ua->agent('getproxylist');
+        $ua->show_progress(1);
+        
+        my @sites =
+            (
+                'http://socks-proxy.net',
+                'http://socksproxylist24.blogspot.com'
+            );
+        
+        ### Download page
+        my $url  = $sites[$self->site()-1];
+        my $list = $ua->get($url)->content();
+    
+        if( $self->site() == 1 )
+            {
+                ### Change from 4 to 5 and from 5 to 4 so that it doesn't use always the same proxies
+                $self->toggle_version();
+                
+                ### Socket version list to download
+                my $socks  = "Socks".$self->version();
+        
+                @proxyaddr = $list =~ /<td>(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})<\/td><td>\d{4,5}<\/td>.+?$socks/g;
+                @proxyport = $list =~ /<td>\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}<\/td><td>(\d{4,5})<\/td>.+?$socks/g;
+            }
+    
+        elsif( $self->site() == 2 )
+            {                
+                ### Get post page...
+                $list =~ /(http:\/\/socksproxylist24\.blogspot\.com\.?\w*.+?-socks-proxy-list.+?\.html)/;
+                $list = $ua->get($1)->content();
+        
+                ### and recognize addresses
+                @proxyaddr = $list =~ /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):\d{3,5}/g;
+                @proxyport = $list =~ /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}:(\d{3,5})/g;
+            }
+
+        print "Number of proxies: ".$self->proxies_left()."\n";
+    }
+
+1;

@@ -1,0 +1,177 @@
+import AbstractPlayer from '../AbstractPlayer';
+import Mino from './Mino';
+import { CLEANING_PHASE, GRAVITY_PHASE, MOVEMENT_PHASE } from '../LogicConstants';
+import { getTime } from '../../utils/Time';
+import Piece from './Piece';
+import { MAX_SPEED } from '../GameConstants';
+
+export default abstract class MinoPlayer extends AbstractPlayer {
+  piece: Mino;
+  pieces: Piece[][];
+
+  move() {
+    if (this.gameOver) {
+      return;
+    }
+
+    if (this.stage.anim <= CLEANING_PHASE) this.stage.continueCleaning();
+    else if (this.stage.anim === GRAVITY_PHASE) this.stage.gravity(this.seriesSize);
+
+    let speed: number;
+    let smoothSpeed: number;
+    const max_speed_level = Math.ceil(MAX_SPEED / this.speed) - 1;
+    if (this.stage.level >= max_speed_level) {
+      speed = MAX_SPEED;
+      smoothSpeed = this.smoothSpeed * (this.stage.level - max_speed_level + 1);
+    } else {
+      speed = this.speed * (this.stage.level + 1);
+      smoothSpeed = this.smoothSpeed;
+    }
+
+    const currentTime = getTime();
+    if (currentTime - this.time >= 1000 / speed) {
+      this.time = currentTime;
+      const ceilY = Math.ceil(this.y);
+      if (this.gravity(smoothSpeed, 0) && Math.abs(ceilY - this.y) <= this.epsilon) {
+        this.onFloorTouched();
+      }
+    }
+  }
+
+  rotate() {
+    let ceilY = Math.ceil(this.y);
+    const rotNext = (this.piece.rot + 1) % 4;
+    const next = this.pieces[this.piece.numPiece][rotNext];
+    if (
+      next.bottomCorner + ceilY < this.stage.height
+  && (next.rightCorner - 1 + this.x) < this.stage.width
+    ) {
+      let i = 0;
+      const nextMap = next.map;
+      let collision = false;
+      let indirectCollision = false;
+
+      while (!collision && i < nextMap.length) {
+        const px = this.x + nextMap[i][0];
+        let py = ceilY + nextMap[i][1];
+        collision = py >= 0 && this.stage.map[px][py] > 0;
+
+        py -= 1;
+        indirectCollision = indirectCollision || (py >= 0 && this.stage.map[px][py] > 0);
+        i += 1;
+      }
+
+      if (!collision) {
+        this.piece.rotation();
+        if (indirectCollision) {
+          this.y = ceilY;
+        }
+      }
+    }
+  }
+
+  moveRight() {
+    const bottom = this.piece.piece.bottomCorner;
+    let ceilY = Math.ceil(this.y);
+    const right = this.piece.piece.rightCorner;
+    if (bottom + ceilY - 1 < this.stage.height && (right + this.x) < this.stage.width) {
+      let i = 0;
+      const map = this.piece.piece.collisionRight;
+      let collision = false;
+      let indirectCollision = false;
+
+      while (!collision && i < map.length) {
+        const px = this.x + map[i][0];
+        let py = ceilY + map[i][1];
+        collision = py >= 0 && this.stage.map[px][py] > 0;
+
+        py -= 1;
+        indirectCollision = indirectCollision || (py >= 0 && this.stage.map[px][py] > 0);
+        i += 1;
+      }
+
+      if (!collision) {
+        this.x += 1;
+        if (indirectCollision) {
+          this.y = ceilY;
+        }
+      }
+    }
+  }
+
+  moveLeft() {
+    const bottom = this.piece.piece.bottomCorner;
+    let ceilY = Math.ceil(this.y);
+    if (bottom + ceilY - 1 < this.stage.height && this.x > 0) {
+      let i = 0;
+      const map = this.piece.piece.collisionLeft;
+      let collision = false;
+      let indirectCollision = false;
+
+      while (!collision && i < map.length) {
+        const px = this.x + map[i][0];
+        let py = ceilY + map[i][1];
+        collision = py >= 0 && this.stage.map[px][py] > 0;
+
+        py -= 1;
+        indirectCollision = indirectCollision || (py >= 0 && this.stage.map[px][py] > 0);
+        i += 1;
+      }
+
+      if (!collision) {
+        this.x -= 1;
+        if (indirectCollision) {
+          this.y = ceilY;
+        }
+      }
+    }
+  }
+  gravity(yMove: number, scoreMultiplier: number) {
+    if (this.stage.anim !== MOVEMENT_PHASE) {
+      return false;
+    }
+
+    let ceilY = Math.ceil(this.y);
+    const map = this.piece.piece.collisionDown;
+    let yBottom = ceilY + this.piece.piece.bottomCorner;
+    let points = 0;
+    while(yMove > 0 && (yBottom < 0 || yBottom < this.stage.height)) {
+      let collision = false;
+      let xBlock = 0;
+      while (!collision && xBlock < map.length) {
+        const py = ceilY + map[xBlock][1];
+        collision = py >= 0 && this.stage.map[this.x + map[xBlock][0]][py] > 0;
+        xBlock += 1;
+      }
+
+      if (!collision) {
+        const movement = Math.min(yMove, 1);
+        yBottom += 1;
+        ceilY += 1;
+        this.y += movement;
+        yMove -= movement;
+        if (scoreMultiplier) {
+          points += scoreMultiplier;
+        }
+      } else {
+        break;
+      }
+    }
+
+    if (yMove >= 1) {
+      this.y = Math.ceil(this.y);
+    } else if (Math.ceil(this.y) !== this.y && yMove > 0) {
+      this.y = Math.min(Math.ceil(this.y), this.y + (yMove % 1))
+    }
+
+    if (scoreMultiplier) {
+      this.stage.increaseScore(points);
+    }
+    return yMove > 0;
+  }
+
+  resetPiece() {
+    this.x = Math.floor((this.stage.width - this.piece.piece.rightCorner) / 2);
+    this.y = -this.piece.piece.bottomCorner - 1;
+  }
+}

@@ -1,0 +1,311 @@
+#include <stdlib.h>
+#include <stdio.h>
+#include <unistd.h>
+#include <string.h>
+#include <sys/types.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <net/ethernet.h>
+#ifdef _MINGW_
+#include <winsock2.h>
+#else
+#include <fcntl.h>
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <netinet/ip.h>
+#define __FAVOR_BSD
+#include <netinet/tcp.h>
+#include <netinet/udp.h>
+#include <arpa/inet.h>
+#endif
+#include <pthread.h>
+#define HAVE_REMOTE
+#include <pcap.h>
+
+#include <ev.h>
+
+#include <sys/basetype.h>
+#include <sys/error.h>
+#include <sys/assert.h>
+#include <sys/strings.h>
+#include <sys/debug.h>
+#include <sys/timer.h>
+#include <sys/in.h>
+#include <sys/netutl.h>
+#include <sys/pcaputl.h>
+
+#include "main.h"
+#include "l2c_tcp.h"
+
+
+static int g_iServerFd = INVALID_FD;
+
+static void disconnect(IN const PCAP_TUNNEL_S* pstTunnel, int iFd)
+{
+    if (NULL != pstTunnel)
+    {
+        PT_MarkDisconnect(pstTunnel, (ulong)(uint32_t)iFd);
+    }
+    TCP_Close(getmainEv(), iFd);
+
+    return;
+}
+
+static ulong fdMsgProc(struct ev_loop *pstEvtLoop, const struct ev_io *pstEvIo, int iEvent)
+{
+    ulong ulRet = ERROR_SUCCESS;
+    int iFd = pstEvIo->fd;
+    PCAP_TUNNEL_S* pstTunnel = (PCAP_TUNNEL_S*)(ulong)ev_watch_userdata(pstEvIo);
+    int iRcv = 0;
+    int iSnd = 0;
+
+    IGNORE_PARAM(pstEvtLoop);
+
+    if (NULL == pstTunnel)
+    {
+        disconnect(pstTunnel, iFd);
+        return ERROR_FAILED;
+    }
+
+    if (0 > checkconnectstatu(iFd))
+    {
+        DBG_ERROR("[TCP]Faild to connect server(%d).\n", iFd);
+        disconnect(pstTunnel, iFd);
+        return ERROR_FAILED;
+    }
+
+    if (0 != (((int)(EV_READ)) & iEvent))
+    {
+        iRcv = PT_Recv(iFd, (size_t)PCAP_TUNNEL_MAX_PACKET_LEN, pstTunnel, (ulong)(uint32_t)iFd);
+        if (0 < iRcv)
+        {
+            iSnd = PT_SendData(pstTunnel, (ulong)(uint32_t)iFd);
+            DBG_PACKET("[TCP]Receive %d length packet from %d and forward %d length packet to tunnel.\n", iRcv, iFd, iSnd);
+            ulRet = ERROR_SUCCESS;
+        }
+        /*else if (0 == iRcv)
+        {
+            DBG_ERROR("[TCP]Receive zero data on fd(%d).\n", iFd);
+        }*/
+        else
+        {
+            /* 异常情况，可以检查剩余buf长度 */
+            if (0 < PT_GetRcvBufLeftLen(pstTunnel, (ulong)(uint32_t)iFd))
+            {
+                #ifdef _WIN32
+                DBG_ERROR("[TCP]Receive null(%d) data on fd(%d), error:%d.\n", iRcv, iFd, WSAGetLastError());
+                #else
+                DBG_ERROR("[TCP]Receive null(%d) data on fd(%d), error:%s.\n", iRcv, iFd, strerror(errno));
+                #endif
+
+                /* 可能还有缓存的数据，无论如何尝试发送一下 */
+                iSnd = PT_SendData(pstTunnel, (ulong)(uint32_t)iFd);
+                if (0 < iSnd)
+                {
+                    DBG_ERROR("[TCP]Forward %d length packet to tunnel.\n", iSnd);
+                    ulRet = ERROR_SUCCESS;
+                }
+                else
+                {
+                    ulRet = ERROR_FAILED;
+                }
+            }
+        }
+    }
+
+    if (0 != (((int)(EV_WRITE)) & iEvent))
+    {
+    }
+
+    if (0 != ((int)EV_ERROR & iEvent))
+    {
+        DBG_ERROR("[TCP]Receive fd(%d) error event, disconnected.\n", iFd);
+        ulRet = ERROR_FAILED;
+    }
+
+    if (ERROR_SUCCESS != ulRet)
+    {
+        disconnect(pstTunnel, iFd);
+    }
+
+    return ulRet;
+}
+
+static ulong recvPTPacket(IN PCAP_TUNNEL_S* pstTunnel, IN PT_SESSION_S *pstSession, IN int iEvent, IN void *pData)
+{
+    PT_PACKET_DATA_S* pstData = (PT_PACKET_DATA_S*)pData;
+    int iFd;
+    int iRet;
+    ulong ulRet = ERROR_SUCCESS;
+
+    IGNORE_PARAM(pstTunnel);
+    IGNORE_PARAM(iEvent);
+
+    if (BOOL_TRUE != PT_IsSessionValid(pstSession))
+    {
+       return ERROR_SUCCESS;
+    }
+
+    iFd = (int)PT_GetUserCtx(pstSession);
+    if (iFd == (int)PCAPTUNNEL_INVALID_USRCTX)
+    {
+        return ERROR_SUCCESS;
+    }
+
+    if (NULL != pstData)
+    {
+        iRet = (int)send(FD_TO_SOCKET(iFd), (char *)pstData->pucPacket, (size_t)pstData->ulPktLen, 0);
+        DBG_PACKET("[TCP]Receive %lu length packet from tunnel and forward %d length to %d.\n",
+                   pstData->ulPktLen, iRet, iFd);
+        if (0 >= iRet)
+        {
+            #ifdef _WIN32
+            DBG_ERROR("Send to %d error:%d\n", iFd, WSAGetLastError());
+            #else
+            DBG_ERROR("Send to %d error:%s\n", iFd, strerror(errno));
+            #endif
+
+            ulRet = ERROR_FAILED;
+        }
+    }
+    return ulRet;
+}
+
+static ulong recvPTConnectMsg(IN PCAP_TUNNEL_S* pstTunnel, IN PT_SESSION_S *pstSession, IN int iEvent, IN void *pData)
+{
+    int iFd;
+    PT_CONNECT_DATA_S* pstData = (PT_CONNECT_DATA_S*)pData;
+    char szAddrStr1[INET_ADDR_STR_LEN + 1];
+
+    IGNORE_PARAM(iEvent);
+
+    DBGASSERT(PCAPTUNNEL_INVALID_USRCTX == PT_GetUserCtx(pstSession));
+    if (NULL == pstData)
+    {
+        return ERROR_FAILED;
+    }
+
+    iFd = TCP_Connect(getmainEv(), pstData->uiIpAddr, htons(pstData->usPort), EV_READ, fdMsgProc, (void *)(ulong)pstTunnel);
+    if (0 > iFd)
+    {
+        DBG_ERROR("[TCP]Failed to connect server(%s, %hu).\n", IP2Str(pstData->uiIpAddr, szAddrStr1), pstData->usPort);
+        return ERROR_FAILED;
+    }
+
+    PT_SetUserCtx(pstSession, (ulong)(uint32_t)iFd);
+
+    DBG_EVENT("[TCP]Receive a tunnel connection, and connected to server succeed(%d).\n", iFd);
+    return ERROR_SUCCESS;
+}
+
+static ulong recvPTDisconnectMsg(IN PCAP_TUNNEL_S* pstTunnel, IN PT_SESSION_S *pstSession, IN int iEvent, IN void *pData)
+{
+    int iFd = (int)PT_GetUserCtx(pstSession);
+
+    DBGASSERT(BOOL_TRUE == PT_IsSessionValid(pstSession));
+    DBG_EVENT("[TCP]Recv disconnect event.\n");
+
+    IGNORE_PARAM(pstTunnel);
+    IGNORE_PARAM(iEvent);
+    IGNORE_PARAM(pData);
+
+    TCP_Close(getmainEv(), iFd);
+
+    return ERROR_SUCCESS;
+}
+
+static ulong recvPTUpMsg(IN PCAP_TUNNEL_S* pstTunnel, IN PT_SESSION_S *pstSession, IN int iEvent, IN void *pData)
+{
+    DBG_EVENT("[TCP]Recv tunnel up event.\n");
+    IGNORE_PARAM(pstTunnel);
+    IGNORE_PARAM(pstSession);
+    IGNORE_PARAM(iEvent);
+    IGNORE_PARAM(pData);
+    return ERROR_SUCCESS;
+}
+
+static PT_EVENT_PF g_apfL2CPTEventProc[PT_EVENT_MAX] = {
+    recvPTUpMsg,
+    recvPTConnectMsg,
+    recvPTDisconnectMsg,
+    recvPTPacket
+};
+
+static ulong l2cPtEventProc(IN PCAP_TUNNEL_S* pstTunnel, IN PT_SESSION_S *pstSession, IN int iEvent, IN void *pData)
+{
+    if ((PT_EVENT_TUNNEL_UP <= iEvent) && (PT_EVENT_MAX > iEvent))
+    {
+        return g_apfL2CPTEventProc[iEvent](pstTunnel, pstSession, iEvent, pData);
+    }
+
+    return ERROR_FAILED;
+}
+
+static ulong acceptConnect(struct ev_loop *pstEvtLoop, const struct ev_io *pstEvIo, int iEvent)
+{
+    int iAccFd = -1;
+
+    PCAP_TUNNEL_S* pstTunnel = (PCAP_TUNNEL_S *)(ulong)ev_watch_userdata(pstEvIo);
+    PT_CONNECT_DATA_S stData;
+
+    IGNORE_PARAM(pstEvtLoop);
+
+    if (0 == ((EV_READ | EV_WRITE) & iEvent))
+    {
+        return ERROR_FAILED;
+    }
+
+    iAccFd = TCP_Accept(getmainEv(), pstEvIo->fd, EV_READ, fdMsgProc, (void *)(ulong)pstTunnel);
+    if (0 > iAccFd)
+    {
+        return ERROR_FAILED;
+    }
+
+    if ((NULL == pstTunnel) || (BOOL_TRUE != PT_IsTunnelReady(pstTunnel)))
+    {
+        TCP_Close(getmainEv(), iAccFd);
+        return ERROR_FAILED;
+    }
+
+    memset(&stData, 0, sizeof(PT_CONNECT_DATA_S));
+    stData.uiIpAddr = g_stParam.stPtParam.uiRemoteIP;
+    stData.usPort = g_stParam.stPtParam.usRemotePort;
+    if (NULL == PT_OpenSession(pstTunnel, PT_APP_TCP, (ulong)(uint32_t)iAccFd, &stData))
+    {
+        TCP_Close(getmainEv(), iAccFd);
+        return ERROR_FAILED;
+    }
+
+    DBG_EVENT("[TCP]There is a new client(%d) connected, start tunnel connection.\n", iAccFd);
+
+    return ERROR_SUCCESS;
+}
+
+ulong L2C_TCP_Init(uint32_t uiAddress, ushort usPort)
+{
+    int iFd;
+
+    PT_RegAppProc(PT_APP_TCP, l2cPtEventProc);
+
+    iFd = TCP_CreateServer(getmainEv(), htonl(uiAddress), htons(usPort), EV_READ, acceptConnect, (void *)(ulong)PT_GetMainTunnel());
+    if (0 > iFd)
+    {
+        DBG_ERROR("Failed to start TCP server\n");
+        return ERROR_FAILED;
+    }
+
+    g_iServerFd = iFd;
+
+    return ERROR_SUCCESS;
+}
+
+void L2C_TCP_Fini(void)
+{
+    if (INVALID_FD != g_iServerFd)
+    {
+        TCP_Close(getmainEv(), g_iServerFd);
+        g_iServerFd = INVALID_FD;
+    }
+
+    return;
+}

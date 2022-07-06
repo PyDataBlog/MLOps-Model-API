@@ -1,0 +1,194 @@
+package tz.gzu.oip.admin.controller;
+
+import org.apache.log4j.Logger;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.core.Authentication;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.web.bind.annotation.*;
+import tz.gzu.oip.admin.dto.ResourcesDto;
+import tz.gzu.oip.dm.bo.ops.MenusDto;
+import tz.gzu.oip.dm.bo.ops.ResourcesMenuDto;
+import tz.gzu.oip.dm.po.AuthorityResources;
+import tz.gzu.oip.dm.po.Resources;
+import tz.gzu.oip.dm.service.ops.AuthorityResourcesService;
+import tz.gzu.oip.dm.service.ops.ResourcesService;
+import tz.gzu.oip.security.jwt.support.SimpleResponse;
+
+import java.lang.reflect.InvocationTargetException;
+import java.util.ArrayList;
+import java.util.Date;
+import java.util.List;
+
+/*
+*  
+*  @author yuit 吴正荣
+*
+*  @create 17-10-18
+*
+*/
+@RestController
+@RequestMapping("resources")
+public class ResourcesController {
+
+    @Autowired
+    private ResourcesService resourcesService;
+
+    @Autowired
+    private AuthorityResourcesService authorityResourcesService;
+
+
+    private Logger logger = Logger.getLogger(getClass());
+
+    /**
+     * 获取菜单
+     *
+     * @param authentication 授权用户
+     * @return
+     */
+    @GetMapping("/menus")
+    public List<ResourcesMenuDto> menus(Authentication authentication) {
+        return resourcesService.findMenusByName(authentication.getName());
+    }
+
+    /**
+     * 获取所有的菜单
+     *
+     * @return
+     */
+    @GetMapping("allMenus/{auid}")
+    public List<ResourcesMenuDto> allMenus(@PathVariable String auid) throws InvocationTargetException, IllegalAccessException {
+
+        List<ResourcesMenuDto> all = this.resourcesService.findAllMenus();
+        List<ResourcesMenuDto> userHave = this.resourcesService.finMenusByAuId(auid);
+
+        for (ResourcesMenuDto item : userHave) {
+
+            for (ResourcesMenuDto allItem : all) {
+
+                if (item.getId().trim().equals(allItem.getId().trim())) {
+
+                    for (MenusDto child : item.getChildren()) {
+
+                        for (MenusDto _child : allItem.getChildren()) {
+
+                            if (child.getCid().trim().equals(_child.getCid().trim())) {
+                                _child.setHave(true);
+                                break;
+                            }
+
+                        }
+
+                    }
+
+                    break;
+                }
+
+
+            }
+
+
+        }
+
+        return all;
+    }
+
+    @PostMapping("modifyMenusByAuId/{auid}")
+    @Transactional(propagation = Propagation.REQUIRED)
+    public void modifyMenusByAuId(@PathVariable String auid, @RequestBody List<AuthorityResources> items) {
+
+
+        List<String> rids = new ArrayList<>();
+
+        List<ResourcesMenuDto> menuDtos = this.resourcesService.finMenusByAuId(auid);
+
+        for (ResourcesMenuDto item : menuDtos) {
+
+            if (item.getChildren() == null) {
+                rids.add(item.getId());
+            }
+        }
+
+        if (rids.size() < 1) {
+            this.authorityResourcesService.deleteResourcesByRId(null, auid);
+        } else {
+            // 先删除该角色所拥有的菜单
+            this.authorityResourcesService.deleteResourcesByRId(rids, auid);
+        }
+
+        if (items.size() > 0) {
+            this.authorityResourcesService.insertMenus(items);
+        }
+
+
+    }
+
+    /**
+     * 获取所有资源
+     *
+     * @return
+     */
+    @GetMapping("/{cPage}/{pSize}")
+    public ResourcesDto allResources(@PathVariable int cPage, @PathVariable int pSize) {
+
+        List<Resources> menuDtos = resourcesService.findAllResources(cPage, pSize);
+        int total = resourcesService.count();
+
+        return new ResourcesDto(menuDtos, total);
+    }
+
+    @GetMapping("/menusParent")
+    public List<Resources> menusParent() {
+        return this.resourcesService.findAllMenuParent();
+    }
+
+    /**
+     * 添加资源
+     *
+     * @param resources
+     * @return
+     */
+    @PutMapping
+    public SimpleResponse addResources(@RequestBody Resources resources) {
+
+        int flg = 0;
+
+        resources.setTime(new Date());
+
+        if (resources != null) {
+            flg = this.resourcesService.insert(resources);
+        }
+
+        if (flg > 0) {
+            // this.authority_resourcesService.insert()
+            return new SimpleResponse("添加成功");
+        } else {
+            return new SimpleResponse("服务器内部错误");
+        }
+    }
+
+    /**
+     * 通过Id删除资源
+     *
+     * @param id
+     */
+    @DeleteMapping("/{id}")
+    public void deleteResource(@PathVariable String id) {
+
+
+        this.resourcesService.deleteResourceById(id);
+    }
+
+    /**
+     * 更新资源
+     *
+     * @param resources
+     */
+    @PostMapping
+    public void modifyResources(@RequestBody Resources resources) {
+
+        resources.setTime(new Date());
+
+        this.resourcesService.update(resources);
+    }
+}

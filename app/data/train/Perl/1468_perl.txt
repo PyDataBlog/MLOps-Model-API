@@ -1,0 +1,1015 @@
+package Parakeet::Xml;
+use strict;
+use warnings;
+use utf8;
+use Exporter 'import';
+
+no warnings 'recursion';
+
+use Parakeet::Xml::Entity;
+
+use Data::Dumper;
+use HTML::Entities; 
+use Misc::DmUtil::Data qw(notEmpty);
+use Misc::DmUtil::File qw(readFileUtf8);
+use Misc::DmUtil::Log qw(:level);
+use Scalar::Util 'blessed';
+use XML::LibXML;
+
+
+our %EXPORT_TAGS = (all => [qw(appendChildren appendClonedChildren attributeRemove attributeSet attributesCopy childElementsDeep childrenByTagName cloneRemoveNamespaces element elementRename elementsByTagName entity escape entityToUnicode innerToString insertChildrenAfter insertChildrenBefore insertElementAfter insertElementBefore moveChildren
+  element isElementNode isTextNode nodePlace removeNodeKeepChildren replaceNode unicodeToEntity)]);
+
+our $nsUrl = "http://www.duncanmartin.com/ns/parakeet.xml";
+
+
+Exporter::export_ok_tags('all');
+
+
+# Append children of one node onto an existing node
+sub appendChildren
+{
+  my $to    = shift;
+  my $from  = shift;
+
+  foreach my $i ($from->childNodes())
+  {
+    $i->unbindNode();
+    $to->appendChild($i);
+  }
+  
+  return 1;
+} # end of 'appendChildren()'
+
+
+
+# Append cloned children of one node onto an existing node
+sub appendClonedChildren
+{
+  my $to    = shift;
+  my $from  = shift;
+
+  foreach my $i ($from->childNodes())
+  {
+    $to->appendChild($i->cloneNode(1));
+  }
+  
+  return 1;
+} # end of 'appendClonedChildren()'
+
+
+
+# Remove an attribute
+sub attributeRemove
+{
+  my $node  = shift;
+  my $name  = shift;
+  
+  if ($name =~ /^pk:(.*)/o)
+  {
+    $node->removeAttributeNS($nsUrl, $1);
+  }
+  else
+  {
+    $node->removeAttribute($name);
+  }
+  
+} # end of 'attributeRemove()'
+
+
+
+# Set an attribute
+sub attributeSet
+{
+  my $node  = shift;
+  my $name  = shift;
+  my $value = shift;
+  my %opt   = @_;
+
+  my $log   = Misc::DmUtil::Log::find(%opt);
+  
+  unless ($node)
+  {
+    $log->fatal("No node supplied");
+  }
+  
+  unless (notEmpty($name))
+  {
+    $log->fatal("No name supplied");
+  }
+  
+  unless (defined $value)
+  {
+    $log->fatal("No value supplied for name [$name]");
+  }
+  
+  if ($name =~ /^pk:(.*)/o)
+  {
+    $log->debug("nsUrl=[$nsUrl], name=[$1], value=[$value]");
+    $node->setAttributeNS($nsUrl, $1, $value);
+  }
+  else
+  {
+    $node->setAttribute($name, $value);
+  }
+  
+} # end of 'attributeSet()'
+
+
+# Copy attributes
+sub attributesCopy
+{
+  my $to    = shift;
+  my $from  = shift;
+  my %opt   = @_;
+  
+  foreach my $a ($from->attributes())
+  {
+    next if ref $a eq "XML::LibXML::Namespace";
+  
+    my $uri = $a->namespaceURI();
+  
+    $to->setAttributeNS($uri, $a->nodeName(), $a->getValue());
+  }
+  
+  return 1;
+} # end of 'attributesCopy()'
+
+
+
+# Return all child elements
+sub childElementsDeep
+{
+  my $parent  = shift;
+  my %arg     = @_;
+  
+  my $depth   = $arg{depth} // 0;
+  ++$depth;
+  
+  if ((ref $parent // "") eq "XML::LibXML::Document")
+  {
+    my @res = childElementsDeep($parent->documentElement(), depth => $depth);
+  
+    push @res, $parent;
+    
+    return @res;
+  }
+
+
+  my @res;
+  foreach my $i ($parent->childNodes())
+  {
+    push @res, $i if $i->nodeType == XML_ELEMENT_NODE;
+    push @res, childElementsDeep($i, depth => $depth);
+  }
+  
+  return @res;
+} # end of 'childElementsDeep()'  
+  
+
+
+# children by tag name
+sub childrenByTagName
+{
+  my $parent  = shift;
+  my $name    = shift;
+  
+  if ((ref $parent // "") eq "XML::LibXML::Document")
+  {
+    return childrenByTagName($parent->documentElement(), $name);
+  }
+  
+  if ($name =~ /^pk:(.*)/o)
+  {
+    return $parent->getChildrenByTagNameNS($nsUrl, $1);
+  }
+  
+  return $parent->getChildrenByTagName($name);
+} # end of 'childrenByTagName()'
+
+
+
+# deep clone elements, removing namespaces
+sub cloneRemoveNamespaces
+{
+  my $root = shift;
+  
+  return cloneRemoveNamespacesRecur($root);
+} # end of 'cloneRemoveNamespaces()'
+
+
+
+# deep clone elements, removing namespaces - recursive part
+sub cloneRemoveNamespacesRecur
+{
+  my $node = shift;
+  my $res;
+  
+  # document node
+  if ($node->nodeType == XML_DOCUMENT_NODE)
+  {
+    $res = new XML::LibXML::Document();
+    
+    $res->setDocumentElement(cloneRemoveNamespacesRecur($node->documentElement()));
+    
+    return $res;  
+  }
+  
+
+  # element node
+  if ($node->nodeType == XML_ELEMENT_NODE)
+  {
+    $res = element($node->localname());
+    foreach my $i ($node->attributes())
+    {
+      next if $i->nodeName() =~ /^xmlns:/o;
+    
+      $res->setAttribute($i->localname(), $i->nodeValue());
+    }
+  }
+  else
+  {
+    $res = $node->cloneNode(0);
+  }
+  
+  foreach my $i ($node->childNodes())
+  {
+    my $j = cloneRemoveNamespacesRecur($i);
+    $res->appendChild($j) if $j;
+  }
+  
+  return $res;  
+} # end of 'cloneRemoveNamespacesRecur()'
+
+  
+
+# create element
+sub element
+{
+  my $name  = shift;
+  my %opt   = @_;
+ 
+  my $node;
+  if ($name =~ /^pk:(.*)/o)
+  {
+    $node = XML::LibXML::Element->new($1);
+    $node->setNamespace($nsUrl, "pk", 1);
+  }
+  else
+  {
+    $node = XML::LibXML::Element->new($name);
+  } 
+  
+  nodePlace($node, %opt);
+ 
+  foreach my $i (qw(alt title))
+  {
+    if (defined $opt{$i})
+    {
+      $node->setAttribute($i, $opt{$i});
+    }
+  }
+  
+  foreach my $i (qw(class href id role src style))
+  {
+    if (notEmpty($opt{$i}))
+    {
+      $node->setAttribute($i, $opt{$i});
+    }
+  }
+
+  foreach my $i (keys %opt)
+  {
+    if ($i =~ /^pk:/o && defined $opt{$i})
+    {
+      $node->setAttribute($i, $opt{$i});
+    }
+  }
+      
+  
+  if (defined $opt{text})
+  {
+    $node->appendText($opt{text});
+  }
+  
+  return $node;
+} # end of 'element()'
+
+
+
+# Rename an element
+sub elementRename
+{
+  my $node  = shift;
+  my $name  = shift;
+  
+  my $e = element($name, after => $node);
+  moveChildren($e, $node);
+
+  attributesCopy($e, $node);
+
+  $node->unbindNode(); 
+  
+  return $e;
+} # end of 'elementRename()'
+  
+
+
+# elements by tag name
+sub elementsByTagName
+{
+  my $parent  = shift;
+  my $name    = shift;
+  my %opt     = @_;
+  
+  unless (blessed($parent))
+  {
+    Misc::DmUtil::Log::find(%opt)->fatal("Non blessed argument passed as parent");
+  }
+  
+  my @buf;
+
+  if ($name =~ /^pk:(.*)/o)
+  {
+    @buf = $parent->getElementsByTagNameNS($nsUrl, $1);
+  }
+  else
+  {  
+    @buf = $parent->getElementsByTagName($name);
+  }
+  
+  @buf = elementsFilter(\@buf, %opt);
+  
+  return @buf;
+} # end of 'elementsByTagName()'
+
+
+
+# Filter elements by rules
+sub elementsFilter
+{
+  my $list  = shift;
+  my %opt   = @_;
+  my @buf   = @{$list};
+
+  foreach my $att (qw(class id))
+  {
+    if ($opt{$att})
+    {
+      my @t;
+      foreach my $i (@buf)
+      {
+        my $j = $i->getAttribute($att);
+        next unless defined $j && $j eq $opt{$att};
+    
+        push @t, $i;
+      }
+    
+      @buf = @t;
+    }
+  }
+  
+  return @buf;
+} # end of 'elementsFilter()'
+
+
+
+# Return entity
+sub entity
+{
+  my $name  = shift;
+
+  unless ($Parakeet::Xml::Entity::entity{$name})
+  {
+    die "Unknown entity [$name]";
+  }
+  
+  return $Parakeet::Xml::Entity::entity{$name};
+} # end of 'entity()'
+
+
+
+# turn entities into unicode
+sub entityToUnicode
+{
+  my $text  = shift;
+  my %opt   = @_;
+
+  return undef unless defined $text;
+
+  foreach my $i (keys %Parakeet::Xml::Entity::entity)
+  {
+    if ($opt{keepXmlEntities})
+    {
+      next if $i eq "amp";
+      next if $i eq "lt";
+      next if $i eq "gt";
+    }
+    
+    $text =~ s/&$i;/$Parakeet::Xml::Entity::entity{$i}/g;
+  }
+ 
+  return $text;
+} # end of 'entityToUnicode()'
+
+
+
+# escape text to valid XML
+sub escape
+{
+  my $text = shift;
+
+  return "" unless defined $text;
+
+  $text =~ s/&/&amp;/go;
+  $text =~ s/</&lt;/go;
+  $text =~ s/>/&gt;/go;
+  $text =~ s/"/&quot;/go;
+  $text =~ s/'/&apos;/go;
+
+  return $text;
+} # end of 'escape()'
+  
+  
+  
+# Test for child nodes
+sub hasChildren
+{
+  my $in  = shift;
+  my @e   = $in->childNodes();
+  
+  return (scalar(@e) > 0 ? 1 : 0);
+} # end of 'hasChildren()'
+
+
+
+# convert inner element to string
+# (i.e. omit root node)
+sub innerToString
+{
+  my $root  = shift;
+  my %opt   = @_;
+  
+  my $xml = $opt{xml} // 0;
+  
+  my $buf = "";
+  foreach my $i ($root->childNodes())
+  {
+    if ($xml == 0)
+    {
+      $buf .= unicodeToEntity($i->toString(1));
+    }
+    else
+    {
+      $buf .= $i->toString(1);
+    }
+  }
+  
+  return $buf;
+} # end of 'innerToString()'
+
+
+
+# Append children of an element after another element
+sub insertChildrenAfter
+{
+  my $new  = shift;
+  my $old  = shift;
+  
+  foreach my $i ($new->childNodes())
+  {
+    $old->parentNode()->insertAfter($i, $old);
+  }
+  
+} # end of 'insertChildrenAfter()'
+
+
+
+# Append children of an element before another element
+sub insertChildrenBefore
+{
+  my $new  = shift;
+  my $old  = shift;
+  
+  foreach my $i ($new->childNodes())
+  {
+    $old->parentNode()->insertBefore($i, $old);
+  }
+  
+} # end of 'insertChildrenBefore()'
+
+
+
+# Append an element after another element
+sub insertElementAfter
+{
+  my $new  = shift;
+  my $old  = shift;
+  
+  $old->parentNode()->insertAfter($new, $old);
+} # end of 'insertElementAfter()'
+
+
+
+# Append an element before another element
+sub insertElementBefore
+{
+  my $new  = shift;
+  my $old  = shift;
+  
+  $old->parentNode()->insertBefore($new, $old);
+} # end of 'insertElementBefore()'
+
+
+
+# Return if element node
+sub isElementNode
+{
+  my $in  = shift;
+  
+  return 0 unless (blessed($in) && $in->isa("XML::LibXML::Node"));
+  
+  return ($in->nodeType == XML_ELEMENT_NODE ? 1 : 0);
+} # end of 'isElementNode)'
+
+
+
+# Return if text node
+sub isTextNode
+{
+  my $in  = shift;
+  
+  return 0 unless (blessed($in) && $in->isa("XML::LibXML::Node"));
+
+  return ($in->nodeType == XML_TEXT_NODE ? 1 : 0);
+} # end of 'isTextNode()'
+
+
+
+# move children to new node
+sub moveChildren
+{
+  my $to    = shift;
+  my $from  = shift;
+  my %opt   = @_;  
+  my $log   = Misc::DmUtil::Log::find(%opt);
+  
+  my @c = $from->childNodes();
+  foreach my $i (@c)
+  {
+    $i->unbindNode();
+    $to->appendChild($i);
+  }
+
+} # end of 'moveChildren()'
+
+
+
+# Place node at position
+sub nodePlace
+{
+  my $node  = shift;
+  my %opt   = @_;
+
+  if ($opt{after})
+  {
+    unless (blessed($opt{after}))
+    {
+      Misc::DmUtil::Log::find()->fatal("Non-blessed reference supplied for after position");
+    }
+
+    insertElementAfter($node, $opt{after});
+  }
+  elsif ($opt{append})
+  {
+    unless (blessed($opt{append}))
+    {
+      Misc::DmUtil::Log::find()->fatal("Non-blessed reference supplied for append position");
+    }
+
+    $opt{append}->appendChild($node);
+  }
+  elsif ($opt{before})
+  {
+    unless (blessed($opt{before}))
+    {
+      Misc::DmUtil::Log::find()->fatal("Non-blessed reference supplied for before position");
+    }
+
+    insertElementBefore($node, $opt{before});
+  }
+  elsif ($opt{prepend})
+  {
+    unless (blessed($opt{prepend}))
+    {
+      Misc::DmUtil::Log::find()->fatal("Non-blessed reference supplied for prepend position");
+    }
+
+    my $f = $opt{prepend}->firstChild();
+    if ($f)
+    {
+      insertElementBefore($node, $f);  
+    }
+    else
+    {
+      $opt{prepend}->appendChild($node);  
+    }
+  }
+  
+} # end of 'nodePlace()'
+
+
+
+# Parse
+sub parse
+{
+  my %opt = @_;
+  
+  my $log = Misc::DmUtil::Log::find(%opt);
+
+  my $input;
+  if (defined $opt{string})
+  {
+    $input = $opt{string};
+  }
+  elsif (defined $opt{file})
+  {
+    $input  = readFileUtf8($opt{file})
+      // return 0;
+  }
+  else
+  {
+    $log->error("No input");
+    return 0;
+  }
+
+  my $dom;
+  eval
+  {
+    my $parser = new XML::LibXML();
+    $dom = $parser->parse_string($input);
+  };
+  
+  if ($@)
+  {
+    $log->error("Failed to parse with error [$@]");
+    $log->error($input);
+    
+    return 0;
+  }
+ 
+  unless ($dom)
+  {
+    $log->notice($input);
+    
+    $log->error("Failed to parse");
+    
+    return 0;
+  }
+    
+  return $dom;
+} # end of 'parse();
+
+
+
+# Parse XHTML
+sub parseXhtml
+{
+  my %opt = @_;
+  
+  my $log = Misc::DmUtil::Log::find(%opt);
+
+  my $input;
+  if (notEmpty($opt{string}))
+  {
+    $input = $opt{string};
+  }
+  elsif (notEmpty($opt{file}))
+  {
+    $input  = readFileUtf8($opt{file})
+      // return 0;
+  }
+  else
+  {
+    $log->error("No input");
+    return 0;
+  }
+  
+  # get rid of doctype
+  $input =~ s/^.*<!DOCTYPE.*$//gmo;
+  
+  # get rid of namespace
+  $input =~ s/<html xmlns.*?>/<html>/go;
+  
+  # fix entities
+  $input = entityToUnicode($input, keepXmlEntities => 1);
+  
+  return parse(string => $input);
+} # end of 'parseXhtml();
+
+
+
+# Remove the node but keep the children
+sub removeNodeKeepChildren
+{
+  my $node  = shift;
+  
+  foreach my $i ($node->childNodes())
+  {
+    $i->unbindNode();
+    $node->parentNode()->insertBefore($i, $node);
+  }
+  
+  $node->unbindNode();
+
+  return 1;
+} # end of 'removeNodeKeepChildren()'
+  
+
+
+# replace one node with another, handle root
+sub replaceNode
+{
+  my $new = shift;
+  my $old = shift;
+  my %opt = @_;
+
+  my $log = Misc::DmUtil::Log::find();
+  
+  unless (ref $new)
+  {
+    $new = element($new, %opt);
+  }
+
+  return 1 if $new == $old;
+  
+  # move children
+  if ($opt{keepChildren})
+  {
+    foreach my $i ($old->childNodes())
+    {
+      $i->unbindNode();
+      $new->appendChild($i);
+    }
+  }
+  
+  # keep attributes
+  if ($opt{keepAttr})
+  {
+    foreach my $a (@{$opt{keepAttr}})
+    {
+      my $value = $old->getAttribute($a);
+      next unless defined $value;
+    
+      $new->setAttribute($a, $value);
+    }
+  }
+  
+  
+  my $doc = $old->ownerDocument();
+  if ($doc->documentElement() == $old)
+  {
+    $log->debug("Setting root to [$new]");
+    $doc->setDocumentElement($new);
+  }
+  else
+  {
+    $old->replaceNode($new);
+  }
+  
+  return $new;
+} # end of 'replaceNode()'
+
+
+
+# Create text node
+sub text
+{
+  my $text  = shift;
+  my %opt   = @_;
+ 
+  my $node = XML::LibXML::Text->new($text);
+  
+  nodePlace($node, %opt);
+
+  return $node;
+} # end of 'text()'
+
+
+
+# Replace text below node with a named element
+sub textToElement
+{
+  my $node    = shift;
+  my $pattern = shift;
+  my $name    = shift;
+  my %opt     = @_;
+  my $log     = Misc::DmUtil::Log::find(%opt);
+  my $debug   = $log->isLoggable(LOG_DEBUG);
+  
+  my @res;
+  if (isElementNode($node))
+  {
+    foreach my $i ($node->childNodes())
+    {
+      push @res, textToElementRecur($i, $pattern, $name, %opt, depth => 0);
+    }
+  }
+  else
+  {
+    push @res, textToElementRecur($node, $pattern, $name, %opt, depth => 0);
+  }  
+  
+  if ($debug)
+  {
+    for (my $i = 0; $i < @res; ++$i)
+    {
+      $log->debug("Position [$i]: ".$res[$i]->toString(0));
+    }
+  }  
+
+  
+  if ($opt{trim})
+  {
+    $log->debug("Want trim") if $debug;
+  
+    while (@res && isElementNode($res[0]) && $res[0]->nodeName() eq $name)
+    {
+      $log->debug("Removing leading") if $debug;
+      shift @res;
+    }
+    
+    while (@res && isElementNode($res[-1]) && $res[-1]->nodeName() eq $name)
+    {
+      $log->debug("Removing trailing") if $debug;
+      pop @res;
+    }
+  }
+  
+  return @res;
+} # end of 'textToElement()'
+
+
+
+# Recursive part of text to element
+sub textToElementRecur
+{
+  my $node    = shift;
+  my $pattern = shift;
+  my $name    = shift;
+  my %opt     = @_;
+  my $depth   = $opt{depth};
+  my $log     = Misc::DmUtil::Log::find(%opt);
+  my $debug   = $log->isLoggable(LOG_DEBUG);
+
+  my @res;
+  
+  $log->debug("[$depth]: On node [".$node->toString(0)."]") if $debug;
+  
+  if (isElementNode($node))
+  {
+    $log->debug("[$depth]: Is element") if $debug;
+
+    my $n = $node->cloneNode(0);
+    push @res, $n;
+    
+    foreach my $i ($node->childNodes())
+    {
+      foreach my $j (textToElementRecur($i, $pattern, $name, %opt, depth => $depth + 1))
+      {
+        $n->appendChild($j);
+      }
+    }
+  }
+  elsif (isTextNode($node))
+  {
+    $log->debug("[$depth]: Is text") if $debug;
+
+    my $t = $node->nodeValue() // "";
+    $log->debug("[$depth]: Text:\n$t") if $debug;
+    
+    while ($t =~ /^(.*?)$pattern(.*)$/s)
+    {
+      $log->debug("[$depth]: Found pattern") if $debug;
+    
+      if (notEmpty($1))
+      {
+        $log->debug("[$depth]: Found [$1] before pattern") if $debug;
+    
+        push @res, text($1);
+      }
+      
+      $log->debug("[$depth]: Adding element") if $debug;
+      push @res, element($name);
+
+      $t = $2;
+      $log->debug("[$depth]: Remaining text:\n$t") if $debug;
+    }
+
+    $log->debug("[$depth]: Pattern not found") if $debug;
+
+    if (notEmpty($t))
+    {
+      $log->debug("[$depth]: Adding remaining:\n$t") if $debug;
+      push @res, text($t);      
+    }  
+      
+  }  
+  else
+  {
+    push @res, $node->cloneNode(1);
+  }
+  
+  return @res;
+} # end of 'textToElementRecur()'
+  
+
+
+# Convert to HTML
+sub toHtml
+{
+  my $in    = shift;
+  my %opt   = @_;
+  my $log   = Misc::DmUtil::Log::find(%opt);
+  my $debug = $log->isLoggable(LOG_DEBUG);
+  
+  unless (ref $in)
+  {
+    $log->fatal("Invalid input");
+  }
+  
+  my $res = "";
+  
+  local $XML::LibXML::setTagCompression = 1;
+  
+  my $outer;
+  
+  if ($in->nodeType == XML_ELEMENT_NODE)
+  {
+    $outer = $in;
+  }
+  else
+  {
+    ($outer) = elementsByTagName($in, "pk:doc");
+  }
+  
+  my $copy = $outer->cloneNode(1);
+  $log->debug("copy:".$copy->toString(0)) if $debug;
+  
+  foreach my $j (childElementsDeep($copy))
+  {
+    if ($j->nodeName() =~ /:/o)
+    {
+      removeNodeKeepChildren($j);
+    }    
+  }
+    
+  foreach my $j ($copy->childNodes())
+  {
+    $res  .= $j->toString(0);
+  }
+   
+  my $r = unicodeToEntity($res);
+
+  # remove unnecessary closing tags
+  $r =~ s/<\/br>//go;
+  $r =~ s/<\/img>//go;
+  
+  $log->debug("r=[$r]") if $debug;
+  
+  return $r;
+} # end of 'toHtml()'
+
+
+
+# Convert to HTML document
+sub toHtmlDoc
+{
+  my $in  = shift;
+  my $res = "";
+  
+  $res .= "<!DOCTYPE html>\n";
+  
+  $res  .= toHtml($in) // return undef;
+  
+  return $res;
+} # end of 'toHtmlDoc()'
+    
+
+
+# encode unicode characters as entities
+sub unicodeToEntity
+{
+  my $text  = shift;
+  
+  foreach my $i (keys %Parakeet::Xml::Entity::entityReverse)
+  {
+    $text =~ s/$i/&$Parakeet::Xml::Entity::entityReverse{$i};/g;
+  }
+  
+  return $text;
+} # end of 'unicodeToEntity()'
+
+
+
+1;  

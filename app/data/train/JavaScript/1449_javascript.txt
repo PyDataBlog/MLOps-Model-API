@@ -1,0 +1,83 @@
+#!/usr/bin/env node
+var http = require('http');
+var moment = require('moment');
+
+var server = undefined;
+var threshold = undefined;
+var units = undefined;
+if (!isValid(process.argv)) {
+  console.error('invalid arguments, expected hostname threshold and units');
+  process.exit(-1);
+}
+
+var request = http.request('http://' + server + '/api/temperatures', function(response) {
+  var statusCode = response.statusCode;
+  var result = [];
+  var json = undefined;
+
+  if (statusCode === 200) {
+    response.on('data', function(chunk) {
+      result.push(chunk.toString());
+    });
+    response.on('end', function() {
+      json = JSON.parse(result.join(''));
+      analyze(json);
+    });
+  }
+});
+request.end();
+
+function analyze(data) {
+  var length = data.length;
+  var i, sensorData, sensorId, sensorLog, dates;
+  var analysis;
+
+  for (i = 0; i < length; i++) {
+    sensorData = data[i];
+    sensorId = sensorData['_id'];
+    sensorLog = sensorData['value'];
+
+    dates = sensorLog.map(function(log) {
+      return moment(log.date);
+    });
+
+    dates.sort(function(a, b) {
+      return (a < b ? -1 : (a > b ? 1 : 0));
+    });
+
+    analysis = dates.reduce(function(analysis, to) {
+      var from = analysis.previous;
+      var diff;
+
+      if (analysis.previous) {
+        diff = to.diff(from, units);
+        if (diff > threshold) {
+          analysis.result.push({
+            diff: diff + ' ' + units,
+            from: from.format('YYMMDDHHmm'),
+            to: to.format('YYMMDDHHmm')
+          });
+        }
+      }
+
+      return {
+        previous: to,
+        result: analysis.result
+      };
+    }, { result: [] });
+
+    console.log(sensorId, analysis.result);
+  }
+}
+
+function isValid(args) {
+  if (args.length === 5) {
+    server = args[2];
+    threshold = parseInt(args[3], 10);
+    units = args[4];
+    return true;
+  }
+  else {
+    return false;
+  }
+}

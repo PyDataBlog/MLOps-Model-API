@@ -1,0 +1,662 @@
+#!/usr/bin/perl
+#### UNSTABLE (unsolicited)
+
+# todo:
+# -make spam/talk limiters channel-specific
+# -affection meters per person
+# -timer
+# -nickname randomizer
+# -config parsing
+# -20 questions: lose state
+# -trigger word stripper
+
+package Bot;
+use base qw(Bot::BasicBot);
+
+use POE;
+use Switch;
+use Time::localtime;
+use warnings;
+use strict;
+
+my @links;
+my $snacks = 0;
+my $linkspam = 0;
+my $talkspam = 0;
+my $last = "";
+my $eavesdropping = 1; 
+my $talking = 1;
+
+#======hardcoded shit that you should break into a config file
+
+my @OPLIST = ("hvincent", "kortec", "grym", "tpburns");
+my $BOSS = "hvincent";
+my $LOG = "klog";
+
+#======20 questions
+
+my $answer;
+my $qcap = 20;
+my $asked = 0;
+my @qs;
+my @as;
+my $knower;
+my $qlength;
+
+#======vocabulary
+
+my @bro 	= ("bro", "broski", "dude", "pal", "chap", "buddy", "kid", "broslice", "homeslice", "brohammed", "brolshevik", "brobama", "broseph", "abroham");
+sub bros {
+	my $plural = &talk(\@bro);
+	if ($plural =~ /buddy/) { $plural = "buddie"; }
+	$plural .= "s";
+	return $plural;
+}
+my @affirm 	= ("sure", "okay", "right", "yeah", "yep", "fine", "alright");
+my @neg		= ("sorry", "nah", "negatory", "uh-uh", "not now");
+my @ask		= ("ask", "check with", "pester", "beg");
+my @affection	= ("<3", "aw thanks, ".&talk(\@bro), ":)");
+my @defy	= ("i don't have to do anything i don't want to do", 
+		"can it, ".&talk(\@bro), 
+		"i really only listen to $BOSS", 
+		"up yours", 
+		"gtfo",
+		"dicks up your ass, ".&talk(\@bro));
+my @telloff	= ("you have smelly testicles",
+		"if i had a dog as ugly as you, i'd shave his butt and make him walk backwards",
+		"i can't even think of anything to say to you",
+		"what the hell are you even doing here?",
+		"tits or gtfo",
+		"you're uncreative");
+my @np		= ("my pleasure, ".&talk(\@bro),
+		"sure thing, ".&talk(\@bro),
+		"whatever, no biggie",
+		"all cool",
+		"yep");
+my @catchall	= ("nothin to say to that, ".&talk(\@bro),
+		"whatever, ".&talk(\@bro),
+		"got nothin, ".&talk(\@bro),
+		"...",
+		"pssht",
+		"yeah try again later, ".&talk(\@bro));
+
+my @greet	= ("sup", "hey", "hi", "yo", "how you doin");
+my @alpha	= ("a", "b", "c", "d", "e", "f", "g", " ", "h", "i", "j", "k", " ", "l", "m", "n", "o", "p", "q", "r", "s", "t", "u", "v", " ", " ", " ", "w", "x", "y", "z");
+
+my @usState = ("alabama", "alaska", "arizona", "arkansas", "california", "colorado", "connecticut", "delaware", "florida", "georgia", "hawaii", "idaho", "illinois", "inidiana", "iowa", "kansas", "kentucky", "louisiana", "maine", "maryland", "massachusetts", "michigan", "minnesota", "mississippi", "missouri", "montana", "nebraska", "nevada", "new hampshire", "new jersey", "new mexico", "new york", "north carolina", "north dakota", "ohio", "oklahoma", "oregon", "pennsylvania", "rhode island", "south carolina", "south dakota", "tennessee", "texas", "utah", "vermont", "virginia", "washington", "west virginia", "wisconsin", "wyoming");
+
+my @unsolicited = ("sometimes you guys just bore me to fucking tears",
+	"when was the last time i cared about this shit",
+	"tell me about it",
+	"that's cool, ".&talk(\@bro),
+	"dicks",
+	"ugh",
+	"BUNDESGESETZBLATT",
+	"sigh.",
+	"is that okay?",
+	"i wonder what it's like outside",
+	"no1curr",
+	"fuck it, i'm moving to ".&talk(\@usState));
+
+#======eavesdrop lines
+
+my @news = ("what has this world come to",
+	"wowwww.",
+	"didn't this just happen?",
+	"who cares");
+
+my @heart = ("spread the love!",
+	 "gaaaaay",
+	 "http://images3.wikia.nocookie.net/__cb20120724043925/degrassi/images/8/8d/Gay-seal_large.jpg",
+	 "i want some <3, too");
+
+my @exercise = ("spinach and walkies, you fatty",
+	 "get swoll!",
+	 "get pumped!",
+	 "http://willgadd.com/it-doesnt-matter-what-but-do-it/",
+	 "shut up and go run or something");
+
+my @food = ("man, now i'm hungry",
+	 "if you have food,  you better share it with the class",
+	 "you're gonna get fat",
+	 "come on, ".&talk(\@bro).", don't taunt me with your food talk");
+
+my @mentioned = ("i heard that",
+	 "man, i love it when y'all talk about me",
+	 "hey, i'm right here",
+	 "blah blah blah");
+			
+my @work = ("quit slacking off",
+	"be more productive",
+	"shut up and do it");
+
+my @imgur = ("omg i'm trying to break my imgur addiction stop it",
+	"pics pics pics",
+	"sweet shit, ".&talk(\@bro));
+
+#======input parsing
+
+my @greeted = ("sup", "hey", "hi", "yo", "how are you", "how you doin", "hello");
+
+#=====overriding 
+
+sub said {
+ 	my $self    = shift;
+	my $message = shift;
+	
+	if (($message->{body} =~ /http/) && ($message->{who} !~ /$BOSS/)) { 
+		&logUrl($self, $message);
+	}
+	
+	if (($message->{body} =~ /^\?/) && ($message->{channel} !~ /giantfuckingqueens/)){ ##20q only works in trhq now
+		return &twentyQ($self, $message);
+	}
+	
+	if ($message->{address}) {
+		if ($message->{body} =~ /go away/) {      
+			&banish($self, $message);
+		} elsif ($message->{body} =~ /quit eavesdrop/){  
+			return &toggleEaves;
+		} elsif ($message->{body} =~ /shut up/) {
+			return &toggleTalk;
+		} elsif (($message->{who} =~ /$BOSS/) && ($message->{channel} =~ /msg/ )){ 
+			#&log($self, $message);
+			return &boss_priv($self, $message);
+		} elsif ($message->{who} =~ /$BOSS/) { 
+			$talkspam = 0;
+			return &boss_pub($self, $message);
+		} elsif ($talking) {
+			return &talkLimiter($self, $message);
+		}
+	}
+
+	if ($eavesdropping && $talking) { 
+		return &eavesdropper ($self, $message); 
+	}
+
+	
+	return;
+}
+
+sub noticed {
+	my $self = shift;
+	my $message = shift;
+	&msg_boss($self, $message, "ugh");
+}
+
+sub chanjoin {
+	my ($self, $message) = @_;
+
+	if ($message->{who} !~ $self->{nick}){
+		if ($message->{who} ~~ @OPLIST) {
+			$self->say(channel => $message->{channel}, body => &giveOps($self, $message));
+		}
+	} else {
+		my @a = ("awake", "here", "up", "listening", "chillin", "running", "doing alright");
+		my $verb = $a[rand($#a+1)];
+		$self->say(channel => $message->{channel}, body => &talk(\@greet).", ".&bros.", i'm $verb now. someone op me up.");
+		return;
+	}
+}
+
+sub chanpart {
+	my ($self, $message) = @_;
+
+	$self->say(channel => $message->{channel}, body => "good fucking riddance. no more $message->{who}.");
+}
+
+sub help {
+	return "i can't help you; you can only help yourself. but if you're actually getting sick of my bullshit, feel free to tell me to shut up, quit eavesdropping, or go away."; 
+}
+
+####### internal shit here
+
+sub talkback {
+	my ($self, $message) = @_;
+
+	switch ($message->{body}) {
+		case /you suck/ 	{ return "no u"; }
+		case /who are you/ 	{ return "i'm $BOSS"."'s bot"; }
+		case /botsnack/ 	{ if ($snacks < 5 ) { $snacks++; return &talk(\@affection); } else { $snacks = 0; return "i'm going to get fat, ".&talk(\@bro); } }
+		case /be nice/		{ return "i'm a fucking bot, i have no emotions."; }
+		case /back.*cave/ 	{ return &talk(\@defy); }
+		case /get.*out/		{ return &talk(\@defy); }
+		case /<3/		{ return "don't try to buy my love, ".&talk(\@bro); }
+		case /dicks up my ass/ 	{ return "if you say so, $message->{who}"; }
+		case /dicks up your ass/ { return "hey, that's my line!"; }
+		case /op up/		{ return &opAll($self, $message); }
+		case /thanks|thank you/ { return &talk(\@np); }
+		case /:</		{ return ";)"; }
+		case /tell.*off/	{ return &talk(\@defy); }
+		case /op me/		{ return &giveOps($self, $message); }
+		case /me op/		{ return &giveOps($self, $message); }
+		case /\?/		{ return "i don't make a habit of answering questions as a general rule"; }
+		case /rude/		{ return "i'm not sorry"; }
+		case [@greeted]	{ return &talk(\@greet); }
+	#	case /$BOSS/		{ 
+	#		&msg_boss($self, $message, "$message->{who} just mentioned you in $message->{channel}, ".&talk(\@bro)); 
+	#		return "one sec, ".&talk(\@bro).", i'm checking if $BOSS is around"; }
+		else { return &talk(\@catchall); }
+	}
+}
+
+sub eavesdropper {
+	my ($self, $message) = @_;
+
+	if (rand(100) < 20) {
+		switch ($message->{body}) {   ###misc context-sensitive responses	
+			case /panic/		{ return &qPanic($self, $message); }
+			case /bbc|nyt/		{ return &talk(\@news); }
+			case /facebook/		{ return "quit using facebook"; }
+			case /.* bots/		{ return "i am only one"; }		
+			case /kvincent/		{ 
+				my @a = ("i heard that, $message->{who}",
+					 "man, i love it when y'all talk about me",
+					 "hey, i'm right here",
+					 "blah blah blah");
+				return &talk(\@a); 
+			}
+			case /<3/  {
+				my @a = ("spread the love!",
+					 "gaaaaay",
+					 "http://images3.wikia.nocookie.net/__cb20120724043925/degrassi/images/8/8d/Gay-seal_large.jpg",
+					 "i want some <3, too");
+				return "$message->{who}: ".&talk(\@a); 
+			}
+			case /exercise/ { 
+				my @a = ("spinach and walkies, you fatty",
+					 "get swoll!",
+					 "get pumped!",
+					 "http://willgadd.com/it-doesnt-matter-what-but-do-it/",
+					 "shut up and go run or something");
+				return "$message->{who}: ".&talk(\@a);
+			}
+			case /food|hungry/ {
+				my @a = ("man, now i'm hungry",
+					 "if you have food, $message->{who}, you better share it with the class",
+					 "you're gonna get fat",
+					 "come on, ".&talk(\@bro).", don't taunt me with your food talk");
+				return &talk(\@a);
+			}
+			case /.* work / {
+				my @a = ("quit slacking off",
+					"be more productive",
+					"shut up and do it");
+				return &talk(\@a);
+			}
+			case /imgur/ {
+				my @a = ("omg i'm trying to break my imgur addiction stop it",
+					"pics pics pics",
+					"sweet shit, ".&talk(\@bro));
+				return &talk(\@a);
+			}
+			else		{ 
+				if (rand(100) < 40) {
+					return &talk(\@unsolicited); 
+				} else { return; }
+			}
+		}
+	}
+}
+
+sub logUrl {
+	my ($self, $message) = @_;
+
+	my @splitter = split(" ", $message->{body});
+	foreach (@splitter) {
+		if ($_ =~ /http/) {
+			if ($_ ~~ @links) {
+				switch ($linkspam) {
+					case 0 {
+						$self->say(who => $message->{who}, channel => $message->{channel}, body => "quit spamming links, ".&talk(\@bro));
+						$linkspam++;
+					}
+					case 1 {
+						$self->say(who => $message->{who}, channel => $message->{channel}, body => "i'm not listening anymore, ".&talk(\@bro));
+						$linkspam++;
+					}
+					else { return; }
+				}
+			} else {
+				$linkspam = 0;
+				push(@links, $_);
+				&msg_boss($self, $message, "LINKIES! $message->{who} in $message->{channel}: $message->{body}");	
+			}
+		}
+	}
+}
+
+sub gtfo {
+	my ($self, $message) = @_;
+
+	$self->reply($message, &talk(\@affirm).", ".&talk(\@bro).", i'm turning off now");
+	$self->shutdown('fuck it');
+}
+
+sub boss_pub {
+	my ($self, $message) = @_;
+
+	switch ($message->{body}) {
+		case /back.*cave/ 	{ &gtfo($self, $message); }
+		case /get.*out/ 	{ &gtfo($self, $message); }
+		case /<3/ 		{ return &talk(\@affection); }
+		case /tell.*off/ 	{ 
+			my @input = split (' ', $message->{body});
+			return &talk(\@affirm).". $input[1], ".&talk(\@telloff);
+		}
+		case /you can talk/	{ ($talking,$eavesdropping) = 1; return "sweet! ".&talk(\@affection); }
+		case /you can eavesdrop/{ $eavesdropping = 1; return "sweet! ".&talk(\@affection). " gonna listen in again"; }
+		else 			{ return &talkback($self, $message) };
+	}
+}
+
+sub boss_priv {
+	my ($self, $message) = @_;
+
+	switch ($message->{body}) {
+		case /join/ {
+			my @channel = split (' *#', $message->{body});
+			$self->join('#'.$channel[1]);
+			return &talk(\@affirm).", ".&talk(\@bro).", trying to join #$channel[1]";
+		}
+		case /oplist/ {
+			my @op = split (' ', $message->{body});
+			push(@OPLIST,$op[1]);
+			return &talk(\@affirm).", ".&talk(\@bro).", oplist is now: @OPLIST";
+		}
+		case /unop/ {
+			my @op = split (' ', $message->{body});
+			if ($op[1] ~~ @OPLIST) {
+				my $i = 0;
+				$i++ until $OPLIST[$i] eq $op[1];
+				splice(@OPLIST, $i, 1);
+				return &talk(\@affirm).", ".&talk(\@bro).", after booting out $op[1], oplist is now: @OPLIST";
+			} else {
+				return "you sure, ".&talk(\@bro)."? $op[1] isn't even on the oplist.";
+			}
+		}
+		case /who.* ops/	{ return "i've got (@OPLIST) on the oplist right now, ".&talk(\@bro); }
+		case /^say/	{
+			my @r = split(' ', $message->{body});
+			shift(@r);
+			my $chan = shift(@r);
+			my $reply = join (' ', @r);
+			$self->say(channel => "#$chan", body => $reply);
+			return "telling #$chan \"$reply\"";
+		} 
+		else { return &boss_pub($self, $message); }
+	}	
+}
+
+sub giveOps {
+	my ($self, $message) = @_;
+
+	if ($message->{who} ~~ @OPLIST) {
+		$self->mode("$message->{channel} +o $message->{who}"); 
+		return "have some ops, $message->{who}"; 
+	} else {
+		&msg_boss($self, $message, "$message->{who} just tried to ask for ops in $message->{channel}, ".&talk(\@bro).", just so you know");
+		return "i'd op you, ".&talk(\@bro).", but you gotta be on the list. ".&talk(\@ask)." $BOSS or something.";
+	}
+}
+
+sub opAll {
+	my ($self, $message) = @_;	
+
+	foreach (@OPLIST) {
+		$self->mode("$message->{channel} +o $_"); 
+	}
+
+	&msg_boss($self, $message, "$message->{who} just oped up $message->{channel}, ".&talk(\@bro));
+	return "roger that, $message->{who}; ops for everyone!";
+}
+
+sub toggleEaves {
+	if ($eavesdropping == 1) {
+		$eavesdropping = 0;
+		return &talk(\@affirm).", ".&talk(\@affirm).", i'll quit listening in on y'all";
+	} elsif ($eavesdropping != 2 ) {
+		$eavesdropping = 2;
+		return "already not listening, leave me alone, ".&talk(\@bro);
+	}
+}
+
+sub toggleTalk {
+	if ($talking == 1) {
+		$talking = 0;
+		$eavesdropping = 0;
+		return &talk(\@affirm).", i'll be quiet";
+	} elsif ($talking != 2) {
+		$talking = 2;
+		return &talk(\@bro).", i'm already quiet, what do you want from me?";
+	}
+}
+
+sub banish {
+	my ($self, $message) = @_;
+
+	$self->reply($message, "fine! what a dick.");
+	$self->part($message->{channel}, 'fuck it');
+	&msg_boss($self, $message, "$message->{who} just banished me from $message->{channel} :(");
+}
+
+sub talkLimiter {
+	my ($self, $message) = @_;
+
+	if ($talkspam < 3) {
+		if ($last =~ $message->{who}) {	 #increment spam count
+			$talkspam++;		
+		} else {
+			$talkspam = 0;  #reset spam count
+		}
+
+		$last = $message->{who};
+		return &talkback($self, $message);
+	} else {
+		if (($talkspam < 100) && ($last =~ $message->{who})) { #warn for spam
+			$talkspam = 100;
+			$last = $message->{who};
+			return "you talk too much; i'm not listening to you for a while";
+		} else {
+			if ($last !~ $message ->{who} ) {
+				$talkspam = 0;
+				return &talkback($self, $message);
+			}
+			$last = $message->{who};
+			return;
+		}
+	}
+}
+
+sub msg_boss {
+	my ($self, $message, $pm) = @_;
+	$self->say(who => $BOSS, channel => "msg", body => $pm);
+}
+
+sub talk {
+	my @words = @{$_[0]};
+	return $words[rand($#words+1)];
+}
+
+sub stripTrigger {
+	my ($self, $message) = @_;
+
+	my @a = split(' ', $message->{body});
+	shift(@a);
+	return join(' ', @a);
+}
+
+#sub log {
+	#my ($self, $message) = @_;
+	#my $channel = $message->{channel};
+	#my $who = $message->{who};
+	#my $body = $message->{body};
+
+	#my $outfile = "$LOG/$channel.txt";
+
+	#open OUT, ">>", $outfile;
+	#select OUT;
+	#print "< $who > $body";
+	#close OUT;
+#}
+
+#======== TWENTY QUESTIONS 
+
+sub twentyQ {
+	my ($self, $message) = @_;
+
+	switch ($message->{body}) {
+		case /^\?ask/	{ return &qAsk($self, $message); }
+		case /^\?answer/{ return &qAnswer($self, $message); }
+		case /^\?skip/	{ return &qSkip($self, $message); }
+		case /^\?status/{ return &qStatus($self, $message); }
+		case /^\?mercy/	{ return &qMercy($self, $message); }
+		case /^\?set/	{ return &qSet($self, $message); }
+		case /^\?win/	{ return &qWin($self, $message); }
+		case /^\?lose/  { return &qLose($self, $message); }
+		case /^\?panic/ { return &qPanic($self, $message); }
+		case /^\?help/ { return "Welcome to the kvincent 20 Questions Mediation Mode. Valid commands are: ?ask, ?answer, ?skip, ?status, ?mercy, ?set, ?win, ?lose, ?panic"; }
+		else { return "you trying to play 20 questions, ".&talk(\@bro)."?"; }
+	}
+}
+
+sub qAsk {
+	my ($self, $message) = @_;
+
+	if ($#qs == $#as) {
+		my $newQ = &stripTrigger($self, $message);
+		if (length($newQ) > $qlength) {
+			$qlength = length($newQ);
+		}
+		push(@qs, $newQ);
+		return;
+	} else {
+		return "whoa whoa one at a time, ".&bros;
+	}
+}
+
+sub qAnswer {
+	my ($self, $message) = @_;
+	
+	if ($#qs == $#as) {
+		return "yo, ".&talk(\@bro).", you can't answer what hasn't been asked";
+	} else {
+		push(@as, &stripTrigger($self, $message));
+		$asked++;
+		my $left = $qcap-$asked;
+		
+		if ($left == 0 ) { # LOSE STATE
+			return &qLose($self, $message);
+		} else {
+			return "y'all have $left questions left";
+		}
+	}
+}
+
+sub qSkip {
+	my ($self, $message) = @_;
+
+	if ($#qs == $#as) {
+		return "you can only skip unanswered quesions, ".&talk(\@bro);
+	} else {
+		pop(@qs);
+		return "axing that question";
+	}
+}
+
+sub qStatus {
+	my ($self, $message) = @_;
+
+	if ($answer) {
+		my $i = 0;
+		my $statusline;
+
+		foreach (@qs) {
+			$statusline = "[$_]";
+			my $l = $qlength - length($_);
+
+			while ($l > 0) {
+				$l--;
+				$statusline .= " ";
+			}
+
+			$statusline .= "--[$as[$i]]";
+			$i++;
+
+			$self->say(channel => $message->{channel}, body => $statusline);
+		}
+
+		my $left = $qcap - $asked;
+
+		return "current asshole is $knower. y'all have $left questions left.";
+	} else {
+		return "no one's thinking of anything interesting. wanna start a game, ".&talk(\@bro)."?";
+	}
+}
+
+sub qMercy {
+	my ($self, $message) = @_;
+
+	$qcap++;
+	my $left = $qcap - $asked;
+
+	return "giving y'all more questions since you suck. now you have $left questions left";
+}
+
+sub qSet {
+	my ($self, $message) = @_;
+
+	if ($message->{channel} =~ /msg/ ) {
+		if (!$answer) {
+			$answer = &stripTrigger($self, $message);
+			$knower = $message->{who};
+			
+			$self->say(channel => "#trhq", body => "hey ".&bros.", $message->{who} is thinking of something");
+
+			return &talk(\@affirm).", ".&talk(\@bro).", starting a new game of 20 questions for $answer";
+		} else {
+			return "whoa, ".&talk(\@bro).", one game at a time here";
+		}
+	} else {
+		return "shit, ".&talk(\@bro).", not where everyone can hear you, okay?";
+	}
+}
+
+sub qLose {
+	my ($self, $message) = @_;
+
+	my $report = $answer;
+	($answer, $knower, @qs, @as) = undef;	
+	
+	return "you guys suck. the answer was $report";
+}
+
+sub qWin {
+	my ($self, $message) = @_;
+
+	($answer, $knower, @qs, @as) = undef;	
+	
+	return "yaaaaay finally";
+}
+
+sub qPanic {
+	my $panic;
+	my $size = rand(40)+10;
+	my $i = 0;
+
+	while ($i < $size) {
+		$i++;
+		$panic .= &talk(\@alpha);
+	}
+	return $panic;
+}
+
+#===== BOT INITIALIZATION
+
+Bot->new(
+	server   => "irc.freenode.net",
+	channels => [ '#kvincent,#giantfuckingqueens,#trhq,#cmubuggy' ],
+	nick     => 'kvincent',
+	name     => $BOSS."'s bot",
+	quit_message     => "fuck it",
+)->run();

@@ -1,0 +1,2336 @@
+<#
+        .SYNOPSIS
+        Functions common to all coding projects
+#>
+#$PSModuleAutoLoadingPreference = 'None'
+
+Set-Variable -Scope Global -Force -Name PROFILE_Home -Value $PSScriptRoot
+
+<#
+        "[$script:currentForestFriendlyName ($(Get-LeaderMachine))] > "
+#>
+function script:prompt
+{
+    [CmdletBinding()]param()
+
+    if ( !( $userDomain = $env:USERDNSDOMAIN ) )
+    {
+        $userDomain = $env:USERDOMAIN
+    }
+    $userName = "$userDomain\$env:USERNAME".ToLower()
+
+    $fqdn = $host.FQDN
+
+    if ( $history = get-History )
+    {
+        $lasthistory = $history[-1]
+        $historyIDString = "($( ( $lasthistory.id + 1 ).ToString( '0000' ) ))"
+        $lastCommandRunTime = '(' +($lasthistory.EndExecutionTime -  $lasthistory.StartExecutionTime).ToString( 'hh\:mm\:ss') + ')'
+    }
+    else
+    {
+        $historyIDString = '(0001)'
+        $lastCommandRunTime = '(00:00:00)'
+    }
+
+    $path = ( Get-Location ).ProviderPath
+
+    $nestedPromptString = "$( '>' * ( $NestedPromptLevel + 1 ) )"
+
+    $dateTime = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+
+    if ( $host.IsAdministrator )
+    {
+        $foregroundColor = 'Magenta'
+        $host.UI.RawUI.WindowTitle = "Administrator: WindowsPowerShell $dateTime $path"
+    }
+    else
+    {
+        $foregroundColor = 'Green'
+        $host.UI.RawUI.WindowTitle = "WindowsPowerShell $dateTime $path"
+    }
+    Write-Host -Object ' '
+    Write-Host -ForegroundColor $foregroundColor -Object "# $userName @ $fqdn"
+    #"$promptStartString $userName @ $fqdn `n$promptStartString $historyIDString $lastCommandRunTime $dateTime $path $nestedPromptString`n"
+    "# $historyIDString $lastCommandRunTime $dateTime $path $nestedPromptString`n"
+
+} #> # function prompt
+
+
+<#
+        .SYNOPSIS
+        Recursively find a string. PSH version of findstr.exe -alphabetsoup with coloured output
+
+        .DESCRIPTION
+        Find-String is a PowerShell script whose purpose is to emulate grep and/or ack. PowerShell already has the built-in Select-String cmdlet, but this script wraps provides match highlighting on top of the searching capabilities.
+
+        It currently highlights matches in a similar style to ack.
+
+        .PARAMETER Pattern
+        Specifies the text to find. Type a regular expression. 
+
+        .PARAMETER LiteralString
+        Treat -Pattern parameter value as a literal string, not a regular expression.
+
+        .PARAMETER Filter
+        Specifies the file types to search in. The default is all file types (*.*).
+
+        .PARAMETER Include
+        Specifies the file types to search in. This allows you to search across multiple file types (i.e. *.ps1,*.psm1).
+
+        .PARAMETER ExcludeFiles
+        Specifies the file types to exclude from searches. If set, this overrides any global defaults or configuration.
+
+        .PARAMETER ExcludeDirectories
+        Specifies the directories to exclude from searches. It really only makes sense for recursive searches. If set, this overrides any global defaults or configuration.
+
+        .PARAMETER Path
+        Specifies the path to the files to be searched. Wildcards are permitted. The default location is the local directory.
+
+        .PARAMETER Context
+        Captures the specified number of lines before and after the line with the match. This allows you to view the match in context.
+
+        .PARAMETER NoRecurse
+        Do not recurse into sub-directories. Default behaviour is to recurse.
+
+        .PARAMETER CaseSensitive
+        Makes matches case-sensitive. By default, matches are not case-sensitive.
+
+        .PARAMETER PassThru
+        Passes the literal MatchInfo object representing the found match to the pipeline. By default, this cmdlet does not send anything through the object pipeline.
+
+        .PARAMETER PipeOutput
+        Sends all output along the object pipeline. By default, this command uses color to help with readability; however, this prevents the output from being piped to another command. If you wish to pipe the output of this command to something else, be sure to use this parameter.
+
+        .PARAMETER ListMatchesOnly
+        Returns all files that have matches existing in them, but doesn't display any of the matches themselves.
+#>
+function script:Find-String 
+{
+    [CmdletBinding(DefaultParameterSetName="Filter")]
+    [Alias( 'fs' )]
+    param (
+        [Parameter(Position = 0, Mandatory=$true)]
+        [regex] $Pattern,
+
+        [Parameter(Position = 1, ParameterSetName="Filter")]
+        [string] $Filter = "*.*",
+
+        [Parameter(Position = 1, ParameterSetName="Include")]
+        [string[]] $Include = @(),
+
+        [string[]] $ExcludeFiles = @(),
+        [string[]] $ExcludeDirectories = @(),
+        [string[]] $Path = @(),
+        [int[]] $Context = 0,
+        [switch] $NoRecurse,
+        [switch] $CaseSensitive,
+        [switch] $PassThru,
+        [switch] $PipeOutput,
+        [switch] $LiteralString,
+        [switch] $ListMatchesOnly
+    )
+
+    $recurse = !$NoRecurse
+
+    if ( $LiteralString )
+    {
+        $Pattern = $Pattern -replace '([\\\.\*\+\\?(\)\[\]\{\}\^\$])', '\$1'
+        Write-Verbose -Message "`$Pattern = '$Pattern'"
+    }
+
+    if ((-not $CaseSensitive) -and (-not $Pattern.Options -match "IgnoreCase")) {
+        $Pattern = New-Object -TypeName regex -Property $Pattern.ToString(),@($Pattern.Options,"IgnoreCase")
+    }
+
+    #  Highlights MatchInfo objects similar to the output from ack.
+    function Out-ColorMatchInfo 
+    {
+        param (
+            [Parameter(Mandatory=$true, ValueFromPipeline=$true)]
+            [Microsoft.PowerShell.Commands.MatchInfo]
+            $match,
+
+            [switch]
+            $onlyShowMatches = $false,
+
+            [switch]
+            $PipeOutput = $false
+        )
+
+        begin {
+            $script:priorPath = ''
+            $script:hasContext = $false
+
+            $script:buffer = New-Object -TypeName System.Text.StringBuilder
+        }
+        process {
+            function output {
+                param (
+                    [string]
+                    $str = '',
+
+                    $foregroundColor = $host.ui.RawUI.ForegroundColor,
+                    $backgroundColor = $host.ui.RawUI.BackgroundColor,
+
+                    [switch]
+                    $noNewLine = $false
+                )
+
+                if ($PipeOutput) {
+                    if ($noNewLine) {
+                        $script:buffer.Append($str) | out-null
+                    }
+                    else {
+                        $script:buffer.AppendLine($str) | out-null
+                    }
+                }
+                else {
+                    $args = @{ Object = $str; NoNewLine = $NoNewLine }
+                    if (-not($foregroundColor -lt 0)) {
+                        $args.Add('ForegroundColor', $foregroundColor)
+                    }
+                    if (-not($backgroundColor -lt 0)) {
+                        $args.Add('BackgroundColor', $backgroundColor)
+                    }
+                    Write-Host @args
+                }
+            }
+
+            function Get-RelativePath([string] $Path = '') {
+                $Path = $Path.Replace($pwd.Path, '')
+                if ($Path.StartsWith('\') -and (-not $Path.StartsWith('\\'))) {
+                    $Path = $Path.Substring(1)
+                }
+                if ( Test-Path -Path $Path )
+                {
+                    ( Resolve-Path -Path $Path ).ProviderPath
+                }
+                else
+                {
+                    $path
+                }
+            }
+
+            function Write-PathOrSeparator($match) {
+                if ($script:priorPath -ne $match.Path) {
+                    output ''
+                    output (Get-RelativePath $match.Path) -foregroundColor Green
+                    $script:priorPath = $match.Path
+                }
+                else {
+                    if ($script:hasContext) {
+                        output '--'
+                    }
+                }
+            }
+
+            function Write-HighlightedMatch($match) {
+                if (-not $onlyShowMatches) {
+                    output "$($match.LineNumber):" -nonewline
+                }
+                $index = 0
+                foreach ($m in $match.Matches) {
+                    output $match.Line.SubString($index, $m.Index - $index) -nonewline
+                    output $m.Value -ForegroundColor Black -BackgroundColor Yellow -nonewline
+                    $index = $m.Index + $m.Length
+                }
+                if ($index -lt $match.Line.Length) {
+                    output $match.Line.SubString($index) -nonewline
+                }
+                output ''
+            }
+
+            function Write-Context {
+                param (
+                    $Context = '',
+                    $ContextLines = ''
+                )
+
+                if ($Context.length -eq $null) {return}
+
+                $script:hasContext = $true
+                for ($i = 0; $i -lt $Context.length; $i++) {
+                    "$($ContextLines[$i])- $($Context[$i])"
+                }
+            }
+
+            if (-not $onlyShowMatches) {
+                Write-PathOrSeparator $match
+            }
+
+            if ( $match.Context -and $match.Context.PSObject.Properties.Name -contains 'DisplayPreContext' )
+            {
+                $lines = ($match.LineNumber - $match.Context.DisplayPreContext.Length)..($match.LineNumber - 1)
+                Write-Context $match.Context.DisplayPreContext $lines
+            }
+
+            Write-HighlightedMatch $match
+
+            if ( $match.Context -and $match.Context.PSObject.Properties.Name -contains 'DisplayPostContent' )
+            {
+                $lines = ($match.LineNumber + 1)..($match.LineNumber + $match.Context.DisplayPostContext.Length)
+                Write-Context $match.Context.DisplayPostContext $lines
+            }
+
+            if ($script:buffer.Length -gt 0) {
+                $script:buffer.ToString()
+            }
+        }
+        end {}
+
+    } # function Out-ColorMatchInfo 
+
+
+    function directoriesToExclude {
+        if ($ExcludeDirectories.Length -gt 0) {
+            return $ExcludeDirectories
+        }
+        else
+        {
+            'bin', 'obj', '.git', '.hg', '.svn', '_ReSharper\.'
+
+            Get-Variable -Scope Global -Name FindStringDirectoriesToExclude* |
+            Where-Object -Property Name -EQ -Value FindStringDirectoriesToExclude |
+            Select-Object -ExpandProperty Value
+
+        }
+    }
+
+    function filesToExclude {
+        if ($ExcludeFiles.Length -gt 0) {
+            return $ExcludeFiles
+        }
+        else
+        {
+            '*.exe', '*.pdb', '*.dll', '*.gif', '*.png', '*.jpg', '*.doc', '*.pdf', '*.cab', '*.pptx', '*.docx', '*.sqlite'
+
+            Get-Variable -Scope Global -Name FindStringFileTypesToExclude* |
+            Where-Object -Property Name -EQ -Value FindStringFileTypesToExclude |
+            Select-Object -ExpandProperty Value
+        }
+    }
+
+    function shouldFilterDirectory {
+        param (
+            [Parameter(Mandatory=$true)]
+            $item
+        )
+
+        $directoriesToExclude = directoriesToExclude | ForEach-Object { "\\$_" }
+
+        if ((Select-String -Pattern $directoriesToExclude -input $item.DirectoryName) -ne $null) {
+            Write-Debug -Message "Excluding results from $item"
+            return $true
+        }
+        else {
+            return $false
+        }
+    }
+
+    function filterExcludes {
+        param (
+            [Parameter(Mandatory=$true)]
+            $item
+        )
+
+        if (-not ($item -is [System.IO.FileInfo])) { return $false }
+        if (shouldFilterDirectory $item) { return $false }
+
+        return $true
+    }
+
+    switch ($PsCmdlet.ParameterSetName)
+    {
+        'Filter' {
+            if ($PassThru) {
+                Get-ChildItem -recurse:$Recurse -filter:$Filter -path $Path -exclude (& filesToExclude) |
+                Where-Object { filterExcludes $_ } |
+                Select-String -caseSensitive:$CaseSensitive -pattern:$Pattern -AllMatches -context $Context
+            }
+            elseif ($ListMatchesOnly) {
+                Get-ChildItem -recurse:$Recurse -filter:$Filter -path $Path -exclude (& filesToExclude) |
+                Where-Object { filterExcludes $_ } |
+                Select-String -caseSensitive:$CaseSensitive -pattern:$Pattern -List |
+                Select-Object -ExpandProperty Path
+            }
+            else {
+                Get-ChildItem -recurse:$Recurse -filter:$Filter -path $Path -exclude (& filesToExclude) |
+                Where-Object { filterExcludes $_ } |
+                Select-String -caseSensitive:$CaseSensitive -pattern:$Pattern -AllMatches -context $Context |
+                Out-ColorMatchInfo -pipeOutput:$PipeOutput
+            }
+        }
+        'Include' {
+            if ($PassThru) {
+                Get-ChildItem -recurse:$Recurse -include:$Include -path $Path -exclude (& filesToExclude) |
+                Where-Object { filterExcludes $_ } |
+                Select-String -caseSensitive:$CaseSensitive -pattern:$Pattern -AllMatches -context $Context
+            }
+            elseif ($ListMatchesOnly) {
+                Get-ChildItem -recurse:$Recurse -include:$Include -path $Path -exclude (& filesToExclude) |
+                Where-Object { filterExcludes $_ } |
+                Select-String -caseSensitive:$CaseSensitive -pattern:$Pattern -AllMatches -context $Context |
+                Select-Object -ExpandProperty Path
+            }
+            else {
+                Get-ChildItem -recurse:$Recurse -include:$Include -path $Path -exclude (& filesToExclude) |
+                Where-Object { filterExcludes $_ } |
+                Select-String -caseSensitive:$CaseSensitive -pattern:$Pattern -AllMatches -context $Context |
+                Out-ColorMatchInfo -pipeOutput:$PipeOutput
+            }
+        }
+    }
+} #> # function Find-String 
+
+
+function script:Test-IsAdministrator
+{
+    [CmdletBinding()]param()
+
+    $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $CurrentUserPrincipal = New-Object -TypeName Security.Principal.WindowsPrincipal -ArgumentList $CurrentUser
+    return $CurrentUserPrincipal.IsInRole( [Security.Principal.WindowsBuiltinRole]::Administrator )
+
+} #> # function Test-IsAdministrator
+
+
+# store it here so we don't have to rerun it every time.
+$host | Add-Member -MemberType NoteProperty -Name IsAdministrator -Value ( Test-IsAdministrator ) -Force
+
+# 'Open as Administrator' shells always start in c:\windows\system32, which is a Very Bad Idea
+if ( $host.IsAdministrator) 
+{
+    if (( Get-Location ).ProviderPath -eq ( Split-Path -Path $env:ComSpec -Parent ) ) 
+    {
+        Set-Location -Path $HOME 
+    }
+}
+
+$host | Add-Member -MemberType NoteProperty -Name FQDN -Value "$env:COMPUTERNAME.$( (Get-WmiObject -Class Win32_ComputerSystem ).Domain )".ToLower() -Force
+
+
+# does Test-FunctionExists exist?
+if ( !(
+        Get-Command -Name Test-FunctionExists* |
+        Where-Object -Property Name -EQ -Value Test-FunctionExists
+) )
+{
+
+    function script:Test-FunctionExists
+    {
+        [CmdletBinding()]
+        param
+        (
+            [Parameter( 
+                    Mandatory,
+                    ValueFromPipeline,
+                    ValueFromPipelineByPropertyName,
+                    Position = 0
+            )]
+            [Alias( 'Command', 'Cmd' )]
+            [string[]]$Name
+        )
+
+        begin
+        {
+            $functionName = $MyInvocation.MyCommand.Name + ':'
+        }
+
+        process
+        {
+            $Name |
+            ForEach-Object -Process `
+            {
+                Get-Command -Name $_* |
+                Where-Object -Property Name -EQ -Value $_
+            }
+        }
+    }
+}
+
+
+
+if ( !( Test-FunctionExists  -Name Compare-File ) )
+{
+
+    <# 
+  
+            .SYNOPSIS 
+  
+            Compares two files, displaying differences in a manner similar to traditional 
+            console-based diff utilities. 
+  
+    #> 
+    function script:Compare-File
+    {
+
+        [CmdletBinding()]
+        [Alias( 'cpf', 'difff' )]
+        param( 
+            ## The first file to compare 
+            [Parameter(
+                    Mandatory,
+                    Position = 0
+            )]
+            $ReferenceFile, 
+    
+            ## The second file to compare 
+            [Parameter(
+                    Mandatory,
+                    Position = 1
+            )]
+            $DifferenceFile,
+        
+            [Parameter(
+                    Position = 2
+            )]
+            [string]$FileName,
+         
+            ## The pattern (if any) to use as a filter for file 
+            ## differences 
+            [string]$pattern = ".*" ,
+
+            [switch]$IncludeEqual
+        ) 
+
+        if ( $fileName )
+        {
+            $ReferenceFile += "/$FileName"
+            $DifferenceFile += "/$FileName"
+        }
+
+
+        $content1 = Get-Content -Path $ReferenceFile
+        $content2 = Get-Content -Path $DifferenceFile
+        $comparedLines = Compare-Object -ReferenceObject $content1 -DifferenceObject $content2 -IncludeEqual:$IncludeEqual |
+        Group-Object { 
+            $_.InputObject.ReadCount 
+        } | 
+        Sort-Object -Property Name
+
+        $padLeft = $comparedLines.Count.ToString().Length
+
+        $comparedLines | 
+        ForEach-Object -Process `
+        {
+            $curr=$_
+
+            switch ( $_.Group[0].SideIndicator ){
+                == { 
+                    $right=$left = $curr.Group[0].InputObject
+                    break
+                }
+            
+                => { 
+                    $right,$left = $curr.Group[0].InputObject,$curr.Group[1].InputObject
+                    break 
+                }
+
+                <=" { 
+                    $right,$left = $curr.Group[1].InputObject,$curr.Group[0].InputObject
+                    break 
+                }
+            }
+
+            [PSCustomObject] @{
+                Line = $_.Name.PadLeft( $padLeft ) -replace ' ', '0'
+                Diff  = & {
+                    if ( $_.Group[0].SideIndicator -eq '==' )
+                    {
+                        '=='
+                    }
+                    else
+                    {
+                        '!='
+                    }
+                }
+                Left = $left
+                Right = $right
+            }
+        } | 
+        Sort-Object -Property Line
+    } #> # function Compare-File
+
+}
+
+
+if ( !( Test-FunctionExists  -Name Format-TableColorByProperty ) )
+{
+
+    <#
+            .SYNOPSIS
+            Color object input by property value
+
+            .PARAMETER InputObject
+            Object to send through Write-Host
+
+            .PARAMETER Pattern
+            [ordered] [hashtable] of regular expressions to dictate colors. 
+
+            By default, any value with the words 'Pass', 'Passes', 'Passing', 'Success', 'Successes', or 'True are colored Green.
+            Any values with the words 'Warn' or 'Warning' are colored Yellow.
+            Any values with the words 'Fail', 'Failing', or 'False' are colored Red.
+
+            Takes EITHER [hashtable] of Regular Expressions to colors, OR [hashtable] of [hashtable] of Regular Expressions to colors. See Examples.
+
+            .PARAMETER HeaderColor
+            Color for header lines (Property Names, and '----' dashed-line delimiter)
+
+            .EXAMPLE
+            dir | Select Mode, LastWriteTime, Length, Name | Format-TableColorByProperty
+            Default patterns. If a file is named 'failures.txt' is present, the file name column will be the color Red.
+
+            .EXAMPLE
+            dir | Select Mode, LastWriteTime, Length, Name | Format-TableColorByProperty -Pattern @{ '^d--' = 'Green'; '^d-r' = 'DarkGreen' }
+            In additional to the above, the any column with these patterns will be colored Green or Dark Green. However, these are unusual file names, but common for directories, so it is likely ony the Mode column for directories will be Green and read-only directories will be Dark Green.
+
+            .EXAMPLE
+            dir | Select Mode, LastWriteTime, Length, Name | Format-TableColorByProperty -Pattern @{ Name = @{ '^d--' = 'Green'; '^d-r' = 'DarkGreen' } }
+            In this case, only file objects with the file NAME matching these patterns will be Green or Dark Green. Directory modes are unchanged.
+
+    #>
+    function script:Format-TableColorByProperty
+    {
+        [CmdletBinding()]
+        param
+        (
+            [Parameter(
+                    Mandatory,
+                    ValueFromPipeline,
+                    ValueFromPipelineByPropertyName,
+                    Position = 1
+            )]
+            [PSCustomObject[]]$InputObject,
+
+            [Parameter( Position = 0 )]
+            [hashtable]$Pattern = [ordered] @{},
+
+            [Parameter( Position = 2 )]
+            [string]$HeaderColor = $host.UI.RawUI.ForegroundColor
+        )
+
+        begin
+        {
+            #region set default foreground color
+
+            # ISE sets $host.UI.RawUI.ForegroundColor to -1 for some reason
+            $defaultForegroundColor = $host.UI.RawUI.ForegroundColor -as [System.ConsoleColor]
+            if ( !$defaultForegroundColor -or $defaultForegroundColor -match '[^a-z]' )
+            {
+                $defaultForegroundColor = 'White'
+            }
+
+            #endregion set default foregroun color
+            #region set color hash per column
+
+            $HeaderColor = $HeaderColor -as [System.ConsoleColor]
+            if ( !$HeaderColor -or $HeaderColor -match '[^a-z]' )
+            {
+                $HeaderColor = $defaultForegroundColor
+            }
+
+            # set default values for all columns
+            $defaultColorPropertyValuePattern = @{
+                '.*' = [ordered] @{
+                    '\bPass(ing|es)?\b' = 'Green'
+                    '\bSuccess(es)?\b'  = 'Green'
+                    '\bTrue\b'          = 'Green'
+
+                    '\bWarn(ing(s)?)?\b' = 'Yellow'
+                
+                    '\bFail(ing|ure(s))?\b' = 'Red'
+                    '\bFalse\b'             = 'Red'
+
+                    # this needs to go last, AFTER user supplied patterns, if any.
+                    #'.*' = $defaultForegroundColor
+                }
+            }
+
+            $ColorPropertyValuePattern = [ordered] @{}
+
+            $firstKey = $Pattern.Keys |
+            Select-Object -First 1
+
+            if ( $Pattern.$firstKey -is [HashTable] )
+            { 
+                # first we set the per-column hashtable to what the user specified
+
+                foreach ( $key in $Pattern.Keys )
+                {
+                    $ColorPropertyValuePattern.$key = $Pattern.$key
+                }
+
+                # set default colour hash for catch-all last.
+                if ( !$ColorPropertyValuePattern.'.*' )
+                {
+                    $ColorPropertyValuePattern.'.*' = $defaultColorPropertyValuePattern
+                }
+            }
+            else
+            {
+                # if it's not a hash-of-hash, then use the default (all-column) one
+                $ColorPropertyValuePattern = $defaultColorPropertyValuePattern
+
+                # and append each value
+                foreach ( $_valueRegex in $Pattern.Keys )
+                {
+                    $ColorPropertyValuePattern.'.*'.$_valueRegex = $Pattern.$_valueRegex
+                }
+            }
+
+            $ColorPropertyValuePattern.'.*'.'.*' = $defaultForegroundColor
+
+            #region set default color hash
+
+            # we'll process everything at the end so we can capture the maximum property lengths
+            [System.Collections.ArrayList]$buffer = @()
+        } # begin
+
+        process
+        {
+            # queue it all up
+            $buffer += $InputObject
+        }
+
+        end
+        {
+            # this is the ordered list of object properties that come with the object
+            [string[]]$properties = $buffer[0].PSObject.Properties.Name
+
+            #region get the number of columns and width of each to display 
+
+            # store the max length of each property
+            $propertyValueMaxLength = @{}
+
+            # try to autodetect, but it fails under ISE
+            if ( !( $HeaderColor -as [System.ConsoleColor] ) )
+            {
+                $HeaderColor = 'White'
+            }
+
+            [System.Collections.ArrayList]$ftAutoSize = ( $buffer | Format-Table -AutoSize | Out-String ) -split '[\r\n]+' | Where-Object -Property Length
+
+            $delimiterLine = $ftAutoSize -match '^[- ]+$' | Select-Object -First 1
+
+            $delimiterIndexOf = $ftAutoSize.IndexOf( $delimiterLine )
+
+            $ftAutoSize[ 0 .. $delimiterIndexOf ] | Write-Host -ForegroundColor $HeaderColor
+
+            # figure out the display length of each property
+            $dashes = $delimiterLine -replace ' -', ' =-' -split '='
+            $propertyMaxLengths = @{}
+            for ( $i = 0; $i -lt $dashes.Count; $i++ )
+            {
+                $propertyValueMaxLength.($properties[$i]) = $dashes[$i].Length
+            }
+        
+            # truncate the property list to only the ones that fit
+            $properties = $properties[ 0 .. ( $dashes.Count - 1 ) ]
+
+            #endregion get the number of columns and width of each to display 
+            #region display the data
+
+            # for each data element
+            foreach ( $_buffer in $buffer )
+            {
+
+                # for each property
+                for ( $i = 0; $i -lt $properties.count; $i ++ )
+                {
+
+                    $_propertyName = $properties[$i]
+                    if ( !( $_value = $_buffer.$_propertyName ) )
+                    {
+                        $value = ' '
+                    }
+
+                    $color = $defaultForegroundColor
+
+                    #region determine the color
+
+                    # find the color matching the first pattern that fits
+                    foreach ( $_propertyNameRegex in $ColorPropertyValuePattern.Keys )
+                    {
+                        # what column (property) is it? (Because we're allowing regexes for property names)
+
+                        if ( $_propertyName -match $_propertyNameRegex )
+                        {
+                            # found the first matching property name
+
+                            foreach ( $_valueRegEx in $ColorPropertyValuePattern.$_propertyName.Keys)
+                            {
+
+                                # which pattern is it?
+
+                                if ( $_value -match $_valueRegEx )
+                                {
+                                    # found the first match, so use that color
+                                    $color = $ColorPropertyValuePattern.$_propertyName.$_valueRegEx
+                                    break
+                                }
+                            }
+                        }
+                    }
+
+                    #endregion determine the color
+                    #region output the property
+
+                    # if the data is a string, left-justify it, otherwise, right-justify it
+                    $isString = $true
+                    if ( !( $_buffer.$_propertyName -is [string] ) )
+                    {
+                        $isString = $false
+                        $_value = "$($_buffer.$_propertyName)"
+                    }
+
+                    # how much do we have to padd it?
+                    $paddingCount =  $propertyValueMaxLength.$_propertyName - $_value.Length - 1
+                    if ( $paddingCount -lt 0 )
+                    {
+                        $paddingCount = 0
+                        $_value = $_value.SubString( 0, ( $propertyValueMaxLength.$_propertyName - 3 ) ) + '...'
+                    }
+
+                    $padding = ' ' * $paddingCount
+
+                    # left-justify non-[string] values
+                    if ( !$isString )
+                    {
+                        Write-Host -NoNewline -Object $padding
+                    }
+
+                    $foregroundColor = $color -as [System.ConsoleColor]
+                    if ( !$foregroundColor -or $foregroundColor -match '^a-z]' )
+                    {
+                        $message = "$_propertyName value '$_value' matches '$_valueRegex', which returns invalid color '$color'"
+                        Write-Error -ErrorAction SilentlyContinue -Message $message
+                        Write-Warning -Message $message
+                        $foregroundColor = $defaultForegroundColor
+                    }
+
+                    Write-Host -ForegroundColor $foregroundColor -NoNewline -Object $_value
+
+                    # right-justify [string] values
+                    if ( $isString )
+                    {
+                        Write-Host -NoNewline -Object $padding
+                    }
+                
+                    #endregion output the property
+
+                    # if we have more properties to display, add a ' ' to separate the columns
+                    if ( $i -lt ( $properties.Count - 1 ) )
+                    {
+                        Write-Host -NoNewline -Object ' '
+                    }
+                    else
+                    {
+                        # otherwise send a newline
+                        ''
+                    }
+
+                } #( for $i = 0 ...
+
+            } # foreach ( $_buffer in $buffer )
+
+            #region display the data
+
+        } # end
+
+    } #> # function Format-TableColorByProperty
+
+}
+
+
+if ( !( Test-FunctionExists  -Name Set-ConsoleIcon ) )
+{
+
+    <#
+            .SYNOPSIS
+            Set shell window icon.
+
+            .PARAMETER Path
+            Path to .ico file.
+    #>
+    function script:Set-ConsoleIcon
+    {
+        ##############################################################################
+        ##
+        ## Script: Set-ConsoleIcon.ps1
+        ## By: Aaron Lerch
+        ## Website: www.aaronlerch.com/blog
+        ##
+        ## Set the icon of the current console window to the specified icon
+        ##
+        ## Usage:  Set-ConsoleIcon [string]
+        ##
+        ## ie:
+        ##
+        ## PS:1 > Set-ConsoleIcon "C:\Icons\special_powershell_icon.ico"
+        ##
+        ##############################################################################
+
+        [CmdletBinding()]
+
+        param(
+            [parameter(Mandatory=$true)]
+            [ValidateScript({
+                        if ( !( Test-Path -Path $_ ) )
+                        {
+                            throw "-Path $_ not found."
+                        }
+
+                        # this will throw if it can't load the file
+                        $null = [System.Reflection.Assembly]::LoadWithPartialName('System.Drawing')
+                        $null = New-Object -TypeName System.Drawing.Icon( $_ ) -ErrorAction Stop
+
+                        # if we're here, we're good.
+                        $true
+            })]
+            [string]$Path
+        )
+
+        function Invoke-Win32
+        {
+            [CmdletBinding()]
+            ## Invoke a Win32 P/Invoke call.
+            ## From: Lee Holmes
+            ## http://www.leeholmes.com/blog/GetTheOwnerOfAProcessInPowerShellPInvokeAndRefOutParameters.aspx
+
+            param (
+                [Parameter( Mandatory )]
+                [string] $dllName, 
+
+                [Parameter( Mandatory )]
+                [Type] $returnType, 
+
+                [Parameter( Mandatory )]
+                [string] $methodName, 
+
+                [Type[]] $parameterTypes = @(), 
+
+                [Object[]] $parameters = @()
+            )
+
+            ## Begin to build the dynamic assembly
+            $domain = [AppDomain]::CurrentDomain
+            $name = New-Object Reflection.AssemblyName 'PInvokeAssembly'
+            $assembly = $domain.DefineDynamicAssembly($name, 'Run')
+            $module = $assembly.DefineDynamicModule('PInvokeModule')
+            $type = $module.DefineType('PInvokeType', 'Public,BeforeFieldInit')
+
+            ## Go through all of the parameters passed to us.  As we do this,
+            ## we clone the user's inputs into another array that we will use for
+            ## the P/Invoke call.  
+            $inputParameters = @()
+            $refParameters = @()
+        
+            for($counter = 1; $counter -le $parameterTypes.Length; $counter++)
+            {
+                ## If an item is a PSReference, then the user 
+                ## wants an [out] parameter.
+                if($parameterTypes[$counter - 1] -eq [Ref])
+                {
+                    ## Remember which parameters are used for [Out] parameters
+                    $refParameters += $counter
+
+                    ## On the cloned array, we replace the PSReference type with the 
+                    ## .Net reference type that represents the value of the PSReference, 
+                    ## and the value with the value held by the PSReference.
+                    $parameterTypes[$counter - 1] = 
+                    $parameters[$counter - 1].Value.GetType().MakeByRefType()
+                    $inputParameters += $parameters[$counter - 1].Value
+                }
+                else
+                {
+                    ## Otherwise, just add their actual parameter to the
+                    ## input array.
+                    $inputParameters += $parameters[$counter - 1]
+                }
+            }
+
+            ## Define the actual P/Invoke method, adding the [Out]
+            ## attribute for any parameters that were originally [Ref] 
+            ## parameters.
+            $method = $type.DefineMethod($methodName, 'Public,HideBySig,Static,PinvokeImpl', 
+            $returnType, $parameterTypes)
+            foreach($refParameter in $refParameters)
+            {
+                $method.DefineParameter($refParameter, 'Out', $null)
+            }
+
+            ## Apply the P/Invoke constructor
+            $ctor = [Runtime.InteropServices.DllImportAttribute].GetConstructor([string])
+            $attr = New-Object Reflection.Emit.CustomAttributeBuilder $ctor, $dllName
+            $method.SetCustomAttribute($attr)
+
+            ## Create the temporary type, and invoke the method.
+            $realType = $type.CreateType()
+            $realType.InvokeMember($methodName, 'Public,Static,InvokeMethod', $null, $null, 
+            $inputParameters)
+
+            ## Finally, go through all of the reference parameters, and update the
+            ## values of the PSReference objects that the user passed in.
+            foreach($refParameter in $refParameters)
+            {
+                $parameters[$refParameter - 1].Value = $inputParameters[$refParameter - 1]
+            }
+        }
+
+        function SendMessage
+        {
+            [CmdletBinding()]
+            param (
+                [Parameter( Mandatory )]
+                [IntPtr] $hWnd, 
+
+                [Parameter( Mandatory )]
+                [Int32] $message, 
+
+                [Parameter( Mandatory )]
+                [Int32] $wParam, 
+
+                [Parameter( Mandatory )]
+                [Int32] $lParam
+            )
+
+            $parameterTypes = [IntPtr], [Int32], [Int32], [Int32]
+            $parameters = $hWnd, $message, $wParam, $lParam
+
+            Invoke-Win32 -DllName 'user32.dll' -returnType ([Int32]) 'SendMessage' -ParameterTypes $parameterTypes -Parameters $parameters
+        }
+
+        function GetConsoleWindow
+        {
+            [CmdletBinding()] param ()
+            Invoke-Win32 'kernel32' ([IntPtr]) 'GetConsoleWindow'
+        }
+
+        # Check the host name and exit if the host is not the Windows PowerShell console host.
+        if ($host.Name -ne 'ConsoleHost') 
+        {
+            $message = "$($MyInvocation.MyCommand.Name) runs only in the console host. You cannot run this script in $($Host.Name)."
+            Write-Error -ErrorAction SilentlyContinue -Message $message
+            Write-Warning -Message $message
+            return
+        }
+
+        $WM_SETICON = 0x80
+        $ICON_SMALL = 0
+
+
+        try
+        {
+            # already did this
+            # $null = [System.Reflection.Assembly]::LoadWithPartialName('System.Drawing')
+
+            $icon = New-Object -TypeName System.Drawing.Icon( $Path )
+            $consoleHandle = GetConsoleWindow
+            $null = SendMessage -hWnd $consoleHandle -message $WM_SETICON -wParam $ICON_SMALL -lParam $icon.Handle 
+        }
+        catch
+        {
+            $message = $_.Exception.Message 
+            Write-Error -ErrorAction SilentlyContinue -Message $message
+            Write-Warning -Message $message
+        }
+
+    } #> # Set-ConsoleIcon
+
+}
+
+
+if ( !( Test-FunctionExists  -Name Find-Mail ) )
+{
+
+    <#
+            .SYNOPSIS
+            Search inbox.
+
+
+            .PARAMETER Pattern
+            Regular Expression to match specified email properties against. See -Property for default properties. Default value is '.*' (matches everything.) Successful matches will return the email.
+
+            .PARAMETER Filter
+            Hashtable of properties and matching Regular Expressions. Used to specify individual patterns against properties. Successful matches will return the email.
+
+            .PARAMETER Days
+            Number of days to start matching against, starting from the -NotAfter parameter value. Defaults to 7 days. When used with the default -NotAfter parameter value, this will search for emails from the past week.
+
+            .PARAMETER NotAfter
+            Most recent sent date for which emails will be returned. Default value is now.
+
+            .PARAMETER Property
+            Property names to match -Pattern parameter value against. Defaults to SenderName, SenderEmailAddress, Subject, and Body.
+
+            .PARAMETER SubFolder
+            Outlook folder to search.
+
+            .PARAMETER RequireAll
+            Require all -Filter parameter values to be satisfied. By default, any successful match will return the email.
+
+    #>
+    function script:Find-Mail
+    {
+        [CmdletBinding( DefaultParameterSetName = 'ByPattern' )]
+
+        [Alias( 'fm' )]
+    
+        param
+        (
+            [Parameter(
+                    ParameterSetName = 'ByPattern',
+                    Position = 0
+            )]
+            [string]$Pattern = '.*',
+
+            [Parameter(
+                    ParameterSetName = 'ByFilter',
+                    Position = 0
+            )]
+            [hashtable]$Filter = $null,
+
+            [Parameter( Position = 2 )]
+            [int]$Days = 7,
+
+            [Parameter( Position = 3 )]
+            [DateTime]$NotAfter = ( [DateTime]::Now ),
+
+            [Parameter(
+                    ParameterSetName = 'ByPattern',
+                    Position = 4
+            )]
+            [string[]]$Property = @(
+                'SenderName',
+                'SenderEmailAddress',
+                'Subject',
+                'Body'
+            ),
+
+            [Parameter( Position = 5 )]
+            [string]$SubFolder = $null,
+
+            [Parameter(
+                    ParameterSetName = 'ByFilter',
+                    Position = 1
+            )]
+            [switch]$RequireAll
+
+        )
+
+        if ( 
+            $Property -contains 'From' -or
+            $Property -contains 'Sender'
+        )
+        {
+            $Property += 'SenderEmailAddress', 'SenderName', 'SentOnBehalfOfName'
+        }
+
+        $functionName = $MyInvocation.MyCommand.Name + ':'
+
+        $NotBefore = $NotAfter - ( New-TimeSpan -Days $Days )
+
+        try
+        {
+            # https://msdn.microsoft.com/en-us/magazine/dn189202.aspx
+            Add-Type -AssemblyName 'Microsoft.Office.Interop.Outlook'
+            $Outlook = New-Object -ComObject Outlook.Application -ErrorAction Stop
+            $namespace = $Outlook.GetNameSpace( 'MAPI' )
+
+            $folder = $namespace.GetDefaultFolder( [Microsoft.Office.Interop.Outlook.OlDefaultFolders]::olFolderInbox )
+            $inboxFolderPath = $folder.FullFolderPath
+
+            if ( $SubFolder )
+            {
+                $fullFolderPath = $folder.FullFolderPath
+                $currentFolder = $folder
+
+                $subfolder = $SubFolder -replace '^[\\/]+' -replace '^Inbox[\\/]*'
+                foreach ( $_subFolder in ( $SubFolder -split '[\\/]+' ) )
+                {
+                    $fullFolderPath = "$fullFolderPath\$_subFolder"
+                    $currentFolder = $currentFolder.Folders |
+                    Where-Object -Property FullFolderPath -eq $fullFolderPath
+
+                    if ( $currentFolder  )
+                    {
+                        Write-Verbose -Message "$fullFolderPath"
+                    }
+                    else
+                    {
+                        throw "unable to find folder $fullFolderPath"
+                    }
+                } # foreach ( $_subFolder
+
+                $folder = $currentFolder
+
+            } # if ( $subfolder )
+        } 
+        catch
+        {
+            $message = $_.Exception.Message -join ' '
+            Write-Error -ErrorAction SilentlyContinue -Exception $_.Exception
+            Write-Warning -Message "$functionName failed with $message"
+            return
+        }
+
+        if ( !$Filter )
+        {
+            $Property |
+            ForEach-Object -Process `
+            {
+                $Filter.$_ = $Pattern
+            }
+        }
+
+        Write-Progress -Activity Reading -Status Inbox
+        $folder.Items |
+        Where-Object -FilterScript `
+        {
+            $_.SentOn -lt $NotAfter -and
+            $_.SentOn -gt $NotBefore
+        } |
+        Sort-Object -Property SentOn -Descending |
+        ForEach-Object -Process `
+        { 
+            Write-Progress -Activity "From: $( $_.SenderName)" -Status "Subject: $( $_.Subject )" -CurrentOperation "SentOn: $( $_.SentOn )"
+
+            if ( $RequireAll )
+            {
+                $isMatch = $true
+            }
+
+            foreach ( $_property in $Filter.Keys )
+            {
+                if ( $_.$_property -match $Filter.$_property )
+                {
+
+                    if ( !$RequireAll )
+                    {
+                        $_
+                        break
+                    }
+                }
+                elseif ( $RequireAll )
+                {
+                    $isMatch = $false
+                    break
+                }
+            }
+
+            if ( $RequireAll -and $isMatch )
+            {
+                $_
+            }
+
+        }
+
+    } #> # function Find-Mail
+
+}
+
+
+if ( !( Test-FunctionExists -Name Enter-TorusSession ) )
+{
+    if ( 
+        (Test-Path -Path 'C:\Torus\TorusClient.ps1' ) -and
+        !( Test-Path -Path Variable:Torusconnection ) -and
+        !( Test-FunctionExists -Name Enter-TorusSession )
+    )
+    {
+
+        function script:Enter-TorusSession
+        {
+            [CmdletBinding()]
+            param
+            (
+                [ValidateSet( 'Setup', 'Connect', 'Cleanup' )]
+                [string]$Mode = 'Connect',
+
+                [ValidateSet( 'Prod', 'SDF', 'Gallatin' )]
+                [String]$Environment = 'Prod',
+
+                [switch]$Force
+            )
+
+            if ( $global:TorusConnection)
+            {
+                if ( !$Force )
+                {
+                    Write-Warning "Already in a torus shell. Specify -Force to override (for whatever reason I can't imagine.)"
+                    return
+                }
+            }
+
+            & 'C:\Torus\TorusClient.ps1' -Mode $Mode -Environment $Environment
+        } #> # function Enter-TorusSession
+
+    }
+}
+
+
+if ( !( Test-FunctionExists -Name Get-HostEntry ) )
+{
+
+    function script:Get-Hostentry
+    {
+        [CmdletBinding()]
+        param
+        (
+            [Parameter(
+                    Mandatory,
+                    ValueFromPipeline,
+                    ValueFromPipeLineByPropertyName,
+                    Position = 0
+            )]
+            [string[]]$ComputerName
+        )
+        
+        begin
+        {
+            $FunctionName = $MyInvocation.MyCommand.Name + ':'
+        }
+
+        process
+        {
+            $ComputerName |
+            ForEach-Object -Process `
+            {
+                $_comptuerName = $_
+                try
+                {
+                    [System.Net.Dns]::GetHostEntry( $_comptuerName )
+                }
+                catch
+                {
+                    Write-Warning -Message "$FunctionName -ComputerName '$_comptuerName' failed with:"
+                    Write-Warning -Message $_
+                }
+            }
+        }
+    }
+
+}
+
+
+if ( !( Test-FunctionExists -Name Get-HostBuffer ) )
+{
+    <#
+            .SYNOPSIS
+            Save PSH console contents as HTML, OR copies console content to STDOUT
+
+            .PARAMETER Path
+            Path to save HTML file.
+
+            .PARAMETER FontSize
+            Font size for captured text. Default value is 12 pt.
+
+            .PARAMETER FontFace
+            Font to use for captured text. Default is Consolas.
+
+            .PARAMETER NoPreview
+            Do not display HTML in default web browser. Default is to open the HTML file.
+
+            .PARAMETER PlainText
+            Output console contents to STDOUT. Default is to save to HTML file.
+
+            .PARAMETER Screen
+            Only capture content in the window. Default is to capture the entire buffer.
+    #>
+    function Get-HostBuffer
+    {
+        [CmdletBinding( DefaultParameterSetName = 'HTML' )]
+        [Alias( 'gcb' )]
+        param ( 
+            [Parameter ( 
+                    ParameterSetName = 'HTML',
+                    Position = 0
+            )]
+            [string]$Path = "$home\Desktop\ConsoleBuffer\ConsoleBuffer_$( $env:COMPUTERNAME.ToLower( ) )-$( Get-Date -Format 'yyyy-MM-dd_HH-mm-ss' ).html",
+
+            [Parameter ( 
+                    ParameterSetName = 'HTML',
+                    Position = 1
+            )]
+            [ValidateRange( 6,24 )]
+            [int]$FontSize = 10,
+
+            [Parameter ( 
+                    ParameterSetName = 'HTML',
+                    Position = 2
+            )]
+            [ValidateSet( 
+                    'Courier',
+                    'Consolas', 
+                    'Courier New', 
+                    'DejaVu Sans Mono',
+                    'Lucinda Console',
+                    'Lucinda Sans Typwriter', 
+                    'MS Gothic',
+                    'OCR A Extended'
+            )]
+            [string]$FontFace = 'Consolas',
+
+            [Parameter ( ParameterSetName = 'HTML' )]
+            [switch]$NoPreview,
+
+            [Parameter ( ParameterSetName = 'Plaintext' )]
+            [switch]$AsPlainText,
+
+            [Switch]$ScreenOnly
+        )
+
+        $functionName = $MyInvocation.MyCommand.Name
+        Write-Debug "$functionName called"
+        $ErrorActionPreference = 'stop'
+
+        if ( $host.Name -ne 'ConsoleHost' )
+        {
+            Write-Error -Message "$functionName only works in the console host ( powershell.exe ).  You cannot run this in $( $host.Name )"
+        }
+
+        if ( !$AsPlainText )
+        {
+            $outputFolder = Split-Path -Parent -Path $Path
+            if ( !( Test-Path -Path $outputFolder ) )
+            {
+                $null = New-Item -ItemType Directory -Path $outputFolder 
+            }
+        }
+
+        # height is a bit of a misnomer - this is the last line that contains data, less the line that executes 'Get-HostBuffer'
+        $bufferHeight = $host.UI.RawUI.CursorPosition.Y - 1
+
+        $bufferWidth = $host.UI.RawUI.BufferSize.Width
+
+        if ( $ScreenOnly )
+        {
+            $startingY = $bufferHeight - $host.UI.RawUI.WindowSize.Height
+        }
+        else
+        {
+            $startingY = 0
+        }
+
+        if ( !$AsPlainText )
+        {
+            # inline the scriptblock that remaps PSH custom colors. from the source script:
+            #
+            # The Windows PowerShell console host redefines DarkYellow and DarkMagenta colors 
+            # and uses them as defaults. The redefined colors do not correspond to the color 
+            # names used in HTML, so they need to be mapped to digital color codes.
+            #
+            $getColor = {
+                switch ( $args[0] ) { 'DarkYellow' 
+                    {
+                        '#eeedf0'
+                    }
+
+                    'DarkMagenta' 
+                    {
+                        '#012456' 
+                    }
+
+                    default 
+                    {
+                        $args[0] 
+                    }
+                } 
+            }
+        }
+
+        Write-Verbose -Message "New-Object -TypeName System.Management.Automation.Host.Rectangle -ArgumentList 0, $startingY, $( $bufferWidth - 1 ), $bufferHeight"
+
+        $rectangle = New-Object -TypeName System.Management.Automation.Host.Rectangle -ArgumentList 0, $startingY, ( $bufferWidth - 1 ), $bufferHeight
+        $buffer = $host.UI.RawUI.GetBufferContents( $rectangle )
+
+        # normally, this is one of the first lines, but we don't want to capture it, so we're moving it here.
+        Write-Verbose -Message "Running $( $MyInvocation.MyCommand.Name )"
+
+        $stringBuilder = New-Object -TypeName System.Text.StringBuilder
+
+        if ( !$AsPlainText )
+        {
+            $backgroundColor = & $getColor $buffer[0, 0].Backgroundcolor
+
+            $null = $stringBuilder.Append( "<html><body cellpadding=20 bgcolor='$backgroundColor'><table bgcolor='$backgroundColor'><tr><td><table bgcolor='$backgroundColor'><tr><td><br/><pre style='MARGIN: 0in 10pt 0in;line-height:normal;font-size:$FontSize'>" )
+
+            # to substitute characters which have special meaning in HTML.
+            $null = [Reflection.Assembly]::LoadWithPartialName( 'System.Web' )
+        }
+
+        $captureHeight = $bufferHeight - $startingY
+
+        $maxLineLength = 0
+        # scan it first for the longest line.
+        for ( $i = 0; $i -lt $captureHeight; $i++ )
+        {
+            for ( $j = 0; $j -lt $bufferWidth; $j++ )
+            {
+                if ( $buffer[$i, $j].Character -notmatch '\s' -and $j -gt $maxLineLength )
+                {
+                    $maxLineLength = $j
+                }
+            }
+        }
+
+        # fencepost! ( you have a 10-yard fence with fenceposts every 1 yard apart. how many fenceposts do you have? )
+        $maxLineLength += 1
+
+        Write-Verbose -Message "CaptureWindow: 0, $startingY, $maxLineLength, $bufferHeight"
+
+        for ( $i = 0; $i -lt $captureHeight; $i++ )
+        {
+            # initialize a new span
+            $spanBuilder = New-Object -TypeName System.Text.StringBuilder
+
+            if ( !$AsPlainText ) 
+            {
+                $currentForegroundColor = $buffer[$i, 0].Foregroundcolor
+                $currentBackgroundColor = $buffer[$i, 0].Backgroundcolor
+            }
+
+            for ( $j = 0; $j -lt $maxLineLength; $j++ )
+            {
+                $cell = $buffer[$i, $j]
+
+                if ( !$AsPlainText )
+                {
+                    if ( $cell.ForegroundColor -ne $currentForegroundColor -or $cell.BackgroundColor -ne $currentBackgroundColor )
+                    {
+                        $foregroundColor = & $getColor $currentForegroundColor
+                        $backgroundColor = & $getColor $currentBackgroundColor
+
+                        $spanText = [System.Web.HttpUtility]::HtmlEncode( $spanBuilder.ToString( ) )
+                        $spanHtml = "<span style='font-family:Consolas;color:$foregroundColor;background:$backgroundColor'>$spanText</span>"
+                        $null = $stringBuilder.Append( $spanHtml )
+
+                        # initialize a new span
+                        $spanBuilder = New-Object -TypeName System.Text.StringBuilder
+                        $currentForegroundColor = $cell.Foregroundcolor
+                        $currentBackgroundColor = $cell.Backgroundcolor
+
+                    } # if ( $cell.ForegroundColor -ne $currentForegroundColor ...
+                }
+
+                $null = $spanBuilder.Append( $cell.Character )
+
+            } # for ( $j = 0; $j -lt $bufferWidth; $j++ )
+
+            if ( $AsPlainText )
+            {
+                $null = $spanBuilder.Append( "`r`n" )
+                $null = $stringBuilder.Append( $spanBuilder.ToString( ) )
+            }
+            else
+            {
+                $foregroundColor = & $getColor $currentForegroundColor
+                $backgroundColor = & $getColor $currentBackgroundColor
+
+                $spanText = [System.Web.HttpUtility]::HtmlEncode( $spanBuilder.ToString( ) ) -replace ' ', '&#160;'
+                $spanHtml = "<span style='font-family:$FontFace;color:$foregroundColor;background:$backgroundColor'>$spanText</span><br/>"
+                $null = $stringBuilder.Append( $spanHtml )
+            }
+
+        } # for ( $i = $startingY; $i -lt $captureHeight; $i++ )
+
+        if ( $AsPlainText )
+        {
+            $stringBuilder.ToString( )
+        }
+        else
+        {
+            $null = $stringBuilder.Append( '</pre><br/></td></tr></table></td></tr></table></body></html>' )
+            Set-Content -Path $Path -Value $stringBuilder.ToString( )
+
+            if ( !$NoPreview )
+            {
+                Invoke-Item -Path $Path
+            }
+
+            Get-Item -Path $Path
+        }
+
+    } #> # function Get-HostBuffer
+}
+
+
+if ( !( Test-FunctionExists -Name Set-HostBuffer ) )
+{
+    <#
+            .SYNOPSIS
+            Write HTML generated by Get-HostBuffer to console to fake the output. 
+    #>
+    function Set-HostBuffer
+    {
+        [CmdletBinding()]
+        [Alias( 'Set-ConsoleBuffer' )]
+        param (
+            [Parameter(Mandatory)]
+            [string]$Path 
+        )
+
+        Write-Verbose -Message "Runing $( $MyInvocation.MyCommand.Name )"
+        $xml = (Get-Content -Path $Path) -as [xml]
+        if (!$xml)
+        {
+            Write-Warning -Message "Failed to parse '$Path' as XML. Returning."
+        }
+
+        $foregroundColor = $host.UI.RawUI.ForegroundColor
+        if ($foregroundColor -eq -1) { $foregroundColor = 'DarkYellow'}
+
+        $backgroundColor = $host.UI.RawUI.BackgroundColor
+        if ($backgroundColor -eq -1) { $backgroundColor = 'DarkMagenta'}
+
+        $writeHostParams = @{
+            ForegroundColor = $foregroundColor
+            BackgroundColor = $backgroundColor
+            NoNewline = $true
+        }
+
+        $xml.html.body.table.tr.td.pre.ChildNodes |
+        ForEach-Object -Process {
+            # <br /> or < span>
+            $localName = $_.LocalName
+
+            if ($localName -eq 'br')
+            { Write-Host -Object '' }
+            elseif ($localName -eq 'span')
+            {
+                if ($_.style)
+                {
+                    $styleArray = $_.style -split ';'
+                    if ($foregroundColor = $styleArray -match '^color:' -replace '^color:')
+                    { 
+                        if ($foregroundColor -eq '#eeedf0') { $foregroundColor = 'DarkYellow' }
+                        $writeHostParams.ForegroundColor = $foregroundColor
+                    }
+                    if ($backgroundColor = $styleArray -match '^background:' -replace '^background:')
+                    { 
+                        if ($backgroundColor -eq '#012456') { $backgroundColor = 'DarkMagenta' }
+                        $writeHostParams.BackgroundColor = $backgroundColor
+                    }
+
+                }
+
+                if ( $_.PSObject.Properties.Name -contains '#text' -and ($writeHostParams.Object = $_.'#text' ) ) { Write-Host @writeHostParams }
+            }
+        }
+
+    } #> # function Set-HostBuffer
+}
+
+
+if ( !( Test-FunctionExists -Name Set-ConsoleWindow ) )
+{
+    <#
+            .SYNOPSIS
+            Resize console window and buffer.
+
+            .DESCRIPTION
+            While Windows 10 introduced the ability to dynamically resize a window using the UI, shrinking the width of the window places the cursor on row 1 of the resized window without clearing the screen.
+
+            This function does not move the cursor, and does not clear the screen (though it does truncate the data in the buffer to the new window and buffer length.)
+
+            .PARAMETER Width
+            Set console width to specified size. Size can be specified as 
+            - an [int] for absolute number of columns.
+            - (+/-)[int] to increase/decrease number of columns.
+            - [float] to increase/decrease number of columns by a relative amount.
+            - 'Max' to increase columns to the maximum amount visible on screen. Note that the taskbar is not included in this calculation.
+
+            .PARAMETER Height
+            Set console height to specified size. Size can be specified as 
+            - an [int] for absolute number of rows.
+            - (+/-)[int] to increase/decrease number of rows.
+            - [float] to increase/decrease number of rows by a relative amount.
+            - 'Max' to increase rows to the maximum amount visible on screen. Note that the taskbar is not included in this calculation.
+
+            .PARAMETER Force
+            Override check to prevent resizing window beyond the maximum able to be displayed on screen.
+
+            .PARAMETER PassThru
+            Display the final window's rows and columns.
+
+    #>
+    function Set-ConsoleWindow
+    {
+        [CmdletBinding(
+                SupportsShouldProcess = $true, 
+                PositionalBinding = $true,
+                HelpUri = 'http://TODO/',
+                ConfirmImpact = 'Low'
+        )]
+        [Alias( 'stcs')]
+        [OutputType([PSObject])]
+
+        param
+        (
+            # Set console width to specified width.
+            [Parameter(
+                    ValueFromPipeline = $true, 
+                    ValueFromPipelineByPropertyName = $true, 
+                    HelpMessage = 'New console window width',
+                    Position = 0
+            )]
+            [ValidateScript(
+                    {
+                        if (
+                            $_ -eq 'max' -or 
+                            $_ -as [int] -gt 0 -or
+                            $_ -as [float] -gt 0 -or
+                            $_ -match '[\+-]\d+$'
+                        )
+                        {
+                            $true
+                        }
+                        else
+                        {
+                            Throw 'Input must be an [int], a [float], +/-[int], or the string "Max"'
+                        }
+                    }
+            )]
+            [string]$Width,
+
+            # Set console width to specified height.
+            [Parameter(
+                    ValueFromPipeline = $true, 
+                    ValueFromPipelineByPropertyName = $true, 
+                    HelpMessage = 'New console window height',
+                    Position = 1
+            )]
+            [ValidateScript(
+                    {
+                        if (
+                            $_ -eq 'max' -or 
+                            $_ -as [int] -gt 0 -or
+                            $_ -as [float] -gt 0 -or
+                            $_ -match '[\+-]\d+$'
+                        )
+                        {
+                            $true
+                        }
+                        else
+                        {
+                            Throw 'Input must be an [int], a [float], +/-[int], or the string "Max"'
+                        }
+                    }
+            )]
+            [string]$Height,
+
+            # Override checks for maximum window height and width.
+            [switch]$Force,
+
+            # Output a PSObject 
+            [switch]$PassThru
+        )
+
+        Begin
+        {
+            Write-Verbose -Message "Runing $( $MyInvocation.MyCommand.Name )"
+            # create output object
+            # this is both used to store 'before' and 'after' properties
+            # it is only output via -PassThru
+            $outputObject = New-Object -TypeName psobject |
+            Select-Object -Property OldWidth, NewWidth, OldBufferWidth, NewBufferWidth, MaxWidth, OldHeight, NewHeight, OldBufferHeight, NewBufferHeight, MaxHeight
+
+            # determine starting window properties
+            $outputObject.OldWidth = $host.UI.RawUI.WindowSize.Width
+            $outputObject.OldHeight = $host.UI.RawUI.WindowSize.Height
+
+            # determine maximum window size
+            $outputObject.MaxWidth = $host.UI.RawUI.MaxPhysicalWindowSize.Width
+            $outputObject.MaxHeight = $host.UI.RawUI.MaxPhysicalWindowSize.Height
+
+            # detrmine buffer size
+            $bufferSize = $host.UI.RawUI.BufferSize
+            $outputObject.OldBufferWidth = $bufferSize.Width
+            $outputObject.OldBufferHeight = $bufferSize.Height
+
+            # determine intended final window dimensions
+
+            # TODO: the code for the two dimensions are 99.99% identical.
+            # refactor as a private function?
+            # PRO: save space, avoid repetition
+            # CON: readablity, and can't test the private function independently
+
+            #region width
+
+            # calculate the desired value
+            if (!$Width)
+            {
+                # When in doubt, do nothing
+                $newWidth = $outputObject.OldWidth
+                $reason = '-Width not specified'
+            }
+            elseif ($Width -match '^\d+$')
+            {
+                # input value is an [int] and not a [float] that can be cast to [int]
+                $newWidth = $Width -as [int]
+                $reason = "input value $Width is an [int]"
+            }
+            elseif ($Width -eq 'Max')
+            {
+                # supersize me
+                $newWidth = $outputObject.MaxWidth
+                $reason = '"Max" is input value'
+            }
+            elseif ($Width -match '(?<Operator>[\+-])(?<Delta>\d+)$')
+            {
+                # allow for +/- to the window size
+
+                # how much we will grow or shrink the window
+                $delta = $Matches.Delta -as [int]
+
+                if ($Matches.Operator -eq '+')
+                {
+                    # enlarge dimension
+                    $newWidth = $outputObject.OldWidth + $delta
+                    $reason = "Adding $delta to width"
+                }
+                else 
+                {
+                    # $Matches.Operator -eq '-'
+                    $newWidth = $outputObject.OldWidth - $delta
+                    $reason = "Subtracting $delta from width"
+
+                    if ($newWidth -lt 1)
+                    {
+                        # range underflow!
+                        $newWidth = $outputObject.OldWidth
+                        $reason += ".  Resulting value of $newWidth is too small.  Leaving unchanged."
+                    }
+                }
+            }
+            elseif ($Width -match '\.')
+            {
+                # handle percentages
+                $multiplier = $Width -as [float]
+                $newWidth = $outputObject.OldWidth * $multiplier
+                $reason = "Multiplying width by $multiplier"
+
+                if ($newWidth -lt 1)
+                {
+                    # range underflow!
+                    $newWidth = $outputObject.OldWidth
+                    $reason += ".  Resulting value of $newWidth is too small.  Leaving unchanged."
+                }
+                else
+                {
+                    # -as [int] rounds down on .5, but Math 101 says to round up
+                    $newWidth = ($newWidth + 0.5) -as [int]
+                }
+            }
+            else
+            {
+                # default case
+                $newWidth = $Width -as [int]
+                $reason = "-Width $newWidth specified."
+            }
+            Write-Verbose -Message "Calculated width is $newWidth becase $reason."
+
+            # if calculated value is too large, look at -Force
+            if ($newWidth -gt $outputObject.MaxWidth)
+            {
+                # know when to say when
+                if ($Force)
+                {
+                    # override it
+                    $reason = "input value $newWidth too large, but -Force specified"
+                }
+                else
+                {
+                    # default to max size
+                    $newWidth = $outputObject.MaxWidth
+                    $reason = 'input value too large'
+                }
+            }
+            else
+            {
+                # okie-dokie, boss
+                $reason = 'input value in acceptable range'
+            }
+            Write-Verbose -Message "Assigned width is $newWidth becase $reason."
+
+            #endregion
+            #region height
+
+            # calculate the desired value
+            if (!$Height)
+            {
+                # When in doubt, do nothing
+                $newHeight = $outputObject.OldHeight
+                $reason = '-Height not specified'
+            }
+            elseif ($Height -match '^\d+$')
+            {
+                # input value is an [int] and not a [float] that can be cast to [int]
+                $newHeight = $Height -as [int]
+                $reason = "input value $Height is an [int]"
+            }
+            elseif ($Height -eq 'Max')
+            {
+                # supersize me
+                $newHeight = $outputObject.MaxHeight
+                $reason = '"Max" is input value'
+            }
+            elseif ($Height -match '(?<Operator>[\+-])(?<Delta>\d+)$')
+            {
+                # allow for +/- to the window size
+
+                # how much we will grow or shrink the window
+                $delta = $Matches.Delta -as [int]
+
+                if ($Matches.Operator -eq '+')
+                {
+                    # enlarge dimension
+                    $newHeight = $outputObject.OldHeight + $delta
+                    $reason = "Adding $delta to height"
+                }
+                else 
+                {
+                    # $Matches.Operator -eq '-'
+                    $newHeight = $outputObject.OldHeight - $delta
+                    $reason = "Subtracting $delta from height"
+
+                    if ($newHeight -lt 1)
+                    {
+                        # range underflow!
+                        $newHeight = $outputObject.OldHeight
+                        $reason += ".  Resulting value of $newHeight is too small.  Leaving unchanged."
+                    }
+                }
+            }
+            elseif ($Height -match '\.')
+            {
+                $multiplier = $Height -as [float]
+                $newHeight = $outputObject.OldHeight * $multiplier
+                $reason = "Multiplying height by $multiplier"
+
+                if ($newHeight -lt 1)
+                {
+                    # range underflow!
+                    $newHeight = $outputObject.OldHeight
+                    $reason += ".  Resulting value of $newHeight is too small.  Leaving unchanged."
+                }
+                else
+                {
+                    # -as [int] rounds down on .5, but Math 101 says to round up
+                    $newHeight = ($newHeight + 0.5) -as [int]
+                }
+            }
+            else
+            {
+                # default case
+                $newHeight = $Height -as [int]
+                $reason = "-Height $newHeight specified."
+            }
+            Write-Verbose -Message "Calculated Height is $newHeight becase $reason."
+
+            # if calculated value is too large, look at -Force
+            if ($newHeight -gt $outputObject.MaxHeight)
+            {
+                # know when to say when
+                if ($Force)
+                {
+                    $reason = "input value $newHeight too large, but -Force specified"
+                }
+                else
+                {
+                    $newHeight = $outputObject.MaxHeight
+                    $reason = 'input value too large'
+                }
+            }
+            else
+            {
+                # okie-dokie, boss
+                $reason = 'input value in acceptable range'
+            }
+            Write-Verbose -Message "Assigned height is $newHeight becase $reason."
+
+            #endregion
+
+        }
+        Process
+        {
+            # update size
+            Write-Verbose -Message "Old width is $($outputObject.OldWidth), new width is $newWidth"
+            Write-Verbose -Message "Old height is $($outputObject.OldHeight), new height is $newHeight"
+            if (
+                $outputObject.OldWidth -eq $newWidth -and
+                $outputObject.OldHeight -eq $newHeight
+            )
+            {
+                # don't resize window
+                Write-Verbose -Message 'Nothing to do!'
+            }
+            elseif ($pscmdlet.ShouldProcess(
+                    "current window with width of $($outputObject.OldWidth) and width of $($outputObject.OldHeight)",
+                    "resize window to width of $newWidth -and height of $newHeight"
+            ))
+            {
+                # resize window
+
+                # create new console buffer and new window
+                $newConsoleBuffer = New-Object -TypeName System.Management.Automation.Host.Size -ArgumentList $newWidth, 9999
+                $newConsoleWindow = New-Object -TypeName System.Management.Automation.Host.Size -ArgumentList $newWidth, $newHeight
+
+                if ($outputObject.OldWidth -gt $newWidth)
+                {
+                    # this is where it gets tricky - if the current window size is larger (i.e. the command will SHRINK the window), the window needs to be updated first
+                    $host.UI.RawUI.WindowSize = $newConsoleWindow
+                    $host.UI.RawUI.BufferSize = $newConsoleBuffer
+                    Write-Verbose -Message 'Shrinking the console window, setting window first.'
+                }
+                else
+                {
+                    # otherwise, if the new window is larger (i.e. the command will ENLARGE the window), the buffer needs to be updated first.
+                    $host.UI.RawUI.BufferSize = $newConsoleBuffer
+                    $host.UI.RawUI.WindowSize = $newConsoleWindow
+                    Write-Verbose -Message 'Enlarging the console window, setting buffer first.'
+                }
+            }
+        }
+        End
+        {
+            $bufferSize = $host.UI.RawUI.BufferSize
+            $outputObject.NewBufferWidth = $bufferSize.Width
+            $outputObject.NewBufferHeight = $bufferSize.Height = 9999
+            $host.UI.RawUI.BufferSize = $bufferSize
+
+            if ($PassThru)
+            {
+                # output before-and-after data if requested
+                $outputObject.NewWidth = $host.UI.RawUI.WindowSize.Width
+                $outputObject.NewHeight = $host.UI.RawUI.WindowSize.Height
+                $outputObject
+            }
+        }
+    } #> # function Set-ConsoleWindow
+}
+
+
+$null = @'
+
+#region module management
+########################################
+
+[System.Collections.ArrayList]$moduleList = @(
+    #'C:\Users\timdunn\Google Drive\Config\PSHModules\PSReadLine\PSReadline.psd1',
+    #'C:\Users\timdunn\Google Drive\Config\PSHModules\Add-on.CopyAsColorizedHTML\Add-on.CopyAsColorizedHTML.psd1'
+    "$global:dcwaMain\Developer\timdunn\PSHToolkit"
+) 
+
+if ($Host.Name -match 'Ise Host' -and $env:COMPUTERNAME -match 'timdunn') 
+{
+    # only load the ISE steroids add-in on my own machines.
+    $moduleList += 'C:\Users\timdunn\Google Drive\Config\PSHModules\ISESteroids'
+}
+
+$myModuleFolder = $env:PSModulePath -split ';' -match $env:USERNAME
+
+$moduleList| ForEach-Object -Process {
+    $path = $_
+    $moduleName = Split-Path -Path $path -Leaf
+    if (
+        ( Test-Path -Path $_ ) -and
+        ( 
+            Get-Module -Name $moduleName* |
+            Where-Object -Property name -EQ -Value $moduleName
+        )
+    )
+    {
+        Write-Verbose -Message "$path is already imported"
+    }
+    else
+    {
+        Import-Module $path
+        Write-Warning "Please add $path to $myModuleFolder"
+    } 
+}
+#>
+
+########################################
+#endregion module management
+#region $host.$env:USERNAME session state noteproperty
+########################################
+
+if (!$Host.$env:USERNAME)  
+{
+    Add-Member -InputObject $global:Host -MemberType NoteProperty -Name $env:USERNAME -Value @{} -Force 
+}
+    
+if ($Host.$env:USERNAME.IsAdministrator -eq $null)
+{ 
+    $CurrentUser = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $CurrentUserPrincipal = New-Object -TypeName Security.Principal.WindowsPrincipal -ArgumentList $CurrentUser
+    $AdminRole = [Security.Principal.WindowsBuiltinRole]::Administrator
+    $global:Host.$env:USERNAME.IsAdministrator = $CurrentUserPrincipal.IsInRole($AdminRole)
+}
+
+if (!($userDomain = $env:USERDNSDOMAIN)) 
+{
+    $userDomain = $env:USERDOMAIN  
+}
+
+$global:Host.$env:USERNAME.UserDomain = $userDomain
+$global:Host.$env:USERNAME.ComputerDomain = (Get-WmiObject -Class Win32_ComputerSystem).Domain
+$global:Host.$env:USERNAME.Process = Get-Process -Id $pid
+$global:Host.$env:USERNAME.TitleBar = $null
+
+########################################
+#endregion $host.$env:USERNAME session state noteproperty
+#region ISE Preview management
+# https://blogs.msdn.microsoft.com/powershell/2016/01/20/introducing-the-windows-powershell-ise-preview/
+########################################
+
+$staticIsePreviewreleasePath = 'C:\Program Files\WindowsPowerShell\Modules\PowerShellISE-preview\5.1.1\powershell_ise.exe'
+
+if ($psISE.IsPreviewRelease)
+{
+    if ($staticIsePreviewreleasePath -ne $Host.$env:USERNAME.Process.Path)
+    {
+        Write-Warning -Message 'Need to update outdated $staticIsePreviewreleasePath in'
+        Write-Warning -Message "    $PSCommandPath from"
+        Write-Warning -Message "    $staticIsePreviewreleasePath to "
+        Write-Warning -Message "    $($Host.$env:USERNAME.Process.Path)"
+    }
+    $staticIsePreviewreleasePath = $Host.$env:USERNAME.Process.Path
+}
+
+if (Test-Path -Path $staticIsePreviewreleasePath)
+{
+    # we want the path to persist, but not pollute the user's variable: PSDrive, so we embed it in a scriptblock
+    Set-Content -Path function:Start-IsePreviewRelease -Value ([scriptblock]::Create("Invoke-Item -Path '$staticIsePreviewreleasePath'"))
+    Set-Alias -Name isep -Value Start-IsePreviewRelease
+}
+
+Set-Content -Path function:Invoke-Profile -Value ([scriptblock]::Create(". '$PSCommandPath'"))
+Set-Alias -Name ip -Value Invoke-Profile
+
+########################################
+#endregion ISE Preview management
+#region function prompt {}
+########################################
+
+<# 
+Break the close-multiline-comment tag to un-collapse only this function#>
+
+$myPrompt = {
+    [CmdletBinding()] param ()
+
+    #region get PSH window data cached in $Host
+    ########################################
+
+    $userDomain = $Host.$env:USERNAME.UserDomain
+    $ComputerDomain = $Host.$env:USERNAME.ComputerDomain
+
+    ########################################
+    #endregion get PSH window data cached in $Host
+    #region get dynamic data
+    ########################################
+
+    if ($Host.$env:USERNAME.IsAdministrator) 
+    {
+        $windowTitleAdminString = 'Administrator: '
+        $promptAdminString = '#!#' # for the command prompt line
+    }
+    else
+    {
+        $windowTitleAdminString = $null
+        $promptAdminString = '#' # for the command prompt line
+    }
+
+    if ($history = Get-History | Select-Object -Last 1)
+    {
+        $lastCommandElapsedTime = ($history.EndExecutionTime - $history.StartExecutionTime).ToString() -replace '\..*'
+    }
+    else
+    {
+        $lastCommandElapsedTime = '00:00:00'
+    } 
+
+    $historyId = [int]($history.Id) + 1
+    $now = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    $path = $ExecutionContext.SessionState.Path.CurrentLocation.Path
+
+    ########################################
+    #endregion get dynamic data
+    #region update the UI
+    ########################################
+
+    # set the titlebar if it's default
+    if ( $global:Host.$env:USERNAME.TitleBar )
+    {
+        $Host.UI.RawUI.WindowTitle = $global:Host.$env:USERNAME.TitleBar
+    }
+    elseif ( $Host.UI.RawUI.WindowTitle -match 'Windows PowerShell' ) 
+    {
+        $Host.UI.RawUI.WindowTitle = "$windowTitleAdminString Windows PowerShell $path [$now]" 
+    }
+
+    # set the prompt
+    "`n$promptAdminString $userDomain\$env:USERNAME @ $env:computerName.$ComputerDomain $lastCommandElapsedTime ($historyId)".ToLower() +
+    "`n$promptAdminString $path $now $('>' * $nestedPromptLevel)>`n"
+
+    ########################################
+    #endregion update the UI
+} #> # function prompt
+
+function prompt { & $myPrompt }
+
+<# 
+Break the close-multiline-comment tag to un-collapse only this function#>
+function Set-DefaultPrompt
+{
+    {
+        "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) ";
+        # .Link
+        # https://go.microsoft.com/fwlink/?LinkID=225750
+        # .ExternalHelp System.Management.Automation.dll-help.xml
+    } | Set-Content -Path function:prompt
+} #> # function Set-DefaultPrompt
+
+<# 
+Break the close-multiline-comment tag to un-collapse only this function#>
+function Set-SimplePrompt
+{
+    {
+        "PS $($ExecutionContext.SessionState.Path.CurrentLocation) ($(1 + (Get-History | Select-Object -Last 1).Id)) $('>' * ($nestedPromptLevel + 1)) " 
+    } | Set-Content -Path function:prompt
+} #> # function Set-SimplePrompt
+
+
+function Set-MyPrompt
+{
+    $myPrompt.ToString() |
+    Set-Content -Path function:prompt
+}
+
+########################################
+#endregion function prompt {}
+#region actual stuff to execute
+########################################
+
+#if ($MyInvocation.invocationName -eq .) { return; } # doesn't work here
+if ($LoadFunctionsOnly) { return }
+
+$codeflowCliPath = "$env:LOCALAPPDATA\cf\cf.exe"
+if (Test-Path -Path $codeflowCliPath)
+{
+    Set-Alias -Name cf -Value $codeflowCliPath
+}
+Remove-Variable -Name codeflowCliPath
+
+$codeflowGuiPath = "$env:LOCALAPPDATA\cfLauncher\BootCodeFlow.exe"
+if (Test-Path -Path $codeflowGuiPath)
+{
+    Set-Alias -Name CodeFlow -Value $codeflowGuiPath
+}
+Remove-Variable -Name codeflowGuiPath
+
+# 'Open as Administrator' shells always start in c:\windows\system32, which is a Very Bad Idea
+$sys32folder = Split-Path -Path $env:ComSpec -Parent
+if ((Get-Location).ProviderPath -eq $sys32folder) 
+{
+    Set-Location -Path $HOME 
+}
+Remove-Variable -Name sys32folder
+
+<# 
+        print my header showing datetimestamps
+
+        2015-10-30 00:19:53 C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe 10.0.10586.0 (th2_release.151029-1700)
+        2016-07-15 17:07:00 \\Tkzaw-pro-16\Mydocs3\timdunn\My Documents\WindowsPowerShell\profile.ps1
+        2016-07-08 13:00:04 \\Tkzaw-pro-16\Mydocs3\timdunn\My Documents\WindowsPowerShell\Microsoft.PowerShell_profile.ps1
+#>
+
+$pshFso = Get-Item -Path $Host.$env:USERNAME.Process.Path
+Write-Host -ForegroundColor Green -Object "$($pshFso.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')) $($pshFso.FullName) $($Host.$env:USERNAME.Process.FileVersion)"
+Remove-Variable -Name pshFso
+
+($PSCommandPath, $profile) |
+Where-Object -FilterScript {
+    Test-Path $_ 
+} |
+ForEach-Object -Process {
+    $fso = Get-Item -Path $_
+    Write-Host -ForegroundColor Green -Object "$($fso.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss')) $($fso.FullName)"
+}
+Remove-Variable -Name fso
+
+$global:profile_parent = Split-Path -Path $profile -Parent
+
+$profileArchive = "$global:dcwaMain\Developer\timdunn\OddsAndEnds\profile"
+if ( Test-Path -Path $profileArchive )
+{
+
+    $deltaTimeSpan = New-TimeSpan -Seconds 5
+
+    Get-ChildItem -Path $profileArchive |
+    ForEach-Object -Process `
+    {
+        $name = $_.Name
+        $mainFullName = $_.FullName
+        $localFullName = Join-Path -Path $global:profile_parent -ChildPath $name
+
+        if ( Test-Path -Path $localFullName )
+        {
+            $localFso = Get-Item -Path $localFullName
+            
+            $mainFso = Get-Item -Path $mainFullName
+
+            [PSCustomObject][ordered] @{
+                Name = $name
+                Length = & {
+                    if ( $mainFso.Length -gt $localFso.Length )
+                    {
+                        Split-Path -Parent -Path $mainFullName
+                    }
+                    elseif ( $localFso.Length -gt $mainFso.Length )
+                    {
+                        Split-Path -Parent -Path $localFullName
+                    }
+                    else
+                    {
+                        'equal'
+                    }
+                }
+                LastWriteTime = & {
+                    if ( ( $mainFso.LastWriteTime - $deltaTimeSpan ) -gt $localFso.LastWriteTime )
+                    {
+                        Split-Path -Parent -Path $mainFullName                    
+                    }
+                    elseif ( ( $localFso.LastWriteTime - $deltaTimeSpan ) -gt $mainFso.LastWriteTime )
+                    {
+                        Split-Path -Parent -Path $localFullName
+                    
+                    }
+                    else
+                    {
+                        'equal'
+                    }
+                }
+            }
+
+        }
+    }
+}
+
+
+
+$lcs_profile = $profile -replace '_profile\.ps1$', 'Lcs_profile.ps1'
+
+if ( ( Test-Path -Path env:_LCSROOT ) -and ( Test-Path -Path $lcs_profile ) )
+{
+    Set-Variable -Scope Global -Name LCS_Profile -Value $lcs_profile
+    . $lcs_profile
+}
+
+$error.Clear()
+
+########################################
+#endregion actual stuff to execute
+'@

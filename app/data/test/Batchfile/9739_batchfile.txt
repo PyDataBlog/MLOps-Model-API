@@ -1,0 +1,1 @@
+cmd_drivers/media/video/msm/built-in.o :=  arm-linux-gnueabi-ld -EL    -r -o drivers/media/video/msm/built-in.o drivers/media/video/msm/msm_camera.o drivers/media/video/msm/msm_v4l2.o drivers/media/video/msm/msm_axi_qos.o drivers/media/video/msm/msm_vfe8x.o drivers/media/video/msm/msm_vfe8x_proc.o drivers/media/video/msm/msm_io8x.o 

@@ -1,0 +1,59 @@
+---
+title: Tartalomelemzés
+layout: post
+categories: szovegek
+tags: R distant&nbsp;reading tutorial
+---
+
+## Tényleg?
+Tényleg!!!! Nem tudok annyi felkiáltójelet tenni, ami kifejezné örömömet, hogy sikerült magyar szövegekkel kapcsolatban tartalmi kérdést feltennem, és értelmezhető választ kaptam. Egyszerűen örülök, hog sikerült. Persze egy `R`-csomag, a `tm` funkcióit sikerült megszólaltatni, de akkor is, nagyon örülök. Ezért írok most. Mert rengeteg tutorial létezik, de mind angol, és angolul egészen más segédeszközeik vannak, elég ha menet közben lemmásítanak... Meg ugye a szóalak és a lemma viszonya is más...
+
+### Szövegelőkészítés
+A `Magyarlanc` segítségével Mikszáth *A jó palócok* kötetének 15 novelláját preparáltam (a későbbiekben aztán...), de ha már nekiálltam, akkor nemcsak morfológiailag, hanem mondattanilag is. Ti. írtam egy másik tanulmányt, ahhoz az is kellett.[^1] Parancssorból kell futtatni linuxos vagy maces gépen. Windows alatt csak akkor működik, ha a `Cygwin` nevű unix-szerű parancssori környezetben futtatjuk. Praktikus, ha a fájlok és a Magyarlanc egy könyvtárban vannak. A parancsok előtt álló szám nem a kód része, csak a könnyebb olvashatóság, és a kódok határainak egyértelműsítése érdekében használom.
+
+    1. for infile in $(ls -1 *.txt); do outfile=$(echo "out_${infile}"); echo $infile; echo $outfile; java -Xmx2G -jar magyarlanc-3.0.jar -mode depparse -input ${infile} -output ${outfile}; done
+
+A további lépéseket már `R`-parancsokkal kell végrehajtani. Én az `RStudio`-t használtam, amely minden platformon elérhető. Az `RStudio` működéséről elég sok tutoriált lehet találni, tehát az alapokat adottnak veszem. Beolvassuk az elemzendő fájlok nevét a `filenames`, magukat a `Magyarlanc`-cal elemzett fájlokat pedig a `filelist` nevű változóba. Értelemszerűen a `filenames`-nél azt az útvonalat kell megadni, ahol a beolvasandó fájlok találhatók, és érdemes odafigyelni, hogy csak ezeket a `.txt`-fájlokat tartalmazza, különben a többit is beolvassa. A `filelist`-be történő beolvasás pedig csak akkor fog működni, ha a munkakönyvtár ugyanaz, mint az előbb megadott útvonal.
+
+    2. filenames <- list.files(path="~/Documents/studies/berzsenyi_itk/berzsenyiversek", pattern="*.txt")
+    3. filelist <- lapply(filenames, function(x){read.csv2(x, header = FALSE, sep = "\t", stringsAsFactors = FALSE)})
+
+A beolvasott fájlok harmadik oszlopát, azaz a lemmatizált alakokat elmentjük a `lemmak` nevű változóba (ha nem a `depparse`-ot, hanem a `morphparse`-ot használjuk, akkor a második oszlop a lemmatizált alak). Mivel a `lemmak` az írásjeleket is tartalmazzák, ezért ezeket kiejtjük és a csak lemmákat tartalmazó listát a `csaklemmak` nevű változóba mentjük, és a listaformátum miatt elejére került "c" karaktert töröljük!
+
+    4. lemmak = lapply(filelist, function(df){df["V3"]})
+    5. csaklemmak = lapply(lemmak, function(x){strsplit(as.character(x),"(\\W+)")})
+    6. csaklemmak = lapply(csaklemmak, function(x){unlist(x)})
+    7. csaklemmak <- lapply(1:length(csaklemmak), function(x) csaklemmak[[x]][csaklemmak[[x]] != "c"])
+
+### Korpuszgyártás
+A `tm` csomag korpuszon dolgozik. Most, hogy megvannak a novellák lemmái, tehát nem a szóalakok, kiejtettük az írásjeleket, tulajdonképpen lehetne is vizsgálni tartalmilag a szöveget. Na. De. Létrehozzuk a korpuszt – igen, valamiért ennyi zárójellel.
+
+    8. (c1 <- VCorpus(VectorSource(csaklemmak), readerControl = list(language = "hun")))
+
+Miután a korpuszt létrehoztuk, érdemes az ún. stopszavaktól megszabadítani. Van az R-ben beépített magyar is, én egy netes forrás alapján sajátot hoztam létre, és egy változóban elmentettem.
+
+    9. mystopwords <- scan(file = "~/Documents/distantreading/tm/stopwords-hu.txt", what = "character")
+    10. jopalocok <- tm_map(c1, removeWords, mystopwords)
+    11. dtm.jopalocok <- DocumentTermMatrix(jopalocok)
+
+És eddig terjed a tudományom. Na jó, egy kicsit tovább. Mindjárt mutatom, de tényleg nem sokkal. Mit lehet most csinálni?
+Ha valaki akarja, eltávolíthatja azokat a kifejezéseket, amelyek kevesebb, mint az összes dokumentum (jelen esetben a 15 novella) X százalékában van csak, itt például 40%.
+
+    12. inspect(removeSparseTerms(dtm.jopalocok, 0.4))
+
+De dönthetünk úgy, hogy kiíratjuk (vagy külön változóba mentjük) az X-szer előforduló szavakat –  a 13. példába 5-öt írtam. Aztán rákérdezhetünk, hogy bizonyos kifejezések mellett mások milyen valószínűséggel jelennek meg. A 14. példa konkrétan azt kérdi, hogy a novellákban legalább 0,7 erősséggel, valószínűséggel (ami nagyon erős) milyen más kifejezések fordulnak elő a leány mellett – ha valaki megcsinálja, tényleg meg fog lepődni az eredményen. És még egy. Egy előre megadott szótárra is rákérdezhetünk, milyen mértékben van jelen az egyes szövegekben az adott kifejezés – ez utóbbihoz, nem tudom, miért nem jó a `dtm.jopalocok`, de azzal nem fut le, csak a `c1`-gyel.
+
+    13. findFreqTerms(dtm.jopalocok, 5)
+    14. findAssocs(dtm.jopalocok, "leány", 0.7)
+    15. inspect(DocumentTermMatrix(c1, list(dictionary = c("leány", "lány", "fiú"))))
+
+A `tm`-csomagból egyelőre ennyi. Ha új fejlemény van, úgyis írok. – Ezzel fejeztem be pár napja. Van új fejlemény. Átböngészve még néhány tutorialt, sikerült újabb, hasznos kódokat találni. A 16. sorban *A jó palócok*ban keres 15 témát. A 17.-ben a topikokat mátrixba teszi, a 18.-ban a 15. téma tíz leggyakoribb szavát menti el (növelhetjük), a 19.-ben ezt kiírjuk magunknak hogy táblázatkezelővel is használhassuk, a 20. megmondja, hogy melyik téma melyik dokumentumban milyen arányban van jelen.
+
+    16. ldaGibbs15 <- LDA(dtm.jopalocok,15,method="Gibbs")
+    17. ldaGibbs15.topics <- as.matrix(topics(ldaGibbs15))
+    18. ldaGibbs15.terms <- as.matrix(terms(ldaGibbs15,10))
+    19. write.csv(ldaGibbs15.terms,file=paste("LDAGibbs",15,"TopicsToTerms.csv"))
+    20. topicProbabilities <- as.data.frame(ldaGibbs15@gamma)
+
+
+[^1]: Továbbra is köszönöm öcsémnek, Labádi Máténak, hogy segített a script megírásában.

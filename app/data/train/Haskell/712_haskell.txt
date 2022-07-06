@@ -1,0 +1,47 @@
+module Main where
+
+import Data.Functor ((<$>))
+import Data.Maybe (isJust, fromJust)
+import System.Cmd (rawSystem)
+import System.Exit (ExitCode(..))
+import System.IO (hFlush, stdout)
+import System.Posix.Process (forkProcess, getProcessStatus)
+
+import           Hackonad.LineParser
+
+typePrompt :: IO ()
+typePrompt = putStr "> " >> hFlush stdout
+
+readCommand :: IO (String, [String])
+readCommand = parseInputLine <$> getLine
+
+while :: (Monad m) => (a -> m (Bool, a)) -> a -> m ()
+while action initialValue = action initialValue >>= \ (res, iterVal) -> if res then while action iterVal else return ()
+
+proccessExitCode :: ExitCode -> String -> Int -> IO ()
+proccessExitCode ExitSuccess _ _ = return ()
+proccessExitCode (ExitFailure code) command sessionLine = case code of
+    127       -> putStrLn $ "Hackonad: " ++ show sessionLine ++ ": " ++ command ++ ": not found"
+    otherwise -> putStrLn $ "Hackonad: " ++ show code ++ ": " ++ command
+
+mainLoop :: Int -> IO (Bool, Int)
+mainLoop sessionLine = do
+    typePrompt
+    (command, parameters) <- readCommand
+    if command == "exit"
+        then return (False, sessionLine)
+        else do
+            pid <- forkProcess $ do
+                exitCode <- rawSystem command parameters
+                proccessExitCode exitCode command sessionLine
+            status <- getProcessStatus True False pid
+            if isJust status
+                then do
+                    putStrLn $ "Base +" ++ show ( fromJust status )
+                    return (True, sessionLine + 1)
+                else do
+                    putStrLn "Base +"
+                    return (True, sessionLine + 1)
+
+main :: IO ()
+main = while mainLoop 0

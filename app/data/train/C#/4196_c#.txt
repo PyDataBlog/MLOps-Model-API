@@ -1,0 +1,489 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Text;
+
+/*
+ * This file is part of lanterna (http://code.google.com/p/lanterna/).
+ *
+ * lanterna is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Lesser General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ * Copyright (C) 2010-2017 Martin Berglund
+ */
+namespace com.googlecode.lanterna.input
+{
+
+	/// <summary>
+	/// Represents the user pressing a key on the keyboard. If the user held down ctrl and/or alt before pressing the key, 
+	/// this may be recorded in this class, depending on the terminal implementation and if such information in available.
+	/// KeyStroke objects are normally constructed by a KeyDecodingProfile, which works off a character stream that likely
+	/// coming from the system's standard input. Because of this, the class can only represent what can be read and 
+	/// interpreted from the input stream; for example, certain key-combinations like ctrl+i is indistinguishable from a tab
+	/// key press.
+	/// <para>
+	/// Use the <tt>keyType</tt> field to determine what kind of key was pressed. For ordinary letters, numbers and symbols, the 
+	/// <tt>keyType</tt> will be <tt>KeyType.Character</tt> and the actual character value of the key is in the 
+	/// <tt>character</tt> field. Please note that return (\n) and tab (\t) are not sorted under type <tt>KeyType.Character</tt>
+	/// but <tt>KeyType.Enter</tt> and <tt>KeyType.Tab</tt> instead.
+	/// @author martin
+	/// </para>
+	/// </summary>
+	public class KeyStroke
+	{
+		private readonly KeyType keyType;
+		private readonly char? character;
+		private readonly bool ctrlDown;
+		private readonly bool altDown;
+		private readonly bool shiftDown;
+		private readonly long eventTime;
+
+		/// <summary>
+		/// Constructs a KeyStroke based on a supplied keyType; character will be null and both ctrl and alt will be 
+		/// considered not pressed. If you try to construct a KeyStroke with type KeyType.Character with this constructor, it
+		/// will always throw an exception; use another overload that allows you to specify the character value instead. </summary>
+		/// <param name="keyType"> Type of the key pressed by this keystroke </param>
+		public KeyStroke(KeyType keyType) : this(keyType, false, false)
+		{
+		}
+
+		/// <summary>
+		/// Constructs a KeyStroke based on a supplied keyType; character will be null.
+		/// If you try to construct a KeyStroke with type KeyType.Character with this constructor, it
+		/// will always throw an exception; use another overload that allows you to specify the character value instead. </summary>
+		/// <param name="keyType"> Type of the key pressed by this keystroke </param>
+		/// <param name="ctrlDown"> Was ctrl held down when the main key was pressed? </param>
+		/// <param name="altDown"> Was alt held down when the main key was pressed? </param>
+		public KeyStroke(KeyType keyType, bool ctrlDown, bool altDown) : this(keyType, null, ctrlDown, altDown, false)
+		{
+		}
+
+		/// <summary>
+		/// Constructs a KeyStroke based on a supplied keyType; character will be null.
+		/// If you try to construct a KeyStroke with type KeyType.Character with this constructor, it
+		/// will always throw an exception; use another overload that allows you to specify the character value instead. </summary>
+		/// <param name="keyType"> Type of the key pressed by this keystroke </param>
+		/// <param name="ctrlDown"> Was ctrl held down when the main key was pressed? </param>
+		/// <param name="altDown"> Was alt held down when the main key was pressed? </param>
+		/// <param name="shiftDown"> Was shift held down when the main key was pressed? </param>
+		public KeyStroke(KeyType keyType, bool ctrlDown, bool altDown, bool shiftDown) : this(keyType, null, ctrlDown, altDown, shiftDown)
+		{
+		}
+
+		/// <summary>
+		/// Constructs a KeyStroke based on a supplied character, keyType is implicitly KeyType.Character.
+		/// <para>
+		/// A character-based KeyStroke does not support the shiftDown flag, as the shift state has
+		/// already been accounted for in the character itself, depending on user's keyboard layout.
+		/// </para>
+		/// </summary>
+		/// <param name="character"> Character that was typed on the keyboard </param>
+		/// <param name="ctrlDown"> Was ctrl held down when the main key was pressed? </param>
+		/// <param name="altDown"> Was alt held down when the main key was pressed? </param>
+		public KeyStroke(char? character, bool ctrlDown, bool altDown) : this(KeyType.Character, character, ctrlDown, altDown, false)
+		{
+		}
+
+		/// <summary>
+		/// Constructs a KeyStroke based on a supplied character, keyType is implicitly KeyType.Character.
+		/// <para>
+		/// A character-based KeyStroke does not support the shiftDown flag, as the shift state has
+		/// already been accounted for in the character itself, depending on user's keyboard layout.
+		/// </para>
+		/// </summary>
+		/// <param name="character"> Character that was typed on the keyboard </param>
+		/// <param name="ctrlDown"> Was ctrl held down when the main key was pressed? </param>
+		/// <param name="altDown"> Was alt held down when the main key was pressed? </param>
+		/// <param name="shiftDown"> Was shift held down when the main key was pressed? </param>
+		public KeyStroke(char? character, bool ctrlDown, bool altDown, bool shiftDown) : this(KeyType.Character, character, ctrlDown, altDown, shiftDown)
+		{
+		}
+
+		private KeyStroke(KeyType keyType, char? character, bool ctrlDown, bool altDown, bool shiftDown)
+		{
+			if (keyType == KeyType.Character && character == null)
+			{
+				throw new System.ArgumentException("Cannot construct a KeyStroke with type KeyType.Character but no character information");
+			}
+			//Enforce character for some key types
+			switch (keyType)
+			{
+				case Backspace:
+					character = '\b';
+					break;
+				case Enter:
+					character = '\n';
+					break;
+				case Tab:
+					character = '\t';
+					break;
+				default:
+			break;
+			}
+			this.keyType = keyType;
+			this.character = character;
+			this.shiftDown = shiftDown;
+			this.ctrlDown = ctrlDown;
+			this.altDown = altDown;
+			this.eventTime = DateTimeHelperClass.CurrentUnixTimeMillis();
+		}
+
+		/// <summary>
+		/// Type of key that was pressed on the keyboard, as represented by the KeyType enum. If the value if 
+		/// KeyType.Character, you need to call getCharacter() to find out which letter, number or symbol that was actually
+		/// pressed. </summary>
+		/// <returns> Type of key on the keyboard that was pressed </returns>
+		public virtual KeyType KeyType
+		{
+			get
+			{
+				return keyType;
+			}
+		}
+
+		/// <summary>
+		/// For keystrokes of ordinary keys (letters, digits, symbols), this method returns the actual character value of the
+		/// key. For all other key types, it returns null. </summary>
+		/// <returns> Character value of the key pressed, or null if it was a special key </returns>
+		public virtual char? Character
+		{
+			get
+			{
+				return character;
+			}
+		}
+
+		/// <returns> Returns true if ctrl was help down while the key was typed (depending on terminal implementation) </returns>
+		public virtual bool CtrlDown
+		{
+			get
+			{
+				return ctrlDown;
+			}
+		}
+
+		/// <returns> Returns true if alt was help down while the key was typed (depending on terminal implementation) </returns>
+		public virtual bool AltDown
+		{
+			get
+			{
+				return altDown;
+			}
+		}
+
+		/// <returns> Returns true if shift was help down while the key was typed (depending on terminal implementation) </returns>
+		public virtual bool ShiftDown
+		{
+			get
+			{
+				return shiftDown;
+			}
+		}
+
+		/// <summary>
+		/// Gets the time when the keystroke was recorded. This isn't necessarily the time the keystroke happened, but when
+		/// Lanterna received the event, so it may not be accurate down to the millisecond. </summary>
+		/// <returns> The unix time of when the keystroke happened, in milliseconds </returns>
+		public virtual long EventTime
+		{
+			get
+			{
+				return eventTime;
+			}
+		}
+
+		public override string ToString()
+		{
+			StringBuilder sb = new StringBuilder();
+			sb.Append("KeyStroke{keytype=").Append(keyType);
+			if (character != null)
+			{
+				char ch = character.Value;
+				sb.Append(", character='");
+				switch (ch)
+				{
+				// many of these cases can only happen through user code:
+				case 0x00:
+					sb.Append("^@");
+					break;
+				case 0x08:
+					sb.Append("\\b");
+					break;
+				case 0x09:
+					sb.Append("\\t");
+					break;
+				case 0x0a:
+					sb.Append("\\n");
+					break;
+				case 0x0d:
+					sb.Append("\\r");
+					break;
+				case 0x1b:
+					sb.Append("^[");
+					break;
+				case 0x1c:
+					sb.Append("^\\");
+					break;
+				case 0x1d:
+					sb.Append("^]");
+					break;
+				case 0x1e:
+					sb.Append("^^");
+					break;
+				case 0x1f:
+					sb.Append("^_");
+					break;
+				default:
+					if (ch <= (char)26)
+					{
+						sb.Append('^').Append((char)(ch + 64));
+					}
+					else
+					{
+						sb.Append(ch);
+					}
+				break;
+				}
+				sb.Append('\'');
+			}
+			if (ctrlDown || altDown || shiftDown)
+			{
+				string sep = "";
+				sb.Append(", modifiers=[");
+				if (ctrlDown)
+				{
+					sb.Append(sep).Append("ctrl");
+					sep = ",";
+				}
+				if (altDown)
+				{
+					sb.Append(sep).Append("alt");
+					sep = ",";
+				}
+				if (shiftDown)
+				{
+					sb.Append(sep).Append("shift");
+					sep = ",";
+				}
+				sb.Append("]");
+			}
+			return sb.Append('}').ToString();
+		}
+
+		public override int GetHashCode()
+		{
+			int hash = 3;
+			hash = 41 * hash + (this.keyType != null ? this.keyType.GetHashCode() : 0);
+			hash = 41 * hash + (this.character != null ? this.character.GetHashCode() : 0);
+			hash = 41 * hash + (this.ctrlDown ? 1 : 0);
+			hash = 41 * hash + (this.altDown ? 1 : 0);
+			hash = 41 * hash + (this.shiftDown ? 1 : 0);
+			return hash;
+		}
+
+//JAVA TO C# CONVERTER TODO TASK: Most Java annotations will not have direct .NET equivalent attributes:
+//ORIGINAL LINE: @SuppressWarnings("SimplifiableIfStatement") @Override public boolean equals(Object obj)
+		public override bool Equals(object obj)
+		{
+			if (obj == null)
+			{
+				return false;
+			}
+			if (this.GetType() != obj.GetType())
+			{
+				return false;
+			}
+//JAVA TO C# CONVERTER WARNING: The original Java variable was marked 'final':
+//ORIGINAL LINE: final KeyStroke other = (KeyStroke) obj;
+			KeyStroke other = (KeyStroke) obj;
+			if (this.keyType != other.keyType)
+			{
+				return false;
+			}
+			if (this.character != other.character && (this.character == null || !this.character.Equals(other.character)))
+			{
+				return false;
+			}
+			return this.ctrlDown == other.ctrlDown && this.altDown == other.altDown && this.shiftDown == other.shiftDown;
+		}
+
+		/// <summary>
+		/// Creates a Key from a string representation in Vim's key notation.
+		/// </summary>
+		/// <param name="keyStr"> the string representation of this key </param>
+		/// <returns> the created <seealso cref="KeyType"/> </returns>
+		public static KeyStroke fromString(string keyStr)
+		{
+			string keyStrLC = keyStr.ToLower();
+			KeyStroke k;
+			if (keyStr.Length == 1)
+			{
+				k = new KeyStroke(KeyType.Character, keyStr[0], false, false, false);
+			}
+			else if (keyStr.StartsWith("<", StringComparison.Ordinal) && keyStr.EndsWith(">", StringComparison.Ordinal))
+			{
+				if (keyStrLC.Equals("<s-tab>"))
+				{
+					k = new KeyStroke(KeyType.ReverseTab);
+				}
+				else if (keyStr.Contains("-"))
+				{
+					List<string> segments = new List<string>(Arrays.asList(keyStr.Substring(1, (keyStr.Length - 1) - 1).Split("-", true)));
+					if (segments.Count < 2)
+					{
+						throw new System.ArgumentException("Invalid vim notation: " + keyStr);
+					}
+					string characterStr = segments.Remove(segments.Count - 1);
+					bool altPressed = false;
+					bool ctrlPressed = false;
+					foreach (string modifier in segments)
+					{
+						if ("c".Equals(modifier.ToLower()))
+						{
+							ctrlPressed = true;
+						}
+						else if ("a".Equals(modifier.ToLower()))
+						{
+							altPressed = true;
+						}
+						else if ("s".Equals(modifier.ToLower()))
+						{
+							characterStr = characterStr.ToUpper();
+						}
+					}
+					k = new KeyStroke(characterStr[0], ctrlPressed, altPressed);
+				}
+				else
+				{
+					if (keyStrLC.StartsWith("<esc", StringComparison.Ordinal))
+					{
+						k = new KeyStroke(KeyType.Escape);
+					}
+					else if (keyStrLC.Equals("<cr>") || keyStrLC.Equals("<enter>") || keyStrLC.Equals("<return>"))
+					{
+						k = new KeyStroke(KeyType.Enter);
+					}
+					else if (keyStrLC.Equals("<bs>"))
+					{
+						k = new KeyStroke(KeyType.Backspace);
+					}
+					else if (keyStrLC.Equals("<tab>"))
+					{
+						k = new KeyStroke(KeyType.Tab);
+					}
+					else if (keyStrLC.Equals("<space>"))
+					{
+						k = new KeyStroke(' ', false, false);
+					}
+					else if (keyStrLC.Equals("<up>"))
+					{
+						k = new KeyStroke(KeyType.ArrowUp);
+					}
+					else if (keyStrLC.Equals("<down>"))
+					{
+						k = new KeyStroke(KeyType.ArrowDown);
+					}
+					else if (keyStrLC.Equals("<left>"))
+					{
+						k = new KeyStroke(KeyType.ArrowLeft);
+					}
+					else if (keyStrLC.Equals("<right>"))
+					{
+						k = new KeyStroke(KeyType.ArrowRight);
+					}
+					else if (keyStrLC.Equals("<insert>"))
+					{
+						k = new KeyStroke(KeyType.Insert);
+					}
+					else if (keyStrLC.Equals("<del>"))
+					{
+						k = new KeyStroke(KeyType.Delete);
+					}
+					else if (keyStrLC.Equals("<home>"))
+					{
+						k = new KeyStroke(KeyType.Home);
+					}
+					else if (keyStrLC.Equals("<end>"))
+					{
+						k = new KeyStroke(KeyType.End);
+					}
+					else if (keyStrLC.Equals("<pageup>"))
+					{
+						k = new KeyStroke(KeyType.PageUp);
+					}
+					else if (keyStrLC.Equals("<pagedown>"))
+					{
+						k = new KeyStroke(KeyType.PageDown);
+					}
+					else if (keyStrLC.Equals("<f1>"))
+					{
+						k = new KeyStroke(KeyType.F1);
+					}
+					else if (keyStrLC.Equals("<f2>"))
+					{
+						k = new KeyStroke(KeyType.F2);
+					}
+					else if (keyStrLC.Equals("<f3>"))
+					{
+						k = new KeyStroke(KeyType.F3);
+					}
+					else if (keyStrLC.Equals("<f4>"))
+					{
+						k = new KeyStroke(KeyType.F4);
+					}
+					else if (keyStrLC.Equals("<f5>"))
+					{
+						k = new KeyStroke(KeyType.F5);
+					}
+					else if (keyStrLC.Equals("<f6>"))
+					{
+						k = new KeyStroke(KeyType.F6);
+					}
+					else if (keyStrLC.Equals("<f7>"))
+					{
+						k = new KeyStroke(KeyType.F7);
+					}
+					else if (keyStrLC.Equals("<f8>"))
+					{
+						k = new KeyStroke(KeyType.F8);
+					}
+					else if (keyStrLC.Equals("<f9>"))
+					{
+						k = new KeyStroke(KeyType.F9);
+					}
+					else if (keyStrLC.Equals("<f10>"))
+					{
+						k = new KeyStroke(KeyType.F10);
+					}
+					else if (keyStrLC.Equals("<f11>"))
+					{
+						k = new KeyStroke(KeyType.F11);
+					}
+					else if (keyStrLC.Equals("<f12>"))
+					{
+						k = new KeyStroke(KeyType.F12);
+					}
+					else
+					{
+						throw new System.ArgumentException("Invalid vim notation: " + keyStr);
+					}
+				}
+			}
+			else
+			{
+				throw new System.ArgumentException("Invalid vim notation: " + keyStr);
+			}
+			return k;
+		}
+	}
+
+}

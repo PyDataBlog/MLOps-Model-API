@@ -1,0 +1,94 @@
+{-# LANGUAGE OverloadedStrings #-}
+-------------------------------------------------------------------------------
+-- |
+-- Module       : Generator.Primer.Modern
+-- Copyright    : (c) 2016 Michael Carpenter
+-- License      : BSD3
+-- Maintainer   : Michael Carpenter <oldmanmike.dev@gmail.com>
+-- Stability    : experimental
+-- Portability  : portable
+--
+-------------------------------------------------------------------------------
+module Generator.Primer.Modern
+  ( primeModernProtocol
+  ) where
+
+import            Data.List
+import            Generator.Parser
+import            Generator.Primer.Common
+import            Generator.Types
+
+primeModernProtocol :: ExtractedVersion
+                    -> ExtractedModernProtocol
+                    -> Either String ModernProtocol
+primeModernProtocol ev ep = do
+    let v = mkProtocolVersion ev
+
+    let lstGettersAndBoundTos =
+          [ modernClientBoundHandshaking  , modernServerBoundHandshaking
+          , modernClientBoundStatus       , modernServerBoundStatus
+          , modernClientBoundLogin        , modernServerBoundLogin
+          , modernClientBoundPlay         , modernServerBoundPlay
+          ]
+
+    let lstMaybeMetadata =
+          fmap
+            (\getter -> getMetadataSection . getter $ ep)
+            lstGettersAndBoundTos
+
+    let lstMaybeNames =
+          (fmap . fmap)
+            getNameMap
+            lstMaybeMetadata
+
+    let lstMaybeIds =
+          (fmap . fmap)
+            getIdMap
+            lstMaybeMetadata
+
+    let lstLstPackets =
+          fmap
+            (\getter -> getPacketSection . getter $ ep)
+            lstGettersAndBoundTos
+
+    let lstPacketSectionMetadata =
+          zip4
+            lstMaybeNames
+            lstMaybeIds
+            lstLstPackets
+            ((concat . repeat) [ClientBound,ServerBound])
+
+    let maybePrimedProto =
+          fmap sequence $ sequence
+            $ fmap
+                (\(a,b,c,d) ->
+                  mkPacketSection
+                    <$> a -- names map
+                    <*> b -- ids map
+                    <*> return c -- packet list
+                    <*> return d -- packet direction
+                )
+                lstPacketSectionMetadata
+
+    case maybePrimedProto of
+      Nothing -> Left "Error: Something went wrong!"
+      Just primedProto ->
+        case primedProto of
+          Nothing -> Left "Error: Packet section primer failure!"
+          Just primedSections -> do
+            Right $ ModernProtocol
+              v
+              (primedSections !! 0)
+              (primedSections !! 1)
+              (primedSections !! 2)
+              (primedSections !! 3)
+              (primedSections !! 4)
+              (primedSections !! 5)
+              (primedSections !! 6)
+              (primedSections !! 7)
+  where
+  mkPacketSection nMap idMap pktLst boundTo =
+    fmap (sortOn pId) $ sequence $
+      fmap
+        (\x -> mkPacket nMap idMap pktLst (ePacketName x) boundTo)
+        pktLst

@@ -1,0 +1,521 @@
+
+#include <assert.h>
+#include <sys/time.h>
+#include <sstream>
+#include "utils.h"
+#include "byte_stream.h"
+#include "debug_utils.h"
+#include "svr_reactor_facade.h"
+#include "global_consts.h"
+#include "config_loader.h"
+#include "service_dispatcher.h"
+#include "service_container.h"
+#include "service_loader.h"
+#include "sess_manager.h"
+#include "server_stat.h"
+#include "app.h"
+
+const uint32_t BASE_SECONDS = 1160370232;	
+const int CLEAN_HANDLE_STEP  = 100;
+const int CLEAN_HANDLE_MAX   = 1024;
+
+////////////////////////
+// class CApp
+CApp::CApp()
+: m_bInit(false)
+, m_iTcpSvrHandler(0)
+, m_pReactor(NULL)
+, m_pTCPNetHandler(NULL)
+, m_dwSockChannel(0)
+, m_iUDPSvrHandler(0)
+, m_dwConnNum(0)
+, m_iCleanHandleBegin(DEFAULT_CLEAN_HANDLE_BEGIN)
+, m_dwBaseStatefulSessId(0)
+, m_dwStatefulSessId(0)
+, m_dwStatelessSessId(0)
+, m_iStatTimerId(0)
+{
+	memset(m_sBuffer, 0, sizeof(m_sBuffer));
+	memset(m_arrTcpConn, 0, MAX_CONN_SIZE);
+	memset(m_arrTcpConnLastTime, 0, MAX_CONN_SIZE);
+	// Create Instances
+    m_poSvcLoader = new CServiceLoader;
+    m_poCfgLoader = new CConfigLoader;
+    m_poSvcDispatcher = new CServiceDispatcher;
+    m_poSvcContainer = new CServiceContainer;
+    m_poSessManager = new CSessionManager;
+    m_poServerStat = new CServerStat;
+}
+
+CApp::~CApp()
+{
+    if(m_bInit)
+        fini();
+
+	// Destroy Instances
+    delete m_poCfgLoader;
+    delete m_poSvcDispatcher;
+    delete m_poSessManager;
+    delete m_poSvcContainer;
+    delete m_poSvcLoader;
+    delete m_poServerStat;
+}
+
+int CApp::RegisterTimer(
+						int& iTimerId, 
+						ITimerHandler& rTimerHandler, 
+						uint32_t ulIntervalSec)
+{
+	assert(ulIntervalSec > 0);
+
+	return m_pReactor->RegisterTimer(
+        iTimerId, &rTimerHandler, 
+        CTimeValue(ulIntervalSec));
+}
+
+uint32_t CApp::getNewStatefulSessId()
+{
+    return ++m_dwStatefulSessId > 0 ? m_dwStatefulSessId : m_dwBaseStatefulSessId;
+}
+
+uint32_t CApp::getNewStatelessSessId()
+{
+    return ++m_dwStatelessSessId >= m_dwBaseStatefulSessId ? 1 : m_dwStatelessSessId;
+}
+
+int CApp::init(
+               const char* pszLocalCfgFile,
+               CReactor* pReactor,
+               int& iProcessNum)
+{
+    assert(pReactor);
+    assert(pszLocalCfgFile);
+
+    m_sLocalCfgFile = pszLocalCfgFile;
+    
+    int iRetCode = 0;
+
+    // Set Rand Seed
+    srand(CUtils::genSeed());
+
+    // Init SessId
+    m_dwSockChannel = rand();
+    
+    /////////////////////////// Load Config ////////////////////////
+    if(LoadCfg_i(pszLocalCfgFile) != 0)
+    {
+        return -1;
+    }
+
+	const LocalCfgItem_T& rLocalCfgItem = m_poCfgLoader->getLocalCfgItem();
+    
+    //////////////////////////// Log Manager //////////////////////////
+	InitLogFile(&m_stDebugLog, const_cast<char*>(rLocalCfgItem.sDebugLog.c_str()), 0, 10, 10000000);
+	InitLogFile(&m_stPerformLog, const_cast<char*>(rLocalCfgItem.sPerformLog.c_str()), 0, 10, 10000000);
+
+	std::string sKeyLogFileName = rLocalCfgItem.sDebugLog;
+	sKeyLogFileName += "_key";
+	InitLogFile(&m_stKeyLog, const_cast<char*>(sKeyLogFileName.c_str()), 0, 10, 10000000);
+
+    //////////////////////////// Server Stat //////////////////////////
+	m_poServerStat->Initialize();
+	m_iCleanHandleBegin = rLocalCfgItem.iLowestTcpHandlers;
+
+    ///////////////////////////// Init Server ////////////////////////////
+    m_pReactor = pReactor;
+	//DebugLog("Init TCPNetHandler. MaxSendBufLen = %u, MaxRecvBufLen = %u", rLocalCfgItem.dwMaxSendBufLen, rLocalCfgItem.dwMaxRecvBufLen);
+	printf("Init TCPNetHandler. MaxSendBufLen = %u, MaxRecvBufLen = %u\n", rLocalCfgItem.dwMaxSendBufLen, rLocalCfgItem.dwMaxRecvBufLen);
+	m_pTCPNetHandler = new CTcpHandleBase(rLocalCfgItem.dwMaxSendBufLen, rLocalCfgItem.dwMaxRecvBufLen);
+    
+    if(!m_bInit) // Init Only Once
+    {
+        iRetCode = initServer();
+        if(iRetCode != 0)
+        {
+            return -1;
+        }
+    }
+
+	iProcessNum = rLocalCfgItem.iGroupSize;
+
+	////////////////////////////// Pre-fork Group /////////////////////////
+	std::cout << "netio started. pid[" << getpid() << "], ProcessNum[" << iProcessNum << "]" << std::endl;
+	for(int i = 1; i < iProcessNum; ++i)
+	{
+		if(fork() == 0)
+		{
+			std::cout << "child started. pid[" << getpid() << "]" << std::endl;
+			break;
+		}
+	}
+
+	// FDWatch Server after fork
+	m_pReactor->FDWatchServer(m_iTcpSvrHandler, -1, -1, -1);
+
+	/////////////////////////// Load Service ////////////////////////
+    if(LoadSvc_i() != 0)
+    {
+        return -1;
+    }
+
+	/////////////////////////// Service Dispatcher ////////////////////////
+    iRetCode = m_poSvcDispatcher->Initialize();
+    if(iRetCode != 0)
+    {
+        m_sLastErrMsg = m_poSvcDispatcher->getLastErrMsg();
+        return -1;
+    }
+
+    //////////////////////////// Session Manager //////////////////////////
+    iRetCode = m_poSessManager->Initialize();
+    if(iRetCode != 0)
+    {
+        m_sLastErrMsg = m_poSessManager->getLastErrMsg();
+        return -1;
+    }
+
+	//DebugLog("netio_with_cont started.");
+    m_bInit = true;
+
+    return 0;
+}
+
+int CApp::initServer()
+{
+    ///////////////////////////// Init Reactor ////////////////////////////
+    const LocalCfgItem_T& rLocalCfgItem = m_poCfgLoader->getLocalCfgItem();
+
+
+    // Init TCP handle 
+    m_pTCPNetHandler->Initialize(
+        m_pReactor, 
+        this,  // ITCPPacketHandleSink
+        true   // bAsServer = true
+        );
+
+    // Register TCP Server
+    if(m_pReactor->RegisterTCPServer(
+        m_iTcpSvrHandler, // [OUT]
+        m_pTCPNetHandler,
+        rLocalCfgItem.wListenPort,
+        false, // Multi-Process server
+        LARGE_RCVBUF_LEN,
+		rLocalCfgItem.sListenHost.c_str(),
+		true, false) != 0)
+    {
+        //DebugLog("[ERROR] %s", m_pReactor->GetLastErrMsg());
+		m_sLastErrMsg = m_pReactor->GetLastErrMsg();
+        return -1;
+    }
+
+	// Register Timer for Statistics 
+	m_pReactor->RegisterTimer(
+			m_iStatTimerId, this,
+			CTimeValue(SHOW_STAT_INTERVAL));
+    
+    return 0;
+}
+
+int CApp::fini()
+{
+    assert(m_bInit);
+
+	delete m_pTCPNetHandler;
+
+    return 0;
+}
+
+int CApp::LoadCfg_i(
+                    const char* pszLocalCfgFile)
+{
+    int iRetCode = 0;
+    
+    /////////////////////////// Config Loader ////////////////////
+    iRetCode = m_poCfgLoader->Initialize(pszLocalCfgFile);
+    if(iRetCode != 0)
+    {
+        m_sLastErrMsg = m_poCfgLoader->getLastErrMsg();
+        return -1;
+    }
+
+    iRetCode = m_poCfgLoader->LoadAll();
+    if(iRetCode != 0)
+    {
+        m_sLastErrMsg = m_poCfgLoader->getLastErrMsg();
+        return -1;
+    }
+
+    // TEST : Dump CfgLoader
+    m_poCfgLoader->Dump(std::cout);
+    
+    return 0;
+}
+
+void CApp::runSvc()
+{
+    assert(m_bInit);
+}
+
+int CApp::SendData(
+                   char* pSendBuf, 
+                   uint32_t nBufLen)
+{
+    assert(m_bInit);
+
+	DebugLog("In SendData, BuffLen[%u]", nBufLen);
+
+    m_poServerStat->UpdateStatValue(CServerStat::PKG_SENT, 1);
+    m_poServerStat->UpdateStatValue(CServerStat::BYTES_SENT, nBufLen);
+
+	C2CPkgHeadEx* pstC2CPkgHeadEx = reinterpret_cast<C2CPkgHeadEx*>(pSendBuf + 1);
+
+	if(pstC2CPkgHeadEx->stOldPkgHead.dwResult != 0)
+		m_poServerStat->UpdateStatValue(CServerStat::ERR_PKG_SENT, 1);
+
+	int iConnHandle = ntohl(pstC2CPkgHeadEx->iSockfd);
+	uint32_t dwSockChannel = ntohl(pstC2CPkgHeadEx->dwSockChannel);
+
+	CTcpHandleBase* pTcpHandler = m_arrTcpConn[iConnHandle];
+	assert(pTcpHandler);
+
+	if(pTcpHandler->GetUserHandle() != dwSockChannel)
+	{
+		DebugLog("[ERROR] SockChannel not Match, pTcpHandler->GetUserHandle()[%u] != dwSockChannel[%u]", pTcpHandler->GetUserHandle(), dwSockChannel);
+		return -1;
+	}
+    
+	DebugLog("Send data to %s:%d, BufLen = %u", pTcpHandler->GetPeerHostIP().c_str(), pTcpHandler->GetPeerHostPort(), nBufLen);
+
+    return pTcpHandler->SendData(
+        const_cast<char*>(pSendBuf), 
+        nBufLen);
+}
+
+int CApp::OnTimer(
+                  int iTimerID)
+{
+    if(m_iStatTimerId == iTimerID)
+    {
+		/////////////////////////// Check TCP Conn Alive //////////////////////////////
+		if(m_poCfgLoader->getLocalCfgItem().iTcpConnTimeoutSec > 0)
+		{
+			uint32_t dwTcpConnTimeoutSec = m_poCfgLoader->getLocalCfgItem().iTcpConnTimeoutSec;
+			uint32_t dwCurrentTime = static_cast<uint32_t>(time((time_t *)0));
+			uint32_t dwTimeDiff = 0;
+			CTcpHandleBase* pTcpHandleBase = NULL;
+			for(int iSockfd = 0; iSockfd < MAX_CONN_SIZE; ++iSockfd)
+			{
+				if(m_arrTcpConnLastTime[iSockfd] > 0)
+				{
+					dwTimeDiff = dwCurrentTime - m_arrTcpConnLastTime[iSockfd];
+					if(dwTimeDiff >= dwTcpConnTimeoutSec)
+					{
+						// TCP Conn Timeout, Close it
+						pTcpHandleBase = m_arrTcpConn[iSockfd];
+						if(pTcpHandleBase)
+						{
+							DebugLog("[ERROR] TCP Conn Timeout, Sockfd = %d, tCurrentTime = %u, TcpConnLastUpdateTime = %u, Timeout = %u, TcpConnTimeoutSec = %u", 
+									iSockfd, dwCurrentTime, m_arrTcpConnLastTime[iSockfd], dwTimeDiff, dwTcpConnTimeoutSec);
+							KeyLog("[ERROR] TCP Conn Timeout, Sockfd = %d, tCurrentTime = %u, TcpConnLastUpdateTime = %u, Timeout = %u, TcpConnTimeoutSec = %u", 
+									iSockfd, dwCurrentTime, m_arrTcpConnLastTime[iSockfd], dwTimeDiff, dwTcpConnTimeoutSec);
+							OnClose(pTcpHandleBase);
+							pTcpHandleBase->Close();
+							m_poServerStat->UpdateStatValue(CServerStat::TCP_CONN_TIMEOUT, 1);
+						}
+					}
+				}
+			}
+		}
+        m_poServerStat->ShowStat();
+        m_poServerStat->Reset();
+
+		/////////////////////////// Release Unused TCP Conn //////////////////////////////
+		time_t curr_t;    
+		time(&curr_t);    
+		struct tm* mytm = localtime(&curr_t);    
+		if(mytm->tm_hour >= 4 && mytm->tm_hour <= 6)    
+		{
+			uint32_t dwCleanCnt = m_pReactor->CleanTcpSvrHandle(m_iCleanHandleBegin, CLEAN_HANDLE_STEP);
+			if(dwCleanCnt > 0)
+				PerformLog("Clean Idle Tcp Handle Count[%u] Begin[%d] Step[%d]", dwCleanCnt, m_iCleanHandleBegin, CLEAN_HANDLE_STEP);
+			m_iCleanHandleBegin += CLEAN_HANDLE_STEP;
+			if(m_iCleanHandleBegin >= CLEAN_HANDLE_MAX)
+				m_iCleanHandleBegin = m_poCfgLoader->getLocalCfgItem().iLowestTcpHandlers;
+		}
+    }
+	else
+		assert(0);
+    
+    return 0;
+}
+
+int CApp::OnConnect(
+                    CTcpHandleBase* pTcpHandleBase,
+                    const char* pszPeerIP,
+                    unsigned short wPeerPort)
+{
+	assert(m_arrTcpConn[pTcpHandleBase->GetConnHandle()] == NULL);
+	pTcpHandleBase->SetUserHandle(m_dwSockChannel++);
+	m_arrTcpConn[pTcpHandleBase->GetConnHandle()] = pTcpHandleBase;
+	m_arrTcpConnLastTime[pTcpHandleBase->GetConnHandle()] = static_cast<uint32_t>(time((time_t *)0));
+
+	DebugLog("OnConnet from %s:%d, Sockfd = %d, SockChannel = %d, ConnNum = %d" , pTcpHandleBase->GetPeerHostIP().c_str(), pTcpHandleBase->GetPeerHostPort() , pTcpHandleBase->GetConnHandle(), pTcpHandleBase->GetUserHandle() , ++m_dwConnNum);
+	
+	m_poServerStat->UpdateStatValue(CServerStat::MAX_CONNECTIONS, m_dwConnNum);
+
+    return 0;
+}
+
+int CApp::OnClose(
+                  CTcpHandleBase* pTcpHandleBase)
+{
+	DebugLog("OnClose from %s:%d, Sockfd = %d, SockChannel = %d, ConnNum = %d" , pTcpHandleBase->GetPeerHostIP().c_str(), pTcpHandleBase->GetPeerHostPort() , pTcpHandleBase->GetConnHandle(), pTcpHandleBase->GetUserHandle(), --m_dwConnNum); 
+
+	assert(m_arrTcpConn[pTcpHandleBase->GetConnHandle()] != NULL);
+    m_arrTcpConn[pTcpHandleBase->GetConnHandle()] = NULL;
+	m_arrTcpConnLastTime[pTcpHandleBase->GetConnHandle()] = 0;
+    return 0;
+}
+
+int CApp::OnRecv(CTcpHandleBase* pTcpHandleBase,char* pBuffer,uint32_t nBufLen)//from cgi»òback_netio
+{
+	assert(pTcpHandleBase != NULL);
+	assert(pBuffer != NULL);
+
+	if(0 == nBufLen) // Error from DownLayer
+	{
+		DebugLog("nBufLen==0, %s", pBuffer);
+		return -1;
+	}
+
+	if(nBufLen < sizeof(C2CPkgHeadEx))
+	{
+		DebugLog("[ERROR] Invalid Pkg Length");
+	}
+
+	// Add Sockfd & SockChannel to PkgHead
+	if(*(reinterpret_cast<uint8_t*>(pBuffer)) != STX)
+	{
+		DebugLog("[ERROR] TCP, Invalid Pkg, wrong STX, Sockfd = %d", pTcpHandleBase->GetConnHandle());
+		return -1;
+	}
+
+	C2CPkgHeadEx* pstC2CPkgHeadEx = reinterpret_cast<C2CPkgHeadEx*>(pBuffer + 1);
+    uint32_t dwCommand = ntohl(pstC2CPkgHeadEx->dwCommand);
+	pstC2CPkgHeadEx->stOldPkgHead.wClientPort = 0; // Mark as TCP
+	pstC2CPkgHeadEx->iSockfd = htonl(pTcpHandleBase->GetConnHandle());
+	pstC2CPkgHeadEx->dwSockChannel = htonl(pTcpHandleBase->GetUserHandle());
+	pstC2CPkgHeadEx->wPeerPort = 0;
+
+	DebugLog("TCP OnRecv %s:%d, Sockfd = %d, SockChannel = %d, BufLen = %u, CmdId = 0x%x " , pTcpHandleBase->GetPeerHostIP().c_str(), pTcpHandleBase->GetPeerHostPort() , pTcpHandleBase->GetConnHandle(), pTcpHandleBase->GetUserHandle(), nBufLen, dwCommand);
+	
+    assert(m_arrTcpConn[pTcpHandleBase->GetConnHandle()] != NULL);
+	m_arrTcpConnLastTime[pTcpHandleBase->GetConnHandle()] = static_cast<uint32_t>(time((time_t *)0));
+
+    m_poServerStat->UpdateStatValue(CServerStat::PKG_RECV, 1);
+    m_poServerStat->UpdateStatValue(CServerStat::BYTES_RECV, nBufLen);
+
+    // Call Bussiness
+	m_poSvcDispatcher->OnRecvData(pBuffer, nBufLen);
+
+	return 0;
+}
+
+int CApp::OnRecvFrom(
+					 int iServerHandle,
+					 char* pBuffer,
+					 uint32_t nBufLen,
+					 unsigned int uiPeerHost,
+					 unsigned short wPeerPort,
+					 int iFlag)
+{
+	assert(pBuffer != NULL);
+	//DebugLog("UDP OnRecvFrom %s:%d", CUtils::IP2String(htonl(uiPeerHost)), wPeerPort);
+
+	if(nBufLen < sizeof(C2CPkgHeadEx))
+	{
+		//DebugLog("[ERROR] : Invalid Pkg Length");
+	}
+
+	// Add Sockfd & SockChannel to PkgHead
+	if(*(reinterpret_cast<uint8_t*>(pBuffer)) != STX)
+	{
+		//DebugLog("[ERROR] : UDP, Invalid Pkg, wrong STX, from %d:%d", uiPeerHost, wPeerPort);
+		return -1;
+	}
+
+	C2CPkgHeadEx* pstC2CPkgHeadEx = reinterpret_cast<C2CPkgHeadEx*>(pBuffer + 1);
+	pstC2CPkgHeadEx->stOldPkgHead.dwClientIP = htonl(uiPeerHost);
+	pstC2CPkgHeadEx->stOldPkgHead.wClientPort = htons(wPeerPort);
+	assert(pstC2CPkgHeadEx->stOldPkgHead.wClientPort > 0); // Mark as UDP
+	
+    m_poServerStat->UpdateStatValue(CServerStat::PKG_RECV, 1);
+    m_poServerStat->UpdateStatValue(CServerStat::BYTES_RECV, nBufLen);
+
+    // Call Business
+	m_poSvcDispatcher->OnRecvData(pBuffer, nBufLen);
+
+	return 0;
+}
+
+int CApp::OnSend(
+                 CTcpHandleBase* pTcpHandleBase)
+{
+    // Send remains data in CTcpHandleBase's send buffer
+    return pTcpHandleBase->SendData();
+}
+
+void CApp::DebugLog(const char* sFormat, ...)
+{
+	if(!m_poCfgLoader->getLocalCfgItem().bDebugSupport)
+		return;
+
+	va_list ap;
+	va_start(ap, sFormat);
+	VLog(&m_stDebugLog, 1, sFormat, ap);
+	va_end(ap);
+}
+
+void CApp::KeyLog(const char* sFormat, ...)
+{
+	va_list ap;
+	va_start(ap, sFormat);
+	VLog(&m_stKeyLog, 1, sFormat, ap);
+	va_end(ap);
+}
+void CApp::PerformLog(const char* sFormat, ...)
+{
+	va_list ap;
+	va_start(ap, sFormat);
+	VLog(&m_stPerformLog, 1, sFormat, ap);
+	va_end(ap);
+}
+
+int CApp::LoadSvc_i()
+{
+    int iRetCode = 0;
+    
+    ///////////////////////// Service Loader ///////////////////////
+    iRetCode = m_poSvcLoader->Initialize();
+    if(iRetCode != 0)
+    {
+        m_sLastErrMsg = m_poSvcLoader->getLastErrMsg();
+        return -1;
+    }
+    SvcFactoryMap_T mapServiceFactory;
+    iRetCode = m_poSvcLoader->LoadServices(mapServiceFactory);
+    if(iRetCode != 0)
+    {
+        m_sLastErrMsg = m_poSvcLoader->getLastErrMsg();
+        return -1;
+    }
+    ////////////////////////// Service Container //////////////////////////
+    iRetCode = m_poSvcContainer->Initialize(mapServiceFactory);
+    if(iRetCode != 0)
+    {
+        m_sLastErrMsg = m_poSvcContainer->getLastErrMsg();
+        return -1;
+    }
+
+    return 0;
+}

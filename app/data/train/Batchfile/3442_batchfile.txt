@@ -1,0 +1,1 @@
+docker run --rm -i --volume %cd%:/app schodemeiss/php-tools %*

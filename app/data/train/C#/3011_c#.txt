@@ -1,0 +1,64 @@
+﻿using Microsoft.Azure.AppService.ApiApps.Service;
+using System.Collections.Generic;
+using System.IO;
+
+namespace FileWatcher.Models
+{
+    // A simple in-memory trigger store.
+    public class InMemoryTriggerStore
+    {
+        private static InMemoryTriggerStore instance;
+
+        private IDictionary<string, FileSystemWatcher> _store;
+
+        private InMemoryTriggerStore()
+        {
+            _store = new Dictionary<string, FileSystemWatcher>();
+        }
+
+        public static InMemoryTriggerStore Instance
+        {
+            get
+            {
+                if (instance == null)
+                {
+                    instance = new InMemoryTriggerStore();
+                }
+                return instance;
+            }
+        }
+
+        // Register a push trigger.
+        public void RegisterTrigger(string triggerId, string rootPath,
+            TriggerInput<string, FileInfoWrapper> triggerInput)
+        {
+            // Use FileSystemWatcher to listen to file change event.
+            var filter = string.IsNullOrEmpty(triggerInput.inputs) ? "*" : triggerInput.inputs;
+            var watcher = new FileSystemWatcher(rootPath, filter);
+            watcher.IncludeSubdirectories = true;
+            watcher.EnableRaisingEvents = true;
+            watcher.NotifyFilter = NotifyFilters.LastAccess;
+
+            // When some file is changed, fire the push trigger.
+            watcher.Changed +=
+                (sender, e) => watcher_Changed(sender, e,
+                    Runtime.FromAppSettings(),
+                    triggerInput.GetCallback());
+
+            // Assoicate the FileSystemWatcher object with the triggerId.
+            _store[triggerId] = watcher;
+
+        }
+
+        // Fire the assoicated push trigger when some file is changed.
+        void watcher_Changed(object sender, FileSystemEventArgs e,
+            // AppService runtime object needed to invoke the callback.
+            Runtime runtime,
+            // The callback to invoke.
+            ClientTriggerCallback<FileInfoWrapper> callback)
+        {
+            // Helper method provided by AppService service SDK to invoke a push trigger callback.
+            callback.InvokeAsync(runtime, FileInfoWrapper.FromFileInfo(new FileInfo(e.FullPath)));
+        }
+    }
+}

@@ -1,0 +1,179 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving, CPP, TypeSynonymInstances, FlexibleInstances #-} 
+-----------------------------------------------------------------------------
+-- |
+-- Module      :  Perfs
+-- Copyright   :  (c)2011, Texas Instruments France
+-- License     :  BSD-style (see the file LICENSE)
+-- 
+-- Maintainer  :  c-favergeon-borgialli@ti.com
+-- Stability   :  provisional
+-- Portability :  portable
+--
+-- Functions for helping write and display performance tests
+--
+-----------------------------------------------------------------------------
+
+module Perfs(
+ -- * Benchmark environment
+   Bench(..)
+ , Samples(..)
+ , Sample(..)
+ , classifySample
+ , newSample
+ , recordSample
+ , getBenchResults
+ , io
+ , simpleCurve
+ , graph
+ , Byte(..)
+ , AsByte(..)
+ ) where
+
+import qualified Data.Map as M
+import Data.Monoid
+import Control.Monad.Trans.Writer.Strict
+import Benchmark
+
+import TestTools
+import Control.Monad(when)
+import Control.Monad.IO.Class
+import System.FilePath
+import System.IO
+import System.Cmd(system)
+import Data.Int
+
+type Sample = (Int,Double)
+type Samples = [(String,Sample)]
+
+ 
+
+type Bench a = WriterT Samples IO a
+
+newtype Byte = Byte Int deriving(Eq,Num,Ord, Integral, Real, Enum)
+
+instance Show Byte where
+  show (Byte s) = show s
+
+class AsByte a where
+  toBytes :: a -> Byte
+
+instance AsByte (CLInt s) where
+  toBytes _ = Byte 4
+
+instance AsByte Int32 where
+  toBytes _ = Byte 4
+
+instance AsByte (CLFloat s) where
+  toBytes _ = Byte 4
+
+instance AsByte Float where
+  toBytes _ = Byte 4
+
+instance AsByte [Float] where
+  toBytes l = toBytes (undefined :: Float) * fromIntegral (length l)
+
+instance AsByte [Int32] where
+  toBytes l = toBytes (undefined :: Int32) * fromIntegral (length l)
+
+instance AsByte Float4 where
+ toBytes _ = Byte 16
+
+instance AsByte [Float4] where
+  toBytes l = toBytes (undefined :: Float4) * fromIntegral (length l)
+
+instance AsByte (CLIntArray s) where
+  toBytes (CLIntArray l) = toBytes (undefined :: Int32) * fromIntegral (length l)
+  toBytes (CLConstIntArray l _) = toBytes (undefined :: Int32) *  fromIntegral l
+
+instance AsByte (CLFloatArray s) where
+  toBytes (CLFloatArray l) = toBytes (undefined :: Float) * fromIntegral (length l)
+  toBytes (CLConstFloatArray l _) = toBytes (undefined :: Float) *  fromIntegral l
+
+instance AsByte (CLFloat4Array s) where
+  toBytes (CLFloat4Array l) = toBytes (undefined :: Float4) * fromIntegral (length l)
+  toBytes (CLConstFloat4Array l _) = toBytes (undefined :: Float4) *  fromIntegral l
+
+
+
+newSample :: Sample -> Bench()
+newSample s = tell [("",s)]
+
+-- | Create a text file for R post processing
+withR name = withFile (makeValid ("R" </> name)) WriteMode
+
+-- | Create a R data file and process it using the simple.r script
+-- to generate a y=f(x) curve for several clock values
+simpleCurve :: (Num a , Num b) 
+            => String -- ^ Name
+            -> String -- ^ y
+            -> String -- ^ x
+            -> (Clocks -> IO [(a,b)])
+            -> IO ()
+simpleCurve name x y a = do
+  withR (name <.> "dat") $ \h -> do
+    hPutStrLn h $ y ++ "," ++ x ++ ",cpu,mem,gpu"
+    forAllClocks (\_ c -> a c >>= writeResult h c)
+  system("./simple.r " ++ name)
+  return()
+ where
+  writeResult h c l = do
+    let Clocks cpu mem gpu = c
+        clockString = "," ++ show cpu ++ "," ++ show mem ++ "," ++ show gpu
+        writeSample (xa,ya) = hPutStrLn h $ show ya ++ "," ++ show xa ++ clockString
+    mapM_ writeSample l
+
+-- | Create a R data file and process it using the graph.r script
+graph :: String -- ^ Name
+      -> (Clocks -> IO [(Byte,TimingResult)])
+      -> IO ()
+graph name a = do
+  withR (name <.> "dat") $ \h -> do
+    hPutStrLn h "b,nb,c,w,e,r,cpu,mem,gpu"
+    forAllClocks (\_ c -> a c >>= writeResult h c)
+  system("./graph.r " ++ name)
+  return()
+ where
+  writeResult h c l = do
+    let Clocks cpu mem gpu = c
+        clockString = "," ++ show cpu ++ "," ++ show mem ++ "," ++ show gpu
+        writeSample (bytes,(c,w,e,r)) = do
+          let clBandwidth = fromIntegral bytes / e * 1e-6
+              s = show clBandwidth ++ "," ++ show bytes ++ "," ++ show c ++ "," ++ show w ++ "," 
+                     ++ show e ++ "," ++ show r ++ clockString
+          hPutStrLn h s
+    mapM_ writeSample l
+
+-- | Classify a sample
+classifySample :: String -> Bool -> Bench Sample -> Bench Sample
+classifySample curve cond b = do
+  s <- b
+  when (cond) $ do
+    recordSample curve s
+  return s
+
+-- | Record a new sample with classification
+recordSample :: String -> Sample -> Bench ()
+recordSample curve s = tell [(curve,s)]
+
+getBenchResults :: Bench () -> IO Samples
+getBenchResults b = execWriterT b
+
+#ifdef OMAP4
+-- | Generate different benchmark for different clock values
+forAllClocks :: MonadIO m => (String -> Clocks -> m ()) -> m ()
+forAllClocks b = do
+ io $ putStrLn "  CPU 1GHz, L3 200MHz, DDR 400MHz, GPU 307MHz"
+ b "CPU 1GHz, L3 200MHz, DDR 400MHz, GPU 307MHz" defaultClocks
+ io $ putStrLn "  CPU 800MHz"
+ b "CPU 800MHz, L3 200MHz, DDR 400MHz, GPU 307MHz" (defaultClocks {cpuClock = CPU_800MHz})
+ io $ putStrLn "  L3 100MHz, DDR 200MHz"
+ b "CPU 1GHz, L3 100MHz, DDR 200MHz, GPU 307MHz" (defaultClocks {memClock = MEM_200MHz})
+ io $ putStrLn "  GPU 192MHz"
+ b "CPU 1GHz, L3 200MHz, DDR 400 MHz, GPU 192MHz" (defaultClocks {gpuClock = GPU_192MHz})
+ io $ putStrLn "  CPU 800MHz, L3 100MHz, DDR 200 MHz, GPU 192MHz"
+ b "CPU 800MHz, L3 100MHz, DDR 200 MHz, GPU 192MHz" (defaultClocks {cpuClock = CPU_800MHz, memClock = MEM_200MHz, gpuClock = GPU_192MHz})
+#else
+-- | Generate different benchmark for different clock values
+forAllClocks :: (String -> Clocks -> Bench()) -> Bench ()
+forAllClocks b = b "Standard clocks"  defaultClocks
+#endif

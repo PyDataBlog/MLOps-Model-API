@@ -1,0 +1,187 @@
+let html_audio = document.getElementById("audio-source");
+let html_open_button = document.getElementById("open-button");
+
+//Setup the audio graph and context
+let audioContext = new window.AudioContext();
+
+let audioSource = audioContext.createMediaElementSource($("#audio-source")[0]);
+
+let audioAnalyser = audioContext.createAnalyser();
+audioAnalyser.fftSize = 2048;
+
+let audioVolume = audioContext.createGain();
+audioVolume.gain.value  = 1;
+
+audioSource.connect(audioAnalyser);
+audioSource.connect(audioVolume);
+audioVolume.connect(audioContext.destination);
+
+//File input
+html_open_button.addEventListener("click", () => {
+    remote.dialog.showOpenDialog({filters: [{name: "Music files" ,extensions: ["mp3"]}], properties: ['openFile']}, (file) => {
+        if(file) {
+            readMusicFile(file);
+        }
+    });
+});
+
+function readMusicFile(file) {
+    html_audio.pause();
+    html_audio.src = file[0];
+    html_audio.load();
+    MusicMetadata.parseFile(file[0], {duration: true})
+    .then((metadata) => {
+        if(metadata.common.artist) {
+            document.getElementById("audio-artist").innerHTML = metadata.common.artist;
+        }
+        else {
+            document.getElementById("audio-artist").innerHTML = null;
+        }
+        
+        if(metadata.common.title) {
+            document.getElementById("audio-title").innerHTML = metadata.common.title;
+        }
+        else  {
+            document.getElementById("audio-title").innerHTML = file[0].slice(file[0].lastIndexOf("\\")+1, file[0].lastIndexOf("."));
+        }
+        readNewDirectory(file[0]);
+        
+        if(metadata.common.picture !== null && typeof metadata.common.picture == "object") {
+            document.getElementById("album-image").width = 125;
+            document.getElementById("album-image").height = 125;
+            
+            let pictureData = new Uint8Array(metadata.common.picture[0].data);
+            let len = metadata.common.picture[0].data.byteLength;
+            let pictureDataString = "";
+            for (let i = 0; i < len; i++) {
+                pictureDataString += String.fromCharCode(pictureData[i]);
+            }
+            let base64String = btoa(pictureDataString);
+            document.getElementById("album-image").src = "data:image/jpg;base64,"+base64String;
+            
+            document.getElementById("audio-title").style.marginLeft = "20px";
+        }
+        else {
+            document.getElementById("album-image").width = 0;
+            document.getElementById("album-image").height = 0;
+            document.getElementById("album-image").src = "";
+            document.getElementById("audio-title").style.marginLeft = "0px";
+        }    
+        
+        document.getElementById("slider").max = Math.floor(metadata.format.duration);
+        let minutes = Math.floor(metadata.format.duration / 60).toString();
+        if(minutes < 10) {
+            minutes = "0" + minutes;
+        }
+        let seconds = Math.round(metadata.format.duration % 60).toString();
+        if(seconds < 10) {
+            seconds = "0" + seconds;
+        }
+        document.getElementById("total-time").innerHTML = minutes + ":" + seconds;
+    })
+    .catch((err) => console.log(err));
+    
+    startSliderPositionUpdate();
+    html_audio.play();
+    document.getElementById("play-button").innerHTML = "&#10072;&#10072;";
+};
+
+//Slider and timestamp
+let sliderPositionInterval = 0;
+let mousedown = false;
+let startSliderPositionUpdate = function() {
+    sliderPositionInterval = setInterval(() => {
+        if(!mousedown) {
+            let minutes = Math.floor(html_audio.currentTime / 60);
+            if(minutes < 10) {
+                minutes = "0" + minutes.toString();
+            }
+            let seconds = Math.round(html_audio.currentTime % 60);
+            if(seconds < 10) {
+                seconds = "0" + seconds.toString();
+            }
+            document.getElementById("current-time").innerHTML = minutes + ":" + seconds;
+            document.getElementById("slider").value = html_audio.currentTime;
+        }
+    }, 500);
+};
+document.getElementById("slider").addEventListener("mousedown", () => {
+    mousedown = true;
+    clearInterval(sliderPositionInterval);
+    sliderPositionInterval = 0;
+});
+document.getElementById("slider").addEventListener("mouseup", () => {
+    mousedown = false;
+    html_audio.currentTime = $("#slider").val();
+    startSliderPositionUpdate();
+});
+
+//Play-pause button
+document.getElementById("play-button").addEventListener("click", () => {
+    if(html_audio.paused) {
+        html_audio.play();
+        document.getElementById("play-button").innerHTML = "&#10072;&#10072;";
+    }
+    else {
+        html_audio.pause();
+        document.getElementById("play-button").innerHTML = "&#9655;";
+    }
+});
+
+//Next song button
+document.getElementById("next-song-button").addEventListener("click", () => {
+    if(currentSong == songsList.length - 1) {
+        currentSong = 0;
+        readMusicFile(new Array(currentDir + "\\" + songsList[currentSong]));
+    }
+    else {
+        currentSong += 1;
+        readMusicFile(new Array(currentDir + "\\" + songsList[currentSong]));
+    }
+});
+
+//Previous song button
+document.getElementById("previous-song-button").addEventListener("click", () => {
+    if(html_audio.currentTime >= 15) {
+        readMusicFile(new Array(currentDir + "\\" + songsList[currentSong]));
+    }
+    else if(currentSong == 0) {
+        currentSong = songsList.length - 1;
+        readMusicFile(new Array(currentDir + "\\" + songsList[currentSong]));
+    }
+    else {
+        currentSong -= 1;
+        readMusicFile(new Array(currentDir + "\\" + songsList[currentSong]));
+    }
+});
+
+//Automatically load next song
+document.getElementById("audio-source").addEventListener("ended", () => {
+    if(currentSong == songsList.length - 1) {
+        currentSong = 0;
+        readMusicFile(new Array(currentDir + "\\" + songsList[currentSong]));
+    }
+    else {
+        currentSong += 1;
+        readMusicFile(new Array(currentDir + "\\" + songsList[currentSong]));
+    }
+});
+
+//Mouse hover delay in player info
+let playerInfoHoverTimer = 0;
+$("#audio-info").hover(() => {
+    if(playerInfoHoverTimer == 0) {
+        $("#audio-info").css("opacity", 1.0);
+        $("#audio-info").css("top", "30px");
+    }
+    else {
+        clearTimeout(playerInfoHoverTimer);
+    }
+}, 
+() => {
+    playerInfoHoverTimer = setTimeout(() => {
+        $("#audio-info").css("opacity", 0.0);
+        $("#audio-info").css("top", "0px");
+        playerInfoHoverTimer = 0;
+    }, 2500);
+});

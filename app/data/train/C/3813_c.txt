@@ -1,0 +1,277 @@
+
+#ifndef __NTFS_H__
+#define __NTFS_H__
+
+#include <windows.h>
+#include <math.h>
+#include "list.h"
+#include "drive.h"
+#include "efs.h"
+
+#pragma pack(push, 1)
+
+// Блок параметров BIOS.
+typedef struct _BIOS_PARAMETER_BLOCK
+{
+	WORD  BytesPerSector;         // Количество байт на сектор.
+	BYTE  SectorsPerCluster;      // Количество секторов в кластере.
+	BYTE  Reserved1[7];           // Не используется.
+	BYTE  Type;                   // Тип носителя.
+	BYTE  Reserved2[2];           // Не используется.
+	WORD  SectorsPerTrack;        // Количество секторов на дорожку.
+	WORD  CountHeads;             // Количество головок.
+	BYTE  Reserved3[8];           // Не используется.
+} BIOS_PARAMETER_BLOCK, *PBIOS_PARAMETER_BLOCK;
+
+// BOOT-сектор NTFS-тома.
+typedef struct _NTFS_BOOT_SECTOR
+{
+	BYTE  Jump[3];                // Команда перехода на вторичный загрузчик.
+	QWORD Signature1;             // Сигнатура 'NTFS    '.
+	BIOS_PARAMETER_BLOCK bpb;     // Блок параметров BIOS.
+	BYTE  Signature2[4];          // Сигнатура 80008000h.
+	QWORD SectorsPerPartition;    // Количество секторов в разделе.
+	QWORD FirstClusterMft;        // Номер первого кластера MFT.
+	QWORD FirstClusterMftMirr;    // Номер первого кластера "зеркала" MFT.
+	BYTE  SizeMftRecord;          // Размер записи MFT в кластерах.
+	BYTE  Reserved4[3];           // Не используется.
+	BYTE  SizeIndexEntry;         // Размер индексной записи в кластерах.
+	BYTE  Reserved5[3];           // Не используется.
+	QWORD SerialNumber;           // Серийный номер тома.*/
+} NTFS_BOOT_SECTOR, *PNTFS_BOOT_SECTOR;
+
+// Заголовок файловой записи.
+typedef struct _FILE_RECORD_HEADER
+{
+	DWORD signature;              // Сигнатура FILE.
+	WORD  update_sequence_number; // Смещение номера послед-ти обновления.
+	WORD  usn_size;               // Размер в словах номера последовательности 
+	                              // обновления и массива обновления.
+	QWORD lsn;                    // Номер послед-ти файла транзакций.
+	WORD  sequence_number;        // Номер последовательности.
+	WORD  hard_link_cnt;          // Счетчик жестких ссылок.
+	WORD  attribute_off;          // Смещение первого атрибута.
+	WORD  flags;                  // 0 – не исп-ся, 1 – файл, 3 – каталог.
+	DWORD real_size;              // Реальный размер файловой записи.
+	DWORD allocated_size;         // Выделенный размер файловой записи.
+	QWORD file_reference;         // Ссылка на файловую запись.
+	WORD  next_attribute_id;      // Идентификатор следующего атрибута.
+	BYTE  not_use[2];             // Просто для выравнивания.
+	DWORD number_mft_record;      // Индекс данной файловой записи.
+} FILE_RECORD_HEADER, *PFILE_RECORD_HEADER;
+
+// Заголовок атрибута (как резидентного, так и нерезидентного).
+// Для резидентного не захватывается только название и тело.
+// Для нерезидентного не захватываются название и список отрезков.
+typedef struct _ATTRIBUTE_HEADER
+{
+	// Общая часть.
+	DWORD type;         // Тип атрибута (не путать с ID).
+	WORD  length;       // Длина атрибута с заголовком.
+	BYTE  reserved[2];
+	BYTE  non_resident; // 0 – резидент, 1 – нерезидент.
+	BYTE  name_length;  // Длина имени атрибута.
+	WORD  name_offset;  // Смещение имени относительно заголовка.
+	WORD  flags;        // Флаги атрибута.
+	WORD  instance;     // Идентификатор атрибута.
+
+	// Различающаяся часть заголовка.
+	union
+	{
+		// Резидентный атрибут.
+		struct
+		{
+			DWORD value_length;   // Длина тела без заголовка.
+			WORD  value_offset;   // Смещение тела атрибута.
+			BYTE  resident_flags; // Индексный флаг.
+			BYTE  reserved;
+		} r;
+		// Нерезидентный атрибут.
+		struct 
+		{
+			QWORD lowest_vcn;           // Начальный виртуальный кластер.
+			QWORD highest_vcn;          // Конечный виртуальный кластер.
+			WORD  mapping_pairs_offset; // Смещение списка отрезков.
+			WORD  compression_unit;     // Размер блока сжатия.
+			BYTE  reserved[4];
+			QWORD allocated_size;       // Выделенный размер.
+			QWORD data_size;            // Реальный размер.
+			QWORD initialized_size;     // Инициализированный размер потока.
+		} nr;
+	} u;
+} ATTRIBUTE_HEADER, *PATTRIBUTE_HEADER;
+
+// Структура описывает один отрезок.
+typedef struct _RUN
+{
+	QWORD qwStartCluster;  // Номер начального кластера отрезка (LCN).
+	QWORD qwCountClusters; // Количество кластеров в отрезке.
+} RUN, *PRUN;
+
+#pragma pack(pop)
+
+// Коды некоторых атрибутов.
+#define AT_DATA             0x80  // Атрибут $DATA.
+#define AT_FILE_NAME        0x30  // Атрибут $FILE_NAME.
+#define AT_INDEX_ROOT       0x90  // Атрибут $INDEX_ROOT.
+#define AT_INDEX_ALLOCATION 0xa0  // Атрибут $INDEX_ALLOCATION.
+#define AT_BITMAP           0xb0  // Атрибут $BITMAP.
+#define AT_EFS              0x100 // Атрибут $EFS.
+
+#pragma pack(push, 1)
+
+// Атрибут $FILE_NAME (тело атрибута).
+typedef struct _FILE_NAME_ATTR
+{
+	QWORD ParentDirRef;           // Ссылка на материнский каталог.
+	QWORD TimeCreation;           // Время создания.
+	QWORD TimeMod;                // Время последнего изменения.
+	QWORD TimeModFileRec;         // Время последнего изменения файловой записи.
+	QWORD TimeLastRead;           // Время последнего чтения.
+	QWORD AllocSize;              // Выделенный размер.
+	QWORD RealSize;               // Реальный размер.
+	DWORD Flags;                  // Флаг атрибутов.
+	DWORD HPFS;                   // Используется HPFS.
+	BYTE  NameLength;             // Длина имени.
+	BYTE  NameSpace;              // Пространство имен.
+	BYTE  FileName[MAX_PATH * 2]; // Имя в Юникоде.
+} FILE_NAME_ATTR, *PFILE_NAME_ATTR;
+
+#pragma pack(pop)
+
+// Описывает один атрибут (заголовок, смещение внутри записи MFT).
+typedef struct _ATTR
+{
+	ATTRIBUTE_HEADER AttributeHeader;
+	WORD             AttributeOffset;
+} ATTR, *PATTR;
+
+#pragma pack(push, 1)
+
+// Индексный элемент - описывает один элемент каталога.
+typedef struct _INDEX_ENTRY
+{
+	QWORD FileRef;    // Ссылка на соответствующий элемент MFT.
+	WORD  length;     // Длина индексного элемента.
+	WORD  key_length; // Длина атрибута $FILE_NAME.
+	DWORD flags;      // бит 0 – есть доч. ветви, 
+	                  // бит 1 – последний элемент.
+	FILE_NAME_ATTR FileName;
+} INDEX_ENTRY, *PINDEX_ENTRY;
+
+// Заголовок индексного узла.
+typedef struct _INDEX_NODE_HEADER
+{
+	DWORD entries_offset; // Смещение первого индекса относительно заголовка.
+	DWORD index_length;   // Размер узла в байтах.
+	DWORD allocated_size; // Выделенный размер узла.
+	DWORD flags;          // Флаги.
+} INDEX_NODE_HEADER, *PINDEX_NODE_HEADER;
+
+// Заголовок $INDEX_ROOT (идет после стандартного заголовка атрибута).
+typedef struct _INDEX_ROOT_HEADER
+{
+	DWORD type;                     // По какому атрибуту индексирование?
+	DWORD collation_rule;           // Правило упорядочения в дереве.
+	DWORD index_block_size;         // Размер индексной записи в байтах.
+	BYTE  clusters_per_index_block; // Размер инд. записи в кластерах 
+                                    // или логарифм размера.
+	BYTE  reserved[3];              // Выравнивание.
+	INDEX_NODE_HEADER index;        // Заголовок индексного узла.
+} INDEX_ROOT_HEADER, *PINDEX_ROOT_HEADER;
+
+// Заголовок индексной записи.
+typedef struct _INDEX_ALLOCATION_ENTRY_HEADER
+{
+	DWORD signature;          // Cигнатура "INDX".
+	WORD  usa_ofs;            // Смещение массива с последними байтами секторов.
+	WORD  usa_count;          // Размер этого массива.
+	QWORD lsn;                // Номер записи в $LogFile.
+	QWORD index_block_vcn;    // VCN индексной записи.
+	INDEX_NODE_HEADER index;  // Заголовок узла.
+} INDEX_ALLOCATION_ENTRY_HEADER, *PINDEX_ALLOCATION_ENTRY_HEADER;
+
+#pragma pack(pop)
+
+// Возможные флаги-состояния, характеризующие результат выполнения кода конструктора.
+#define NTFS_DRIVE_STATE_OK   0 // Инициализация выполнена успешно.
+#define NTFS_DRIVE_STATE_FAIL 1 // В ходе инициализации возникли ошибки.
+#define NTFS_DRIVE_STATE_WP   2 // Работал конструктор без параметров.
+
+// Описывает один том NTFS.
+class TNtfs : public TDrive, TEfs
+{
+	protected:
+		WORD  wSizeMftRecord;         // Размер записи MFT в байтах.
+		DWORD dwSectorsPerMftRecord;  // Размер записи MFT в секторах.
+		BYTE  nDriveNumber;           // Номер физ. накопителя.
+		QWORD qwFirstSector;          // Адрес первого сектора.
+		BYTE  *pMftRec0;              // Массив под запись MFT #0 ($MFT).
+		BYTE  *pMftRec6;              // Массив под запись MFT #6 ($BITMAP).
+		BYTE  *pBitmap;               // Тело метафайла $BITMAP.
+		BYTE  nState;                 // Флаг успешности выполнения 
+		                              // кода конструктора.
+		NTFS_BOOT_SECTOR boot_ntfs;   // BOOT-сектор.
+		TList<RUN> RunListMft0;       // Список отрезков для MFT #0.
+	protected:
+		// Функция инициализации.
+		VOID Init(QWORD qwFirstSector, BYTE nDriveNumber);
+		/* По типу атрибута возвращает список отрезков его тела (если атрибут 
+		* нерезидентный).
+		* Номера начальных кластеров отрезков – логические. */
+		BOOL GetRunList(PBYTE pMftRec, const DWORD dwAttributeType, 
+			TList<RUN> &RunList);
+		// Определяет размер записи MFT в байтах.
+		VOID GetSizeMftRecord();
+		// Проверка последних слов секторов.
+		BOOL CheckUsn(PBYTE pMftRec, const FILE_RECORD_HEADER &frh);
+		// Восстановление последних слов секторов.
+		VOID RestoringMft(PBYTE pMftRec, const FILE_RECORD_HEADER &frh);
+		// Извлекает из MFT-записи список заголовков всех имеющихся атрибутов.
+		BOOL GetAttrList(PBYTE pMftRec, TList<ATTR> &AttrList);
+		// Декодирование атрибута $INDEX_ROOT.
+		VOID DecodeIndexRootAttr(ATTRIBUTE_HEADER ahIndexRoot, WORD wAttrOffset,
+			TList<INDEX_ENTRY> &iel, PBYTE pMftRec);
+		// Декодирование атрибута $INDEX_ALLOCATION.
+		BOOL DecodeIndexAllocationAttr(INDEX_ROOT_HEADER irh, 
+			ATTRIBUTE_HEADER ahIndexAllocation, ATTRIBUTE_HEADER ahBitmap, 
+			PBYTE pIndexAllocationBody, PBYTE pBitmapBody, 
+			TList<INDEX_ENTRY> &iel);
+		// Проверяет, выделен ли указанный кластер.
+		BOOL ClusterState(DWORD dwClusterNumber);
+		// Проверяет, выделены ли кластера тела атрибута.
+		BOOL CheckClusters(TList<RUN> &run_list);
+	public:
+		TNtfs(QWORD qwFirstSector, BYTE nDriveNumber); // Конструктор.
+		TNtfs();                                       // Конструктор по умолчанию.
+		~TNtfs();                                      // Деструктор.
+		// Возвращает MFT-запись по ее индексу.
+		BOOL GetMftRecByIndex(const DWORD dwIndex, PBYTE pMftRec, 
+			PQWORD pBeginMftRecord);
+		// Извлекает из MFT-записи список заголовков указанного типа атрибута 
+		// (атрибуты некоторых типов могут присутствовать в записи во 
+		// множественном числе).
+		BOOL GetAttributesHeaders(PBYTE pMftRec, DWORD dwAttributeType, 
+			TList<ATTR> &AttrList);
+		// Возвращает размер тела атрибута.
+		BOOL GetAttributeBodySize(PBYTE pMftRec, const DWORD dwAttributeType, 
+			PQWORD pSize);
+		// Возвращает тело атрибута по его типу.
+		BOOL GetAttributeBody(PBYTE pMftRec, const DWORD dwAttributeType, 
+			PBYTE pBody, QWORD qwSize);
+		// Получение списка элементов каталога (по номеру записи в MFT).
+		BOOL GetListElementsDir(DWORD dwMftRecIndex, TList<INDEX_ENTRY> &iel);
+		// По указанному пути возвращает номер записи MFT.
+		BOOL GetMftByPath(LPCWSTR lpPath, PDWORD pMftRecIndex);
+		// Возвращает флаг успешности выполнения кода конструктора.
+		BYTE GetState();
+	private:
+		// Разбор информации атрибута $EFS (только для пользователя, 
+		// выполнившего шифрование).
+		BOOL ParseEfs(PBYTE pEfsAttrBody, EFS_DATA &EfsData);
+	public:
+		// Извлечение данных из атрибута $EFS указанного файла.
+		BOOL GetEfsData(LPCWSTR lpFileName, EFS_DATA &EfsData);
+};
+
+#endif __NTFS_H__

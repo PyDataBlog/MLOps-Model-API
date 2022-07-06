@@ -1,0 +1,74 @@
+module System.Nemesis.DSL where
+
+import Control.Arrow ((>>>))
+import Control.Lens
+import Control.Monad (when)
+import Data.List (sort, nub)
+import System.Directory (doesFileExist, doesDirectoryExist, removeFile, removeDirectoryRecursive)
+import System.Exit (ExitCode( ExitSuccess, ExitFailure), exitWith)
+import System.FilePath.Glob (globDir, compile)
+import System.Process (system)
+import Text.Printf (printf)
+
+import Prelude hiding ((-))
+import System.Nemesis.Driver
+import System.Nemesis.Type
+import System.Nemesis.Utils
+
+desc :: String -> Unit
+desc = (currentDesc .=) . Just
+
+task :: String -> IO () -> Unit
+task s aAction =
+  if ':' `elem` s
+    then
+      let h = s & takeWhile (/= ':')
+          t = s & dropWhile (/= ':') & tail
+      in
+      task' (strip h ) (words t)
+    else
+      task' s []
+  where
+    task' _name _deps = insertTask -
+                      emptyTask
+                        & name .~ _name
+                        & deps .~ _deps
+                        & action .~ ShowIO aAction
+    strip = dropWhile (== ' ') >>> reverse >>> dropWhile (== ' ') >>> reverse
+
+namespace :: String -> Unit -> Unit
+namespace aName aUnit = do
+  push aName
+  aUnit
+  pop
+
+  where
+    push :: String -> Unit
+    push = (currentNamespace %=) . (:)
+
+    pop :: Unit
+    pop = (currentNamespace %= tail)
+
+sh :: String -> IO ()
+sh s = do
+  status <- system s
+  case status of
+    ExitSuccess -> return ()
+    ExitFailure code -> do
+      putStrLn - printf "%s failed with status code: %s" s (show code)
+      exitWith status
+
+
+clean :: [String] -> Unit
+clean xs = do
+  desc "Remove any temporary products."
+  task "clean" - do
+    paths <- globDir (xs & map compile) "." <&> concat <&> nub <&> sort <&> reverse
+    mapM_ rmAny paths
+    where
+      rmAny s = do
+        _fileExist <- doesFileExist s
+        when _fileExist - removeFile s
+        _dirExist <- doesDirectoryExist s
+        when _dirExist - removeDirectoryRecursive s
+

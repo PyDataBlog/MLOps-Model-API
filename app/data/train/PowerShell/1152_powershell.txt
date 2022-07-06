@@ -1,0 +1,96 @@
+﻿##############################################################
+# PowerShell Manager Script ver 0.2 06/07/2015               #
+# Powershell Version 4.0                                     #
+# If this script works it was written by Nathan Kewley       #
+# If this script does not work is was written by Michael Cho #
+#                                                            #
+# Updates AD objects to add a manager to field (read in from #
+# A CSV file)                                                #
+##############################################################
+
+#import Active Directory cmdlet
+import-module activedirectory
+
+#define file to write users who have been modified into
+$filename = "C:\Users\TEMP.PENRITH\Desktop\ChangedUsers.txt"
+$errorOut = "C:\Users\TEMP.PENRITH\Desktop\ErrorUsers.txt"
+
+#Output the date and time of script execution to the file
+Get-Date >> $filename
+
+#import the specified csv conataning the data and store it in $staff
+$staff = Import-Csv "C:\Users\TEMP.PENRITH\Desktop\staff.csv"
+
+#for each staff member read from the csv file
+Foreach ($member in $staff){
+    #add the prefixed 'p' to the payroll number stored in the CSV
+    $payroll = 'p' + $member.payroll
+
+    #query AD for the user corresponding to the payroll number (only from the AD Cleanup OU)
+    $user = Get-ADuser -SearchBase 'ou=user, ou=accounts, ou=new, dc=penrith, dc=local' -Filter {SamAccountName -eq $payroll}
+
+    #If AD did not return a user
+    If ($user -eq $Null){
+        #Create an error output string
+        $errOut = "User: " + $payroll + " Could not be found in the specified OU - "  + $member.given + "  " + $member.surname
+
+        #output error to the console in red because its an error
+        write-host $errOut -foregroundcolor "red"
+
+        #output error to log file
+        $errOut >> $filename
+        $errOut >> $errorOut
+    }
+    
+    #if AD did return a user
+    else{
+        #create a variable to hold the payroll of the manager
+        $manPay = "no-manager";
+
+        #open the same .csv again to lookup position number against reports to number
+        $managers = Import-Csv "C:\Users\TEMP.PENRITH\Desktop\staff.csv"
+
+        #loop through each entry trying to match position to reports number
+        Foreach ($manager in $managers){
+            #check if the current '$manager' matches the current '$user' reports to
+            if($manager.pos -eq $member.reports){
+                #users match
+                $manPay = "p" + $manager.payroll
+
+                #break out of the for loop as the user has been found
+                break;
+            }
+        }
+
+        #If no manager was found for the user
+        if($manPay -eq "no-manager"){
+            #Create an error output string
+            $errOut = "User: " + $payroll + " Does not have a manager.  " + $member.given + "  " + $member.surname
+
+            #output error to the console in red because its an error
+            write-host $errOut -foregroundcolor "red"
+
+            #output error to log file
+            $errOut >> $filename
+            $errOut >> $errorOut
+        }
+
+        #if the users manager was found
+        else{
+            #set the users manager to thier manager.........
+            SET-ADUser $user –manager $manPay
+            
+            #Create changes string
+            $changes = "User: " + $payroll + " modified to report to: " + $manPay + " " + $member.given + "  " + $member.surname
+
+            #output error to the console in red because its an error
+            write-host $changes -foregroundcolor "green"
+
+            #output the user's name to the output file so we know who was changed
+            $changes >> $filename
+        }
+    }
+}
+
+#output when the script has finished running
+Write-Host("Execution Completed")

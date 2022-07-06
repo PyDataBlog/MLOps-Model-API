@@ -1,0 +1,396 @@
+package Parakeet::Dependency::Item;
+use strict;
+use warnings;
+use utf8;
+use v5.12;
+
+use Misc::DmUtil::Data qw(dumperSelective isEmpty notEmpty toStr);
+use Misc::DmUtil::Log qw(:level);
+
+use Data::Dumper;
+use Time::HiRes qw(gettimeofday tv_interval);
+
+
+use overload
+  '<=>' => \&cmp,
+  '""'  => \&asString,
+  'cmp' => \&cmp;
+
+
+
+# Convert to string
+sub asString
+{
+  my $this  = shift;
+  
+  my $m   = $this->modified();
+  my $mod = ($m >= 0 ? new Misc::DmUtil::DateTime($m)->toIso8601() : "null");
+  
+  return $this->type().",".$this->subject()->asString().",".$this->subjectStage().",$mod";
+} # end of 'asString()'
+ 
+
+
+# Compare for sort
+sub cmp
+{
+  my $a = shift;
+  my $b = shift;
+
+  return $a->asString() cmp $b->asString();
+} # end of 'cmp()'
+
+
+
+# Return if content is current versus item
+sub isCurrent
+{
+  my $this    = shift;
+  my $log     = $this->{log};
+  my $debug   = $log->isLoggable(LOG_DEBUG);
+  my $info    = $log->isLoggable(LOG_INFO);
+
+  $log->debug("Start") if $debug;
+  
+  $log->debug("type=[".$this->{type}."], subject=[".$this->subject()."]") if $debug;
+  
+  if ($this->type() eq "content")
+  {
+    my $address     = $this->subjectAddress();
+    my $depContent  = $this->subjectContent();
+    unless ($depContent)
+    {
+      $log->info("Failed to get Content [$address]") if $info;
+      return 0;
+    }
+    
+    my $modified  = $depContent->modifiedHighest($this->subjectStage());    
+    unless ($modified->{epoch} == $this->modified())
+    {
+      $log->info(
+        "Modified time difference, saw [".
+        new Misc::DmUtil::DateTime($modified->{epoch})->toIso8601().
+        "] from [$modified->{file}] and expected [".
+        new Misc::DmUtil::DateTime($this->modified())->toIso8601().
+        "]") if $info;
+        
+      return 0;
+    }
+    
+  }
+  elsif ($this->type() eq "file")
+  {
+    my $modified  = $this->subjectFile()->modifiedTime() // -1;
+    $log->debug("modified=[".toStr($modified)."], this.modified=[".$this->modified()."]") if $debug;
+   
+    unless ($modified == $this->modified())
+    {
+      my $old = ($this->modified() >= 0 ? new Misc::DmUtil::DateTime($this->modified())->toIso8601() : "missing");
+      my $new = ($modified >= 0         ? new Misc::DmUtil::DateTime($modified)->toIso8601() : "missing");
+    
+      $log->info("Modified time difference, saw [$new] and expected [$old]") if $info;
+
+      return 0;
+    }
+  }
+
+  $log->info("All OK") if $info;
+  return 1;
+} # end of 'isCurrent()'
+  
+
+
+# Return if ready for dependency check
+sub isReady
+{
+  my $this    = shift;
+  my $log     = $this->{log};
+  my $debug   = $log->isLoggable(LOG_DEBUG);
+  my $info    = $log->isLoggable(LOG_INFO);
+
+  my $content;
+ 
+  if ($this->type() eq "content")
+  {
+    $content = $this->subjectContent();
+    
+    # Failure to get content counts as ready as it means the content
+    # has been deleted so will never become ready
+    unless ($content)
+    {
+      $log->info("Failed to get content") if $info;
+      return 1;
+    }
+    
+  }
+  elsif ($this->type() eq "file")
+  {
+  
+    # Files with a stage attached are a readyness check versus self
+    if (notEmpty($this->subjectStage()))
+    {
+      $content = $this->observerContent();
+    }
+    else
+    {
+      $log->info("Generic file, presume ready") if $info;
+      return 1;
+    }
+  }
+  else
+  {
+    $log->fatal("Unknown type");
+  }
+  
+    
+  my $stage = $this->subjectStage();
+  unless ($content->stageRun($stage))
+  {
+    $log->info("Stage [$stage] on [".$content->address()."] not run yet") if $info;
+    return 0;
+  }
+  
+  $log->info("Ready") if $info;
+  return 1;
+} # end of 'isReady()'
+
+
+
+# Return key
+sub key
+{
+  my $this  = shift;
+  
+  unless (defined $this->{key})
+  {
+    $this->{key} = $this->type()."/".$this->subject()."/".$this->subjectStage();
+  }
+
+  return $this->{key};
+} # end of 'key()'
+  
+  
+
+# Return modified time
+sub modified
+{
+  my $this  = shift;
+  my $log   = $this->{log};
+  
+  unless (defined $this->{modified})
+  {
+    if ($this->type() eq "content")
+    {
+      my $content = $this->subjectContent();
+      if ($content)
+      {
+        my $highest = $content->modifiedHighest($this->subjectStage());
+        if ($highest)
+        {
+          $log->info(
+            "Seen highest time of [".
+            new Misc::DmUtil::DateTime($highest->{epoch}).
+            "] from [".
+            $highest->{file}.
+            "]") if $log->isLoggable(LOG_INFO);
+
+          $this->{modified} = $highest->{epoch};
+        }      
+      }
+    }
+    elsif ($this->type() eq "file")
+    {
+      $this->{modified} = $this->{subjectFile}->modifiedTime();
+    }
+    else
+    {
+      $log->fatal("Unknown type");
+    }
+ 
+    $this->{modified} //= -1;
+  }
+
+  return $this->{modified};
+} # end of 'modified()'
+
+
+
+# Construction
+sub new
+{
+  my $class = shift;
+  my %arg   = @_;
+  
+  my $this  = {};
+  bless $this, $class;
+ 
+  # create log
+  my $log = Misc::DmUtil::Log::find(%arg);
+
+  # straight copies
+  foreach my $i (qw(modified observerContent observerStage subjectStage type))
+  {
+    $this->{$i} = $arg{$i};
+  }
+
+  foreach my $i (qw(observerStage))
+  {
+    unless (notEmpty($this->{$i}))
+    {
+      $log->fatal("No [$i] supplied");
+    }
+  }
+  
+  if ($arg{subjectContent})
+  {
+    $this->{subjectAddress}   = $arg{subjectContent}->address();
+    $this->{subjectContent}   = $arg{subjectContent};
+    $this->{type}             = "content";
+  }
+  elsif ($arg{subjectFile})
+  {
+    $this->{subjectFile}    = Misc::DmUtil::FilePath::toObject($arg{subjectFile});
+    $this->{type}           = "file";
+  }
+  elsif ($arg{subject})
+  {
+    my $t = $arg{type} // "";
+    if ($t eq "content")
+    {
+      $this->{subjectAddress}   = Parakeet::Address::toObject($arg{subject});
+      $this->{type}             = "content";
+    }
+    elsif ($t eq "file")
+    {
+      $this->{subjectFile}    = Misc::DmUtil::FilePath::toObject($arg{subject});
+      $this->{type}           = "file";
+    }
+    else
+    {
+      $log->fatal("Unknown subject type [$t]");
+    }
+  }
+  else
+  {
+    $log->fatal("No inputs\n".Dumper(\%arg));
+  }  
+    
+  $this->{log} = new Misc::DmUtil::Log(id => $log->id().",".$this->subject());
+
+  return $this;
+} # end of 'new()'
+
+
+
+# Return observer content
+sub observerContent
+{
+
+  return shift()->{observerContent};
+} # end of 'observerContent()'
+
+
+
+# Return observer stage
+sub observerStage
+{
+  
+  return shift()->{observerStage};
+} # end of 'observerStage();
+
+
+
+# Return subject
+sub subject
+{
+  my $this  = shift;
+  
+  if ($this->type() eq "file")
+  {
+    return $this->subjectFile();
+  }
+  else
+  {
+    return $this->subjectAddress();
+  }
+  
+} # end of 'subject()'
+
+
+
+# Return subject address
+sub subjectAddress
+{
+
+  return shift()->{subjectAddress};
+} # end of 'subjectAddress()'
+
+
+
+# Return subjectContent
+sub subjectContent
+{
+  my $this  = shift;
+  my $log   = $this->{log};
+  
+  if ($this->type() ne "content")
+  {
+    $log->fatal("Can't call subjectContent() on non-content dependency");
+  }
+  
+  unless (defined $this->{subjectContent})
+  {
+    $this->{subjectContent} = Parakeet::Content::get($this->subjectAddress(), fatal => 0);
+  }
+ 
+  $this->{subjectContent} //= 0;
+  
+  return $this->{subjectContent};
+} # end of 'subjectContent()'
+
+
+
+# Return subject file
+sub subjectFile
+{
+
+  return shift()->{subjectFile};
+} # end of 'subjectFile()'
+
+
+
+# Return subject stage
+sub subjectStage
+{
+  my $this  = shift;
+  
+  unless (defined $this->{subjectStage})
+  {
+    if ($this->type() eq "content")
+    {
+      my $content = $this->subjectContent();
+      if ($content)
+      {
+        $this->{subjectStage} = $content->stagePrev($this->observerStage());   
+      }
+    }
+    
+    $this->{subjectStage} //= "";
+  }
+          
+
+  return $this->{subjectStage};
+} # end of 'subjectStage()'
+
+
+
+# Return type
+sub type
+{
+  
+  return shift()->{type};
+} # end of 'type()'
+
+
+
+1;

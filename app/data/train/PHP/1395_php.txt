@@ -1,0 +1,118 @@
+<?php
+/**
+ * Project Name: map-board
+ * File Name: create_benchmark_fixture.php
+ * Last modified: 2017/11/20 12:51
+ * Author: Hiroaki Goto
+ *
+ * Copyright (c) 2017 Hiroaki Goto. All rights reserved.
+ */
+
+require_once __DIR__.'/../vendor/autoload.php';
+
+$db = connectDB();
+$redis = connectRedis();
+
+const USER_SIZE = 1000;
+const THREAD_NUM = 200;
+const MIN_POST = 0;
+const MAX_POST = 10000;
+const CONTENT_MIN = 3;
+const CONTENT_MAX = 1000;
+
+function unichr( $unicode , $encoding = 'UTF-8' ) {
+    return mb_convert_encoding("&#{$unicode};", $encoding, 'HTML-ENTITIES');
+}
+
+class RandomStringGenerator {
+    private $seed;
+    private $strtmp;
+    private $seedSize;
+    private $cnt = 0;
+
+    public function __construct(bool $only_ascii = false, bool $multi_line = true) {
+        $this->seed = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+
+        if(!$only_ascii) {
+            // ひらがな
+            for ($i = 12353; $i <= 12435; $i++) {
+                $this->seed .= unichr($i);
+            }
+            // カタカナ
+            for ($i = 12449; $i <= 12534; $i++) {
+                $this->seed .= unichr($i);
+            }
+            // 常用漢字
+            $file_content = file_get_contents('joyo.csv');
+            $unicode_list = preg_split('/(\r\n)|[\r\n]/', $file_content);
+            foreach ($unicode_list as $code_point) {
+                $this->seed .= unichr(hexdec($code_point));
+            }
+        }
+        // 改行文字
+        if($multi_line) {
+            $this->seed .= '\n';
+        }
+        $this->seedSize = mb_strlen($this->seed);
+        $this->shuffle();
+    }
+
+    private function shuffle() {
+        $this->strtmp = '';
+        for($i = 0; $i < $this->seedSize; $i++) {
+            $this->strtmp .= mb_substr($this->seed, mt_rand(0, $this->seedSize - 1), 1);
+        }
+    }
+
+    public function pseudo(int $length) {
+        if(++$this->cnt > 1000) {
+            $this->cnt = 0;
+            $this->shuffle();
+        }
+        $offset_max = $this->seedSize - $length;
+        return mb_substr($this->strtmp, mt_rand(0, $offset_max), $length);
+    }
+
+    public function generate(int $length) {
+        $str = '';
+        for($i = 0; $i < $length; $i++) {
+            $str .= mb_substr($this->seed, mt_rand(0, $this->seedSize - 1), 1);
+        }
+        return $str;
+    }
+}
+
+$single_gen = new RandomStringGenerator(true, false);
+$content_gen = new RandomStringGenerator();
+$gen_content = function() use($content_gen) {
+    return $content_gen->pseudo(mt_rand(CONTENT_MIN, CONTENT_MAX));
+};
+echo "Creating users...\n";
+$user_ids = [];
+for($i = 0; $i < USER_SIZE; $i++) {
+    $password = $single_gen->pseudo(mt_rand(7, 40));
+    $user_name = $single_gen->generate(mt_rand(4, 8));
+    $user = new mb\models\User($user_name, $user_name.'@example.com', $password, $password);
+    if($user->create($db)) {
+        $user_ids[] = $user->id;
+    }
+}
+$user_count = count($user_ids);
+$gen_user_id = function() use($user_ids, $user_count) {
+    return $user_ids[mt_rand(0, $user_count - 1)];
+};
+echo "End creating users.\n";
+echo "Creating threads...\n";
+for($i = 0; $i < THREAD_NUM; $i++) {
+    $thread_owner = $gen_user_id();
+    $thread = new mb\models\Thread($db, $single_gen->generate(mt_rand(5, 80)), $thread_owner);
+    $thread->create($db, $redis);
+    $post_first = new mb\models\Post($db, $thread->id, $thread_owner, $gen_content());
+    $post_first->create($db);
+    $post_num = mt_rand(MIN_POST, MAX_POST);
+    for($j = 0; $j < $post_num; $j++) {
+        $post = new mb\models\Post($db, $thread->id, $gen_user_id(), $gen_content());
+        $post->create($db);
+    }
+}
+echo "End creating thread.\n";

@@ -1,0 +1,128 @@
+// github package provides an API client for github.com
+//
+// Copyright (C) 2014 Yohei Sasaki
+//
+//    Licensed under the Apache License, Version 2.0 (the "License");
+//    you may not use this file except in compliance with the License.
+//    You may obtain a copy of the License at
+//
+//        http://www.apache.org/licenses/LICENSE-2.0
+//
+//    Unless required by applicable law or agreed to in writing, software
+//    distributed under the License is distributed on an "AS IS" BASIS,
+//    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+//    See the License for the specific language governing permissions and
+//    limitations under the License.
+//
+package github
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+	"net/http"
+	"strconv"
+	"time"
+)
+
+const BaseUrl = "https://api.github.com"
+
+type Client struct {
+	RateLimit          int
+	RateLimitRemaining int
+	RateLimitReset     time.Time
+	baseUrl            string
+	client             *http.Client
+}
+
+func NewClient(c *http.Client) *Client {
+	return &Client{
+		baseUrl: BaseUrl,
+		client:  c,
+	}
+}
+
+type MarkdownMode string
+
+var Markdown = MarkdownMode("markdown")
+var Gfm = MarkdownMode("gfm")
+
+type ApiError struct {
+	Status int
+	Body   string
+	*Client
+}
+
+func (e *ApiError) Error() string {
+	return fmt.Sprintf("Github API Error: %d - %v", e.Status, e.Body)
+}
+
+func NewApiError(status int, body string, c *Client) *ApiError {
+	return &ApiError{Status: status, Body: body, Client: c}
+}
+
+func IsApiError(err error) bool {
+	switch err.(type) {
+	case *ApiError:
+		return true
+	default:
+		return false
+	}
+}
+
+// Call /markdown API
+// See: https://developer.github.com/v3/markdown/
+func (g *Client) Markdown(text string, mode MarkdownMode, context string) (string, error) {
+	url := g.baseUrl + "/markdown"
+	body := map[string]string{
+		"text":    text,
+		"mode":    string(mode),
+		"context": context,
+	}
+	buff, _ := json.Marshal(body)
+	resp, err := g.client.Post(url, "application/json", bytes.NewBuffer(buff))
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	buff, err = ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return "", err
+	}
+	g.updateRateLimit(resp)
+
+	if resp.StatusCode != http.StatusOK {
+		return "", NewApiError(resp.StatusCode, string(buff), g)
+	}
+
+	return string(buff), nil
+}
+
+// Returns if the client exceeds the limit or not.
+func (g *Client) LimitExceeded() bool {
+	if g.RateLimit == 0 && g.RateLimitRemaining == 0 { // initial value
+		return false
+	}
+	return g.RateLimitRemaining == 0
+}
+
+func (g *Client) updateRateLimit(resp *http.Response) {
+	limit := resp.Header.Get("X-Ratelimit-Limit")
+	i, err := strconv.ParseInt(limit, 10, 32)
+	if err == nil {
+		g.RateLimit = int(i)
+	}
+
+	remaining := resp.Header.Get("X-Ratelimit-Remaining")
+	i, err = strconv.ParseInt(remaining, 10, 32)
+	if err == nil {
+		g.RateLimitRemaining = int(i)
+	}
+
+	reset := resp.Header.Get("X-Ratelimit-Reset")
+	i, err = strconv.ParseInt(reset, 10, 32)
+	if err == nil {
+		g.RateLimitReset = time.Unix(i, 0)
+	}
+}

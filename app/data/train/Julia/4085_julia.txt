@@ -1,0 +1,169 @@
+using Knet
+using ArgParse
+using JLD
+
+include("util.jl")
+include("data.jl")
+include("layer.jl")
+include("model.jl")
+
+function train()
+    s = ArgParseSettings()
+
+    @add_arg_table s begin
+        ("--trainfiles"; nargs = 2; required = true)
+        ("--devfiles"; nargs = 2)
+        ("--savefile")
+        ("--charenc"; action = :store_true)
+        ("--chardec"; action = :store_true)
+        ("--encvfile"; required = true)
+        ("--decvfile"; required = true)
+        ("--cpu"; action = :store_true)
+        ("--epochs"; arg_type = Int; default = 50)
+        ("--embedsize_src"; arg_type = Int; default = 256)
+        ("--embedsize_trg"; arg_type = Int; default = 32)
+        ("--hiddensize"; arg_type = Int; default = 512)
+        ("--batchsize"; arg_type = Int; default = 1)
+        ("--seed"; arg_type = Int; default = -1)
+        ("--pdrop"; arg_type = Float32; default = 0.25f0)
+        ("--lr_init"; arg_type = Float32; default = 1.0f0)
+        ("--lr_decay"; arg_type = Float32; default = 0.5f0)
+        ("--decay_after"; arg_type = Int; default = 9)
+        ("--gclip"; arg_type = Float32; default = 5.0f0)
+        ("--maxpredlen"; arg_type = Int; default = 45)
+        ("--norevenc"; action = :store_true)
+        ("--nlayer"; arg_type = Int; default = 2)
+        ("--noforcing"; action = :store_true)
+        ("--beamsize"; arg_type = Int; default = 5)
+        ("--penalize_length"; action = :store_true)
+        ("--optim_algo"; arg_type = String; default = "Adam")
+        ("--min_save_acc"; arg_type = Float32; default = 0.0f0)
+        ("--bidirectional"; action = :store_true)
+        ("--init_uniform"; arg_type = Float32; nargs = 2)
+    end
+
+    args = parse_args(s)
+    println(prettydict(args; sorted=true, by=(x -> x[1])))
+
+    if args["seed"] > 0
+        setseed(args["seed"])
+    end
+
+    if args["cpu"]
+        dtype = Array{Float32}
+    else
+        dtype = KnetArray{Float32}
+    end
+
+    encv = create_vocab(args["encvfile"]; char=args["charenc"])
+    decv = create_vocab(args["decvfile"]; char=args["chardec"])
+
+    dsrc = Data(dtype, args["trainfiles"][1], encv; char=args["charenc"])
+    dtrg = Data(dtype, args["trainfiles"][2], decv; char=args["chardec"])
+    dtrain = (dsrc, dtrg)
+
+    if !isempty(args["devfiles"])
+        dsrc = Data(dtype, args["devfiles"][1], encv; char=args["charenc"])
+        dtrg = Data(dtype, args["devfiles"][2], decv; char=args["chardec"])
+        ddev = (dsrc, dtrg)
+    else
+        ddev = dtrain
+    end
+
+    network = Network(dtype, dtrain[1].vocabsize, dtrain[2].vocabsize, dtrain[2].word_to_index[EOS], args)
+    if !isempty(args["init_uniform"])
+        lo, hi = args["init_uniform"]
+        dist(args...) = (hi - lo) * rand(args...) + lo
+    else
+        dist = xavier
+    end
+    parameters = init_network!(network, dist)
+    optim_algo = eval(parse(args["optim_algo"]))
+    optim = init_optim(parameters, network.dtype, optim_algo; lr=args["lr_init"], gclip=args["gclip"])
+
+    gradloss = grad(loss)
+
+    nbatch = length(dtrain[1].vecdata)
+    progr = 0.1
+    prev_avgl = Inf
+    best_acc = args["min_save_acc"]
+    avgl = report(0, 0, parameters, network, ddev)[1]
+    lr = args["lr_init"]
+
+    for epoch = 1:args["epochs"]
+        batch = 0
+        nextdot = progr
+
+        # if epoch > args["decay_after"] || avgl >= prev_avgl
+        if avgl >= prev_avgl
+            lr *= args["lr_decay"]
+            modify_lr!(optim, optim_algo, lr)
+        end
+
+        @time for (source, target) in zip(dtrain[1].vecdata, dtrain[2].vecdata)
+            gradients = gradloss(parameters, network, source, target)
+
+            update!(parameters, gradients, optim)
+
+            batch += 1
+            if batch / nbatch > nextdot
+                print(".")
+                nextdot += progr
+            end
+        end
+
+        prev_avgl = avgl
+        avgl, acc = report(epoch, lr, parameters, network, ddev)
+
+        if acc > best_acc
+            best_acc = acc
+            if args["savefile"] != nothing
+                head, ext = splitext(args["savefile"])
+                filename = "$(head)__epoch-$(epoch)__avgl-$(avgl)__acc-$(acc)$(ext)"
+                _save(filename, parameters, network, (dsrc.word_to_index, dtrg.index_to_word), args)
+            end
+        end
+    end
+end
+
+function report(epoch, lr, parameters, network, dpair)
+    avgl = avgloss(parameters, network, dpair)
+    acc = accuracy(parameters, network, dpair)
+
+    println("Epoch: $epoch, Learning rate = $lr, Loss = $avgl, Accuracy = $acc")
+
+    return avgl, acc
+end
+
+function avgloss(parameters, network, dpair)
+    dsrc, dtrg = dpair
+
+    z = 0
+    nword = 0
+
+    for (source, target) in zip(dsrc.vecdata, dtrg.vecdata)
+        z += loss(parameters, network, source, target)
+        nword += length(target) + 1
+    end
+
+    return z / nword
+end
+
+function accuracy(parameters, network, dpair)
+    dsrc, dtrg = dpair
+
+    correct = 0
+    total = length(dsrc.vecdata)
+
+    for (source, target) in zip(dsrc.vecdata, dtrg.vecdata)
+        prediction = beamsearch(parameters, network, source)
+        correct += (prediction == target)
+        # println("Pred: ", map(indmax, prediction))
+        # println("Targ: ", map(indmax, target))
+        # println()
+    end
+
+    return correct / total
+end
+
+train()

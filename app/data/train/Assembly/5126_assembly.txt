@@ -1,0 +1,134 @@
+        .equ __P24FJ64GA002,1        ;required "boiler-plate" (BP)
+        .include "p24Fxxxx.inc"      ;BP
+
+#include "xc.inc"                    ;BP
+        ;the next two lines set up the actual chip for operation - required
+        config __CONFIG2, POSCMOD_EC & I2C1SEL_SEC & IOL1WAY_OFF & OSCIOFNC_ON & FCKSM_CSECME & FNOSC_FRCPLL & SOSCSEL_LPSOSC & WUTSEL_FST & IESO_OFF
+        config __CONFIG1, WDTPS_PS1 & FWPSA_PR32 & WINDIS_OFF & FWDTEN_OFF & COE_ON & BKBUG_ON & GWRP_ON & GCP_ON & JTAGEN_OFF
+
+        .global ALLVar
+        .global BLLVar
+        .global CLLVar
+        .global op1
+    .bss                        ;put the following labels in RAM
+
+aVAR:     .space 6		;declare 48-bit variable
+XnVAR:    .space 6		;declare 48-bit variable
+Final:    .space 6		;declare 48-bit variable, store first 48-bits
+						;of 48-bit multiplication
+    
+    
+stack:
+    .space  32                  ;BP
+    .text                       ;BP (put the following data in ROM(program memory))
+    .global _main
+
+_main:						;Pseudo-random number generator (PNG)
+    mov     #3,w0
+    mov     w0,TRISB		;make bits 15-2 of PORTB outputs (RB0 and RB1 remain inputs)
+    mov     #0xffff,w0
+    mov     w0,AD1PCFG		;set outputs to digital
+    bset    TRISA, #0		
+    bset    CNPU1, #2
+    mov	    #1,w0			set the 48-bit number to initial seed = 1
+    mov	    w0,0x80C
+    mov	    #0xE66D,w0
+    mov	    w0,0x800
+    mov	    #0xDEEC,w0
+    mov	    w0,0x802
+    mov	    #0x0005,w0
+    mov	    w0,0x804
+    mov	    #0xfffC,w0
+    mov	    w0,LATB			;start with all LED's off (1 is low)
+    
+SetSeed:
+    mov	    0x80C,w0		;move seed to registers for manipulation
+    mov	    0x80E,w1		
+    mov	    0x810,w2
+    mov	    w1,w2			;left shift by 16(one register) according to PNG 
+    mov	    w0,w1
+    mov	    #0x330E,w0		;add the value 0X330E to the least significant
+    mov	    w0,0x80C		;register which has been cleared by the LS
+    mov	    w1,0x80E
+    mov	    w2,0x810
+    mov	    w0,0x806		;mov result to XnVar and Final
+    mov	    w1,0x808
+    mov	    w2,0x80A
+    
+waitpress:
+    btsc    PORTA,#0		;wait for button press from user
+    bra	    waitpress 
+    mov	    #10,w0		
+Delay:
+    Repeat  #16000			;once button is pressed, debounce
+    nop						;10ms delay for debouncing 
+    dec	    w0,w0
+    bra	    nz,Delay
+  
+waitrelease:
+    btss    PORTA,#0		;wait for button release to preform PNG function
+    bra	    waitrelease
+
+MULT:
+    mov	    #aVAR,w0	    ;move address of 'a' for indirect addressing
+    mov	    #XnVAR,w1	    ;move address of 'Xn' for indirect addressing
+    
+    mov	    [w0++],w2	    ;stores a1 to w2
+    MUL.UU  w2,[w1],w4	    ;w4 and w5 now represent A1*B1
+    mov	    w4,Final	    ;move first 16 bits to final, allow use of w4 later
+	
+    mov	    [w0++],w2	    ;stores a2 to w2
+    MUL.UU  w2,[w1],w6	    ;w6 and w7 have A2*B1
+    
+    mov	    [w0],w2			;a3 is stored in w2
+    MUL.UU  w2,[w1],w8	    ;w8 and w9 now have A3B1
+    
+    mov	    #aVAR,w0	    ;reset w0 to a1
+    
+    mov	    [w0++],w2	    ;a1 is in w2
+    MUL.UU  w2,[++w1],w10   ;w10 and w11 now have A1*B2
+    
+    ;need to add w5 + w6 + w10 and push to final
+    
+    add	    w5,w6,w3	    ;w5+w6 into w3
+    addc    w3,w10,w3	    ;in case of carry, w3+C+w10 into w3
+    
+    mov	    w3,0x80e	    ;move w3 into next 16 bits of final
+    
+    mov	    [w0--],w2	    ;a2 is stored in w2
+    MUL.UU  w2,[w1],w4	    ;w4 and w5 hold A2*B2
+    
+    mov	    [w0],w2			;a1 is stored in w2
+    MUL.UU  w2,[++w1],w12   ;w12 and w13 now hold A1*B3
+    
+    ;now add C + w7 + w8 + w11 + w4 + w12
+    
+    addc   w7,w8,w3			;add remaining values for last 16-bits of final
+    add    w3,w11,w3
+    add    w3,w4,w3
+    add    w3,w12,w3
+    
+    mov	   w3,0x810			;move last 16-bits to final
+    
+ContinueRand:
+    mov	    0x80C,w0	    ;move 48-bits of final into working registers 
+    mov	    0x80E,w1
+    mov	    0x810,w2  
+    add	    w0,#0xB,w0	    ;add 11 to final (as described in PNG function)
+    addc    #0,w1			;in case of carray for w0
+    addc    #0,w2			;in case of carray for w1
+    
+    mov	    w0,0x80C			
+    mov	    w1,0x80E
+    mov	    w2,0x810	    ;move 48-bit random number into XnVAR and Final
+    mov	    w0,0x806
+    mov	    w1,0x808
+    mov	    w2,0x80A
+    mov	    0x80C,w0	    ;mov 8-least significant bits to w0
+    sl	    w0,#2,w0	    ;shift left by 2 (divide by 4)
+    com	    w0,w0			;take complement due to LED's having 1 = low
+    mov	    w0,LATB			;move the result into the LED's
+    bra	    waitpress	    ;wait for the next button push from user
+    
+loopback:
+    bra	    loopback	    ;should not reach, end of code

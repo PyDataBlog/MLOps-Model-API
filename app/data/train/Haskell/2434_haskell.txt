@@ -1,0 +1,96 @@
+{-# OPTIONS_GHC -fno-warn-orphans #-}
+{-# LANGUAGE FlexibleInstances, MultiParamTypeClasses, InstanceSigs #-}
+
+module CompilerUtility (compilerSettings) where
+
+import Control.Applicative
+import Data.List.Utils
+import System.FilePath.Posix
+import System.IO
+
+import Data.ConfigFile
+import CompilationUtility
+import qualified ConfigFile
+import Printer
+import Utility
+
+
+data COMPILER_SETTINGS = COMPILER_SETTINGS {
+  cs_executable :: FilePath,
+  cs_options :: String,
+  cs_compiler :: FilePath,
+  cs_externs :: [FilePath],
+  cs_readable :: String,
+  cs_debug :: String,
+  cs_flags :: String,
+  cs_quick :: String,
+  cs_standard :: String,
+  cs_extended :: String,
+  cs_js :: [FilePath],
+  cs_js_output_file :: FilePath,
+  cs_create_source_map :: FilePath,
+  cs_property_renaming_report :: FilePath,
+  cs_verbose :: Bool
+}
+
+
+instance UtilitySettings COMPILER_SETTINGS where
+  executable = cs_executable
+  toStringList cs = concat [
+     words $ cs_options cs,
+     ["-jar", cs_compiler cs,
+     "--js_output_file=" ++ (cs_js_output_file cs),
+     "--create_source_map=" ++ (cs_create_source_map cs),
+     "--property_renaming_report=" ++ (cs_property_renaming_report cs)],
+     fmap ("--externs=" ++) $ cs_externs cs,
+     words $ cs_readable cs,
+     words $ cs_debug cs,
+     words $ cs_flags cs,
+     words $ cs_quick cs,
+     words $ cs_standard cs,
+     words $ cs_extended cs,
+     fmap ("--js=" ++) $ cs_js cs]
+  utitle _ = Just "Closure Compiler"
+  verbose = cs_verbose
+
+
+compilerSettings :: ConfigParser -> [FilePath] -> EitherT String IO COMPILER_SETTINGS
+compilerSettings cp files = do
+  readable <- hoistEither $ ConfigFile.getBool cp "DEFAULT" "readable"
+  production <- hoistEither $ ConfigFile.getBool cp "DEFAULT" "production"
+  quick <- hoistEither $ ConfigFile.getBool cp "DEFAULT" "quick"
+  extended <- hoistEither $ ConfigFile.getBool cp "DEFAULT" "extended"
+  COMPILER_SETTINGS
+    <$> ConfigFile.getFile cp "DEFAULT" "utility.compiler.executable"
+    <*> getString "utility.compiler.options"
+    <*> ConfigFile.getFile cp "DEFAULT" "utility.compiler.compiler"
+    <*> ConfigFile.getFiles cp "DEFAULT" "utility.compiler.externs"
+    <*> (if readable then do getString "utility.compiler.readable" else return "")
+    <*> (if not production then do getString "utility.compiler.debug" else return "")
+    <*> getString "utility.compiler.flags"
+    <*> getString "utility.compiler.quick"
+    <*> (if not quick then do getString "utility.compiler.standard" else return "")
+    <*> (if not quick && extended then do getString "utility.compiler.extended" else return "")
+    <*> pure files
+    <*> getString "utility.compiler.js_output_file"
+    <*> getString "utility.compiler.create_source_map"
+    <*> getString "utility.compiler.property_renaming_report"
+    <*> (hoistEither $ ConfigFile.getBool cp "DEFAULT" "verbose")
+ where
+  getString :: String -> EitherT String IO String
+  getString = hoistEither . ConfigFile.get cp "DEFAULT"
+
+instance CompilationUtility COMPILER_SETTINGS () where
+  defaultValue :: COMPILER_SETTINGS -> ()
+  defaultValue _ = ()
+
+
+  failure :: UtilityResult COMPILER_SETTINGS -> EitherT String IO ()
+  failure r = do
+    errors <- catchIO $ hGetContents $ ur_stderr r
+    dPut [Failure, Str errors, Ln $ "Exit code: " ++ (show $ ur_exit_code r)]
+    throwT "CompilerUtility failure"
+
+
+  success :: UtilityResult COMPILER_SETTINGS -> EitherT String IO ()
+  success _ = dPut [Success]

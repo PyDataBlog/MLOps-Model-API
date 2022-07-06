@@ -1,0 +1,1 @@
+﻿#Install-VirtualPackage 'winbareos.portable' 'winbareos.install'

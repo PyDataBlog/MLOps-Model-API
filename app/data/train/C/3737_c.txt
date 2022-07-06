@@ -1,0 +1,454 @@
+// tinyfs.c
+//
+//[reference]
+//  https://blog.csdn.net/dog250/article/details/100099936
+//  https://blog.csdn.net/Angel_94/article/details/100880297
+//  https://blog.csdn.net/u011784994/article/details/52614935
+//
+// $ make all install test
+// dmesg
+// [  382.940306] tinyfs_mount; -enter, dev_name=none
+// [  382.940317] tinyfs_fill_super; -enter
+// [  382.940319] tinyfs_fill_super; -exit
+// [  382.940320] tinyfs_mount; -exit
+// [  382.944703] tinyfs_lookup; -enter
+// [  382.944705] tinyfs_lookup; -exit
+// [  382.944707] tinyfs_create; -enter
+// [  382.944709] tinyfs_create; -exit; ret=0
+// [  382.944717] tinyfs_write; -enter
+// [  382.944718] tinyfs_write; local buffer=11111
+// [  382.944718]
+// [  382.944720] tinyfs_write; -exit
+// [  382.948739] tinyfs_read; -enter
+// [  382.948742] tinyfs_read; local buffer=11111
+// [  382.948742]
+// [  382.948743] tinyfs_read; -exit
+// [  382.948748] tinyfs_read; -enter
+// [  382.952066] tinyfs_lookup; -enter
+// [  382.952068] tinyfs_lookup; -exit
+// [  382.952069] tinyfs_mkdir; -enter
+// [  382.952071] tinyfs_mkdir; -exit; ret=0
+// [  382.955690] tinyfs_lookup; -enter
+// [  382.955692] tinyfs_lookup; -exit
+// [  382.955693] tinyfs_create; -enter
+// [  382.955695] tinyfs_create; -exit; ret=0
+// [  382.955703] tinyfs_write; -enter
+// [  382.955704] tinyfs_write; local buffer=22222
+// [  382.955704]
+// [  382.955705] tinyfs_write; -exit
+// [  382.959352] tinyfs_lookup; -enter
+// [  382.959354] tinyfs_lookup; -exit
+// [  382.959355] tinyfs_create; -enter
+// [  382.959356] tinyfs_create; -exit; ret=0
+// [  382.959363] tinyfs_write; -enter
+// [  382.959364] tinyfs_write; local buffer=333
+// [  382.959364]
+// [  382.959365] tinyfs_write; -exit
+// [  382.963276] tinyfs_read; -enter
+// [  382.963280] tinyfs_read; local buffer=22222
+// [  382.963280]
+// [  382.963281] tinyfs_read; -exit
+// [  382.963289] tinyfs_read; -enter
+// [  382.966910] tinyfs_read; -enter
+// [  382.966913] tinyfs_read; local buffer=333
+// [  382.966913]
+// [  382.966914] tinyfs_read; -exit
+// [  382.966919] tinyfs_read; -enter
+// [  382.971237] tinyfs_iterate; -enter
+// [  382.971239] tinyfs_iterate; -exit
+// [  382.994283] tinyfs_kill_superblock; -enter
+// [  382.994295] tinyfs_kill_superblock; -exit
+//
+#include "tinyfs.h"
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/fs.h>
+#include <linux/uaccess.h>
+#include <linux/version.h> //LINUX_VERSION_CODE
+
+struct file_blk block[MAX_FILES+1];
+int curr_count = 0; // 我勒个去，竟然使用了全局变量！
+
+// 获得一个尚未使用的文件块，保存新创建的文件或者目录
+static int get_block(void)
+{
+	int i;
+
+	// 就是一个遍历，但实现快速。
+	for (i = 2; i < MAX_FILES; i++) {
+		if (!block[i].busy) {
+			block[i].busy = 1;
+			return i;
+		}
+	}
+	return -1;
+}
+
+static struct inode_operations tinyfs_inode_ops;
+
+// 读取目录的实现
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0))
+static int tinyfs_iterate(struct file *file, struct dir_context *ctx)
+{
+    printk("%s; -enter\n", __FUNCTION__);
+    printk("%s; -exit\n", __FUNCTION__);
+    return 0;
+}
+#else
+static int tinyfs_readdir(struct file *filp, void *dirent, filldir_t filldir)
+{
+	loff_t pos;
+	struct file_blk *blk;
+	struct dir_entry *entry;
+	int i;
+
+    printk("%s; -enter\n", __FUNCTION__);
+
+	pos = filp->f_pos;
+	if (pos)
+		return 0;
+
+	/* blk = (struct file_blk *)filp->f_dentry->d_inode->i_private; */
+	blk = (struct file_blk *)file_inode(filp)->i_private;
+
+	if (!S_ISDIR(blk->mode)) {
+		return -ENOTDIR;
+	}
+
+	// 循环获取一个目录的所有文件的文件名
+	entry = (struct dir_entry *)&blk->data[0];
+	for (i = 0; i < blk->dir_children; i++) {
+		filldir(dirent, entry[i].filename, MAXLEN, pos, entry[i].idx, DT_UNKNOWN);
+		filp->f_pos += sizeof(struct dir_entry);
+		pos += sizeof(struct dir_entry);
+	}
+
+    printk("%s; -exit\n", __FUNCTION__);
+	return 0;
+}
+#endif
+
+// read实现
+ssize_t tinyfs_read(struct file * filp, char __user * buf, size_t len, loff_t *ppos)
+{
+	struct file_blk *blk;
+	char *buffer;
+
+    printk("%s; -enter\n", __FUNCTION__);
+
+	blk = (struct file_blk *)filp->f_path.dentry->d_inode->i_private;
+	if (*ppos >= blk->file_size)
+		return 0;
+
+	buffer = (char *)&blk->data[0];
+	len = min((size_t) blk->file_size, len);
+
+	if (copy_to_user(buf, buffer, len)) {
+        return -EFAULT;
+    }
+    printk("tinyfs_read; local buffer=%s\n", buffer);
+    *ppos += len;
+
+    printk("%s; -exit\n", __FUNCTION__);
+    return len;
+}
+
+// write实现
+ssize_t tinyfs_write(struct file * filp, const char __user * buf, size_t len, loff_t * ppos)
+{
+    struct file_blk *blk;
+    char *buffer;
+
+    printk("%s; -enter\n", __FUNCTION__);
+
+    blk = filp->f_path.dentry->d_inode->i_private;
+
+    buffer = (char *)&blk->data[0];
+    buffer += *ppos;
+
+    if (copy_from_user(buffer, buf, len)) {
+        return -EFAULT;
+    }
+    printk("tinyfs_write; local buffer=%s\n", buffer);
+    *ppos += len;
+    blk->file_size = *ppos;
+
+    printk("%s; -exit\n", __FUNCTION__);
+    return len;
+}
+
+const struct file_operations tinyfs_file_operations = {
+    .read = tinyfs_read,
+	.write = tinyfs_write,
+};
+
+const struct file_operations tinyfs_dir_operations = {
+	.owner = THIS_MODULE,
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(3, 11, 0))
+    .iterate = tinyfs_iterate,
+#else
+	.readdir = tinyfs_readdir,
+#endif
+};
+
+// 创建文件的实现
+static int tinyfs_do_create(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+	struct inode *inode;
+	struct super_block *sb;
+	struct dir_entry *entry;
+	struct file_blk *blk, *pblk;
+	int idx;
+
+	sb = dir->i_sb;
+
+	if (curr_count >= MAX_FILES) {
+		return -ENOSPC;
+	}
+
+	if (!S_ISDIR(mode) && !S_ISREG(mode)) {
+		return -EINVAL;
+	}
+
+	inode = new_inode(sb);
+	if (!inode) {
+		return -ENOMEM;
+	}
+
+	inode->i_sb = sb;
+	inode->i_op = &tinyfs_inode_ops;
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)) //ubuntu 18.04 --> linux kernel 5.4.0-45-generic
+	inode->i_atime = inode->i_mtime = inode->i_ctime = (struct timespec64){0,0};
+#else
+	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+#endif
+
+	idx = get_block(); // 获取一个空闲的文件块保存新文件
+
+	blk = &block[idx];
+	inode->i_ino = idx;
+	blk->mode = mode;
+	curr_count ++;
+
+	if (S_ISDIR(mode)) {
+		blk->dir_children = 0;
+		inode->i_fop = &tinyfs_dir_operations;
+	} else if (S_ISREG(mode)) {
+		blk->file_size = 0;
+		inode->i_fop = &tinyfs_file_operations;
+	}
+
+	inode->i_private = blk;
+	pblk = (struct file_blk *)dir->i_private;
+
+	entry = (struct dir_entry *)&pblk->data[0];
+	entry += pblk->dir_children;
+	pblk->dir_children ++;
+
+	entry->idx = idx;
+	strcpy(entry->filename, dentry->d_name.name);
+
+	// VFS穿针引线的关键步骤，将VFS的inode链接到链表
+	inode_init_owner(inode, dir, mode);
+	d_add(dentry, inode);
+
+	return 0;
+}
+
+static int tinyfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
+{
+    printk("%s; -enter\n", __FUNCTION__);
+    int ret = tinyfs_do_create(dir, dentry, S_IFDIR | mode);
+    printk("%s; -exit; ret=%d\n", __FUNCTION__, ret);
+	return ret;
+}
+
+static int tinyfs_create(struct inode *dir, struct dentry *dentry, umode_t mode, bool excl)
+{
+    printk("%s; -enter\n", __FUNCTION__);
+    int ret = tinyfs_do_create(dir, dentry, mode);
+    printk("%s; -exit; ret=%d\n", __FUNCTION__, ret);
+	return ret;
+}
+
+static struct inode * tinyfs_iget(struct super_block *sb, int idx)
+{
+	struct inode *inode;
+	struct file_blk *blk;
+
+	inode = new_inode(sb);
+	inode->i_ino = idx;
+	inode->i_sb = sb;
+	inode->i_op = &tinyfs_inode_ops;
+
+	blk = &block[idx];
+
+	if (S_ISDIR(blk->mode))
+		inode->i_fop = &tinyfs_dir_operations;
+	else if (S_ISREG(blk->mode))
+		inode->i_fop = &tinyfs_file_operations;
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)) //ubuntu 18.04 --> linux kernel 5.4.0-45-generic
+	inode->i_atime = inode->i_mtime = inode->i_ctime = (struct timespec64){0,0};
+#else
+	inode->i_atime = inode->i_mtime = inode->i_ctime = CURRENT_TIME;
+#endif
+	inode->i_private = blk;
+
+	return inode;
+}
+
+struct dentry *tinyfs_lookup(struct inode *parent_inode, struct dentry *child_dentry, unsigned int flags)
+{
+    printk("%s; -enter\n", __FUNCTION__);
+	struct super_block *sb = parent_inode->i_sb; //warning: ISO C90 forbids mixed declarations and code
+	struct file_blk *blk;
+	struct dir_entry *entry;
+	int i;
+
+	blk = (struct file_blk *)parent_inode->i_private;
+	entry = (struct dir_entry *)&blk->data[0];
+	for (i = 0; i < blk->dir_children; i++) {
+		if (!strcmp(entry[i].filename, child_dentry->d_name.name)) {
+			struct inode *inode = tinyfs_iget(sb, entry[i].idx);
+			struct file_blk *inner = (struct file_blk *)inode->i_private;
+			inode_init_owner(inode, parent_inode, inner->mode);
+			d_add(child_dentry, inode);
+			return NULL;
+		}
+	}
+
+    printk("%s; -exit\n", __FUNCTION__);
+	return NULL;
+}
+
+int tinyfs_rmdir(struct inode *dir, struct dentry *dentry)
+{
+    //TODO: there is bug in this function
+    printk("%s; -enter\n", __FUNCTION__);
+	struct inode *inode = dentry->d_inode;
+	struct file_blk *blk = (struct file_blk *)inode->i_private;
+
+	blk->busy = 0;
+    int ret = simple_rmdir(dir, dentry);
+    printk("%s; -exit; ret=%d\n", __FUNCTION__, ret);
+	return ret;
+}
+
+int tinyfs_unlink(struct inode *dir, struct dentry *dentry)
+{
+    printk("%s; -enter\n", __FUNCTION__);
+	int i;
+	struct inode *inode = dentry->d_inode;
+	struct file_blk *blk = (struct file_blk *)inode->i_private;
+	struct file_blk *pblk = (struct file_blk *)dir->i_private;
+	struct dir_entry *entry;
+
+	// 更新其上层目录
+	entry = (struct dir_entry *)&pblk->data[0];
+	for (i = 0; i < pblk->dir_children; i++) {
+		if (!strcmp(entry[i].filename, dentry->d_name.name)) {
+			int j;
+			for (j = i; j < pblk->dir_children - 1; j++) {
+				memcpy(&entry[j], &entry[j+1], sizeof(struct dir_entry));
+			}
+			pblk->dir_children --;
+			break;
+		}
+	}
+
+	blk->busy = 0;
+	int ret = simple_unlink(dir, dentry);
+    printk("%s; -exit; ret=%d\n", __FUNCTION__, ret);
+    return ret;
+}
+
+static struct inode_operations tinyfs_inode_ops = {
+	.lookup = tinyfs_lookup,
+	.create = tinyfs_create,
+	.mkdir = tinyfs_mkdir,
+	.rmdir = tinyfs_rmdir,
+	.unlink = tinyfs_unlink,
+};
+
+int tinyfs_fill_super(struct super_block *sb, void *data, int silent)
+{
+	struct inode *root_inode;
+	int mode = S_IFDIR;
+    printk("%s; -enter\n", __FUNCTION__);
+
+	root_inode = new_inode(sb);
+	root_inode->i_ino = 1;
+	inode_init_owner(root_inode, NULL, mode);
+	root_inode->i_sb = sb;
+	root_inode->i_op = &tinyfs_inode_ops;
+	root_inode->i_fop = &tinyfs_dir_operations;
+
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(5, 4, 0)) //ubuntu 18.04 --> linux kernel 5.4.0-45-generic
+	root_inode->i_atime = root_inode->i_mtime = root_inode->i_ctime = (struct timespec64){0,0};
+#else
+	root_inode->i_atime = root_inode->i_mtime = root_inode->i_ctime = CURRENT_TIME;
+#endif
+
+	block[1].mode = mode;
+	block[1].dir_children = 0;
+	block[1].idx = 1;
+	block[1].busy = 1;
+	root_inode->i_private = &block[1];
+
+	sb->s_root = d_make_root(root_inode);
+	curr_count ++;
+
+    printk("%s; -exit\n", __FUNCTION__);
+	return 0;
+}
+
+static struct dentry * tinyfs_mount(struct file_system_type *fs_type, int flags, const char *dev_name, void *data)
+{
+    printk("%s; -enter, dev_name=%s\n", __FUNCTION__, dev_name);
+    struct dentry* pdentry = mount_nodev(fs_type, flags, data, tinyfs_fill_super);
+    printk("%s; -exit\n", __FUNCTION__);
+	return pdentry;
+}
+
+static void tinyfs_kill_superblock(struct super_block *sb)
+{
+    printk("%s; -enter\n", __FUNCTION__);
+	kill_anon_super(sb);
+    printk("%s; -exit\n", __FUNCTION__);
+}
+
+struct file_system_type tinyfs_fs_type = {
+	.owner = THIS_MODULE,
+	.name = "tinyfs",
+	.mount = tinyfs_mount,
+	.kill_sb = tinyfs_kill_superblock,
+};
+
+static int tinyfs_init(void)
+{
+	int ret;
+    printk("%s; -enter\n", __FUNCTION__);
+
+	memset(block, 0, sizeof(block));
+	ret = register_filesystem(&tinyfs_fs_type);
+	if (ret) {
+		printk("register tinyfs failed\n");
+    }
+
+    printk("%s; -exit\n", __FUNCTION__);
+	return ret;
+}
+
+static void tinyfs_exit(void)
+{
+    printk("%s; -enter\n", __FUNCTION__);
+	unregister_filesystem(&tinyfs_fs_type);
+    printk("%s; -exit\n", __FUNCTION__);
+}
+
+module_init(tinyfs_init);
+module_exit(tinyfs_exit);
+
+MODULE_LICENSE("GPL");

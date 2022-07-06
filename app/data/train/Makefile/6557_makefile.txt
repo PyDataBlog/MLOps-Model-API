@@ -1,0 +1,46 @@
+TRIPLET:= x86_64-w64-mingw32
+CXX:= $(TRIPLET)-g++
+STRIP:= $(TRIPLET)-strip
+DLLTOOL:= $(TRIPLET)-dlltool
+
+STEAM_SDK:=./sdk
+CXXFLAGS:= -O3
+override CXXFLAGS+= -std=c++14 -I$(STEAM_SDK)/public/steam
+override LDFLAGS+= -shared -Wl,--exclude-all-symbols -L.
+override LDLIBS+= -lsteam_api64_original
+
+$(STEAM_SDK)/public/steam/steam_api.json:
+$(STEAM_SDK)/redistributable_bin/win64/steam_api64.dll:
+GENHEADERS:= printers.hpp proxies.hpp unholy_ABIfix.hpp
+OBJS:= steam_interceptor.o
+
+$(GENHEADERS): $(STEAM_SDK)/public/steam/steam_api.json ./generate_headers.lua
+	./generate_headers.lua < $(STEAM_SDK)/public/steam/steam_api.json
+
+steam_api64_original.lib: steam_api64_original.def
+	$(DLLTOOL) -d steam_api64_original.def -l steam_api64_original.lib
+
+steam_interceptor.dll: steam_interceptor.def $(OBJS) steam_api64_original.lib
+	$(CXX) $(CXXFLAGS) $(LDFLAGS) -o steam_interceptor.dll steam_interceptor.def $(OBJS) -static $(LDLIBS)
+	$(STRIP) --strip-unneeded steam_interceptor.dll
+
+steam_api64.dll: steam_interceptor.dll
+	ln steam_interceptor.dll steam_api64.dll
+release: steam_api64.dll
+	zip steam_interceptor steam_api64.dll steam_interceptor.ini install_readme.txt
+
+clean:
+	rm -f $(OBJS) steam_interceptor.dll steam_interceptor.zip
+clean-all: clean
+	rm -f $(GENHEADERS) steam_api64_original.lib steam_api64.dll
+
+makedepend: $(GENHEADERS)
+	makedepend -a -Y $(OBJS:.o=.cpp)
+
+.PHONY: clean clean-all makedepend
+.INTERMEDIATE: steam_api64_original.lib steam_api64.dll
+.DEFAULT_GOAL := steam_interceptor.dll
+
+# DO NOT DELETE
+
+steam_interceptor.o: unholy_ABIfix.hpp printers.hpp proxies.hpp callbacks.hpp

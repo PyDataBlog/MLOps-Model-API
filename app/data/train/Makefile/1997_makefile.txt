@@ -1,0 +1,290 @@
+# -*- mode:makefile; coding:utf-8; -*-
+{
+	use strict;
+	use utf8;
+	use vars qw($ABS_LOCAL_BBBIKE_DIR $BBBIKE_DATA_DIR $BBBIKE_MISCSRC_DIR $BBBIKE_TMP_DIR);
+	use vars qw($FRZ_NEXTCHECK_SRC $FRZ_SRC);
+	use vars qw($BBBIKE_HOSTEUROPE_HOST $BBBIKE_HOSTEUROPE_USER $BBBIKE_ROOT_URL);
+	use Cwd qw(realpath);
+	use File::Compare qw(compare);
+	use File::Temp qw(tempdir);
+	use IPC::Run qw(run);
+	use POSIX qw(strftime);
+
+	$ABS_LOCAL_BBBIKE_DIR =	realpath("..");
+	$BBBIKE_DATA_DIR      = "$ABS_LOCAL_BBBIKE_DIR/data";
+	$BBBIKE_MISCSRC_DIR   = "$ABS_LOCAL_BBBIKE_DIR/miscsrc";
+	$BBBIKE_TMP_DIR       = "$ABS_LOCAL_BBBIKE_DIR/tmp";
+	$FRZ_NEXTCHECK_SRC    = "$BBBIKE_DATA_DIR/../tmp/fragezeichen-outdoor-nextcheck.bbd";
+	$FRZ_SRC	      = "$BBBIKE_DATA_DIR/fragezeichen";
+	$BBBIKE_ROOT_URL      = "http://bbbike.de"; # XXX change to scheme-less once bbbike.de can https
+
+	require lib;
+	lib->import($ABS_LOCAL_BBBIKE_DIR, "$ABS_LOCAL_BBBIKE_DIR/lib");
+	require Strassen::Core;
+	require Strassen::MultiStrassen;
+	require VectorUtil;
+	require BBBikeVar;
+	require BBBikeUtil;
+	require Geography::Berlin_DE;
+
+	sub do_fragezeichen_list {
+		my($op_mode) = @_;
+		die "Invalid operation mode '$op_mode'" if $op_mode !~ m{^(local|XXX|remote|XXX-remote)$};
+
+		my $dir                 = ($op_mode eq 'local' ? "$BBBIKE_TMP_DIR/fragezeichen_list_local" :
+					   $op_mode eq 'XXX'   ? "$BBBIKE_TMP_DIR/XXX_list_local" :
+					   $op_mode eq 'XXX-remote' ? "$BBBIKE_TMP_DIR/XXX_list" :
+								 "$BBBIKE_TMP_DIR/fragezeichen_list");
+		my $bbbikeurl           = ($op_mode eq 'local' || $op_mode eq 'XXX' ? '/bbbike/cgi/bbbike.cgi' :
+										      "$BBBIKE_ROOT_URL/cgi-bin/bbbike.cgi");
+		my $fragezeichenformurl = ($op_mode eq 'local' || $op_mode eq 'XXX' ? '/bbbike/html/fragezeichenform.html' :
+										      "$BBBIKE_ROOT_URL/BBBike/html/fragezeichenform.html");
+		my $title               = ($op_mode =~ /^XXX/ ? 'Fragezeichen (privat+öffentlich)' : 'Fragezeichen');
+
+		mkdir $dir if !-d $dir;
+		chmod 0755, $dir;
+		my $tmpdir = tempdir(CLEANUP => 1) or die;
+		my $ot = MultiStrassen->new(Strassen->new("$BBBIKE_DATA_DIR/berlin_ortsteile"),
+					    Strassen->new("$BBBIKE_DATA_DIR/potsdam"));
+		my %citypart2polygon;
+		my %citypart2bbox;
+		while (1) {
+			my $r = $ot->next;
+			my @c = @{ $r->[Strassen::COORDS()] };
+			last if !@c;
+			my $name = $r->[Strassen::NAME()];
+			my $poly = [ map { [split /,/] } @c ];
+			push @{ $citypart2polygon{$name} }, $poly;
+			push @{ $citypart2bbox{$name} }, VectorUtil::bbox_of_polygon($poly);
+		}
+
+		my %citypart2fz;
+		my $fragezeichen_src = $op_mode =~ m{^XXX} ? $FRZ_NEXTCHECK_SRC : $FRZ_SRC;
+		my $fz = Strassen->new($fragezeichen_src);
+		while(1) {
+			my $r = $fz->next;
+			my @c = @{ $r->[Strassen::COORDS()] };
+			last if !@c;
+			@c = map { [split /,/] } @c;
+			CITYPART: while(my($citypart, $polygons) = each %citypart2polygon) {
+				for my $polygon_i (0 .. $#$polygons) {
+					my $polygon = $polygons->[$polygon_i];
+					my $bbox = $citypart2bbox{$citypart}->[$polygon_i];
+					for my $c (@c) {
+						# XXX using point_in_polygon is somewhat rough, probably should use something like line_in_polygon
+						if (VectorUtil::point_in_grid(@$c, @$bbox) &&
+						    VectorUtil::point_in_polygon($c, $polygon)) {
+		#warn "yes for $r->[Strassen::NAME()] in $citypart";
+							my $s = $citypart2fz{$citypart};
+							if (!$s) {
+								$s = $citypart2fz{$citypart} = Strassen->new;
+							}
+							$s->push($r);
+							next CITYPART;
+						}
+					}
+				}
+			}
+		}
+
+		my %citypart2link;
+		while(my($citypart, $fz) = each %citypart2fz) {
+			@{ $fz->{Data} } = sort @{ $fz->{Data} };
+			my $bbd = $fz->as_string;
+			my @cmd = ("$BBBIKE_MISCSRC_DIR/bbd2mapservhtml.pl",
+				   '-bbbikeurl', $bbbikeurl,
+				   '-email', $BBBike::EMAIL,
+				   '-partialhtml', '-linklist',
+				   '-mapscale', '1:6000',
+				   '-customlink', $fragezeichenformurl . '?supplied_coord=$CENTER_COORD;strname=$NAME;strname_html=$NAME_HTML Eintragen',
+				   '-noroutelistbutton',
+				   '-linktarget', 'int_frame',
+				  );
+			my $err;
+			my $citypart_html;
+			run \@cmd, \$bbd, \$citypart_html, \$err or die "Failed: @cmd: $?";
+
+			my $basename = BBBikeUtil::umlauts_to_german($citypart) . ".html";
+			$basename =~ s{ }{_}g;
+			$citypart2link{$citypart} = {label => $citypart, href => $basename, count => $fz->count};
+			my $ofile = "$dir/" . $basename;
+			open my $ofh, ">", "$ofile~" or die "Can't write to $ofile~: $!";
+			binmode $ofh, ":utf8";
+			print $ofh qq{<html><head><title>BBBike: $title in $citypart</title><meta http-equiv="content-type" content="text/html; charset=utf-8"></title><body style="margin:0px;"><div style="width:100%; height:50%; overflow:scroll; padding:0px;"><div style="padding:5px;">};
+			print $ofh "<h1>$title: $citypart</h1>";
+			print $ofh $citypart_html;
+			print $ofh qq{<br/><a href="index.html">Liste der Ortsteile</a> (<a href="index-sort-by-count.html">sortiert nach Anzahl</a>)<br/>};
+			print $ofh qq{</div></div><iframe style="width:100%; height:50%; border:0px;" name="int_frame"></iframe></body></html>};
+			close $ofh or die $!;
+			if (!-f $ofile || compare("$ofile~", $ofile) != 0) {
+				chmod 0644, "$ofile~";
+				rename "$ofile~", $ofile or die "Can't rename $ofile~: $!";
+			} else {
+				unlink "$ofile~";
+			}
+		}
+
+		for my $def (["index.html", 0],
+			     ["index-sort-by-count.html", 1],
+			    ) {
+			my($output, $do_sort_by_count) = @$def;
+			my $index_file = "$dir/$output";
+			open my $ofh, ">", "$index_file~" or die "While writing to $index_file~: $!";
+			binmode $ofh, ":utf8";
+			print $ofh qq{<html><head><title>BBBike: $title</title><meta http-equiv="content-type" content="text/html; charset=utf-8"></title><body>};
+			print $ofh "<h1>BBBike: $title</h1>";
+
+			my $total_count = 0;
+			my $stat = eval {
+				die "Don't use median based coloring...";
+				require Statistics::Descriptive;
+				Statistics::Descriptive::Full->new;
+			};
+			for my $citypart (sort keys %citypart2polygon) {
+				my $link = $citypart2link{$citypart};
+				if ($link) {
+					$total_count += $link->{count};
+					if ($stat) {
+						$stat->add_data($link->{count});
+					}
+				}
+			}
+
+			my $median;
+			if ($stat) { $median = $stat->median }
+
+			my @cityparts = $do_sort_by_count
+				? map { $_->[1] }
+				  sort { $b->[0] <=> $a->[0] || $a->[1] cmp $b->[1] } # sort by count, then by name
+				  map { my $link = $citypart2link{$_}; [ $link ? $link->{count} : 0, $_ ]; }
+				  keys %citypart2polygon
+				: sort keys %citypart2polygon;
+			for my $citypart (@cityparts) {
+				my $link = $citypart2link{$citypart};
+				if ($link) {
+					my $style_attr = "";
+					if ($median) {
+						if ($link->{count} < $median) {
+							$style_attr = 'style="color:#cc7c00;"';
+						} else {
+							$style_attr = 'style="color:red;"';
+						}
+					}
+					print $ofh qq{<a $style_attr href="$link->{href}">$link->{label}</a> ($link->{count})<br/>\n}; # XXX escaping?
+				} else {
+					print $ofh qq{<span style="color:green;">$citypart</span> (0)<br/>\n}; # XXX escaping?
+				}
+			}
+			if ($op_mode =~ m{^XXX}) {
+				my $geo = Geography::Berlin_DE->new;
+				my($lon,$lat) = split /,/, $geo->center_wgs84;
+				print $ofh "<hr/>";
+				print $ofh qq{<a href="/cgi-bin/bbbikeleaflet.cgi?geojsonp_url=/BBBike/tmp/bbbgeojsonp/fragezeichen-outdoor-nextcheck.bbbgeojsonp&zoom=12&lat=$lat&lon=$lon">Karte mit allen Fragezeichen</a><br>\n};
+			}
+			print $ofh "<hr/>";
+			print $ofh "Insgesamt: $total_count $title-Einträge<br>\n";
+			print $ofh "Aktualisiert: " . strftime("%F %T", localtime) . "<br>\n";
+			print $ofh "<hr/>";
+			print $ofh qq{<a href="$BBBIKE_ROOT_URL">BBBike</a>\n};
+			print $ofh qq{</body></html>};
+			close $ofh or die $!;
+			chmod 0644, "$index_file~";
+			rename "$index_file~", $index_file or die "While renaming $index_file~: $!";
+		}
+		"";
+	}
+
+	use vars qw(@DO_FRAGEZEICHEN_LIST_DEPS);
+	@DO_FRAGEZEICHEN_LIST_DEPS = ("$BBBIKE_DATA_DIR/fragezeichen",
+				      "$BBBIKE_DATA_DIR/berlin_ortsteile",
+				      "$BBBIKE_MISCSRC_DIR/bbd2mapservhtml.pl",
+				      "$BBBIKE_MISCSRC_DIR/grepstrassen",
+				      "SlayMakefile",
+				     );
+}
+
+all:
+
+fragezeichen-list:		{ "$BBBIKE_TMP_DIR/fragezeichen_list/index.html" }
+
+{ "$BBBIKE_TMP_DIR/fragezeichen_list/index.html" } :		{ @DO_FRAGEZEICHEN_LIST_DEPS }
+	{
+		do_fragezeichen_list('remote');
+	}
+
+fragezeichen-list-local:		{ "$BBBIKE_TMP_DIR/fragezeichen_list_local/index.html" }
+	{
+		print "Try now:\n";
+		print "\n";
+		print "    firefox $BBBIKE_TMP_DIR/fragezeichen_list_local/index.html\n";
+		print "    firefox $BBBIKE_TMP_DIR/fragezeichen_list_local/index-sort-by-count.html\n";
+		print "    firefox http://localhost/bbbike/tmp/fragezeichen_list_local/index.html\n";
+		print "    firefox http://localhost/bbbike/tmp/fragezeichen_list_local/index-sort-by-count.html\n";
+		print "\n";
+		"";
+	}
+
+{ "$BBBIKE_TMP_DIR/fragezeichen_list_local/index.html" } :	{ @DO_FRAGEZEICHEN_LIST_DEPS }
+	{
+		do_fragezeichen_list("local");
+	}
+
+XXX-list:				{ "$BBBIKE_TMP_DIR/XXX_list/index.html" }
+
+{ "$BBBIKE_TMP_DIR/XXX_list/index.html" } :		{ map { $_ eq $FRZ_SRC ? $FRZ_NEXTCHECK_SRC : $_ } @DO_FRAGEZEICHEN_LIST_DEPS }
+	{
+		do_fragezeichen_list('XXX-remote');
+	}
+
+XXX-list-local:				{ "$BBBIKE_TMP_DIR/XXX_list_local/index.html" }
+	{
+		print "Try now:\n";
+		print "\n";
+		print "    firefox $BBBIKE_TMP_DIR/XXX_list_local/index.html\n";
+		print "    firefox $BBBIKE_TMP_DIR/XXX_list_local/index-sort-by-count.html\n";
+		print "\n";
+		"";
+	}
+
+{ "$BBBIKE_TMP_DIR/XXX_list_local/index.html" } :	{ map { $_ eq $FRZ_SRC ? $FRZ_NEXTCHECK_SRC : $_ } @DO_FRAGEZEICHEN_LIST_DEPS }
+	{
+		do_fragezeichen_list('XXX');
+	}
+
+
+rsync-fragezeichen-list:	fragezeichen-list
+	{
+		my $host = $BBBIKE_HOSTEUROPE_HOST || 'bbbike.de';
+		my $user = $BBBIKE_HOSTEUROPE_USER || 'root';
+		my @cmd = (qw(rsync -avz), "$BBBIKE_TMP_DIR/fragezeichen_list/", $user.'@'.$host.':/srv/www/bbbike-webserver/BBBike/tmp/fragezeichen_list/');
+		system @cmd;
+		die "@cmd failed: $?" if $? != 0;
+	}
+
+rsync-XXX-list:	XXX-list
+	{
+		my $host = $BBBIKE_HOSTEUROPE_HOST || 'bbbike.de';
+		my $user = $BBBIKE_HOSTEUROPE_USER || 'root';
+		my @cmd = (qw(rsync -avz), "$BBBIKE_TMP_DIR/XXX_list/", $user.'@'.$host.':/srv/www/bbbike-webserver/BBBike/tmp/XXX_list/');
+		system @cmd;
+		die "@cmd failed: $?" if $? != 0;
+	}
+
+rsync-bbbgeojsonp:
+	{
+		my $host = $BBBIKE_HOSTEUROPE_HOST || 'bbbike.de';
+		my $user = $BBBIKE_HOSTEUROPE_USER || 'root';
+		my @cmd = (qw(rsync -avz), "$BBBIKE_TMP_DIR/bbbgeojsonp/", $user.'@'.$host.':/srv/www/bbbike-webserver/BBBike/tmp/bbbgeojsonp/');
+		system @cmd;
+		die "@cmd failed: $?" if $? != 0;
+	}
+
+rsync-geojson:
+	{
+		my $host = $BBBIKE_HOSTEUROPE_HOST || 'bbbike.de';
+		my $user = $BBBIKE_HOSTEUROPE_USER || 'root';
+		my @cmd = (qw(rsync -avz), "$BBBIKE_TMP_DIR/geojson/", $user.'@'.$host.':/srv/www/bbbike-webserver/BBBike/tmp/geojson/');
+		system @cmd;
+		die "@cmd failed: $?" if $? != 0;
+	}

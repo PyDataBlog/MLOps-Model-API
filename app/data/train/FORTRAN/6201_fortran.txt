@@ -1,0 +1,179 @@
+!*********************************************************************
+program laplace
+!*********************************************************************
+!
+!  This program solves the Laplace equation using the ADI method.
+!
+!  Copyright (C) 2012  Jason Graham <jgraha8@gmail.com>
+!
+!  This file is part of matsolv
+!
+!  matsolv is free software: you can redistribute it and/or modify it
+!  under the terms of the GNU General Public License as published by
+!  the Free Software Foundation, either version 3 of the License, or
+!  (at your option) any later version.
+!
+!  matsolv is distributed in the hope that it will be useful, but
+!  WITHOUT ANY WARRANTY; without even the implied warranty of
+!  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+!  General Public License for more details.
+!
+!  You should have received a copy of the GNU General Public License
+!  along with matsolv.  If not, see <http://www.gnu.org/licenses/>.
+!
+use matsolv, rp => matsolv_rp
+implicit none
+
+include 'tecryte.h'
+
+integer, parameter :: Nsamples = 50
+integer, parameter :: Nx=64, Ny=Nx
+real(rp), parameter :: Lx = 1._rp, Ly=Lx
+real(rp), parameter :: dx = Lx/Nx, dy = Ly/Ny
+
+real(rp), parameter :: Te = 0._rp, Tw = 0._rp
+real(rp), parameter :: Tn = 1._rp, Ts = 0._rp
+
+real(rp), parameter :: eps = 1.e-12_rp
+
+real(rp), parameter :: dx2 = dx**2, dy2 = dy**2
+
+real(rp), allocatable, dimension(:) :: x,y
+real(rp), allocatable, dimension(:,:) :: phi, phi_f
+real(rp), allocatable, dimension(:,:) :: AS,AW,AP,AE,AN,B
+
+integer :: i,j, ns
+integer :: iter, irc
+
+real(8) :: clock_start, clock_stop
+
+allocate(x(0:Nx+1), y(0:Ny+1))
+allocate(phi(0:Nx+1,0:Ny+1))
+allocate(AS(0:Nx+1,0:Ny+1),AW(0:Nx+1,0:Ny+1), AP(0:Nx+1,0:Ny+1))
+allocate(AE(0:Nx+1,0:Ny+1), AN(0:Nx+1,0:Ny+1), B(0:Nx+1,0:Ny+1))
+
+! Set x and y
+do i=0, Nx+1
+  x(i) = (i-1)*dx + dx/2._rp
+enddo
+
+do j=0, Ny+1
+  y(j) = (j-1)*dy + dy/2._rp
+enddo
+
+! Initialize phi
+phi=0._rp
+
+! Set coefficients
+AS=0._rp
+AW=0._rp
+AP=0._rp
+AE=0._rp
+AN=0._rp
+B=0._rp
+
+! Set ghost cell corners
+AP(0,0) = 1._rp
+AP(Nx+1,0) = 1._rp
+AP(0,Ny+1) = 1._rp
+AP(Nx+1,Ny+1) = 1._rp
+
+! Set bottom ghost cells
+AP(1:Nx,0) = 1._rp
+AN(1:Nx,0) = 1._rp
+B(1:Nx,0) = 2*Ts
+
+! Set top ghost cells
+AP(1:Nx,Ny+1) = 1._rp
+AS(1:Nx,Ny+1) = 1._rp
+B(1:Nx,Ny+1) = 2*Tn
+
+! Set left ghost cells
+AP(0,1:Ny) = 1._rp
+AE(0,1:Ny) = 1._rp
+B(0,1:Ny) = 2*Tw
+
+! Set right ghost cells
+AP(Nx+1,1:Ny) = 1._rp
+AW(Nx+1,1:Ny) = 1._rp
+B(Nx+1,1:Ny) = 2*Te*sin(2*3.14/Ly*y(1:Ny))
+!B(Nx+1,Ny/2:Ny) = 4*Te*sin(4*3.14/Ly*y(Ny/2:Ny))
+
+! Set interior cells
+AS(1:Nx,1:Ny) = 1._rp / dy2
+AW(1:Nx,1:Ny) = 1._rp / dx2
+AP(1:Nx,1:Ny) = -2*( 1._rp / dx2 + 1._rp / dy2 )
+AE(1:Nx,1:Ny) = 1._rp / dx2
+AN(1:Nx,1:Ny) = 1._rp / dy2
+
+call cpu_time( clock_start )
+do ns=1, Nsamples
+   phi = 1.0_rp
+   call matsolv_adi(AS,AW,AP,AE,AN,B,eps,phi,iter, irc)
+enddo
+call cpu_time( clock_stop )
+write(*,*) 'iter, irc, cpu time : ', iter, irc, clock_stop - clock_start
+
+! Interpolate boundary points to check BC's
+! Lower boundary
+allocate(phi_f(0:Nx+1,0:Ny+1))
+phi_f = phi
+! Lower boundary
+phi_f(1:Nx,0) = 0.5*(phi(1:Nx,0) + phi(1:Nx,1))
+! Top boundary
+phi_f(1:Nx,Ny+1) = 0.5*(phi(1:Nx,Ny) + phi(1:Nx,Ny+1))
+! Left boundary
+phi_f(0,1:Ny) = 0.5*(phi(0,1:Ny)+phi(1,1:Ny))
+! Right boundary
+phi_f(Nx+1,1:Ny) = 0.5*(phi(Nx,1:Ny)+phi(Nx+1,1:Ny))
+
+! Bottom Left Corner
+phi_f(0,0) = 0.5*(phi_f(1,0)+phi_f(0,1))
+! Top Left Corner
+phi_f(0,Ny+1) = 0.5*(phi_f(0,Ny)+phi_f(1,Ny+1))
+! Bottom Right Corner
+phi_f(Nx+1,0) = 0.5*(phi_f(Nx,0)+phi_f(Nx+1,1))
+! Top Left Corner
+phi_f(Nx+1,Ny+1) = 0.5*(phi_f(Nx,Ny+1) + phi_f(Nx+1,Ny))
+
+x(0) = x(0) + dx/2
+x(Nx+1) = x(Nx+1) - dx/2
+y(0) = y(0) + dy/2
+y(Ny+1) = y(Ny+1) - dy/2
+
+call write_tecplot_header_ND('phi.dat', 'rewind', 3, &
+  (/ Nx+2, Ny+2 /), '"x", "y", "phi"', 'Steady State', 1)
+call write_real_data_2D('phi.dat', 'append', 'formatted', &
+  1, Nx+2, Ny+2, (/ phi_f /), 0 , x, y)
+
+!call write_tecplot_header_ND('B.dat', 'rewind', 3, &
+  !(/ Nx+2, Ny+2 /), '"x", "y", "B"', 'Steady State', 1)
+!call write_real_data_2D('B.dat', 'append', 'formatted', &
+  !1, Nx+2, Ny+2, (/ B /), 0 , x, y)
+
+!call write_tecplot_header_ND('AS.dat', 'rewind', 3, &
+  !(/ Nx+2, Ny+2 /), '"x", "y", "AS"', 'Steady State', 1)
+!call write_real_data_2D('AS.dat', 'append', 'formatted', &
+  !1, Nx+2, Ny+2, (/ AS /), 0 , x, y)
+
+!call write_tecplot_header_ND('AW.dat', 'rewind', 3, &
+  !(/ Nx+2, Ny+2 /), '"x", "y", "AW"', 'Steady State', 1)
+!call write_real_data_2D('AW.dat', 'append', 'formatted', &
+  !1, Nx+2, Ny+2, (/ AW /), 0 , x, y)  
+
+!call write_tecplot_header_ND('AP.dat', 'rewind', 3, &
+  !(/ Nx+2, Ny+2 /), '"x", "y", "AP"', 'Steady State', 1)
+!call write_real_data_2D('AP.dat', 'append', 'formatted', &
+  !1, Nx+2, Ny+2, (/ AP /), 0 , x, y) 
+
+!call write_tecplot_header_ND('AE.dat', 'rewind', 3, &
+  !(/ Nx+2, Ny+2 /), '"x", "y", "AE"', 'Steady State', 1)
+!call write_real_data_2D('AE.dat', 'append', 'formatted', &
+  !1, Nx+2, Ny+2, (/ AE /), 0 , x, y)   
+
+!call write_tecplot_header_ND('AN.dat', 'rewind', 3, &
+  !(/ Nx+2, Ny+2 /), '"x", "y", "AN"', 'Steady State', 1)
+!call write_real_data_2D('AN.dat', 'append', 'formatted', &
+  !1, Nx+2, Ny+2, (/ AN /), 0 , x, y)   
+
+end program laplace

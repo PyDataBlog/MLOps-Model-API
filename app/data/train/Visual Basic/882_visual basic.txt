@@ -1,0 +1,449 @@
+﻿Imports System.IO
+Imports Gif.Components
+Namespace GenKernel
+    ''' <summary>
+    ''' 为字体测量和绘制提供接口。
+    ''' </summary>
+    Public Class MyTextRenderer
+        ''' <summary>
+        ''' 绘制使用的掩码。
+        ''' </summary>
+        Public Shared BitMask As String
+        ''' <summary>
+        ''' 测量指定的文字。
+        ''' </summary>
+        ''' <param name="str">要测量的文字</param>
+        ''' <param name="fon">使用的字体</param>
+        ''' <returns>测量的结果</returns>
+        Public Shared Function MeasureText(ByVal str As String, ByVal fon As Font) As Size
+            Dim lines() As String = str.Split({vbCrLf}, StringSplitOptions.None)
+            Dim i, w, h As Integer
+            Dim siz As Size
+            For i = 0 To lines.Length - 1
+                siz = TextRenderer.MeasureText(lines(i), fon)
+                siz.Height = Math.Max(siz.Height, 20)
+                siz.Width -= 5
+                siz.Height -= 3
+                If siz.Width >= GlobalOptions.MaxPixel Then
+                    w = GlobalOptions.MaxPixel
+                Else
+                    w = Math.Max(w, siz.Width)
+                End If
+                If siz.Width Mod GlobalOptions.MaxPixel = 0 Then
+                    h += (siz.Width \ GlobalOptions.MaxPixel) * siz.Height
+                Else
+                    h += (siz.Width \ GlobalOptions.MaxPixel + 1) * siz.Height
+                End If
+            Next
+            Return New Size(w, h)
+        End Function
+        ''' <summary>
+        ''' 绘制指定的文字
+        ''' </summary>
+        ''' <param name="g">绘制使用的Graphics</param>
+        ''' <param name="str">要绘制的文字</param>
+        ''' <param name="fon">要使用的字体</param>
+        ''' <param name="poi">绘制的位置</param>
+        ''' <param name="clr">文字颜色</param>
+        Public Shared Sub DrawString(g As Graphics, str As String, fon As Font, ByVal poi As Point, clr As Color)
+            Dim lines() As String = str.Split({vbCrLf}, StringSplitOptions.None)
+            Dim lb() As String = Nothing
+            If BitMask <> "" Then
+                lb = BitMask.Split({vbCrLf}, StringSplitOptions.None)
+            End If
+            Dim nl As New List(Of String)
+            Dim nb As New List(Of String)
+            Dim i, j, start As Integer
+            Dim siz, siz2 As Size
+            For i = 0 To lines.Length - 1
+                Dim c As String = lines(i)
+                start = 0
+                For j = 0 To lines(i).Length - 1
+                    siz2 = siz
+                    siz = TextRenderer.MeasureText(c.Substring(start, j - start + 1), fon)
+                    siz.Width -= 5
+                    siz.Height -= 3
+                    If siz.Width > GlobalOptions.MaxPixel Then
+                        nl.Add(c.Substring(start, j - start + 1))
+                        start = j + 1
+                    End If
+                Next
+                If start <> lines(i).Length Then
+                    nl.Add(c.Substring(start))
+                    If BitMask <> "" Then
+                        nb.Add(lb(i).Substring(start))
+                    End If
+                End If
+            Next
+            Dim p As New Pen(Color.Black, 1)
+            p.DashStyle = Drawing2D.DashStyle.Dash
+            For i = 0 To nl.Count - 1
+                Dim c As String = nl(i)
+                If BitMask = "" Then
+                    g.DrawString(c, fon, New SolidBrush(clr), poi)
+                    poi.Y += TextRenderer.MeasureText(c, fon).Height
+                Else
+                    Dim curClr As Color = clr
+                    Dim cb As String = nb(i)
+                    Dim wid As Integer = poi.X
+                    For j = 0 To c.Length - 1
+                        If cb.Substring(j, 1) = "@" Then curClr = Color.FromArgb(25, 147, 234) Else curClr = Color.Black
+                        g.DrawString(c.Substring(j, 1), fon, New SolidBrush(curClr), New Point(wid, poi.Y))
+                        wid = poi.X + TextRenderer.MeasureText(c.Substring(0, j + 1), fon).Width - 9
+                    Next
+                    poi.Y += TextRenderer.MeasureText(c, fon).Height
+                    wid = poi.X
+                    For j = 0 To c.Length - 1
+                        Dim wid2 As Integer = poi.X + TextRenderer.MeasureText(c.Substring(0, j + 1), fon).Width - 7
+                        If cb.Substring(j, 1) = "-" Then
+                            g.DrawLine(p, New Point(wid, poi.Y), New Point(wid2, poi.Y))
+                        End If
+                        wid = wid2
+                    Next
+                End If
+            Next
+        End Sub
+    End Class
+    ''' <summary>
+    ''' 定义气泡。
+    ''' </summary>
+    Public Class Bubble
+        Public preb As Bitmap
+        Public writepoint, icopoint, nickpoint As Point
+        Public TopLeft, TopMiddle, TopRight, MiddleLeft, MiddleRight, BottomLeft, BottomMiddle, BottomRight As Rectangle
+        Public offtl, offtm, offtr, offml, offmr, offbl, offbm, offbr As Point
+        Public ctxt, sc As Color
+        Public mlne, mcul As Integer
+        Public name As String
+        ''' <summary>
+        ''' 绘制气泡。
+        ''' </summary>
+        ''' <param name="bits">绘制的目标</param>
+        ''' <param name="siz">气泡大小</param>
+        Public Sub Draw(ByRef bits As Bitmap, ByVal siz As Size)
+            Dim i, j As Integer
+            Dim gra As Graphics = Graphics.FromImage(bits)
+            'draw the topleft
+            gra.DrawImage(preb.Clone(TopLeft, preb.PixelFormat), TopLeft.Location + offtl)
+            'draw the topmiddle
+            For i = TopLeft.Right To TopLeft.Right + siz.Width
+                gra.DrawImage(preb.Clone(TopMiddle, bits.PixelFormat), New Point(i, TopMiddle.Y) + offtm)
+            Next
+            'draw the topright
+            gra.DrawImage(preb.Clone(TopRight, bits.PixelFormat), New Point(TopLeft.Right + siz.Width, TopRight.Y) + offtr)
+            'draw the middleleft
+            For i = TopLeft.Bottom To TopLeft.Bottom + siz.Height
+                gra.DrawImage(preb.Clone(MiddleLeft, bits.PixelFormat), New Point(MiddleLeft.X, i) + offml)
+            Next
+            'fill the middlemiddle
+            For i = TopLeft.Right To TopLeft.Right + siz.Width
+                For j = TopLeft.Bottom To TopLeft.Bottom + siz.Height
+                    bits.SetPixel(i, j, sc)
+                Next
+            Next
+            'draw the middleright
+            For i = TopRight.Bottom To TopRight.Bottom + siz.Height
+                gra.DrawImage(preb.Clone(MiddleRight, bits.PixelFormat), New Point(MiddleLeft.Right + siz.Width, i) + offmr)
+            Next
+            'draw the bottomleft
+            gra.DrawImage(preb.Clone(BottomLeft, bits.PixelFormat), New Point(BottomLeft.X, TopMiddle.Bottom + siz.Height) + offbl)
+            'draw the bottommiddle
+            For i = BottomLeft.Right To MiddleLeft.Right + siz.Width
+                gra.DrawImage(preb.Clone(BottomMiddle, bits.PixelFormat), New Point(i, TopMiddle.Bottom + siz.Height) + offbm)
+            Next
+            'draw the bottomright
+            gra.DrawImage(preb.Clone(BottomRight, bits.PixelFormat), New Point(MiddleLeft.Right + siz.Width, TopMiddle.Bottom + siz.Height) + offbr)
+        End Sub
+    End Class
+    ''' <summary>
+    ''' 定义用户。
+    ''' </summary>
+    Public Class CommonUser
+        Public bal As Bubble
+        Public name As String
+        Public icon As Bitmap
+        Public fon As Font
+        Public id As String
+        Public icop As String
+        Public Shared bubbles As New Dictionary(Of String, Bubble)
+        ''' <summary>
+        ''' 使用指定的气泡、昵称、头像、字体和用户ID初始化CommonUser类的新实例。
+        ''' </summary>
+        ''' <param name="_b">气泡</param>
+        ''' <param name="nm">昵称</param>
+        ''' <param name="ic">头像</param>
+        ''' <param name="_f">字体</param>
+        ''' <param name="_id">用户ID</param>
+        Public Sub New(_b As Bubble, nm As String, ic As Bitmap, _f As Font, _id As String)
+            bal = _b
+            name = nm
+            If ic IsNot Nothing Then icon = New Bitmap(ic, New Size(30, 30))
+            fon = _f
+            id = _id
+        End Sub
+        ''' <summary>
+        ''' 读取所有气泡。
+        ''' </summary>
+        Public Shared Sub ReadBubbles()
+            Dim sr As New StreamReader(Application.StartupPath + "\Bubbles\Bubbles.ini", Text.Encoding.Default)
+            While Not sr.EndOfStream
+                Dim bal As New Bubble
+                Dim nm As String = sr.ReadLine
+                bal.preb = Image.FromFile("Bubbles\" + sr.ReadLine)
+                Dim tmp As String = sr.ReadLine
+                bal.icopoint.X = Val(tmp.Substring(1, tmp.IndexOf(",") - 1))
+                bal.icopoint.Y = Val(tmp.Substring(tmp.IndexOf(",") + 1))
+                tmp = sr.ReadLine
+                bal.writepoint.X = Val(tmp.Substring(1, tmp.IndexOf(",") - 1))
+                bal.writepoint.Y = Val(tmp.Substring(tmp.IndexOf(",") + 1))
+                tmp = sr.ReadLine
+                bal.nickpoint.X = Val(tmp.Substring(1, tmp.IndexOf(",") - 1))
+                bal.nickpoint.Y = Val(tmp.Substring(tmp.IndexOf(",") + 1))
+                ReadRect(sr, bal.TopLeft, bal.offtl)
+                ReadRect(sr, bal.TopMiddle, bal.offtm)
+                ReadRect(sr, bal.TopRight, bal.offtr)
+                ReadRect(sr, bal.MiddleLeft, bal.offml)
+                ReadRect(sr, bal.MiddleRight, bal.offmr)
+                ReadRect(sr, bal.BottomLeft, bal.offbl)
+                ReadRect(sr, bal.BottomMiddle, bal.offbm)
+                ReadRect(sr, bal.BottomRight, bal.offbr)
+                ReadColor(sr, bal.ctxt)
+                ReadColor(sr, bal.sc)
+                bal.mlne = Val(sr.ReadLine)
+                bal.mcul = Val(sr.ReadLine)
+                bal.name = nm
+                bubbles.Add(nm, bal)
+            End While
+        End Sub
+        ''' <summary>
+        ''' 生成截图。
+        ''' </summary>
+        ''' <param name="txt">说的话</param>
+        ''' <returns>生成结果</returns>
+        Public Function Generate(txt As String) As Bitmap
+            Dim tsiz As Size = MyTextRenderer.MeasureText(txt, fon)
+            Dim nsiz As Size = TextRenderer.MeasureText(name, New Font("微软雅黑", 9))
+            Dim fsiz As Size
+            fsiz.Width = Math.Max(nsiz.Width + 73, tsiz.Width + 66)
+            fsiz.Height = tsiz.Height + 56
+            tsiz.Width -= bal.mcul
+            tsiz.Height -= bal.mlne
+            Dim bits As New Bitmap(fsiz.Width, fsiz.Height)
+            Dim gra As Graphics = Graphics.FromImage(bits)
+            'draw the background
+            gra.Clear(GlobalOptions.BackColor)
+            'draw the icon
+            If icon IsNot Nothing Then gra.DrawImage(icon, bal.icopoint)
+            'draw the nickname
+            gra.DrawString(name, New Font(New FontFamily("微软雅黑"), 9), New SolidBrush(Color.FromArgb(139, 139, 139)), bal.nickpoint)
+            'draw the bubble
+            bal.Draw(bits, tsiz)
+            'draw the string
+            MyTextRenderer.DrawString(gra, txt, fon, bal.writepoint, bal.ctxt)
+            gra.Dispose()
+            Return bits
+        End Function
+        ''' <summary>
+        ''' 生成截图。
+        ''' </summary>
+        ''' <param name="bm">发的图</param>
+        ''' <returns>生成结果</returns>
+        Public Function Generate(bm As Bitmap) As Bitmap
+            Dim tsiz As Size = bm.Size
+            Dim nsiz As Size = TextRenderer.MeasureText(name, New Font("微软雅黑", 9))
+            Dim fsiz As Size
+            fsiz.Width = Math.Max(nsiz.Width + 67, tsiz.Width + 60)
+            fsiz.Height = tsiz.Height + 50
+            tsiz.Width -= bal.mcul + 6
+            tsiz.Height -= bal.mlne + 6
+            Dim bits As New Bitmap(fsiz.Width, fsiz.Height)
+            Dim gra As Graphics = Graphics.FromImage(bits)
+            'draw the background
+            gra.Clear(GlobalOptions.BackColor)
+            'draw the icon
+            If icon IsNot Nothing Then gra.DrawImage(icon, bal.icopoint)
+            'draw the nickname
+            gra.DrawString(name, New Font(New FontFamily("微软雅黑"), 9), New SolidBrush(Color.FromArgb(139, 139, 139)), bal.nickpoint)
+            'draw the bubble
+            bal.Draw(bits, tsiz)
+            'draw the image
+            If bm IsNot Nothing Then gra.DrawImage(bm, bal.writepoint - New Size(2, 2))
+            gra.Dispose()
+            Return bits
+        End Function
+        Public Sub Generate_Gif(gif As String, save As String, Optional dialog As Boolean = False)
+            Dim dia As New GenerateProgress
+            If dialog Then dia.Show()
+            Dim src As New GifDecoder
+            dia.ToolStripStatusLabel1.Text = "读取GIF..."
+            Application.DoEvents()
+            src.Read(gif)
+            Dim cnt As Integer = src.GetFrameCount
+            dia.ProgressBar1.Maximum = cnt
+            Dim sav As New AnimatedGifEncoder
+            sav.Start(save)
+            Dim back As Bitmap = Generate(New Bitmap(src.GetFrameSize.Width, src.GetFrameSize.Height))
+            Dim drawpoint As Point = bal.writepoint - New Size(2, 2)
+            For i = 0 To cnt - 1
+                Dim tmp As New Bitmap(back)
+                Dim gra As Graphics = Graphics.FromImage(tmp)
+                gra.DrawImage(src.GetFrame(i), drawpoint)
+                gra.Dispose()
+                sav.AddFrame(tmp)
+                sav.SetDelay(src.GetDelay(i))
+                dia.ProgressBar1.Value += 1
+                dia.ToolStripStatusLabel1.Text = "生成..." + (i + 1).ToString + "/" + cnt.ToString
+                Application.DoEvents()
+                GC.Collect()
+            Next
+            sav.Finish()
+            dia.Close()
+        End Sub
+        ''' <summary>
+        ''' This is a helper function of ReadBubbles.
+        ''' </summary>
+        ''' <param name="sr">The Stream</param>
+        ''' <param name="rect">The Return Rectangle</param>
+        ''' <param name="p">The Return Point</param>
+        Protected Shared Sub ReadRect(ByRef sr As StreamReader, ByRef rect As Rectangle, ByRef p As Point)
+            Dim str As String = sr.ReadLine
+            rect.X = Val(str.Substring(0, str.IndexOf(" ")))
+            str = str.Substring(str.IndexOf(" ") + 1)
+            rect.Y = Val(str.Substring(0, str.IndexOf(" ")))
+            str = str.Substring(str.IndexOf(" ") + 1)
+            rect.Width = Val(str.Substring(0, str.IndexOf(" ")))
+            str = str.Substring(str.IndexOf(" ") + 1)
+            rect.Height = Val(str.Substring(0, str.IndexOf(" ")))
+            str = str.Substring(str.IndexOf(" ") + 1)
+            p.X = Val(str.Substring(0, str.IndexOf(" ")))
+            str = str.Substring(str.IndexOf(" ") + 1)
+            p.Y = Val(str)
+        End Sub
+        'This is a helper function of ReadBalloons.
+        Private Shared Sub ReadColor(ByRef sr As StreamReader, ByRef clr As Color)
+            clr = Color.FromArgb(Val(sr.ReadLine), Val(sr.ReadLine), Val(sr.ReadLine))
+        End Sub
+        Public Function GenerateText(txt As String, time As String) As Bitmap
+            Dim tmp As String = name
+            If id.IndexOf("@") <> -1 Then
+                tmp += "<"
+            Else
+                tmp += "("
+            End If
+            Dim presize As Size = TextRenderer.MeasureText(tmp, New Font("微软雅黑"， 9))
+            presize.Width -= 8
+            Dim nsize As Size = TextRenderer.MeasureText(name + "<" + id + ">" + time, New Font("微软雅黑", 9))
+            Dim tsize As Size = MyTextRenderer.MeasureText(txt, fon)
+            Dim idsize As Size = TextRenderer.MeasureText(id, New Font("微软雅黑"， 9, FontStyle.Underline))
+            idsize.Width -= 8
+            Dim bits As New Bitmap(Math.Max(tsize.Width + 18, nsize.Width + 10), tsize.Height + 25)
+            Dim gra As Graphics = Graphics.FromImage(bits)
+            gra.Clear(Color.FromArgb(223, 236, 246))
+            gra.DrawString(tmp, New Font("微软雅黑", 9), New SolidBrush(Color.FromArgb(0, 110, 254)), New Point(10, 2))
+            gra.DrawString(id, New Font("微软雅黑", 9, FontStyle.Underline), New SolidBrush(Color.FromArgb(0, 114, 193)), New Point(10 + presize.Width, 2))
+            If id.IndexOf("@") <> -1 Then
+                tmp = ">" + time
+            Else
+                tmp = ")" + time
+            End If
+            gra.DrawString(tmp, New Font("微软雅黑"， 9), New SolidBrush(Color.FromArgb(0, 110, 254)), New Point(10 + presize.Width + idsize.Width, 2))
+            MyTextRenderer.DrawString(gra, txt, fon, New Point(18, 23), Color.Black)
+            gra.Dispose()
+            Return bits
+        End Function
+        Public Function GenerateText(ima As Bitmap, time As String) As Bitmap
+            Dim isize As Size
+            If ima.Width <= GlobalOptions.MaxPixel Then
+                isize = ima.Size
+            Else
+                isize.Width = GlobalOptions.MaxPixel
+                isize.Height = GlobalOptions.MaxPixel / ima.Width * ima.Height
+            End If
+            Dim ti As New Bitmap(ima, isize)
+            Dim tmp As String = name
+            If id.IndexOf("@") <> -1 Then
+                tmp += "<"
+            Else
+                tmp += "("
+            End If
+            Dim presize As Size = TextRenderer.MeasureText(tmp, New Font("微软雅黑"， 9))
+            presize.Width -= 8
+            Dim nsize As Size = TextRenderer.MeasureText(name + "<" + id + ">" + time, New Font("微软雅黑", 9))
+            Dim idsize As Size = TextRenderer.MeasureText(id, New Font("微软雅黑"， 9, FontStyle.Underline))
+            idsize.Width -= 8
+            Dim bits As New Bitmap(Math.Max(ima.Width + 18, nsize.Width + 10), isize.Height + 25)
+            Dim gra As Graphics = Graphics.FromImage(bits)
+            gra.Clear(Color.FromArgb(223, 236, 246))
+            gra.DrawString(tmp, New Font("微软雅黑", 9), New SolidBrush(Color.FromArgb(0, 110, 254)), New Point(10, 2))
+            gra.DrawString(id, New Font("微软雅黑", 9, FontStyle.Underline), New SolidBrush(Color.FromArgb(0, 114, 193)), New Point(10 + presize.Width, 2))
+            If id.IndexOf("@") <> -1 Then
+                tmp = ">" + time
+            Else
+                tmp = ")" + time
+            End If
+            gra.DrawString(tmp, New Font("微软雅黑"， 9), New SolidBrush(Color.FromArgb(0, 110, 254)), New Point(10 + presize.Width + idsize.Width, 2))
+            gra.DrawImage(ti, New Point(18, 23))
+            gra.Dispose()
+            Return bits
+        End Function
+    End Class
+    ''' <summary>
+    ''' 提供个别的生成服务。
+    ''' </summary>
+    Public Class SpecialGen
+        ''' <summary>
+        ''' 生成“系统消息”。
+        ''' </summary>
+        ''' <param name="txt">生成内容</param>
+        ''' <returns>生成结果</returns>
+        Public Shared Function GenSystem(txt As String) As Bitmap
+            Dim preb_ban As Bitmap = My.Resources.SystemMessage
+            Dim fon As New Font("微软雅黑", 9)
+            Dim tsize As Size = TextRenderer.MeasureText(txt, fon)
+            Dim bits As New Bitmap(tsize.Width + 32, 30)
+            Dim gra As Graphics = Graphics.FromImage(bits)
+            Dim i As Integer
+            gra.DrawImage(preb_ban.Clone(New Rectangle(0, 0, 18, 30), Imaging.PixelFormat.Format32bppArgb), New Point(0, 0))
+            For i = 18 To bits.Width - 16
+                gra.DrawImage(preb_ban.Clone(New Rectangle(58, 0, 1, 30), Imaging.PixelFormat.Format32bppArgb), New Point(i, 0))
+            Next
+            gra.DrawImage(preb_ban.Clone(New Rectangle(193, 0, 15, 30), Imaging.PixelFormat.Format32bppArgb), New Point(bits.Width - 15, 0))
+            gra.DrawString(txt, fon, Brushes.Black, New Point(18, 8))
+            gra.Dispose()
+            Return bits
+        End Function
+
+    End Class
+End Namespace
+''' <summary>
+''' 定义CommonUser类使用的全局设置。
+''' </summary>
+Public Class GlobalOptions
+    ''' <summary>
+    ''' 定义生成的背景色。
+    ''' </summary>
+    Public Shared BackColor As Color
+    ''' <summary>
+    ''' 定义每行最多可容纳的像素数。
+    ''' </summary>
+    Public Shared MaxPixel As Integer
+    ''' <summary>
+    ''' 初始化设置。
+    ''' </summary>
+    Public Shared Sub Init()
+        Dim sett As SettingBlockCollection = SettingManager.LoadSettingsFromFile("Bubbles\Options.ini")
+        BackColor = sett("BackColor")("BackColor").Value
+        MaxPixel = sett("MaxPixel")("MaxPixel").Value
+    End Sub
+    ''' <summary>
+    ''' 保存设置。
+    ''' </summary>
+    Public Shared Sub Save()
+        Dim sett As New SettingBlockCollection
+        sett.Add("BackColor", New SettingBlock)
+        sett("BackColor").Add("BackColor", New Setting("color", BackColor))
+        sett.Add("MaxPixel", New SettingBlock)
+        sett("MaxPixel").Add("MaxPixel", New Setting("integer", MaxPixel))
+        SettingManager.SaveSettingsToFile(sett, "Bubbles\Options.ini")
+    End Sub
+End Class

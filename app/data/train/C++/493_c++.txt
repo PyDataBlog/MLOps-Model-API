@@ -1,0 +1,367 @@
+#include "precomp.h"
+#include "stdinc.h"
+#include "io_sfen.h"
+#include "commandpacket.h"
+
+namespace godwhale {
+
+const CommandPacket::CharSeparator CommandPacket::ms_separator(" ", "");
+
+CommandPacket::CommandPacket(CommandType type)
+    : m_type(type), m_positionId(-1), m_position(false)
+{
+}
+
+CommandPacket::CommandPacket(CommandPacket const & other)
+    : m_positionId(-1), m_position(false)
+{
+}
+
+CommandPacket::CommandPacket(CommandPacket && other)
+    : m_positionId(-1), m_position(false)
+{
+}
+
+/**
+ * @brief R}hÌÀsDæÊðæ¾µÜ·B
+ *
+ * lªå«¢ûªADæÊÍ¢Å·B
+ */
+int CommandPacket::getPriority() const
+{
+    switch (m_type) {
+    // I¹nÌR}hÍ·®ÉÀs
+    case COMMAND_QUIT:
+    case COMMAND_STOP:
+        return 100;
+
+    // ÊíÌR}hÍ»ÌÜÜÌÅ
+    case COMMAND_LOGIN:
+    case COMMAND_SETPOSITION:
+    case COMMAND_MAKEROOTMOVE:
+    case COMMAND_SETPV:
+    case COMMAND_SETMOVELIST:
+    case COMMAND_VERIFY:
+        return 50;
+
+    // G[Ý½¢ÈàÌ
+    case COMMAND_NONE:
+        return 0;
+    }
+
+    unreachable();
+    return -1;
+}
+
+/**
+ * @brief strªtargetª¦·g[NÅ é©²×Ü·B
+ */
+bool CommandPacket::isToken(std::string const & str, std::string const & target)
+{
+    return (str.compare(target) == 0);
+}
+
+/**
+ * @brief RSI(remote shogi interface)ðp[XµAR}hÉ¼µÜ·B
+ */
+shared_ptr<CommandPacket> CommandPacket::parse(std::string const & rsi)
+{
+    if (rsi.empty()) {
+        throw new std::invalid_argument("rsi");
+    }
+
+    Tokenizer tokens(rsi, ms_separator);
+    std::string token = *tokens.begin();
+
+    if (isToken(token, "login")) {
+        return parse_Login(rsi, tokens);
+    }
+    else if (isToken(token, "setposition")) {
+        return parse_SetPosition(rsi, tokens);
+    }
+    else if (isToken(token, "makerootmove")) {
+        return parse_MakeRootMove(rsi, tokens);
+    }
+    else if (isToken(token, "setmovelist")) {
+        return parse_SetMoveList(rsi, tokens);
+    }
+    else if (isToken(token, "stop")) {
+        return parse_Stop(rsi, tokens);
+    }
+    else if (isToken(token, "quit")) {
+        return parse_Quit(rsi, tokens);
+    }
+
+    return shared_ptr<CommandPacket>();
+}
+
+/**
+ * @brief R}hðRSI(remote shogi interface)ÉÏ·µÜ·B
+ */
+std::string CommandPacket::toRSI() const
+{
+    assert(m_type != COMMAND_NONE);
+
+    switch (m_type) {
+    case COMMAND_LOGIN:
+        return toRSI_Login();
+    case COMMAND_SETPOSITION:
+        return toRSI_SetPosition();
+    case COMMAND_MAKEROOTMOVE:
+        return toRSI_MakeRootMove();
+    case COMMAND_SETMOVELIST:
+        return toRSI_SetMoveList();
+    case COMMAND_STOP:
+        return toRSI_Stop();
+    case COMMAND_QUIT:
+        return toRSI_Quit();
+    }
+
+    unreachable();
+    return std::string();
+}
+
+
+#pragma region Login
+/**
+ * @brief loginR}hðp[XµÜ·B
+ *
+ * login <address> <port> <login_id> <nthreads>
+ */
+shared_ptr<CommandPacket> CommandPacket::parse_Login(std::string const & rsi,
+                                                     Tokenizer & tokens)
+{
+    shared_ptr<CommandPacket> result(new CommandPacket(COMMAND_LOGIN));
+    Tokenizer::iterator begin = ++tokens.begin();
+
+    result->m_serverAddress = *begin++;
+    result->m_serverPort = *begin++;
+    result->m_loginId = *begin++;
+    return result;
+}
+
+/**
+ * @brief loginR}hðRSIÉÏ·µÜ·B
+ */
+std::string CommandPacket::toRSI_Login() const
+{
+    return (F("login %1% %2% %3%")
+        % m_serverAddress % m_serverPort % m_loginId)
+        .str();
+}
+#pragma endregion
+
+
+#pragma region SetPosition
+/**
+ * @brief setpositionR}hðp[XµÜ·B
+ *
+ * setposition <position_id> [sfen <sfen> | startpos] moves <move1> ... <moven>
+ * <sfen> = <board_sfen> <turn_sfen> <hand_sfen> <nmoves>
+ */
+shared_ptr<CommandPacket> CommandPacket::parse_SetPosition(std::string const & rsi,
+                                                           Tokenizer & tokens)
+{
+    shared_ptr<CommandPacket> result(new CommandPacket(COMMAND_SETPOSITION));
+    Tokenizer::iterator begin = ++tokens.begin();
+
+    result->m_positionId = lexical_cast<int>(*begin++);
+
+    std::string token = *begin++;
+    if (token == "sfen") {
+        std::string sfen;
+        sfen += *begin++ + " "; // board
+        sfen += *begin++ + " "; // turn
+        sfen += *begin++ + " "; // hand
+        sfen += *begin++;       // nmoves
+        result->m_position = sfenToPosition(sfen);
+    }
+    else if (token == "startpos") {
+        result->m_position = Position();
+    }
+
+    // movesÍÈ¢±Æª èÜ·B
+    if (begin == tokens.end()) {
+        return result;
+    }
+
+    if (*begin++ != "moves") {
+        throw new ParseException(F("%1%: wµèª³µ­ èÜ¹ñB") % rsi);
+    }
+
+    for (; begin != tokens.end(); ++begin) {
+        Move move = sfenToMove(result->m_position, *begin);
+
+        if (!result->m_position.makeMove(move)) {
+            LOG_ERROR() << result->m_position;
+            LOG_ERROR() << *begin << ": wµèª³µ­ èÜ¹ñB";
+            throw new ParseException(F("%1%: wµèª³µ­ èÜ¹ñB") % *begin);
+        }
+    }
+
+    return result;
+}
+
+/**
+ * @brief setpositionR}hðRSIÉÏ·µÜ·B
+ */
+std::string CommandPacket::toRSI_SetPosition() const
+{
+    Position position = m_position;
+    std::vector<Move> moves = position.getMoveList();
+
+    // ÇÊð·×ÄßµÜ·B
+    while (!position.getMoveList().empty()) {
+        position.unmakeMove();
+    }
+
+    std::string posStr;
+    if (position.isInitial()) {
+        posStr = " startpos";
+    }
+    else {
+        posStr  = " sfen ";
+        posStr += positionToSfen(position);
+    }
+
+    std::string movesStr;
+    if (!moves.empty()) {
+        movesStr += " moves";
+        BOOST_FOREACH(Move move, moves) {
+            movesStr += " ";
+            movesStr += moveToSfen(move);
+        }
+    }
+
+    return (F("setposition %1%%2%%3%")
+        % m_positionId % posStr % movesStr)
+        .str();
+}
+#pragma endregion
+
+
+#pragma region MakeRootMove
+/**
+ * @brief makerootmoveR}hðp[XµÜ·B
+ *
+ * makerootmove <position_id> <old_position_id> <move>
+ */
+shared_ptr<CommandPacket> CommandPacket::parse_MakeRootMove(std::string const & rsi,
+                                                            Tokenizer & tokens)
+{
+    shared_ptr<CommandPacket> result(new CommandPacket(COMMAND_MAKEROOTMOVE));
+    Tokenizer::iterator begin = ++tokens.begin(); // ÅÌg[NÍòÎµÜ·B
+
+    result->m_positionId = lexical_cast<int>(*begin++);
+    result->m_oldPositionId = lexical_cast<int>(*begin++);
+
+    // ^¦çê½positionIdÈÇ©çÇÊðõµÜ·B
+    Position position;
+
+    result->m_move = sfenToMove(position, *begin++);
+    return result;
+}
+
+/**
+ * @brief makerootmoveR}hðRSIÉÏ·µÜ·B
+ */
+std::string CommandPacket::toRSI_MakeRootMove() const
+{
+    return (F("makerootmove %1% %2% %3%")
+        % m_positionId % m_oldPositionId % moveToSfen(m_move))
+        .str();
+}
+#pragma endregion
+
+
+#pragma region SetMoveList
+/**
+ * @brief setmovelistR}hðp[XµÜ·B
+ *
+ * setmovelist <position_id> <itd> <pld> <move1> ... <moven>
+ */
+shared_ptr<CommandPacket> CommandPacket::parse_SetMoveList(std::string const & rsi,
+                                                           Tokenizer & tokens)
+{
+    shared_ptr<CommandPacket> result(new CommandPacket(COMMAND_SETMOVELIST));
+    Tokenizer::iterator begin = ++tokens.begin(); // ÅÌg[NÍòÎµÜ·B
+
+    result->m_positionId = lexical_cast<int>(*begin++);
+    result->m_iterationDepth = lexical_cast<int>(*begin++);
+    result->m_plyDepth = lexical_cast<int>(*begin++);
+
+    // ^¦çê½positionIdÈÇ©çÇÊðõµÜ·B
+    Position position;
+
+    Tokenizer::iterator end = tokens.end();
+    for (; begin != end; ++begin) {
+        Move move = sfenToMove(position, *begin);
+
+        if (move.isEmpty()) {
+            throw ParseException(F("%1%: ³µ¢wµèÅÍ èÜ¹ñB") % *begin);
+        }
+
+        result->m_moveList.push_back(move);
+    }
+
+    return result;
+}
+
+/**
+ * @brief setmovelistR}hðRSIÉÏ·µÜ·B
+ */
+std::string CommandPacket::toRSI_SetMoveList() const
+{
+    std::string movesStr;
+    BOOST_FOREACH(Move move, m_moveList) {
+        movesStr += " ";
+        movesStr += moveToSfen(move);
+    }
+
+    return (F("setmovelist %1% %2% %3% %4%")
+        % m_positionId %m_iterationDepth % m_plyDepth % movesStr)
+        .str();
+}
+#pragma endregion
+
+
+#pragma region Stop
+/**
+ * @brief stopR}hðp[XµÜ·B
+ */
+shared_ptr<CommandPacket> CommandPacket::parse_Stop(std::string const & rsi,
+                                                    Tokenizer & tokens)
+{
+    return shared_ptr<CommandPacket>(new CommandPacket(COMMAND_STOP));
+}
+
+/**
+ * @brief stopR}hðRSIÉÏ·µÜ·B
+ */
+std::string CommandPacket::toRSI_Stop() const
+{
+    return "stop";
+}
+#pragma endregion
+
+
+#pragma region Quit
+/**
+ * @brief quitR}hðp[XµÜ·B
+ */
+shared_ptr<CommandPacket> CommandPacket::parse_Quit(std::string const & rsi,
+                                                    Tokenizer & tokens)
+{
+    return shared_ptr<CommandPacket>(new CommandPacket(COMMAND_QUIT));
+}
+
+/**
+ * @brief quitR}hðRSIÉÏ·µÜ·B
+ */
+std::string CommandPacket::toRSI_Quit() const
+{
+    return "quit";
+}
+#pragma endregion
+
+} // namespace godwhale

@@ -1,0 +1,87 @@
+<?php
+
+namespace Dvsa\Mot\Frontend\SecurityCardModule\CardOrder\Controller;
+
+use Core\Controller\AbstractDvsaActionController;
+use Dvsa\Mot\Frontend\AuthenticationModule\Model\Identity;
+use Dvsa\Mot\Frontend\SecurityCardModule\CardOrder\Service\OrderNewSecurityCardSessionService;
+use DvsaCommon\Constants\FeatureToggle;
+use DvsaFeature\FeatureToggles;
+use Zend\Http\Response;
+use Zend\View\Model\ViewModel;
+
+class CardOrderConfirmationController extends AbstractDvsaActionController
+{
+    /** @var OrderNewSecurityCardSessionService $session */
+    protected $session;
+
+    /** @var Identity $identity */
+    private $identity;
+
+    /** @var FeatureToggles */
+    private $featureToggles;
+
+    public function __construct(
+        OrderNewSecurityCardSessionService $securityCardSessionService,
+        Identity $identity,
+        FeatureToggles $featureToggles
+    ) {
+        $this->session = $securityCardSessionService;
+        $this->identity = $identity;
+        $this->featureToggles = $featureToggles;
+    }
+
+    /**
+     * @return ViewModel
+     */
+    public function indexAction(): ViewModel
+    {
+        $userId = $this->params()->fromRoute('userId', $this->identity->getUserId());
+        if (false === $this->checkValidSession()) {
+            $this->redirectToStart($userId);
+        }
+
+        if ($this->featureToggles->isEnabled(FeatureToggle::TWO_FA_GRACE_PERIOD) && $this->identity->isAuthenticatedWithSecurityQAndAs()) {
+            $this->identity->setAuthenticatedWith2FA(true);
+        }
+
+        if (!$this->identity->isAuthenticatedWithSecurityQAndAs()) {
+            $this->buildBreadcrumbs();
+        }
+
+        // As this is the last page of the journey clear the session
+        $this->session->clearByGuid($userId);
+
+        return (new ViewModel())->setTemplate('2fa/card-order/confirmation');
+    }
+
+    /**
+     * If there is no valid session, we should go to the journey start.
+     *
+     * @return bool
+     */
+    protected function checkValidSession(): bool
+    {
+        $values = $this->session->toArray();
+
+        return !(is_array($values) && count($values) === 0);
+    }
+
+    /**
+     * @param int $userId
+     *
+     * @return Response
+     */
+    protected function redirectToStart($userId): Response
+    {
+        return $this->redirect()->toRoute('security-card-order/new', ['userId' => $userId]);
+    }
+
+    protected function buildBreadcrumbs()
+    {
+        $this->getBreadcrumbBuilder()
+            ->simple('Your profile', 'newProfile')
+            ->simple('Order a security card')
+            ->build();
+    }
+}

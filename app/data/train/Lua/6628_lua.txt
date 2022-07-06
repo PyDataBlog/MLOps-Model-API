@@ -1,0 +1,112 @@
+-- pass with openresty-1.15.8.2
+
+if ngx.var.request_method ~= "POST" then
+    ngx.exit(405)
+end
+
+local upload       = require "resty.upload"
+local resty_string = require "resty.string"
+local resty_md5    = require "resty.md5"
+local lpkg         = require "lpkg"
+
+local function get_filename(res)
+    -- example:
+    -- Content-Disposition: form-data; name="file"; filename="hello.dat"
+    -- Content-Type: application/octet-stream
+
+    if "Content-Disposition" ~= res[1] then
+        return nil
+    end
+
+    local regex = 'filename="(.+)"'
+    local match = ngx.re.match(res[2], regex, "jo")
+    if match then
+        return match[1]
+    end
+end
+
+local function handle_upload()
+    local chunk_size = 8192
+    local form = upload:new(chunk_size)
+    local md5 = resty_md5:new()
+    local file
+    local filename
+    local fullname
+    local tmpfile
+
+    form:set_timeout(5000)
+
+    local function cleanup()
+        if file then
+            io.close(file)
+            file = nil
+        end
+        md5:reset()
+    end
+
+    while true do
+        local typ, res, err = form:read()
+        if not typ then
+            ngx.log(ngx.ERR, "failed to read: ", err)
+            ngx.exit(408)
+        end
+    
+        if typ == "header" then
+            local name = get_filename(res)
+            if name then
+                filename = name
+                local md5sum = lpkg.lookup_file(filename)
+                local arg_md5sum = ngx.var.arg_md5sum
+                if md5sum and (arg_md5sum == nil or arg_md5sum == md5sum) then
+                    cleanup()
+                    ngx.say('{"md5sum":"' .. md5sum .. '"}')
+                    break
+                end
+
+                local filepath = lpkg.get_filepath(filename)
+                fullname = filepath .. filename
+                tmpfile = filepath .. "." .. filename
+                file = io.open(tmpfile, "w+")
+                if not file then
+                    ngx.log(ngx.ERR, "failed to open file ", tmpfile)
+                    cleanup()
+                    ngx.exit(500)
+                end
+            end
+        elseif typ == "body" then
+            if not file then
+                cleanup()
+                ngx.exit(400)
+            end
+
+            file:write(res)
+            md5:update(res)
+        elseif typ == "part_end" then
+            if not file then
+                cleanup()
+                ngx.exit(400)
+            end
+
+            local md5sum = resty_string.to_hex(md5:final())
+            if ngx.var.arg_md5sum and ngx.var.arg_md5sum ~= md5sum then
+                cleanup()
+                os.remove(tmpfile)
+                ngx.exit(400)
+            end
+
+            local ok, msg = os.rename(tmpfile, fullname)
+            if not ok then
+                cleanup()
+                ngx.log(ngx.ERR, msg)
+                ngx.exit(500)
+            end
+            cleanup()
+            lpkg.create_md5sum_file(fullname, filename, md5sum)
+            ngx.say('{"md5sum":"' .. md5sum .. '"}')
+        elseif typ == "eof" then
+            break
+        end
+    end
+end
+
+handle_upload()

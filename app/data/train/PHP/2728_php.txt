@@ -1,0 +1,215 @@
+<?php
+
+namespace User\Form;
+
+class User extends \Zend\Form\Form
+{
+    /**
+     * @var \User\Model\User 
+     */
+    protected $userModel;
+    
+    /**
+     * 
+     * @param \User\Model\User $userModel
+     * @param array $options
+     */
+    public function __construct(\User\Model\User $userModel, array $options = []) {
+        $defaults = [
+            'method' => 'post'
+        ];
+        
+        $this->userModel = $userModel;
+        $formOptions = array_replace_recursive($defaults, $options);
+        
+        parent::__construct('user-form', $formOptions);
+    }
+    
+    /**
+     * 
+     */
+    protected function createBaseForm() {
+        $inputFilter = $this->userModel->getInputFilter();
+        $fieldsDefinitions = $this->userModel->getFieldsDefinitions();
+
+        $this->setInputFilter($this->userModel->getInputFilter());
+        $this->bind($this->userModel);
+
+        foreach ($this->getInputFilter()->getInputs() as $input) {
+            $fieldName = $input->getName();
+            $fieldDefinition = $fieldsDefinitions[$fieldName];
+            //var_dump($fieldsDefinitions[$fieldName]);
+
+            $element = null;
+            switch (strtolower($fieldDefinition['type'])) {
+                case 'text':
+                    $element = new \Zend\Form\Element\Text($fieldName);
+                    break;
+
+                case 'select':
+                    $element = new \Zend\Form\Element\Select($fieldName);
+                    break;
+
+                case 'hidden':
+                default:
+                    $element = new \Zend\Form\Element\Hidden($fieldName);
+                    break;
+                
+                // ...
+            }
+            
+            $fieldId = isset($fieldDefinition['options']['id'])
+                    ? $fieldDefinition['options']['id']
+                    : 'field-' . $fieldName;
+            
+            $fieldClass = isset($fieldDefinition['options']['class'])
+                    ? $fieldDefinition['options']['class']
+                    : 'formularz';
+            
+            
+            $fieldOptions = array_replace_recursive([
+                'column-size' => 'xs-9'
+            ], $fieldDefinition['options']);
+
+            // walidacja
+            $validators = $input->getValidatorChain()->getValidators();
+            $data = isset($fieldDefinition['options']['data'])
+                    ? $fieldDefinition['options']['data']
+                    : [];
+            foreach ($validators as $validator) {
+                $validatorObject = $validator['instance'];
+
+                switch (get_class($validatorObject)) {
+                    case 'Zend\Validator\StringLength':
+                        $messages = $validatorObject->getMessageTemplates();
+
+                        $data['data-strlen-min'] = $validatorObject->getMin();
+                        $data['data-strlen-max'] = $validatorObject->getMax();
+                        $data['data-strlen-message-invalid'] = $messages['stringLengthInvalid'];
+                        $data['data-strlen-message-too-short'] = $messages['stringLengthTooShort'];
+                        $data['data-strlen-message-too-long'] = $messages['stringLengthTooLong'];
+                        
+                        if (0 < $validatorObject->getMax()) {
+                            $element->setAttributes([
+                                'maxlength' => $validatorObject->getMax()
+                            ]);
+                        }
+
+                        break;
+
+                    case 'Zend\Validator\Regex':
+                        $messages = $validatorObject->getMessageTemplates();
+                        $pattern = trim($validatorObject->getPattern(), '/');
+
+                        $element->setAttributes([
+                            'pattern' => $pattern
+                        ]);
+
+                        $data['data-regex-pattern'] = $pattern;
+                        $data['data-regex-message'] = $messages['regexNotMatch'];
+                        break;
+                }
+            }
+            
+            $element
+                ->setAttributes(array_merge([
+                    'class' => $fieldClass,
+                    'id' => $fieldId,
+                    ], $data))
+            ->setLabel($fieldDefinition['label'])
+            ->setLabelAttributes([
+                'class' => 'col-xs-3',
+                'for' => $fieldId,
+            ])
+            ->setOptions($fieldOptions);
+            
+            $this->add($element);
+        }
+
+        // uzupełniamy select opcjami - tablica klucz => wartość
+        $this->get('userStatus')->setValueOptions([
+            'active' => 'Aktywny',
+            'inactive' => 'Nieaktywny',
+            'deleted' => 'Usunięty',
+            'suspended' => 'Zawieszony',
+        ]);
+        
+        $saveButton = new \Zend\Form\Element\Submit('save');
+        $saveButton
+            ->setLabel('Akcje')
+            ->setValue('Zapisz')
+            ->setAttributes([
+                'class' => 'btn btn-primary'
+            ])
+            ->setLabelAttributes([
+                'class' => 'col-xs-3',
+                'for' => 'field-userName',
+            ])
+            ->setOptions([
+                'column-size' => 'xs-9'
+            ]);
+        
+        $this->add($saveButton);
+        
+        
+/*        
+        można "ręcznie", każde pole osobno:
+ 
+        $userNameField = new \Zend\Form\Element\Text('userName');
+        $userNameField
+            ->setAttributes([
+                'class' => '',
+                'id' => 'field-userName'
+            ])
+            ->setLabel('Imię użytkownika')
+            ->setLabelAttributes([
+                'class' => 'col-xs-3',
+                'for' => 'field-userName',
+            ])
+            ->setOptions([
+                'column-size' => 'xs-9'
+            ]);
+        
+        $userSurnameField = new \Zend\Form\Element\Text('userSurname');
+        $userSurnameField
+            ->setAttributes([
+                'class' => '',
+                'id' => 'field-userSurname'
+            ])
+            ->setLabel('Nazwisko użytkownika')
+            ->setLabelAttributes([
+                'class' => 'col-xs-3',
+                'for' => 'field-userSurname',
+            ])
+            ->setOptions([
+                'column-size' => 'xs-9'
+            ]);
+*/
+
+        return $this;
+    }
+
+    /**
+     * formularz do tworzenia użytkownika
+     */
+    public function asCreateForm() {
+        $this
+            ->createBaseForm();
+        
+        $this->get('save')
+            ->setValue('Dodaj użytkownika');
+
+        return $this;
+    }
+
+    /**
+     * formularz do edycji użytkownika
+     */
+    public function asEditForm() {
+        $this
+            ->createBaseForm()
+            ->populateValues($this->userModel);
+
+        return $this;
+    }
+}

@@ -1,0 +1,174 @@
+use dirs;
+use serde_derive::{Deserialize, Serialize};
+use std::default::Default;
+use std::fs::File;
+use std::io::Read;
+use toml;
+
+use crate::errors::*;
+use crate::slack::config::SlackConfig;
+use crate::todoist::config::TodoistConfig;
+use crate::toggl::config::TogglConfig;
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct Config {
+    pub todoist: TodoistConfig,
+    pub toggl: TogglConfig,
+    pub slack: SlackConfig,
+    pub message_template: MessageTemplate,
+}
+
+impl Config {
+    fn from_parsed_config(parsed: ParsedConfig) -> Config {
+        Config {
+            todoist: parsed.todoist,
+            toggl: parsed.toggl,
+            slack: parsed.slack,
+            message_template: MessageTemplate::default()
+                .fill_from_parsed_message_template(parsed.message_template),
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ParsedConfig {
+    pub todoist: TodoistConfig,
+    pub toggl: TogglConfig,
+    pub slack: SlackConfig,
+    pub message_template: ParsedMessageTemplate,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct MessageTemplate {
+    title_daily_tasks: String,
+    title_daily_report: String,
+    title_daily_report_completed: String,
+    title_daily_report_rescheduled: String,
+    pub prefix_daily_tasks: String,
+    pub prefix_daily_report_completed: String,
+    pub prefix_daily_report_rescheduled: String,
+    no_tasks: String,
+    no_report: String,
+}
+
+impl Default for MessageTemplate {
+    fn default() -> Self {
+        Self {
+            title_daily_tasks: "".to_string(),
+            title_daily_report: "".to_string(),
+            title_daily_report_completed: "Completed".to_string(),
+            title_daily_report_rescheduled: "Rescheduled".to_string(),
+            prefix_daily_tasks: ":inbox_tray:".to_string(),
+            prefix_daily_report_completed: ":white_check_mark:".to_string(),
+            prefix_daily_report_rescheduled: ":calendar:".to_string(),
+            no_tasks: "There seems to be no task of today. How about trying new things?"
+                .to_string(),
+            no_report: "Hmm. Let's do your best at tomorrow.".to_string(),
+        }
+    }
+}
+
+impl MessageTemplate {
+    fn fill_from_parsed_message_template(mut self, parsed: ParsedMessageTemplate) -> Self {
+        if let Some(title_daily_tasks) = parsed.title_daily_tasks {
+            self.title_daily_tasks = title_daily_tasks;
+        }
+
+        if let Some(title_daily_report) = parsed.title_daily_report {
+            self.title_daily_report = title_daily_report;
+        }
+
+        if let Some(title_daily_report_completed) = parsed.title_daily_report_completed {
+            self.title_daily_report_completed = title_daily_report_completed;
+        }
+
+        if let Some(title_daily_report_rescheduled) = parsed.title_daily_report_rescheduled {
+            self.title_daily_report_rescheduled = title_daily_report_rescheduled;
+        }
+
+        if let Some(prefix_daily_tasks) = parsed.prefix_daily_tasks {
+            self.prefix_daily_tasks = prefix_daily_tasks;
+        }
+
+        if let Some(prefix_daily_report_completed) = parsed.prefix_daily_report_completed {
+            self.prefix_daily_report_completed = prefix_daily_report_completed;
+        }
+
+        if let Some(prefix_daily_report_rescheduled) = parsed.prefix_daily_report_rescheduled {
+            self.prefix_daily_report_rescheduled = prefix_daily_report_rescheduled;
+        }
+
+        if let Some(no_tasks) = parsed.no_tasks {
+            self.no_tasks = no_tasks;
+        }
+
+        if let Some(no_report) = parsed.no_report {
+            self.no_report = no_report;
+        }
+
+        self
+    }
+
+    pub fn title_daily_tasks_owned(&self) -> String {
+        self.title_daily_tasks.clone()
+    }
+    // pub fn title_daily_report_owned(&self) -> String {
+    //     self.title_daily_report.clone()
+    // }
+    pub fn title_daily_report_completed_owned(&self) -> String {
+        self.title_daily_report_completed.clone()
+    }
+    pub fn title_daily_report_rescheduled_owned(&self) -> String {
+        self.title_daily_report_rescheduled.clone()
+    }
+    pub fn no_tasks_owned(&self) -> String {
+        self.no_tasks.clone()
+    }
+    pub fn no_report_owned(&self) -> String {
+        self.no_report.clone()
+    }
+}
+
+/// Parsed Template for the Slack message.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ParsedMessageTemplate {
+    pub title_daily_tasks: Option<String>,
+    pub title_daily_report: Option<String>,
+    pub title_daily_report_completed: Option<String>,
+    pub title_daily_report_rescheduled: Option<String>,
+    pub prefix_daily_tasks: Option<String>,
+    pub prefix_daily_report_completed: Option<String>,
+    pub prefix_daily_report_rescheduled: Option<String>,
+    pub no_tasks: Option<String>,
+    pub no_report: Option<String>,
+}
+
+impl MessageTemplate {
+    #[cfg(test)]
+    pub fn stub() -> MessageTemplate {
+        MessageTemplate {
+            title_daily_tasks: "Awesome Title Daily Task".to_string(),
+            title_daily_report: "Awesome Title Daily Report".to_string(),
+            title_daily_report_completed: "Awesome Daily Report Completed".to_string(),
+            title_daily_report_rescheduled: "Awesome Daily Report Rescheduled".to_string(),
+            prefix_daily_tasks: "Awesome Prefix Daily Tasks".to_string(),
+            prefix_daily_report_completed: "Awesome Prefix Daily Report Completed".to_string(),
+            prefix_daily_report_rescheduled: "Awesome Prefix Daily Report Rescheduled".to_string(),
+            no_tasks: "Awesome No Tasks".to_string(),
+            no_report: "Awesome No Report".to_string(),
+        }
+    }
+}
+
+pub fn load_config() -> Result<Config> {
+    let mut config_file = dirs::home_dir().unwrap();
+    config_file.push(".fericonfig");
+    let mut file = File::open(&config_file).chain_err(|| "Missing `.fericonfig` in $HOME")?;
+
+    let mut toml_string = String::new();
+    file.read_to_string(&mut toml_string).unwrap();
+    let parsed = toml::from_str::<ParsedConfig>(&toml_string)
+        .chain_err(|| "Failed to deserialize from `.fericonfig` to ParsedConfig")?;
+
+    Ok(Config::from_parsed_config(parsed))
+}

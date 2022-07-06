@@ -1,0 +1,87 @@
+module Infinity.Util (
+ -- * Functions
+ unlessM, whenM, mkdate, mktime, mkdir, ci,
+ run,
+ -- * Types
+ User, Channel, Command, Nick, Cmds
+) where
+import Data.List
+import System.IO
+import System.Exit
+import System.Time
+import Control.Monad
+import System.Process
+import System.FilePath
+import System.Directory
+import Control.Concurrent
+import Control.Exception as Ex
+
+type Nick    = String
+type User    = String
+type Channel = String
+type Command = String
+type Cmds    = [String]
+
+-- | Runs an executable program, returning output and anything from stderr
+run :: FilePath -> [String] -> Maybe String -> IO (String,String)
+run file args input = do
+  (inp,out,err,pid) <- runInteractiveProcess file args Nothing Nothing
+
+  case input of
+    Just i  -> hPutStr inp i >> hClose inp
+    Nothing -> return ()
+
+  -- get contents
+  output <- hGetContents out
+  errs   <- hGetContents err
+
+  -- at this point we force their evaluation
+  -- since hGetContents is lazy.
+  oMVar  <- newEmptyMVar
+  eMVar  <- newEmptyMVar
+
+  forkIO (Ex.evaluate (length output) >> putMVar oMVar ())
+  forkIO (Ex.evaluate (length errs)   >> putMVar eMVar ())
+  takeMVar oMVar >> takeMVar eMVar
+
+  -- wait and return
+  Prelude.catch (waitForProcess pid) $ const (return ExitSuccess)
+  return (output,errs)
+
+-- | Makes the current date, i.e. 1-8-08
+mkdate :: IO String
+mkdate = do
+  time <- (getClockTime >>= toCalendarTime)
+  let date = ci "-" $ map show $ [(fromEnum $ ctMonth time)+1,ctDay time,ctYear time]
+  return date
+
+-- | Makes the current time, i.e. '22:14'
+mktime :: IO String
+mktime = do
+  time <- (getClockTime >>= toCalendarTime)
+  let h  = show $ ctHour time
+      m  = show $ ctMin  time
+      h' = if (length h) == 1 then "0"++h else h
+      m' = if (length m)  == 1 then "0"++m  else m
+  return (h'++":"++m')
+
+-- | Creates a directory if it doesn't already
+-- exist
+mkdir :: FilePath -> IO ()
+mkdir p = unlessM (doesDirectoryExist p) (createDirectory p)
+
+-- | unless with it's first parameter wrapped in
+-- IO, i.e @unlessM b f = b >>= \x -> unless x f@
+unlessM :: IO Bool -> IO () -> IO ()
+unlessM b f = b >>= \x -> unless x f
+
+-- | when with it's first parameter wrapped in
+-- IO, i.e. @whenM   b f = b >>= \x -> when x f@
+whenM :: IO Bool -> IO () -> IO ()
+whenM   b f = b >>= \x -> when x f
+
+-- | Concatenates a list of Strings and 
+-- intersperses a character inbetween each
+-- element
+ci :: String -> [String] -> String
+ci x s = concat $ intersperse x s

@@ -1,0 +1,322 @@
+/*
+ * image.cpp
+ *
+ *  Created on: 24/10/2016
+ *
+ * This file is part of fgeal.
+ *
+ * fgeal - Faruolo's game engine/library abstraction layer
+ * Copyright (C) 2016  Carlos F. M. Faruolo <5carlosfelipe5@gmail.com>
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+ */
+
+#include "implementation.hpp"
+#include "fgeal/core.hpp"
+#include "fgeal/image.hpp"
+
+#include "fgeal/exceptions.hpp"
+
+#include "SDL/SDL_image.h"
+#include "SDL/SDL_rotozoom.h"
+#include "SDL/SDL_gfxPrimitives.h"
+
+#include <cmath>
+
+using std::string;
+
+#if SDL_GFXPRIMITIVES_MAJOR > 2 \
+	or (SDL_GFXPRIMITIVES_MAJOR == 2 and SDL_GFXPRIMITIVES_MINOR > 0) \
+	or (SDL_GFXPRIMITIVES_MAJOR == 2 and SDL_GFXPRIMITIVES_MINOR == 0 and SDL_GFXPRIMITIVES_MICRO >= 17)
+	#define IS_SDL_GFX_ROTOZOOM_SURFACE_90_DEGREES_AVAILABLE
+#endif
+
+#ifdef FGEAL_SDL1_2_USE_SMOOTH_ROTOZOOM
+	#define REQUESTED_ROTOZOOM_SMOOTHING_FLAG SMOOTHING_ON
+#else
+	#define REQUESTED_ROTOZOOM_SMOOTHING_FLAG SMOOTHING_OFF
+#endif
+
+// Useful macros to improve readability and reduce typing
+#define toSDLRect(x, y, w, h) {static_cast<Sint16>(x), static_cast<Sint16>(y), static_cast<Uint16>(w), static_cast<Uint16>(h)}
+#define toSDLRect2(x, y)      {static_cast<Sint16>(x), static_cast<Sint16>(y)}
+#define toSDLPoint(x, y)      {static_cast<int>(x),    static_cast<int>(y)}
+
+namespace fgeal
+{
+	/// Wrapper function that uses 90-degree optimization, if possible. This function is rotation-only: no scaling is supported.
+	SDL_Surface* customRotozoomSurface(SDL_Surface* surface, float angle)
+	{
+		// check if rotateSurface90Degrees() is available (only when using SDL_gfx 2.0.17 or higher)
+		#if defined(IS_SDL_GFX_ROTOZOOM_SURFACE_90_DEGREES_AVAILABLE) and not defined(FGEAL_SDL1_2_FORCE_GFX_COMPATIBILITY)
+
+		if(surface->format->BitsPerPixel == 32) // rotateSurface90Degrees() only supports 32bit RGBA/ABGR (and fails otherwise)
+		{
+			double turns;
+			if(fabs(modf(angle / M_PI_2, &turns)) == 0) // only use if angle is a multiple of 90 degrees.
+				return rotateSurface90Degrees(surface, static_cast<int>(-turns)); // optimized 90-degree rotations
+		}
+
+		#endif
+
+		// fallback to standard rotation function
+		return rotozoomSurface(surface, rad2deg(angle), 1.0, REQUESTED_ROTOZOOM_SMOOTHING_FLAG);
+	}
+
+	// =====================================================================================================================================================
+
+	Image::Image(const string& filename)
+	: self(*new implementation())
+	{
+		FGEAL_CHECK_INIT();
+		self.sdlSurface = IMG_Load(filename.c_str() );
+		if ( self.sdlSurface == null)
+			throw AdapterException("Could not load image \"%s\": %s", filename.c_str(), IMG_GetError());
+
+		// attempt to use 32bit format, which are better suited to rotozoom
+		if(self.sdlSurface->format->BitsPerPixel != 32)
+		{
+			SDL_PixelFormat format32 = *(self.sdlSurface->format);
+			format32.BitsPerPixel = 32;
+			SDL_Surface* surf = SDL_ConvertSurface(self.sdlSurface, &format32, 0);
+			if(surf != null)  // if 32bit surf could not be obtained, move on
+			{
+				SDL_FreeSurface(self.sdlSurface);
+				self.sdlSurface = surf;
+			}
+		}
+	}
+
+	Image::Image(int w, int h)
+	: self(*new implementation())
+	{
+		FGEAL_CHECK_INIT();
+		self.sdlSurface = SDL_CreateRGBSurface(SDL_HWSURFACE, w, h, 32, 0, 0, 0, 0);
+		if ( self.sdlSurface == null)
+			throw AdapterException("Could not load image with dimensions w=%d h=%d :%s", w, h, IMG_GetError());
+
+		// clear the surfarce with transparent black
+		boxRGBA(self.sdlSurface, 0, 0, w, h, 0, 0, 0, 0);
+	}
+
+	Image::~Image()
+	{
+		FGEAL_CHECK_INIT();
+		SDL_FreeSurface(self.sdlSurface);
+		delete &self;
+	}
+
+	int Image::getWidth()
+	{
+		FGEAL_CHECK_INIT();
+		return self.sdlSurface->w;
+	}
+
+	int Image::getHeight()
+	{
+		FGEAL_CHECK_INIT();
+		return self.sdlSurface->h;
+	}
+
+	void Image::draw(float x, float y)
+	{
+		FGEAL_CHECK_INIT();
+		//draws all source region
+		SDL_Rect dstrect = toSDLRect2(x, y);
+		SDL_BlitSurface(self.sdlSurface, null, fgeal::drawTargetSurface, &dstrect);
+	}
+
+	void Image::drawRegion(float x, float y, float fromX, float fromY, float fromWidth, float fromHeight)
+	{
+		FGEAL_CHECK_INIT();
+		SDL_Rect dstrect = toSDLRect2(x, y);
+		SDL_Rect srcrect = toSDLRect(fromX, fromY, fromWidth, fromHeight); //draws selected region
+		SDL_BlitSurface(self.sdlSurface, &srcrect, fgeal::drawTargetSurface, &dstrect);
+	}
+
+	void Image::drawFlipped(float x, float y, const FlipMode flipmode)
+	{
+		FGEAL_CHECK_INIT();
+		const bool flipX = (flipmode == Image::FLIP_HORIZONTAL), flipY = (flipmode == Image::FLIP_VERTICAL);
+		SDL_Surface* flippedSurface = zoomSurface(self.sdlSurface, (flipX? -1 : 1), (flipY? -1 : 1), SMOOTHING_OFF);
+		//draws all source region
+		SDL_Rect dstrect = toSDLRect2(x , y);
+		SDL_BlitSurface(flippedSurface, null, fgeal::drawTargetSurface, &dstrect);
+		SDL_FreeSurface(flippedSurface); flippedSurface = null;
+	}
+
+	void Image::drawFlippedRegion(float x, float y, const FlipMode flipmode, float fromX, float fromY, float fromWidth, float fromHeight)
+	{
+		FGEAL_CHECK_INIT();
+		const bool flipX = (flipmode == Image::FLIP_HORIZONTAL), flipY = (flipmode == Image::FLIP_VERTICAL);
+		SDL_Surface* flippedSurface = zoomSurface(self.sdlSurface, (flipX? -1 : 1), (flipY? -1 : 1), SMOOTHING_OFF);
+		SDL_Rect dstrect = toSDLRect2(x, y);
+		SDL_Rect srcrect = toSDLRect( //draws selected region
+										flipX? (self.sdlSurface->w - fromX - fromWidth) : fromX,
+										flipY? (self.sdlSurface->h - fromY - fromHeight): fromY,
+										fromWidth, fromHeight);
+		SDL_BlitSurface(flippedSurface, &srcrect, fgeal::drawTargetSurface, &dstrect);
+		SDL_FreeSurface(flippedSurface); flippedSurface = null;
+	}
+
+	void Image::drawScaled(float x, float y, float xScale, float yScale, const FlipMode flipmode)
+	{
+		FGEAL_CHECK_INIT();
+		const bool flipX = (flipmode == Image::FLIP_HORIZONTAL), flipY = (flipmode == Image::FLIP_VERTICAL);
+		SDL_Surface* scaledSurface = zoomSurface(self.sdlSurface, (flipX? -xScale : xScale), (flipY? -yScale : yScale), REQUESTED_ROTOZOOM_SMOOTHING_FLAG);
+		//draws all source region
+		SDL_Rect dstrect = toSDLRect2(x, y);
+		SDL_BlitSurface(scaledSurface, null, fgeal::drawTargetSurface, &dstrect);
+		SDL_FreeSurface(scaledSurface); scaledSurface = null;
+	}
+
+	void Image::drawScaledRegion(float x, float y, float xScale, float yScale, const FlipMode flipmode, float fromX, float fromY, float fromWidth, float fromHeight)
+	{
+		FGEAL_CHECK_INIT();
+		const bool flipX = (flipmode == Image::FLIP_HORIZONTAL), flipY = (flipmode == Image::FLIP_VERTICAL);
+		SDL_Surface* scaledSurface = zoomSurface(self.sdlSurface, (flipX? -xScale : xScale), (flipY? -yScale : yScale), REQUESTED_ROTOZOOM_SMOOTHING_FLAG);
+		SDL_Rect dstrect = toSDLRect2(x, y);
+		SDL_Rect srcrect = toSDLRect( //draws selected region
+										xScale*(flipX? (self.sdlSurface->w - fromX - fromWidth) : fromX),
+										yScale*(flipY? (self.sdlSurface->h - fromY - fromHeight): fromY),
+										xScale*fromWidth, yScale*fromHeight);
+		SDL_BlitSurface(scaledSurface, &srcrect, fgeal::drawTargetSurface, &dstrect);
+		SDL_FreeSurface(scaledSurface); scaledSurface = null;
+	}
+
+	void Image::drawRotated(float x, float y, float angle, float centerX, float centerY, const FlipMode flipmode)
+	{
+		FGEAL_CHECK_INIT();
+		const bool flipX = (flipmode == Image::FLIP_HORIZONTAL), flipY = (flipmode == Image::FLIP_VERTICAL);
+		SDL_Surface* rotatedSurface = null;
+
+		if(flipmode == Image::FLIP_NONE)
+			rotatedSurface = customRotozoomSurface(self.sdlSurface, angle);
+		else
+			rotatedSurface = rotozoomSurfaceXY(self.sdlSurface, rad2deg(angle), (flipX? -1 : 1), (flipY? -1 : 1), REQUESTED_ROTOZOOM_SMOOTHING_FLAG);
+
+		const float sina = sin(-angle), cosa = cos(-angle);
+
+		const float w1 = self.sdlSurface->w,
+					h1 = self.sdlSurface->h,
+					w2 = rotatedSurface->w,
+					h2 = rotatedSurface->h;
+
+		const float ax2 = w2/2 + (centerX - w1/2) * cosa - (centerY - h1/2) * sina;
+		const float ay2 = h2/2 + (centerX - w1/2) * sina + (centerY - h1/2) * cosa;
+
+		//draws all source region
+		SDL_Rect dstrect = toSDLRect2((x - ax2), (y - ay2));
+		SDL_BlitSurface(rotatedSurface, null, fgeal::drawTargetSurface, &dstrect);
+		SDL_FreeSurface(rotatedSurface); rotatedSurface = null;
+	}
+
+	void Image::drawRotatedRegion(float x, float y, float angle, float centerX, float centerY, const FlipMode flipmode, float fromX, float fromY, float fromWidth, float fromHeight)
+	{
+		FGEAL_CHECK_INIT();
+		const bool flipX = (flipmode == Image::FLIP_HORIZONTAL), flipY = (flipmode == Image::FLIP_VERTICAL);
+		SDL_Surface* rotatedCroppedSurface = null;
+
+		//crop surface first
+		SDL_Surface* croppedSurface = SDL_CreateRGBSurface(self.sdlSurface->flags, fromWidth, fromHeight, self.sdlSurface->format->BitsPerPixel, 0, 0, 0, 0);
+		SDL_Rect srcrect = toSDLRect(fromX, fromY, fromWidth, fromHeight);
+		SDL_BlitSurface(self.sdlSurface, &srcrect, croppedSurface, null);
+
+		if(flipmode == Image::FLIP_NONE)
+			rotatedCroppedSurface = customRotozoomSurface(croppedSurface, angle);
+		else
+			rotatedCroppedSurface = rotozoomSurfaceXY(croppedSurface, rad2deg(angle), (flipX? -1 : 1), (flipY? -1 : 1), REQUESTED_ROTOZOOM_SMOOTHING_FLAG);
+
+		const float sina = sin(-angle), cosa = cos(-angle);
+
+		const float w1 = croppedSurface->w,
+					h1 = croppedSurface->h,
+					w2 = rotatedCroppedSurface->w,
+					h2 = rotatedCroppedSurface->h;
+
+		const float ax2 = w2/2 + (centerX - w1/2) * cosa - (centerY - h1/2) * sina;
+		const float ay2 = h2/2 + (centerX - w1/2) * sina + (centerY - h1/2) * cosa;
+
+		SDL_Rect dstrect = toSDLRect2((x - ax2), (y - ay2));
+		//draws all cropped region
+		SDL_BlitSurface(rotatedCroppedSurface, null, fgeal::drawTargetSurface, &dstrect);
+
+		// we dont need these anymore
+		SDL_FreeSurface(croppedSurface); croppedSurface = null;
+		SDL_FreeSurface(rotatedCroppedSurface); rotatedCroppedSurface = null;
+	}
+
+	void Image::drawScaledRotated(float x, float y, float xScale, float yScale, float angle, float centerX, float centerY, const FlipMode flipmode)
+	{
+		FGEAL_CHECK_INIT();
+		const bool flipX = (flipmode == Image::FLIP_HORIZONTAL), flipY = (flipmode == Image::FLIP_VERTICAL);
+		SDL_Surface* rotatedScaledSurface = rotozoomSurfaceXY(self.sdlSurface, rad2deg(angle), (flipX? -xScale : xScale), (flipY? -yScale : yScale), REQUESTED_ROTOZOOM_SMOOTHING_FLAG);
+
+		const float sina = sin(-angle), cosa = cos(-angle);
+
+		const float w1 = self.sdlSurface->w,
+					h1 = self.sdlSurface->h,
+					w2 = rotatedScaledSurface->w,
+					h2 = rotatedScaledSurface->h;
+
+		const float ax2 = w2/2 + (centerX - w1/2) * cosa - (centerY - h1/2) * sina;
+		const float ay2 = h2/2 + (centerX - w1/2) * sina + (centerY - h1/2) * cosa;
+
+		//draws all source region
+		SDL_Rect dstrect = toSDLRect2((x - ax2), (y - ay2));
+		SDL_BlitSurface(rotatedScaledSurface, null, fgeal::drawTargetSurface, &dstrect);
+		SDL_FreeSurface(rotatedScaledSurface); rotatedScaledSurface = null;
+	}
+
+	void Image::drawScaledRotatedRegion(float x, float y, float xScale, float yScale, float angle, float centerX, float centerY, const FlipMode flipmode, float fromX, float fromY, float fromWidth, float fromHeight)
+	{
+		FGEAL_CHECK_INIT();
+		const bool flipX = (flipmode == Image::FLIP_HORIZONTAL), flipY = (flipmode == Image::FLIP_VERTICAL);
+
+		//crop surface first
+		SDL_Surface* croppedSurface = SDL_CreateRGBSurface(self.sdlSurface->flags, fromWidth, fromHeight, self.sdlSurface->format->BitsPerPixel, 0, 0, 0, 0);
+		SDL_Rect srcrect = toSDLRect(fromX, fromY, fromWidth, fromHeight);
+		SDL_BlitSurface(self.sdlSurface, &srcrect, croppedSurface, null);
+
+		SDL_Surface* rotatedScaledCroppedSurface = rotozoomSurfaceXY(croppedSurface, rad2deg(angle), (flipX? -xScale : xScale), (flipY? -yScale : yScale), REQUESTED_ROTOZOOM_SMOOTHING_FLAG);
+
+		const float sina = sin(-angle), cosa = cos(-angle);
+
+		const float w1 = croppedSurface->w,
+					h1 = croppedSurface->h,
+					w2 = rotatedScaledCroppedSurface->w,
+					h2 = rotatedScaledCroppedSurface->h;
+
+		const float ax2 = w2/2 + (centerX - w1/2) * cosa - (centerY - h1/2) * sina;
+		const float ay2 = h2/2 + (centerX - w1/2) * sina + (centerY - h1/2) * cosa;
+
+		SDL_Rect dstrect = toSDLRect2((x - ax2), (y - ay2));
+		//draws all cropped region
+		SDL_BlitSurface(rotatedScaledCroppedSurface, null, fgeal::drawTargetSurface, &dstrect);
+
+		// we dont need these anymore
+		SDL_FreeSurface(croppedSurface); croppedSurface = null;
+		SDL_FreeSurface(rotatedScaledCroppedSurface); rotatedScaledCroppedSurface = null;
+	}
+
+	void Image::blit(Image& img, float x, float y, float xScale, float yScale, float angle, float centerX, float centerY, const FlipMode flipmode, float fromX, float fromY, float fromWidth, float fromHeight)
+	{
+		FGEAL_CHECK_INIT();
+		SDL_Surface* displayBackup = fgeal::drawTargetSurface;
+		fgeal::drawTargetSurface = img.self.sdlSurface;
+		this->delegateDraw(x, y, xScale, yScale, angle, centerX, centerY, flipmode, fromX, fromY, fromWidth, fromHeight);
+		fgeal::drawTargetSurface = displayBackup;
+	}
+}

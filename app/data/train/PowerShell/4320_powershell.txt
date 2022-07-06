@@ -1,0 +1,152 @@
+Function Start-AzureADConnect {
+<#
+.SYNOPSIS
+Start an Azure Active Directory Connect synchronization
+.DESCRIPTION
+Checks the current status of Azure AD Connect, if currently running will write a warning. If no sync is
+currently running a new sync cycle is requested. The event log is queried for sync completion and if any errors
+or warnings are encountered they are displayed when using the -Verbose switch.
+.PARAMETER Credential
+Standard Credential parameter which accepts PSCredential objects. Intended to specify elevated privelege account
+to perform operations where elevated priveleges are required
+.PARAMETER ComputerName
+ComputerName of the server running Azure AD Connect. Defaults to w8000op25.internal.dentsply.net
+.EXAMPLE
+Start-DSAzureADSync -Credential $cred
+Initiates Azure AD Connect synchronization
+.EXAMPLE
+Start-DSAzureADSync -Credential $cred -Verbose
+Initiates Azure AD Connect synchronization and shows verbose output
+#>
+[CmdletBinding(SupportsShouldProcess = $true)]
+Param (
+    [Parameter(Mandatory = $true)]
+    [System.Management.Automation.PSCredential]
+    [System.Management.Automation.CredentialAttribute()]
+    $Credential,
+    
+    [Parameter(Mandatory = $false)]
+    [string]$ComputerName = 'w8000op25.internal.dentsply.net'
+)
+
+Begin {
+    # create session
+    Write-Verbose "Creating PowerShell session to $ComputerName"
+    $Session = New-PsSession -ComputerName $ComputerName -Credential $Credential
+    Import-PSSession -Session $Session -CommandName Get-ADSyncConnectorRunStatus, Start-ADSyncSyncCycle -AllowClobber | Out-Null
+
+    # test if sync is currently running
+    Write-Verbose 'Checking if sync is currently running'
+    $Running = $false
+    $LoopCounter = 0
+    Do {
+        $LoopCounter++
+        # check the status
+        $CurrentStatus = Get-ADSyncConnectorRunStatus
+        
+        If ($CurrentStatus.RunState -eq 'Busy'){
+            Write-Verbose "Sync is currently active: $($CurrentStatus.ConnectorName)"
+            $Running = $true
+        }
+        Else {
+            #Write-Verbose "Loop $($LoopCounter); sync is not active"
+        }
+        
+        # sleep
+        Start-Sleep -Seconds 2
+    }
+    Until (($Running -eq $true) -or ($LoopCounter -eq 5))
+
+    If ($Running -eq $true){
+        Write-Warning 'Azure AD Sync is currently active, please try again later'
+    }
+    Else {
+        Write-Verbose 'Sync not active, requesting new sync cycle'
+    }
+}
+
+Process {
+    If ($Running -eq $false){
+        # start sync
+        $SyncStartTime = Get-Date
+        Start-ADSyncSyncCycle
+
+        # check until completion
+        Write-Verbose 'Waiting for sync cycle to start'
+        $Started = $false
+        Do {
+            $CurrentStatus = Get-ADSyncConnectorRunStatus
+            If ($CurrentStatus.RunState -eq 'Busy'){
+                $Started = $true
+            }
+            Start-Sleep -Seconds 4
+        }
+        Until ($Started -eq $true)
+        Write-Verbose 'Sync cycle has started'
+
+        # wait 30s then query event log for completion
+        Write-Verbose 'Waiting for sync cycle to complete'
+        Start-Sleep -Seconds 30
+
+        Do {
+            $InfoEventFilter = @{LogName = 'Application'
+                                 Id = 904
+                                 StartTime = $SyncStartTime
+                                 Level = 4}
+
+            $InfoEvents = Get-WinEvent -ComputerName $ComputerName -Credential $Credential -FilterHashtable $InfoEventFilter -ErrorAction SilentlyContinue | Sort-Object TimeCreated
+            $FinishedEvent = $InfoEvents.Where( {$_.Message -eq 'Finished'} ) 
+
+            Write-Verbose -Message 'Waiting for sync cycle to complete'
+            Start-Sleep -Seconds 10
+        }
+        Until ([bool]$FinishedEvent -eq $true)
+
+        Write-Verbose 'Sync cycle has completed'
+
+        # get events, check for errors
+        $EventFilter = @{LogName = 'Application'
+                         ProviderName = 'ADSync', 'Directory Synchronization'
+                         StartTime = $SyncStartTime
+                         Level = 2, 3, 4}
+
+        $AllEvents = Get-WinEvent -ComputerName $ComputerName -Credential $Credential -FilterHashtable $EventFilter -ErrorAction SilentlyContinue | Sort-Object TimeCreated
+
+        # set the output status based on errors found
+        If (($AllEvents.Level -eq 2) -or ($AllEvents.Level -eq 3)){
+            $FinalStatus = 'CompletedWithErrors'
+        }
+        Else {
+            $FinalStatus = 'Success'
+        }
+
+        # dump all events if -verbose used
+        If ($PSCmdlet.MyInvocation.BoundParameters["Verbose"].IsPresent -eq $true) {
+            Write-Verbose -Message 'Showing all Azure AD Connect event log messages'
+            ForEach ($event in $AllEvents) { 
+                Write-Verbose -Message "$($event.TimeCreated) $($event.Message)" 
+            }
+        }
+
+        # calculate runtime
+        $Span = New-TimeSpan -Start $SyncStartTime -End (Get-Date)
+        $CompletionTime = "$($Span.Hours.ToString('00')):$($Span.Minutes.ToString('00')):$($Span.Seconds.ToString('00'))"
+        #Write-Output "Azure AD Connect sync completed in $($Runtime.Hours)h:$($Runtime.Minutes)m:$($Runtime.Seconds)s"
+
+    }
+} 
+
+End {
+    If ($Running -eq $false){
+        Write-Verbose 'Removing PowerShell session'
+        Remove-PSSession $Session
+
+        # write output object
+        $properties = @{Status = $FinalStatus
+                        CompletionTime = $CompletionTime}
+        $obj = New-Object -TypeName psobject -Property $properties
+        Write-Output $obj
+    }
+}
+}
+

@@ -1,0 +1,139 @@
+import os
+import stat
+import socket
+import paramiko
+
+from transfert.statresult import stat_result
+from transfert.resources._resource import _Resource
+from transfert.exceptions import TransfertFileExistsError, TransfertFileNotFoundError
+
+
+class SftpResource(_Resource):
+    KNOW_HOSt_FILE = '~/.ssh/known_hosts'
+    GSS_AUTH = False
+    GSS_KEX = False
+    _DEFAULT_PORT = 22
+
+    def __init__(self, url):
+        _Resource.__init__(self, url)
+        self.__client = None
+        self._transport = None
+        self._fd = None
+
+    def exists(self):
+        try:
+            return self.isfile() or self.isdir()
+        except FileNotFoundError:
+            return False
+
+    def _get_hostkey(self):
+        try:
+            host_keys = paramiko.util.load_host_keys(os.path.expanduser(self.KNOW_HOSt_FILE))
+            htype = host_keys[self.url.host].keys()[0]
+            return host_keys[self.url.host][htype]
+        except (IOError, KeyError):
+            return None
+
+    def _connect(self):
+        self._transport = paramiko.Transport((self.url.host, self.url.port or self._DEFAULT_PORT))
+        self._transport.connect(self._get_hostkey(),
+                                self.url.user,
+                                self.url.password,
+                                gss_host=socket.getfqdn(self.url.host),
+                                gss_auth=self.GSS_AUTH,
+                                gss_kex=self.GSS_KEX)
+        self.__client = paramiko.SFTPClient.from_transport(self._transport)
+        self.__client.chdir()
+
+    def open(self, flags):
+        self._fd = self._client.open(self.url.path[1:], flags)
+
+    @property
+    def _client(self):
+        if self.__client is None:
+            self._connect()
+        return self.__client
+
+    def isfile(self):
+        try:
+            with self('r'):
+                return stat.S_ISREG(self.stat().st_mode)
+        except IOError:
+            return False
+
+    def isdir(self):
+        try:
+            with self('r'):
+                return stat.S_ISDIR(self.stat().st_mode)
+        except IOError:
+            return False
+
+    def listdir(self, path=None):
+        if self.isfile():
+            yield self
+        elif self.isdir():
+            for entry in self._client.listdir(self.url.path[1:] + '/'):
+                yield self.join(entry)
+        else:
+            raise FileNotFoundError(self)
+
+    def close(self):
+        if self._fd:
+            self._fd.close()
+        self._fd = None
+        if self._transport:
+            self._transport.close()
+            self._transport = None
+        if self.__client is not None:
+            self.__client.close()
+            self.__client = None
+
+    def stat(self):
+        stat_res = self._client.stat(self.url.path[1:])
+        return stat_result(
+            st_atime=stat_res.st_atime,
+            st_gid=stat_res.st_gid,
+            st_mode=stat_res.st_mode,
+            st_mtime=stat_res.st_mtime,
+            st_size=stat_res.st_size,
+            st_uid=stat_res.st_uid,
+        )
+
+    def size(self):
+        return self.stat().st_size
+
+    def delete(self):
+        if self.isfile():
+            self._client.remove(self.url.path[1:])
+        elif self.isdir():
+            self._client.rmdir(self.url.path[1:])
+        else:
+            raise TransfertFileNotFoundError(self)
+
+    def chmod(self, mode):
+        self._client.chmod(self.url.path[1:], mode)
+
+    def read(self, size):
+        return iter(lambda: self._fd.read(size), b'')
+
+    def write(self, data):
+        self._fd.write(data)
+
+    def mkdir(self, name=None):
+        # Can be optimized after connection pool setup
+        if name is None:
+            if self.isfile():
+                raise TransfertFileExistsError(self)
+            elif not self.isdir():
+                self._client.mkdir(self.url.path[1:])
+            return self
+        else:
+            dire = self.join(name)
+            if dire.isfile():
+                raise TransfertFileExistsError(self)
+            elif not dire.isdir():
+                return dire.mkdir()
+            return dire
+
+    def __del__(self):
+        self.close()

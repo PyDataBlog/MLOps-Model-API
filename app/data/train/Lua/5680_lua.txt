@@ -1,0 +1,67 @@
+local GearsObject = require('gears.object')
+local Mode = require('./vim_plugin/mode_constants')
+local getCommands = require('./vim_plugin/commands')
+local Apps = require('./vim_plugin/apps')
+local naughty = require('naughty')
+local utils = require('awful.util')
+local commandRunner = require('./vim_plugin/command_runner')
+
+commandRunner.setApps(Apps)
+require('./json')
+
+local vimPlugin = GearsObject()
+vimPlugin:add_signal('vim_plugin::mode_changed')
+
+local currentMode = Mode.INSERT_MODE
+local initialized = false
+local actionsHistory = {}
+local keyPressed = {}
+local keysToCommands = {}
+
+vimPlugin.changeMode = function(newMode, flags)
+  if (type(flags) ~= 'table') then
+    flags = {}
+  end
+  if (newMode ~= currentMode) then
+    currentMode = newMode
+    vimPlugin:emit_signal('vim_plugin::mode_changed', currentMode)
+
+    if (currentMode == Mode.COMMAND_MODE or currentMode == Mode.ONECOMMAND_MODE) then
+      if not keygrabber.isrunning() then
+        keygrabber.run(function(mod, key, event)
+          if (event == 'press') then
+            keyPressed = key
+            local newFlags = {}
+            local originalMode = currentMode
+            if (currentMode == Mode.ONECOMMAND_MODE) then
+              keepKeygrabber = commandRunner.executeCommand(keyPressed)
+              newFlags.keepKeygrabber = keepKeygrabber
+            elseif (currentMode == Mode.APPLICATION_MODE) then
+              commandRunner.runApp(keyPressed)
+            end
+            if (originalMode == currentMode and keyPressed ~= 'Super_L') then
+              vimPlugin.changeMode(Mode.INSERT_MODE, newFlags)
+            end
+          end
+        end)
+      end
+    end
+    if (currentMode == Mode.INSERT_MODE and not flags.keepKeygrabber) then
+      keygrabber.stop()
+    end
+  end
+end
+vimPlugin.getMode = function()
+  return currentMode
+end
+vimPlugin.initialize = function(myPromptBox, layouts, appsWithClosingConf)
+  initialized = true
+  commandRunner.setCommands(getCommands(myPromptBox, layouts, appsWithClosingConf))
+end
+vimPlugin.bindCommands = function(_keysToCommands, _keysToApps)
+  keysToCommands = _keysToCommands
+  commandRunner.setKeysToCommands(keysToCommands)
+  commandRunner.setKeysToApps(_keysToApps)
+end
+
+return vimPlugin

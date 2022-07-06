@@ -1,0 +1,1 @@
+$(document).ready(function(){(new WOW).init()}),$(document).ready(function(){var e=document.getElementById("scene");new Parallax(e);$.stellar()});

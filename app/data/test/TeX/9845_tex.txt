@@ -1,0 +1,149 @@
+\documentclass{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{underscore}
+\usepackage{systeme}
+\usepackage{mathtools}
+\usepackage{amsmath}
+\usepackage{url}
+\usepackage{graphicx}
+%\usepackage[T1]{fontenc}
+\usepackage{titlesec}
+\usepackage{titling}
+\usepackage[margin=1in]{geometry}
+\usepackage{listings}
+\usepackage{color}
+\usepackage{courier}
+\usepackage{standalone}
+
+\newcommand{\imagi}{\mathnormal{i}}
+\newcommand{\imagj}{\mathnormal{j}}
+\newcommand{\euler}{\mathnormal{e}}
+
+\graphicspath{ {Images/} }
+
+\lstset{language=C,
+captionpos=b,
+tabsize=8,
+frame=lines,
+keywordstyle=\color{blue},
+commentstyle=\color{darkgreen},
+stringstyle=\color{red},
+numbers=left,
+numberstyle=\normalsize,
+numbersep=5pt,
+breaklines=true,
+showstringspaces=false,
+basicstyle=\large\ttfamily,
+emph={label}}
+
+\begin{document}
+
+\title{PodNet $\Rightarrow$ CLock $\rightarrow$ CSpinLock}
+\author{Zach Podbielniak}
+
+\maketitle
+
+\section{Spin Lock}
+
+A SPIN LOCK is exactly what it sounds there. The CPU will enter a while loop either for a particular amount of time, or an infinite amount of time, and poll the status of the lock, and attempt to lock it. 
+
+\subsection{How It Works}
+
+This is achieved through the function \textit{InterlockedCompareExchangeHappened()}, which is compare-exchange operation that returns whether or not the exchange happened. Each iteration of the interal while loop will call that function, and check to see if \textit{TRUE} was returned or not. If \textit{TRUE} was returned, then that thread has a lock.
+
+\subsection{When To Use It}
+
+Use a SPIN LOCK where there are scenarios that a high amount of locking is happening, and when the lock happens, there are few instructions that are executed before that lock is released. A great example to use this would be for a CONTAINER Object, such as a VECTOR or LINKEDLIST.
+
+\subsection{Pros}
+
+SPIN LOCKs are the lightest of all the advisory locks, as it just relies on the function \textit{InterlockedCompareExchangeHappened()}. They also happen to be the fastest to lock and then release.
+
+\subsection{Cons}
+
+There is no such thing as a free lunch. While SPIN LOCKs are the lightest and fastest advisory locks, they are not the best at everything. On single-core, non-hyperthreaded CPUs, they can and will waist their entire quantum (time-slice) if they are waiting for a longer amount of time than the scheduled quantum. This is highly inefficient. SPIN LOCKs work best on multi-core, or at a bare-minimum, a single-core CPU with hyperthreading (or equivalent technology). Please note that while calling \textit{WaitForSingleObject()}, supplying a HANDLE to a SPIN LOCK, the core / CPU that the caller thread is running will peg straight out to 100\%, as it is directly equivalent to the following: 
+\begin{lstlisting}
+while (TRUE) {}
+\end{lstlisting}
+
+\vspace{2mm}
+\noindent
+While it is a little more complicated than that, that is essentially what is going on behind the hood.
+
+\vspace{2mm}
+\noindent
+Please note that there is no queue for who obtains the lock next. It is simply what I like to call ``Survival Of The Fittest.'' That is, whichever thread happens to be the first one to successfully perform \textit{InterlockedCompareExchangeHappened()}, after the SPIN LOCK was released will acquire it. It is completely possible one thread can continously keep acquiring the lock, while another thread never is able to acquire it. The PodNet library has no control over the kernel's scheduling algorithm, and as such, some threads may be more `lucky' than other threads with a SPIN LOCK.
+
+\subsection{Special Wait Times}
+
+There are two special wait times for a SPIN LOCK:
+
+\vspace{2mm}
+\noindent
+\textbf{0 / NULL}:
+
+\vspace{2mm}
+\noindent
+When supplying \textbf{0} or \textbf{NULL} to the parameter \textit{ullMilliSeconds} when calling \textit{WaitForSingleObject()}, this will perform a `Try Lock' operation on the SPIN LOCK. That is, it will call \textit{InterlockedCompareExchangeHappened()} exactly once, and whatever the return value is, is what \textit{WaitForSingleObject()} will return.
+
+\vspace{2mm}
+\noindent
+\textbf{INFINITE\_WAIT\_TIME}:
+
+\vspace{2mm}
+\noindent
+When supplying \textbf{INFINITE\_WAIT\_TIME} or \textbf{MAX\_ULONGLONG} to the parameter \textit{ullMilliSeconds} when calling \textit{WaitForSingleObject()}, the result is the calling thread to wait until at least the end of time. Keep in mind, while doing this long wait, it is completely pegging that core to 100\%. This is \textbf{NOT} advisable on a single-core system. Also, supplying \textbf{INFINITE\_WAIT\_TIME} \textbf{CAN CAUSE A DEADLOCK CONDITION}, and a very nasty one...one that is pegging the core to 100\% until the end of time. \textbf{USE WITH CAUTION!}
+
+\subsection{Spin Lock Functions}
+
+Lets take a look at the functions that make up a SPIN LOCK.
+
+\subsubsection{CreateSpinLock}
+
+\begin{lstlisting}
+_Result_Null_On_Failure_
+_Success_(return != NULLPTR, _Non_Locking_)
+PODNET_API
+HANDLE
+CreateSpinLock(
+	VOID
+);
+\end{lstlisting}
+
+\vspace{2mm}
+\noindent
+\textit{CreateSpinLock} takes in no parameters and will return a HANDLE to the newly created SPIN LOCK.
+
+\vspace{2mm}
+\noindent
+\textbf{Return $\rightarrow$ HANDLE}: On success, a valid HANDLE to the new SPIN LOCK will be returned. If this function fails, the return will be \textit{NULLPTR}.
+
+
+\subsubsection{ReleaseSpinLock}
+
+\begin{lstlisting}
+_Success_(return != NULL, _Interlocked_)
+PODNET_API
+BOOL
+ReleaseSpinLock(
+	_In_ 		HANDLE 		hSpinLock
+);
+\end{lstlisting}
+
+\vspace{2mm}
+\noindent
+\textit{ReleaseSpinLock} takes in one parameter, and will return a BOOL.
+
+\vspace{2mm}
+\noindent
+\textbf{hSpinLock}: This is a HANDLE to a valid SPIN LOCK that is going to be released.
+
+\vspace{2mm}
+\noindent
+\textbf{Return $\rightarrow$ BOOL}: On success, a non-zero value is returned (\textit{!FALSE}).
+
+
+
+\end{document}

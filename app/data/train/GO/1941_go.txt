@@ -1,0 +1,250 @@
+/*
+   Copyright 2015 Daniel Nichter
+
+   This program is free software: you can redistribute it and/or modify
+   it under the terms of the GNU Affero General Public License as published by
+   the Free Software Foundation, either version 3 of the License, or
+   (at your option) any later version.
+
+   This program is distributed in the hope that it will be useful,
+   but WITHOUT ANY WARRANTY; without even the implied warranty of
+   MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+   GNU Affero General Public License for more details.
+
+   You should have received a copy of the GNU Affero General Public License
+   along with this program.  If not, see <http://www.gnu.org/licenses/>
+*/
+
+package ticker
+
+import (
+	"testing"
+	"time"
+)
+
+var nowNano int64
+
+func mockNowNanoFunc() int64 {
+	return nowNano
+}
+
+var nowUnix int64
+
+func mockNowUnixFunc() int64 {
+	return nowUnix
+}
+
+var slept time.Duration
+
+func mockSleepFunc(t time.Duration) {
+	slept = t
+	return
+}
+
+func init() {
+	useMockFuncs()
+}
+
+func useMockFuncs() {
+	nowNanoFunc = mockNowNanoFunc
+	nowUnixFunc = mockNowUnixFunc
+	sleepFunc = mockSleepFunc
+}
+
+func TestFake2sTicker(t *testing.T) {
+	// To align ticks, we must first sleep N number of nanoseconds until
+	// the next interval.  So we specify the curren time (now) in
+	// nanoseconds, and an interval time (2), and then we know how long
+	// the syncer should sleep to wait from now until the next interval
+	// time.
+
+	// Fri Sep 27 18:11:37.385120 -0700 PDT 2013 =
+	nowNano = int64(1380330697385120263)
+
+	// Start a 2s, aligned ticker.
+	tkr := NewTimeTicker(2, true)
+	defer tkr.Stop()
+
+	// Subscribe the 2s ticker.
+	c := tkr.Subscribe()
+	defer tkr.Remove(c)
+
+	// Wait for the first tick, which should be 0.61488 seconds away
+	// because now is ^ so the next interval 2s interval, 18:11:38.000.
+	<-c
+
+	// Check how long ticker slept.
+	got := slept.Nanoseconds()
+	expect := int64(614879744) // 0.61488s
+	if got != expect {
+		t.Errorf("Slept %d, expected %d\n", got, expect)
+	}
+
+	// Next (time to next tick) should be reported as the same: 0.614880s
+	d := tkr.Next()
+	if d < 0.614 || d > 0.615 {
+		t.Errorf("Next %f, expected 0.61488\n", d)
+	}
+}
+
+func TestFake60sTicker(t *testing.T) {
+	// Fri Sep 27 18:11:37.385120 -0700 PDT 2013 =
+	nowNano = int64(1380330697385120263)
+
+	tkr := NewTimeTicker(60, true)
+	defer tkr.Stop()
+
+	c := tkr.Subscribe()
+	defer tkr.Remove(c)
+	<-c
+
+	got := slept.Nanoseconds()
+	expect := int64(614879744 + (22 * time.Second))
+	if got != expect {
+		t.Errorf("Slept %d, expected %d\n", got, expect)
+	}
+}
+
+func TestReal2sTicker(t *testing.T) {
+	// Use real time functions for this test.
+	nowNanoFunc = time.Now().UnixNano
+	nowUnixFunc = time.Now().Unix
+	sleepFunc = time.Sleep
+	defer useMockFuncs() // restore mock time functions
+
+	// The ticker returned by the syncer should tick at this given interval,
+	// 2s in this case.  We test this by ensuring that the current time at
+	// a couple of ticks is divisible by 2, and that the fractional seconds
+	// part is < ~1 millisecond, e.g.:
+	//   00:00:02.000123456  OK
+	//   00:00:04.000123456  OK
+	//   00:00:06.001987654  BAD
+	// This may fail on slow test machines.
+
+	// Start a 2s, aligned ticker.
+	tkr := NewTimeTicker(2, true)
+	defer tkr.Stop()
+
+	// Subscribe the 2s ticker.
+	c1 := tkr.Subscribe()
+	defer tkr.Remove(c1)
+
+	c2 := tkr.Subscribe()
+	defer tkr.Remove(c2)
+
+	// Get 2 ticks but only on c1.  "Time waits for nobody" and neither does
+	// the ticker, so c2 not receiving should not affect c1.
+	maxDelay := 8900000 // 8.9ms
+	var lastTick time.Time
+	for i := 0; i < 2; i++ {
+		select {
+		case tick := <-c1:
+			sec := tick.Second()
+			if sec%2 > 0 {
+				t.Errorf("Tick %d not 2s interval: %d", i, sec)
+			}
+			nano := tick.Nanosecond()
+			if nano > maxDelay {
+				t.Errorf("Tick %d too slow: %d >= %d: %s", i, nano, maxDelay, tick)
+			}
+			lastTick = tick
+		}
+	}
+
+	// Remove c1 and recv on c2 now.  Even though c2 missed previous 2 ticks,
+	// it should be able to start receiving new ticks.  By contrast, c1 should
+	// not receive the tick.
+	tkr.Remove(c1)
+
+	timeout := time.After(2500 * time.Millisecond)
+	var c2Tick time.Time
+TICK_LOOP:
+	for {
+		select {
+		case tick := <-c2:
+			if !c2Tick.IsZero() {
+				t.Error("c2 gets only 1 tick")
+			} else {
+				c2Tick = tick
+			}
+		case <-c1:
+			t.Error("c1 does not get current tick")
+		case <-timeout:
+			break TICK_LOOP
+		}
+	}
+
+	if c2Tick == lastTick || c2Tick.Before(lastTick) {
+		t.Error("c2 gets current tick")
+	}
+}
+
+func TestStopTicker(t *testing.T) {
+	// Use real time functions for this test.
+	nowNanoFunc = time.Now().UnixNano
+	nowUnixFunc = time.Now().Unix
+	sleepFunc = time.Sleep
+	defer useMockFuncs() // restore mock time functions
+
+	// Start a 2s, aligned ticker.
+	tkr := NewTimeTicker(1, false)
+	defer tkr.Stop()
+
+	// Subscribe the 2s ticker.
+	c := tkr.Subscribe()
+	ticked := make(chan bool, 1)
+	stopped := make(chan bool, 1)
+	go func() {
+		for _ = range c {
+			ticked <- true
+		}
+		stopped <- true
+	}()
+
+	// Wait for a tick to make sure it's alive.
+	select {
+	case <-ticked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Didn't get tick after 2s")
+	}
+
+	// Stop the ticker which should stop and close all the watcher chans.
+	tkr.Stop()
+	select {
+	case <-stopped:
+	case <-time.After(1 * time.Second):
+		t.Fatal("Ticker didn't stop after 1s")
+	}
+
+	// Stopping should be idempotent.
+	tkr.Stop()
+}
+
+func TestCurrent(t *testing.T) {
+	// 5m ticker
+	tkr := NewTimeTicker(300, true)
+	defer tkr.Stop()
+
+	var began time.Time
+
+	// between intervals
+	nowUnix = 1388577750 // 2014-01-01 12:02:30
+	began = tkr.Current()
+	if began.Unix() != int64(1388577600) { // 2014-01-01 12:00:00
+		t.Error("Got %d, expected 1388577600\n", began.Unix())
+	}
+
+	// 1s before next interval
+	nowUnix = 1388577899 // 2014-01-01 12:04:59
+	began = tkr.Current()
+	if began.Unix() != int64(1388577600) { // 2014-01-01 12:00:00
+		t.Error("Got %d, expected 1388577600\n", began.Unix())
+	}
+
+	// at interval
+	nowUnix = 1388577900 // 2014-01-01 12:05:00
+	began = tkr.Current()
+	if began.Unix() != int64(1388577900) { // 2014-01-01 12:05:00
+		t.Error("Got %d, expected 1388577900\n", began.Unix())
+	}
+}

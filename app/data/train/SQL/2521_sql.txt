@@ -1,0 +1,205 @@
+CREATE OR REPLACE FUNCTION find_road_from_to_osm_city_trigram(IN roadway text, IN from_road text, IN to_road text, IN in_city text)
+returns streetlength
+as
+$BODY$
+DECLARE
+    var_sql text := '';
+    ret record;
+    in_statefp varchar(2) ;
+    results streetlength;
+BEGIN
+    IF COALESCE(roadway,'') = '' THEN
+        -- not enough to give a result just return
+        RAISE NOTICE 'need a street to do this';
+        return results;
+    END IF;
+    IF COALESCE(from_road,to_road,'') = '' THEN
+        -- not enough to give a result just return
+        RAISE NOTICE 'need a from and/or to road to do this';
+        return results;
+    END IF;
+    IF COALESCE(in_city,'') = '' THEN
+        -- not enough to give a result just return
+        RAISE NOTICE 'need a city to do this';
+        return results;
+    END IF;
+var_sql := '
+WITH
+    city as (select name,ST_Union(wkb_geometry) as geom
+             from public.multipolygons r
+             where r.name ~* $2
+             and other_tags -> '|| quote_literal('border_type')
+|| ' ~* '
+|| quote_literal('city')
+||'             group by name
+             order by similarity(r.name,$2) desc limit 1),
+    sim_ranking as (select r.*, similarity(r.name,$1) as score
+           from lines r
+           join city on (r.wkb_geometry && city.geom)
+           where similarity(r.name,$1) > 0.1
+           order by score desc),
+    max_sim as (select max(score) as max_sim from sim_ranking),
+    s1_segments as (select s.* from sim_ranking s, max_sim where score = max_sim),
+    s1_g as (select name, ST_MakeLine(ST_LineMerge(wkb_geometry)) as geom from s1_segments group by name),
+    --
+    -- first intersection
+    --
+    from_ranking as (select r.wkb_geometry,r.osm_id,r.name, similarity(r.name,$3) as score
+           from lines r
+           join city on (r.wkb_geometry && city.geom)
+           where similarity(r.name,$3) > 0.1
+           UNION
+           select r.wkb_geometry,r.osm_id,r.name, similarity(r.name,$3) as score
+           from multilinestrings r
+           join city on (r.wkb_geometry && city.geom)
+           where similarity(r.name,$3) > 0.1
+           order by score desc),
+    max_sim_from as (select max(score) as max_sim from from_ranking ),
+    s2_segments as (select distinct * from max_sim_from, from_ranking where score = max_sim),
+    s2_g as (select name, st_makeline(st_linemerge(wkb_geometry)) as geom from s2_segments group by name limit 1),
+    --
+    -- second intersection
+    --
+    to_ranking as (select r.wkb_geometry,r.osm_id,r.name, similarity(r.name,$4) as score
+           from lines r
+           join city on (r.wkb_geometry && city.geom)
+           where similarity(r.name,$4) > 0.1
+           UNION
+           select r.wkb_geometry,r.osm_id,r.name, similarity(r.name,$4) as score
+           from multilinestrings r
+           join city on (r.wkb_geometry && city.geom)
+           where similarity(r.name,$4) > 0.1
+           order by score desc),
+    max_sim_to as (select max(score) as max_sim from to_ranking),
+    s3_segments as (select distinct * from max_sim_to, to_ranking where score = max_sim),
+    s3_g as (select name, st_makeline(st_linemerge(wkb_geometry)) as geom from s3_segments group by name limit 1),
+    --
+    -- nearness of s1 to s2
+    --
+    m2 as (select st_ClosestPoint(s.wkb_geometry,s2_g.geom) as pt, st_distance(s.wkb_geometry,s2_g.geom) as s2_dist from s1_segments s,s2_g order by s2_dist limit 1),
+    -- nearness of s1 to s3
+    m3 as (select st_ClosestPoint(s.wkb_geometry,s3_g.geom) as pt, st_distance(s.wkb_geometry,s3_g.geom) as s3_dist from s1_segments s,s3_g order by s3_dist limit 1),
+    --
+    -- maximum inclusive distance
+    --
+    maximal as (select st_distance(m2.pt,m3.pt) as maxdist from m2,m3 limit 1),
+    keep_segs as (select distinct s.*,
+                  st_distance(s.wkb_geometry,m2.pt) as s2_dist,
+                  st_distance(s.wkb_geometry,m3.pt) as s3_dist
+                  from s1_segments s,m2,m3 ),
+    closest_segs as (select s.* from keep_segs s, maximal
+                     where  s2_dist <= maxdist and s3_dist <= maxdist)
+    select s.name,
+           st_collect(ST_linemerge(s.wkb_geometry)) as geom,
+           sum(st_length(st_transform(s.wkb_geometry,32611)) * 0.000621371192) as len
+           from closest_segs s
+           group by name
+';
+  EXECUTE var_sql into results USING roadway,in_city,from_road,to_road;
+  RETURN results;
+END;
+$BODY$
+  LANGUAGE 'plpgsql' IMMUTABLE STRICT;
+
+CREATE OR REPLACE FUNCTION find_road_from_cl_osm_city_trigram(IN roadway text, IN from_road text,  IN in_city text)
+returns streetlength
+as
+$BODY$
+DECLARE
+    var_sql text := '';
+    ret record;
+    in_statefp varchar(2) ;
+    results streetlength;
+BEGIN
+    IF COALESCE(roadway,'') = '' THEN
+        -- not enough to give a result just return
+        RAISE NOTICE 'need a street to do this';
+        return results;
+    END IF;
+    IF COALESCE(from_road,'') = '' THEN
+        -- not enough to give a result just return
+        RAISE NOTICE 'need a crossing road to do this';
+        return results;
+    END IF;
+    IF COALESCE(in_city,'') = '' THEN
+        -- not enough to give a result just return
+        RAISE NOTICE 'need a city to do this';
+        return results;
+    END IF;
+var_sql := '
+WITH
+    city as (select name,ST_Union(wkb_geometry) as geom
+             from public.multipolygons r
+             where r.name ~* $2
+             and other_tags -> '|| quote_literal('border_type')
+|| ' ~* '
+|| quote_literal('city')
+||'             group by name
+             order by similarity(r.name,$2) desc limit 1),
+    sim_ranking as (select r.*, similarity(r.name,$1) as score
+           from lines r
+           join city on (r.wkb_geometry && city.geom)
+           where similarity(r.name,$1) > 0.1
+           order by score desc),
+    max_sim as (select max(score) as max_sim from sim_ranking),
+    s1_segments as (select s.* from sim_ranking s, max_sim where score = max_sim),
+    s1_g as (select name, ST_MakeLine(ST_LineMerge(wkb_geometry)) as geom from s1_segments group by name),
+    --
+    -- first intersection
+    --
+    from_ranking as (select r.wkb_geometry,r.osm_id,r.name, similarity(r.name,$3) as score
+           from lines r
+           join city on (r.wkb_geometry && city.geom)
+           where similarity(r.name,$3) > 0.1
+           UNION
+           select r.wkb_geometry,r.osm_id,r.name, similarity(r.name,$3) as score
+           from multilinestrings r
+           join city on (r.wkb_geometry && city.geom)
+           where similarity(r.name,$3) > 0.1
+           order by score desc),
+    max_sim_from as (select max(score) as max_sim from from_ranking ),
+    s2_segments as (select distinct * from max_sim_from, from_ranking where score = max_sim),
+    s2_g as (select name, st_makeline(st_linemerge(wkb_geometry)) as geom from s2_segments group by name limit 1),
+    --
+    -- city border intersection
+    --
+    cl as (select (ST_DumpPoints(st_exteriorring(st_concavehull(st_union(city.geom),.5)))).geom  as cl
+           from city
+           ),
+    cl2 as (select cl.cl as cl2, st_distance(cl.cl,s1_g.geom) as dist
+            from cl,s1_g
+            ),
+    s3_g as (
+        select  cl2.cl2 as geom
+          from cl2
+            where dist > 0
+            order by dist
+            limit 1
+          ),
+    --
+    -- nearness of s1 to s2
+    --
+    m2 as (select st_ClosestPoint(s.wkb_geometry,s2_g.geom) as pt, st_distance(s.wkb_geometry,s2_g.geom) as s2_dist from s1_segments s,s2_g order by s2_dist limit 1),
+    -- nearness of s1 to s3
+    m3 as (select st_ClosestPoint(s.wkb_geometry,s3_g.geom) as pt, st_distance(s.wkb_geometry,s3_g.geom) as s3_dist from s1_segments s,s3_g order by s3_dist limit 1),
+    --
+    -- maximum inclusive distance
+    --
+    maximal as (select st_distance(m2.pt,m3.pt) as maxdist from m2,m3 limit 1),
+    keep_segs as (select distinct s.*,
+                  st_distance(s.wkb_geometry,m2.pt) as s2_dist,
+                  st_distance(s.wkb_geometry,m3.pt) as s3_dist
+                  from s1_segments s,m2,m3 ),
+    closest_segs as (select s.* from keep_segs s, maximal
+                     where  s2_dist <= maxdist and s3_dist <= maxdist)
+    select s.name,
+           st_collect(ST_linemerge(s.wkb_geometry)) as geom,
+           sum(st_length(st_transform(s.wkb_geometry,32611)) * 0.000621371192) as len
+           from closest_segs s
+           group by name
+';
+  EXECUTE var_sql into results USING roadway,in_city,from_road;
+  RETURN results;
+END;
+$BODY$
+  LANGUAGE 'plpgsql' IMMUTABLE STRICT;

@@ -1,0 +1,339 @@
+###############################################
+# PROXY CONFIG (if needed)
+###############################################
+#$browser = New-Object System.Net.WebClient
+#$browser.Proxy.Credentials =[System.Net.CredentialCache]::DefaultNetworkCredentials
+
+
+###############################################
+# INITIAL CONFIG
+###############################################
+## uncomment the necessary modules for first run
+#Install-Module Find-String
+
+#Set-ExecutionPolicy unrestricted
+
+# Install OpenSSH
+# Note: do not install chocolatey. Use Install-Package instead.
+# Get-PackageProvider
+# Get-PackageSource -Provider chocolatey
+# Install-Package -Name openssh -Force
+# Add to path
+$env:path += ";" + (Get-Item "Env:ProgramFiles").Value + "\OpenSSH-Win64"
+$env:path += ";" + (Get-Item "Env:ProgramFiles").Value + "\7-zip"
+$env:path += ";" + (Get-Item "Env:ProgramFiles").Value + "\Git\bin"
+
+## For working less (except in ISE)
+#Install-Package Pscx -Force -ProviderName chocolatey
+
+## For history with up/down arrows
+#Install-Package PSReadLine
+#Import-Module PSReadLine
+
+## https://technet.microsoft.com/en-us/magazine/hh241048.aspx
+$MaximumHistoryCount = 10000
+
+## https://gallery.technet.microsoft.com/scriptcenter/Get-NetworkStatistics-66057d71
+Unblock-File "$home\Documents\WindowsPowerShell\Scripts\Get-NetworkStatistics.ps1"
+. "$home\Documents\WindowsPowerShell\Scripts\Get-NetworkStatistics.ps1" 
+
+## Produce UTF-8 by default
+## https://news.ycombinator.com/item?id=12991690
+$PSDefaultParameterValues["Out-File:Encoding"]="utf8"
+
+###############################################
+# GENERAL ALIASES
+###############################################
+
+# Functions are required for multi-line commands
+Function notepad { start notepad++ }
+
+New-Alias c clear
+New-Alias ll dir
+New-Alias np notepad
+
+###############################################
+# DANGEROUS ALIASES
+###############################################
+
+New-Alias reboot Restart-Computer
+
+###############################################
+# DIRECTORY ALIASES
+###############################################
+
+# Functions are required for multi-line commands
+Function GoBackUpOne { cd ..; dir; }
+Function GoToDesktop { c:;  cd .\Desktop; dir}
+Function GoToHomeDirectory { cd ~; dir }
+
+# Bind alias with function call
+New-Alias .. GoBackUpOne
+New-Alias ~ GoToHomeDirectory
+New-Alias cdd GoToDesktop
+New-Alias e explorer
+
+###############################################
+# SOME HANDY FUNCTIONS
+###############################################
+
+function uptime {
+	Get-WmiObject win32_operatingsystem | select csname, @{LABEL='LastBootUpTime';
+	EXPRESSION={$_.ConverttoDateTime($_.lastbootuptime)}}
+}
+
+function edit-powershell-profile {
+	subl $profile
+}
+
+function reload-powershell-profile {
+	& $profile
+}
+
+# From http://stackoverflow.com/questions/7330187/how-to-find-the-windows-version-from-the-powershell-command-line
+function get-windows-build {
+	[Environment]::OSVersion
+}
+
+# http://mohundro.com/blog/2009/03/31/quickly-extract-files-with-powershell/
+function unarchive([string]$file, [string]$outputDir = '') {
+	if (-not (Test-Path $file)) {
+		$file = Resolve-Path $file
+	}
+
+	if ($outputDir -eq '') {
+		$outputDir = [System.IO.Path]::GetFileNameWithoutExtension($file)
+	}
+
+	7z e "-o$outputDir" $file
+}
+
+function findfile($name) {
+	ls -recurse -filter "*${name}*" -ErrorAction SilentlyContinue | foreach {
+		$place_path = $_.directory
+		echo "${place_path}\${_}"
+	}
+}
+
+function get-path {
+	($Env:Path).Split(";")
+}
+
+function explorer {
+	explorer.exe .
+}
+
+
+function open($file) {
+	ii $file
+}
+
+# http://stackoverflow.com/questions/39148304/fuser-equivalent-in-powershell/39148540#39148540
+function fuser($relativeFile){
+	$file = Resolve-Path $relativeFile
+	echo "Looking for processes using $file"
+	foreach ( $Process in (Get-Process)) {
+		foreach ( $Module in $Process.Modules) {
+			if ( $Module.FileName -like "$file*" ) {
+				$Process | select id, path
+			}
+		}
+	}
+}
+
+
+#######################################################
+# UNIXLIKE SHELL COMMANDS
+#######################################################
+
+function df {
+	get-volume
+}
+
+function sed($file, $find, $replace){
+	(Get-Content $file).replace("$find", $replace) | Set-Content $file
+}
+
+function sed-recursive($filePattern, $find, $replace) {
+	$files = ls . "$filePattern" -rec
+	foreach ($file in $files) {
+		(Get-Content $file.PSPath) |
+		Foreach-Object { $_ -replace "$find", "$replace" } |
+		Set-Content $file.PSPath
+	}
+}
+
+function grep($regex, $dir) {
+	if ( $dir ) {
+		ls $dir | select-string $regex
+		return
+	}
+	$input | select-string $regex
+}
+
+function grepv($regex) {
+	$input | ? { !$_.Contains($regex) }
+}
+
+function which($name) {
+	Get-Command $name | Select-Object -ExpandProperty Definition
+}
+
+# Should really be name=value like Unix version of export but not a big deal
+function export($name, $value) {
+	set-item -force -path "env:$name" -value $value;
+}
+
+function pkill($name) {
+	ps $name -ErrorAction SilentlyContinue | kill
+}
+
+function pgrep($name) {
+	ps $name
+}
+
+function touch($file) {
+	"" | Out-File $file -Encoding ASCII
+}
+
+# From https://github.com/keithbloom/powershell-profile/blob/master/Microsoft.PowerShell_profile.ps1
+function sudo {
+	$file, [string]$arguments = $args;
+	$psi = new-object System.Diagnostics.ProcessStartInfo $file;
+	$psi.Arguments = $arguments;
+	$psi.Verb = "runas";
+	$psi.WorkingDirectory = get-location;
+	[System.Diagnostics.Process]::Start($psi) >> $null
+}
+
+# https://gist.github.com/aroben/5542538
+function pstree {
+	$ProcessesById = @{}
+	foreach ($Process in (Get-WMIObject -Class Win32_Process)) {
+		$ProcessesById[$Process.ProcessId] = $Process
+	}
+
+	$ProcessesWithoutParents = @()
+	$ProcessesByParent = @{}
+	foreach ($Pair in $ProcessesById.GetEnumerator()) {
+		$Process = $Pair.Value
+
+		if (($Process.ParentProcessId -eq 0) -or !$ProcessesById.ContainsKey($Process.ParentProcessId)) {
+			$ProcessesWithoutParents += $Process
+			continue
+		}
+
+		if (!$ProcessesByParent.ContainsKey($Process.ParentProcessId)) {
+			$ProcessesByParent[$Process.ParentProcessId] = @()
+		}
+		$Siblings = $ProcessesByParent[$Process.ParentProcessId]
+		$Siblings += $Process
+		$ProcessesByParent[$Process.ParentProcessId] = $Siblings
+	}
+
+	function Show-ProcessTree([UInt32]$ProcessId, $IndentLevel) {
+		$Process = $ProcessesById[$ProcessId]
+		$Indent = " " * $IndentLevel
+		if ($Process.CommandLine) {
+			$Description = $Process.CommandLine
+		} else {
+			$Description = $Process.Caption
+		}
+
+		Write-Output ("{0,6}{1} {2}" -f $Process.ProcessId, $Indent, $Description)
+		foreach ($Child in ($ProcessesByParent[$ProcessId] | Sort-Object CreationDate)) {
+			Show-ProcessTree $Child.ProcessId ($IndentLevel + 4)
+		}
+	}
+
+	Write-Output ("{0,6} {1}" -f "PID", "Command Line")
+	Write-Output ("{0,6} {1}" -f "---", "------------")
+
+	foreach ($Process in ($ProcessesWithoutParents | Sort-Object CreationDate)) {
+		Show-ProcessTree $Process.ProcessId 0
+	}
+}
+
+function unzip ($file) {
+	$dirname = (Get-Item $file).Basename
+	echo("Extracting", $file, "to", $dirname)
+	New-Item -Force -ItemType directory -Path $dirname
+	expand-archive $file -OutputPath $dirname -ShowProgress
+}
+
+###############################################
+# GIT ALIASES
+###############################################
+
+# Functions are required for multi-line commands
+Function GitAdd { git add -A }
+Function GitBranch { git branch }
+Function GitCheckout { git checkout $args }
+Function GitCommit { git commit -m }
+Function GitDiff { git diff }
+Function GitFetch { git fetch --prune }
+Function GitGetStatus { git status }
+Function GitLog { git log --graph --name-only }
+Function GitMove { git mv }
+Function GitNukeChanges { git clean -f -d; git reset HEAD --hard; git status; }
+Function GitPush { git push }
+Function GitPull { git pull --all }
+Function GitRefresh { git pull --all; git fetch --prune; }
+Function GitUnstageFile {git reset HEAD $args;}
+Function MakeNewBranchAndPush { git checkout -b $args; git push --set-upstream origin $args; }
+
+# Bind alias with function call
+New-Alias ga GitAdd
+New-Alias gb GitBranch
+New-Alias go GitCheckout
+New-Alias gd GitDiff
+New-Alias gf GitFetch
+New-Alias gs GitGetStatus
+New-Alias glog GitLog
+New-Alias gmov GitMove
+New-Alias git_nuke GitNukeChanges
+New-Alias gpull GitPull
+New-Alias gpush GitPush
+New-Alias git_refresh GitRefresh
+New-Alias git_unstage GitUnstageFile
+New-Alias new_branch MakeNewBranchAndPush
+
+###############################################
+# GIT OPTIMIZED PROMPT
+###############################################
+
+# Displays git branch and stats when inside a git repository
+
+. (Resolve-Path ~/Documents/WindowsPowershell/Scripts/gitutils.ps1)
+
+function prompt {
+	$path = [string]$pwd
+
+	$host.UI.RawUi.WindowTitle = Get-Location
+
+	Write-Host " ~" -nonewline -foregroundcolor Green
+	
+    if (isCurrentDirectoryGitRepository) {
+        $status = gitStatus
+        $currentBranch = $status["branch"]
+
+        Write-Host(' [') -nonewline -foregroundcolor Yellow
+        if ($status["ahead"] -eq $FALSE) {
+            # We are not ahead of origin
+            Write-Host($currentBranch) -nonewline -foregroundcolor Cyan
+        } else {
+            # We are ahead of origin
+            Write-Host($currentBranch) -nonewline -foregroundcolor Red
+        }
+
+        if ($status["untracked"] -ne $FALSE) {
+            Write-Host(' !') -nonewline -foregroundcolor Yellow
+        }
+
+        Write-Host(']') -nonewline -foregroundcolor Yellow
+    }
+
+	Write-Host(' $') -nonewline -foregroundcolor Green
+	return " "
+}
+

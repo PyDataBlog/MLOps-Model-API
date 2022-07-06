@@ -1,0 +1,118 @@
+﻿Public Class Form1
+    Private readercount As Integer = 0
+    Private textdata As String = ""
+    Private logtext As String = ""
+    Private logflag As Boolean = False
+    Private Readers() As ClientHandler
+    Private run As Boolean = True
+    Private LogFileExt As String = Format(Now.Year, "0000") & Format(Now.Month, "00") & Format(Now.Day, "00") & "_" & Format(Now.Hour, "00") & Format(Now.Minute, "00") & Format(Now.Second, "00") & Format(Now.Millisecond, "000") & ".txt"
+    Private LogThread As Threading.Thread
+
+    Private Sub Form1_FormClosing(ByVal sender As Object, ByVal e As System.Windows.Forms.FormClosingEventArgs) Handles Me.FormClosing
+        For i As Integer = 0 To Readers.Count - 1
+            Readers(i).Dispose()
+        Next
+        run = False
+        Dim k As Date = Now
+        While Not LogThread.ThreadState = Threading.ThreadState.Stopped
+            If (Now - k).TotalSeconds > 2 Then
+                log("LogThreadError!!")
+                Exit Sub
+            End If
+        End While
+    End Sub
+    Private Sub Form1_Load(ByVal sender As Object, ByVal e As System.EventArgs) Handles Me.Load                
+        Me.Text = My.Application.Info.AssemblyName & " " & My.Application.Info.Version.ToString
+        log(Me.Text & " Started")        
+    End Sub
+
+    Private Sub LogThreadSub()
+        Dim temp As String = ""
+        While run
+            Threading.Thread.Sleep(100)
+            SyncLock logtext
+                temp = logtext
+                logtext = ""
+            End SyncLock
+            If Not temp = "" Then
+                Try
+                    If Not FileIO.FileSystem.DirectoryExists(My.Application.Info.DirectoryPath & "\LOG\ReaderEmulator") Then
+                        FileIO.FileSystem.CreateDirectory(My.Application.Info.DirectoryPath & "\LOG\ReaderEmulator")
+                    End If
+                    FileIO.FileSystem.WriteAllText(My.Application.Info.DirectoryPath & "\LOG\ReaderEmulator\ReaderEmulatorLog_" & LogFileExt, temp, True)
+                Catch ex As Exception
+                    log("ERROR: " & ex.Message)
+                End Try
+            End If
+        End While
+    End Sub
+
+    Private Sub log(ByVal s)
+        If InvokeRequired Then
+            Invoke(New Threading.ParameterizedThreadStart(AddressOf log), s)
+        Else
+            logtext &= Format(Now.Hour, "00:") & Format(Now.Minute, "00:") & Format(Now.Second, "00:") & Format(Now.Millisecond, "000 -") & s & vbCrLf
+            TextBox1.Text &= Format(Now.Hour, "00:") & Format(Now.Minute, "00:") & Format(Now.Second, "00:") & Format(Now.Millisecond, "000 -") & s & vbCrLf
+        End If
+    End Sub
+
+    Private Sub Timer1_Tick(ByVal sender As System.Object, ByVal e As System.EventArgs) Handles Timer1.Tick
+        ToolStripStatusLabel2.Text = readercount & " readers with memory usage " & (Math.Round(My.Application.Info.WorkingSet / 1024 / 1024, 2)) & "MB    "
+        For i As Integer = 0 To Readers.Length - 1
+            ToolStripStatusLabel2.Text &= "  R" & i + 1 & "(" & Readers(i).GetBufferLength & ")"
+        Next
+    End Sub
+
+    Private Sub TextBox1_TextChanged(ByVal sender As Object, ByVal e As System.EventArgs) Handles TextBox1.TextChanged
+        TextBox1.Select(TextBox1.TextLength - 1, 1)
+        TextBox1.ScrollToCaret()        
+    End Sub
+
+    Private Sub Form1_Shown(ByVal sender As Object, ByVal e As System.EventArgs) Handles Me.Shown
+        If My.Computer.FileSystem.FileExists(My.Application.Info.DirectoryPath & "\SAVE\READERLOG.dat") Then
+            If FileIO.FileSystem.ReadAllText(My.Application.Info.DirectoryPath & "\SAVE\READERLOG.dat") = "YES" Then
+                logflag = True
+            End If
+        Else
+            If Not FileIO.FileSystem.DirectoryExists(My.Application.Info.DirectoryPath & "\SAVE") Then
+                FileIO.FileSystem.CreateDirectory(My.Application.Info.DirectoryPath & "\SAVE")
+            End If
+            If MessageBox.Show("Turn on logging? Slows down performance.", "Logging", MessageBoxButtons.YesNo) = vbYes Then
+                FileIO.FileSystem.WriteAllText(My.Application.Info.DirectoryPath & "\SAVE\READERLOG.dat", "YES", False)
+            Else
+                FileIO.FileSystem.WriteAllText(My.Application.Info.DirectoryPath & "\SAVE\READERLOG.dat", "NO", False)
+            End If
+        End If
+        If Not logflag Then
+            log("Logging disabled")
+        Else
+            log("Logging enabled")
+        End If
+        Dim temp As String
+        If My.Computer.FileSystem.FileExists(My.Application.Info.DirectoryPath & "\SAVE\READERS.dat") Then
+            temp = FileIO.FileSystem.ReadAllText(My.Application.Info.DirectoryPath & "\SAVE\READERS.dat")
+        Else
+            If Not FileIO.FileSystem.DirectoryExists(My.Application.Info.DirectoryPath & "\SAVE") Then
+                FileIO.FileSystem.CreateDirectory(My.Application.Info.DirectoryPath & "\SAVE")
+            End If
+            FileIO.FileSystem.WriteAllText(My.Application.Info.DirectoryPath & "\SAVE\READERS.dat", InputBox("Enter amount of readers"), False)
+            temp = FileIO.FileSystem.ReadAllText(My.Application.Info.DirectoryPath & "\SAVE\READERS.dat")
+        End If
+        If IsNumeric(temp.Trim) Then
+            Array.Resize(Readers, temp)
+            readercount = temp
+            For i As Integer = 0 To temp - 1
+                Readers(i) = New ClientHandler(i + 1, 6000 + i + 1, logflag)
+                If logflag Then
+                    AddHandler Readers(i).LogThis, AddressOf log
+                End If
+            Next
+            Timer1.Enabled = True
+            LogThread = New Threading.Thread(AddressOf LogThreadSub)
+            LogThread.IsBackground = False
+            LogThread.Start()
+        Else
+            log("Load error. Please save reader amount in READERS.dat")
+        End If
+    End Sub
+End Class

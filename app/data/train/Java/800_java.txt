@@ -1,0 +1,359 @@
+/*
+ * LBFGS.java
+ *
+ * Copyright (C) 2016  Pavel Prokhorov (pavelvpster@gmail.com)
+ *
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * This program is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *
+ */
+package org.interactiverobotics.ml.optimization;
+
+import static org.interactiverobotics.ml.optimization.OptimizationResult.Status.*;
+
+import org.apache.log4j.Logger;
+import org.interactiverobotics.math.Vector;
+
+import java.util.Objects;
+
+/**
+ * Limited-memory BFGS.
+ *
+ * https://en.wikipedia.org/wiki/Limited-memory_BFGS
+ *
+ * Liu, D. C.; Nocedal, J. (1989). "On the Limited Memory Method for Large Scale Optimization".
+ * Mathematical Programming B. 45 (3): 503–528. doi:10.1007/BF01589116.
+ *
+ */
+public final class LBFGS extends AbstractOptimizer implements Optimizer {
+
+    private static final Logger LOG = Logger.getLogger(LBFGS.class);
+
+
+    public LBFGS(final OptimizableFunction function) {
+        this.function = Objects.requireNonNull(function);
+    }
+
+
+    private final OptimizableFunction function;
+
+
+    /**
+     * Maximum number of iterations.
+     */
+    private int maxIterations = 100;
+
+    /**
+     * The number of corrections to approximate the inverse Hessian matrix.
+     */
+    private int m = 6;
+
+    /**
+     * Epsilon for convergence test.
+     * Controls the accuracy of with which the solution is to be found.
+     */
+    private double epsilon = 1.0E-5;
+
+    /**
+     * Distance (in iterations) to calculate the rate of decrease of the function.
+     * Used in delta convergence test.
+     */
+    private int past = 3;
+
+    /**
+     * Minimum rate of decrease of the function.
+     * Used in delta convergence test.
+     */
+    private double delta = 1.0E-5;
+
+    /**
+     * Maximum number of line search iterations.
+     */
+    private int maxLineSearchIterations = 100;
+
+    /**
+     * Continue optimization if line search returns {@code MAX_ITERATION_REACHED}.
+     */
+    private boolean continueOnMaxLineSearchIterations = false;
+
+
+    public int getMaxIterations() {
+        return maxIterations;
+    }
+
+    public void setMaxIterations(int maxIterations) {
+        this.maxIterations = maxIterations;
+    }
+
+    public int getM() {
+        return m;
+    }
+
+    public void setM(int m) {
+        this.m = m;
+    }
+
+    public double getEpsilon() {
+        return epsilon;
+    }
+
+    public void setEpsilon(double epsilon) {
+        this.epsilon = epsilon;
+    }
+
+    public int getPast() {
+        return past;
+    }
+
+    public void setPast(int past) {
+        this.past = past;
+    }
+
+    public double getDelta() {
+        return delta;
+    }
+
+    public void setDelta(double delta) {
+        this.delta = delta;
+    }
+
+    public int getMaxLineSearchIterations() {
+        return maxLineSearchIterations;
+    }
+
+    public void setMaxLineSearchIterations(int maxLineSearchIterations) {
+        this.maxLineSearchIterations = maxLineSearchIterations;
+    }
+
+    public boolean isContinueOnMaxLineSearchIterations() {
+        return continueOnMaxLineSearchIterations;
+    }
+
+    public void setContinueOnMaxLineSearchIterations(boolean continueOnMaxLineSearchIterations) {
+        this.continueOnMaxLineSearchIterations = continueOnMaxLineSearchIterations;
+    }
+
+
+    @Override
+    public OptimizationResult optimize() {
+
+        LOG.debug("Limited-memory BFGS optimize...");
+
+        final BacktrackingLineSearch lineSearch = new BacktrackingLineSearch(function);
+
+        lineSearch.setMaxIterations(maxLineSearchIterations);
+
+        final State[] states = new State[m];
+
+        for (int i = 0; i < m; i ++) {
+
+            states[i] = new State();
+        }
+
+        int currentStateIndex = 0;
+
+        final double[] pastValues;
+
+        if (past > 0) {
+
+            pastValues = new double[past];
+
+            pastValues[0] = function.getValue();
+
+        } else {
+
+            pastValues = null;
+        }
+
+        Vector parameters = function.getParameters();
+
+        Vector gradient = function.getValueGradient();
+
+        final double initialGradientNorm = gradient.getLength() / Math.max(parameters.getLength(), 1.0);
+
+        LOG.debug("Initial gradient norm = " + initialGradientNorm);
+
+        if (initialGradientNorm <= epsilon) {
+            LOG.debug("Already minimized");
+            return new OptimizationResult(ALREADY_MINIMIZED, parameters, function.getValue(), 0);
+        }
+
+        Vector direction = gradient.copy().neg();
+
+        double step = Vector.dotProduct(direction, direction);
+
+        Vector prevParameters, prevGradient;
+
+        OptimizationResult.Status status = MAX_ITERATION_REACHED;
+
+        int iteration;
+
+        for (iteration = 1; iteration <= maxIterations; iteration ++) {
+
+            LOG.debug("Iteration " + iteration);
+
+            // save previous Parameters and Gradient
+
+            prevParameters = parameters.copy();
+
+            prevGradient = gradient.copy();
+
+            // search for optimal Step
+
+            LOG.debug("Direction: " + direction + " Step = " + step);
+
+            lineSearch.setDirection(direction);
+
+            lineSearch.setInitialStep(step);
+
+            final OptimizationResult lineSearchResult = lineSearch.optimize();
+
+            if (!lineSearchResult.hasConverged()) {
+
+                LOG.error("Line search not converged: " + lineSearchResult.getStatus());
+
+                final boolean continueOptimization =
+                        (lineSearchResult.getStatus() == MAX_ITERATION_REACHED) && continueOnMaxLineSearchIterations;
+
+                if (!continueOptimization) {
+
+                    // step back
+                    function.setParameters(prevParameters);
+                    status = lineSearchResult.getStatus();
+                    break;
+                }
+            }
+
+            parameters = function.getParameters();
+
+            gradient = function.getValueGradient();
+
+            final double value = function.getValue();
+
+            final boolean stop = fireOptimizerStep(parameters, value, direction, iteration);
+
+            if (stop) {
+                LOG.debug("Stop");
+                status = STOP;
+                break;
+            }
+
+            // test for convergence
+
+            final double gradientNorm = gradient.getLength() / Math.max(parameters.getLength(), 1.0);
+
+            LOG.debug("Gradient norm = " + gradientNorm);
+
+            if (gradientNorm <= epsilon) {
+                LOG.debug("Success");
+                status = SUCCESS;
+                break;
+            }
+
+            // delta convergence test
+
+            if (past > 0) {
+
+                if (iteration > past) {
+
+                    // relative improvement from the past
+
+                    final double rate = (pastValues[iteration % past] - value) / value;
+
+                    if (rate < delta) {
+                        status = STOP;
+                        break;
+                    }
+                }
+
+                pastValues[iteration % past] = value;
+            }
+
+            // update S and Y
+
+            final State currentState = states[currentStateIndex];
+
+            currentState.s = parameters.copy().sub(prevParameters);
+
+            currentState.y = gradient.copy().sub(prevGradient);
+
+            final double ys = Vector.dotProduct(currentState.y, currentState.s);
+
+            final double yy = Vector.dotProduct(currentState.y, currentState.y);
+
+            currentState.ys = ys;
+
+            currentStateIndex = (currentStateIndex + 1) % m;
+
+            // update Direction
+
+            direction = gradient.copy();
+
+            int availableStates = Math.min(iteration, m);
+
+            LOG.debug("Available states = " + availableStates);
+
+            int j = currentStateIndex;
+
+            for (int i = 0; i < availableStates; i ++) {
+
+                j = (j + m - 1) % m;
+
+                final State t = states[j];
+
+                t.alpha = Vector.dotProduct(t.s, direction) / t.ys;
+
+                direction.sub(t.y.copy().scale(t.alpha));
+            }
+
+            direction.scale(ys / yy);
+
+            for (int i = 0; i < availableStates; i ++) {
+
+                final State t = states[j];
+
+                final double beta = Vector.dotProduct(t.y, direction) / t.ys;
+
+                direction.add(t.s.copy().scale(t.alpha - beta));
+
+                j = (j + 1) % m;
+            }
+
+            direction.neg();
+
+            step = 1.0;
+        }
+
+        final Vector finalParameters = function.getParameters();
+
+        final double finalValue = function.getValue();
+
+        LOG.debug("Status = " + status + " Final Value = " + finalValue + " Parameters: " + finalParameters
+                + " Iteration = " + iteration);
+
+        return new OptimizationResult(status, finalParameters, finalValue, iteration);
+    }
+
+
+    private static class State {
+
+        public double alpha;
+
+        public Vector s;
+
+        public Vector y;
+
+        public double ys;
+    }
+
+}

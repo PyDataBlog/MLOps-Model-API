@@ -1,0 +1,211 @@
+<# 
+Author: Adam Richards
+list services on host(s)
+Dependencies:
+. "$($workingDirectory)\lib\serverUserAndGroupReport.ps1"
+. "$($workingDirectory)\lib\getUserCredentials.ps1"
+. "$($workingDirectory)\lib\validateUserCredentials.ps1"
+. "$($workingDirectory)\lib\createWorkbookFromCSV.ps1"
+
+Syntax:
+powershell this.ps -Server ServerName [-OutputDir] [output dir name]
+or
+powershell this.ps -Listfile ListFileName [-OutputDir] [output dir name]
+	-Listfile Path to test List File
+or
+powershell this.ps
+prompts will be used for a single server
+current directory will be used for output
+
+Notes: 
+$Host is a reserved word. dont use it as a variable
+For enabling debug messages
+If $DebugPreference = "Continue" PowerShell will show the debug message.
+If $DebugPreference = "SilentlyContinue" PowerShell will not show the message. 
+#>
+ [CmdletBinding(DefaultParameterSetName="set1")]
+    param (
+	[Parameter(ParameterSetName="set1" ,Position=0, Mandatory=$true)] [System.String]  $Server,
+	[Parameter(ParameterSetName="set2" ,Position=0, Mandatory=$false)] [System.String]  $ListFile,
+	[System.String]  $OutputDir
+)
+Clear-Host
+Write-Host "Starting Server User and Group Collection" -ForegroundColor Cyan
+
+<# Enable Debug Messages #>
+<#
+$DebugPreference = "Continue"
+#>
+
+<# get path or running script #>
+$runningScriptPath =  $MyInvocation.MyCommand.Path
+$file = Get-ChildItem $runningScriptPath
+$workingDirectory = $file.Directory
+$filename = $file.Name
+
+<# process passed parameters #>
+$activeParameterSet = $PSCmdlet.ParameterSetName
+
+<# Process Parameters#>
+<# Decide if OutputDir used #>
+if ($OutputDir.Length -eq 0 )
+	{
+	$OutputDir = "$($workingDirectory)"
+	}
+else
+	{
+	$nOutputDir = $OutputDir
+	Write-Debug "Checking for absolulte OutputDir '$($nOutputDir)'"
+	if (!(Test-Path -Path "$nOutputDir" -ErrorAction Stop)) 
+		{
+		<# try relative path #>
+		$nOutputDir = "$($workingDirectory)" + "\"+ "$($nOutputDir)"
+		Write-Debug "Checking for relative OutputDir '$($nOutputDir)'"
+		if (!(Test-Path -Path "$nOutputDir" -ErrorAction Stop)) 
+			{
+			Write-Host "OutputDir not found: '$($OutputDir)'" -ForegroundColor Red
+			Exit 1
+			}	
+		}
+	$OutputDir = $nOutputDir
+	}
+<# Decide if listfile used or server #>
+$Items = @()
+Get-Variable -Name ListFile  -ea SilentlyContinue | out-null
+if (!$?)
+	{
+	$Items += New-Object PSObject -Property @{        
+            'HOST' = $Server
+			}
+	}
+else
+	{
+	$nListFile = $ListFile
+	Write-Debug "Checking for absolulte ListFile '$($nListFile)'"
+	if (!(Test-Path -Path "$nListFile" -ErrorAction Stop)) 
+		{
+		<# try relative path #>
+		$nListFile = "$($workingDirectory)" + "\"+ "$($nListFile)"
+		Write-Debug "Checking for relative ListFile '$($nListFile)'"
+		if (!(Test-Path -Path "$nListFile" -ErrorAction Stop)) 
+			{
+			Write-Host "List file not found: '$($ListFile)'" -ForegroundColor Red
+			Exit 1
+			}	
+		}
+	$Items = Import-CSV $nListFile -Delimiter ","
+	}
+
+
+<# get Date #>
+$_Day = Get-Date -Format yyyyMMdd
+
+<# import serverGetServices function from library #>
+. "$($workingDirectory)\lib\serverGetUsersAndGroups.ps1"
+<# import getUserCredentials function from library #>
+. "$($workingDirectory)\lib\getUserCredentials.ps1"
+<# read authentication credentials for remote sytems #>
+$Credential = getUserCredentials
+<# import validateUserCredentials function from library #>
+. "$($workingDirectory)\lib\validateUserCredentials.ps1"
+$ok = validateUserCredentials $Credential.UserName $Credential.Password
+if ($ok -eq $false )
+	{
+	Write-Host "User login $($Credential.Username) failed." -ForegroundColor Red
+	Exit 1
+	}
+
+
+<# initialize results array #>
+$resultsList = @()
+
+ForEach ($Item in $Items)
+{
+$_Host = $Item.HOST
+Write-Host " processing $_Host"
+$result = serverGetUsersAndGroups $_Host $Credential
+if ($result.status -eq 0)
+	{
+	Write-Host "`tScanning `t$_Host`tResult: Success" -ForegroundColor DarkGreen
+	}
+	else
+	{
+	Write-Host "`tScanning `t$_Host`tResult: $($result.error)" -ForegroundColor Red
+	}
+$resultsList += $result
+}
+
+<# build objects to export to CSV #>
+$errorList = @()
+$userList = @()
+$groupList = @()
+$memberList = @()
+
+ForEach ($r in $resultsList)
+{
+if ($r.status -ne 0)
+	{
+	$errorList += New-Object PSObject -Property @{
+		"Computer" = $r.computer
+		"Status" = $r.status
+		"Error" = $r.error
+		}
+	}
+else
+	{
+	$userList += $r.userList
+	$groupList += $r.groupList
+	$memberList += $r.memberList
+	}
+}
+
+<# write CSV output files #>
+$_userfile = Join-Path $env:TEMP "serverUser_ScanUsers_$(Get-Date -Format yyyyMMdd).csv"
+$userList | `
+    select-object -property 'Computer','Name','SID','Disabled','PasswordExpires','Lockout'| `
+    Export-Csv $_userfile -NoTypeInformation
+
+$_groupfile = Join-Path $env:TEMP "serverUser_ScanGroups_$(Get-Date -Format yyyyMMdd).csv"
+$groupList | `
+    select-object -property 'Computer','Name','Description' | `
+    Export-Csv $_groupfile -NoTypeInformation
+
+$_memberfile = Join-Path $env:TEMP "serverUser_ScanMembers_$(Get-Date -Format yyyyMMdd).csv"
+$memberList | `
+    select-object -property 'Computer','Group','Users' | `
+    Export-Csv $_memberfile -NoTypeInformation
+
+
+$_errorfile = Join-Path $env:TEMP "serverUser_Scan_Error$(Get-Date -Format yyyyMMdd).csv"
+$errorList | `
+    select-object -property 'Computer','Status','Error' | `
+    Export-Csv $_errorfile -NoTypeInformation
+	
+<# Build Excel Workbook #>
+$_xlsfile = "$($outputDir)" + "\serverUserGroupsReport_$(Get-Date -Format yyyyMMdd).xlsx"
+Write-Host " Building Excel Workbook $($_xlsfile)"
+<# build list of csv files to process #>
+$csvFileList = @()
+$csvFileList += New-Object PSObject -Property @{        
+            'file' = "$($_memberfile)"
+            'name'='Membership'
+            }
+$csvFileList += New-Object PSObject -Property @{        
+            'file' = "$($_userfile)"
+            'name'='Users'
+            }
+$csvFileList += New-Object PSObject -Property @{        
+            'file' = "$($_groupfile)"
+            'name'='Groups'
+            }
+$csvFileList += New-Object PSObject -Property @{        
+            'file' = "$($_errorfile)"
+            'name'='Errors'
+            }
+
+<# import validateUserCredentials function from library #>
+. "$($workingDirectory)\lib\createWorkbookFromCSV.ps1"
+$ok = createWorkbookFromCSV  $csvFileList "$($_xlsfile)"
+Write-Host " Done"
+Write-Host "End" -ForegroundColor Cyan
+

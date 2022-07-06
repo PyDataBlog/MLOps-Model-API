@@ -1,0 +1,92 @@
+# ulimit -s unlimited
+#source /opt/intel/fc/10.0.023/bin/ifortvars.sh
+#source /opt/intel/idb/10.0.023/bin/idbvars.sh
+
+#FC = ifort
+FC = gfortran
+#FC = pgfortran
+
+ifeq ($(FC),ifort)
+  OPTIM = -O2 -xHost -g -implicitnone # -ipo -fltconsistency # -fp-model source -no-prec-div
+  PARAL = $(OPTIM) -qopenmp -parallel -fpp -lpthread # -fltconsistency # -ipo
+  DEBUG = -check all -debug full -stand f08 -warn all -traceback -g -O0 -fp-model precise -fp-model source -no-vec -fp-stack-check -qopenmp -parallel -fpp -lpthread
+  LLIBS = -lblas -llapack # -i-static # -lg2c
+  SMODD = -module $(MODDIR)
+else ifeq ($(FC),gfortran)
+  DEBUG = -g -Waliasing -Wampersand -Wsurprising -Wc-binding-type -Wintrinsics-std -Wno-tabs -Wintrinsic-shadow -Wline-truncation -Wtarget-lifetime -Wreal-q-constant -Wunused -fopenmp -fbounds-check -fimplicit-none # -Wconversion -Winteger-division
+  OPTIM	= -O3 -march=native -fstack-arrays -fno-cx-limited-range -funroll-loops -fimplicit-none --param max-unroll-times=2 # -flto
+  PARAL	= $(OPTIM) -fopenmp
+  LLIBS = -lblas -llapack # -lg2c
+  SMODD = -J./$(MODDIR)
+#  LLIBS = -Wl,--no-as-needed -L${MKLROOT}/lib/intel64 -lmkl_gf_lp64 -lmkl_core -lmkl_gnu_thread -ldl -lpthread -lm
+else ifeq ($(FC),pgfortran)
+  OPTIM = -O3 -Bstatic
+  LLIBS = -llapack -lblas -lpgftnrtl #  # order important!
+endif
+
+#OPTIONS = $(OPTIM)
+#OPTIONS = $(DEBUG)
+OPTIONS = $(PARAL)
+
+HOST=`hostname -s | grep -o '[^0-9]\+'`
+
+SMDDIR := ../../../../mod
+SRCDIR := ../../lib
+OBJDIR := ../../obj
+MODDIR := ../../mod
+BINDIR := ../../../../../bin
+OBJS  = $(addprefix $(OBJDIR)/,nrtp.o   nrut.o   base.o   vars.o   io.o   lncz.o   ops.o   strg.o rng.o obs.o   latt.o   xfciop.o   )
+MODS  = $(addprefix $(MODDIR)/,nrtp.mod nrut.mod base.mod          io.mod lncz.mod ops.mod              obs.mod latt.mod xfciop.mod )
+
+xfci : $(OBJDIR)/main.o
+	$(FC) $(OPTIONS) -o xfci $(OBJDIR)/main.o $(OBJS) $(LLIBS) && \
+      if test -d $(BINDIR)/$(HOST); then cp ./xfci $(BINDIR)/$(HOST); \
+      else mkdirhier $(BINDIR)/$(HOST) && cp ./xfci $(BINDIR)/$(HOST); fi
+
+$(OBJDIR)/main.o : main.f90 $(addprefix $(OBJDIR)/,io.o ops.o obs.o xfciop.o base.o vars.o nrtp.o lncz.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/xfciop.o $(MODDIR)/xfciop.mod : $(SRCDIR)/xfciop.f90 $(addprefix $(OBJDIR)/,nrtp.o ops.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/obs.o $(MODDIR)/obs.mod : $(SMDDIR)/obs.f90 $(addprefix $(OBJDIR)/,lncz.o ops.o base.o vars.o nrtp.o nrut.o strg.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/ops.o $(MODDIR)/ops.mod : $(SMDDIR)/ops.f90 $(addprefix $(OBJDIR)/,base.o vars.o rng.o nrtp.o nrut.o strg.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/base.o $(MODDIR)/base.mod : $(SMDDIR)/base.f90 $(addprefix $(OBJDIR)/,latt.o vars.o nrtp.o nrut.o strg.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/latt.o $(MODDIR)/latt.mod : $(SMDDIR)/latt.f90 $(addprefix $(OBJDIR)/,nrut.o nrtp.o strg.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/io.o $(MODDIR)/io.mod : $(SMDDIR)/io.f90 $(addprefix $(OBJDIR)/,nrtp.o strg.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/lncz.o $(MODDIR)/lncz.mod : $(SMDDIR)/lncz.f90 $(addprefix $(OBJDIR)/,nrut.o nrtp.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/nrut.o $(MODDIR)/nrut.mod : $(SMDDIR)/nrut.F90 $(addprefix $(OBJDIR)/,nrtp.o rng.o) Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/vars.o $(MODDIR)/vars.mod : $(SMDDIR)/vars.f90 $(OBJDIR)/nrtp.o Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/strg.o $(MODDIR)/strg.mod : $(SMDDIR)/strg.f90 $(OBJDIR)/nrtp.o Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/rng.o $(MODDIR)/rng.mod : $(SMDDIR)/rng.f90 $(OBJDIR)/nrtp.o Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR)/nrtp.o $(MODDIR)/nrtp.mod : $(SMDDIR)/nrtp.F90 Makefile | $(OBJDIR) $(MODDIR)
+	$(FC) $(OPTIONS) -c $< -o $(OBJDIR)/$(notdir $*).o $(SMODD)
+
+$(OBJDIR):
+	@mkdir -p $@
+
+$(MODDIR):
+	@mkdir -p $@
+
+clean : 
+	rm -rf $(OBJDIR) $(MODDIR) xfci

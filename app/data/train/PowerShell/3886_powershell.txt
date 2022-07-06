@@ -1,0 +1,244 @@
+﻿Function Get-NRKMPDisplayString {
+[Cmdletbinding()]
+Param(
+    [Parameter(Mandatory=$true)]
+    [xml]$Document,
+    [Parameter(Mandatory=$true)]
+    [string]$ElementID,
+    [Parameter(Mandatory=$false)]
+    [string]$SubElementID = ''
+)
+
+    $DisplayStrings = $Document.ManagementPack.LanguagePacks.LanguagePack.DisplayStrings.DisplayString
+        
+    If ($SubElementID -ne '') {
+        $ReturnValue = $DisplayStrings | Where-Object { $_.ElementID -eq $ElementID -and $_.SubElementID -eq $SubElementID } | Select-Object -first 1
+    } Else {
+        $ReturnValue = $DisplayStrings | Where-Object { $_.ElementID -eq $ElementID } | Select-Object -first 1
+    }
+
+    Write-Output $ReturnValue    
+} # End Function
+
+Function Get-NRKMPRule
+{
+[Cmdletbinding()]
+Param(
+    [Parameter(Mandatory=$true,ValueFromPipeline=$true)]
+    [string[]]$FileName
+)
+
+Begin {
+}
+
+Process {
+
+    Foreach($FN in $Filename) {
+        Write-Verbose "Reading Management Pack backup $FN"
+        [XML]$Document = Get-Content $FN
+        Foreach ($R in $Document.ManagementPack.Monitoring.Rules.Rule) {
+            $DisplayStrings = Get-NRKMPDisplayString -Document $Document -ElementID $R.ID
+            If ($DisplayStrings.Description) {
+                $DisplayStrings.Description = $DisplayStrings.Description.Replace("'","")
+            }
+
+            If ($DisplayStrings.Name) {
+                $DisplayStrings.Name = $DisplayStrings.Name.Replace("'","")
+            }
+
+            $SCOMInstance = Get-SCOMRule -Name $R.ID
+            If ($SCOMInstance -ne $Null) {
+                $SCOMGuid = $SCOMInstance.Id.Guid
+            } Else {
+                $SCOMGuid = "Not found"
+            }
+
+            $PropertyHash = @{
+                ManagementPack     = [System.Convert]::ToString($Document.ManagementPack.Manifest.Identity.Id)
+                Name               = [System.Convert]::ToString($R.ID)
+                SCOMGuid           = [System.Convert]::ToString($SCOMGuid)
+                RuleDisplayName    = [System.Convert]::ToString($DisplayStrings.Name)
+                Frequency          = [System.Convert]::ToString(($R.DataSources.Datasource.Frequency))
+                RuleDescription    = [System.Convert]::ToString($DisplayStrings.Description)
+                Enabled            = [System.Convert]::ToString($R.Enabled)
+                Target             = [System.Convert]::ToString($R.Target)
+                Category           = [System.Convert]::ToString($R.Category)
+            } #End PropertyHash
+    
+            $NewObject = New-Object -TypeName PSObject -Property $PropertyHash
+            Write-Output $NewObject
+            Write-Verbose "Found rule: $($DisplayStrings.Name)"
+        } # Foreach R
+    } # Foreach FN
+}
+
+End {}
+} # End Function
+Function Get-NRKMPDiscovery
+{
+[Cmdletbinding()]
+Param(
+    [Parameter(Mandatory=$true,ValueFromPipeline=$true)]
+    [string[]]$FileName
+)
+
+Begin {}
+Process {
+    Foreach($FN in $FileName) {
+        [XML]$Document = Get-Content $FileName
+
+        Foreach ($D in $Document.ManagementPack.Monitoring.Discoveries.Discovery) {
+            $DisplayStrings = Get-NRKMPDisplayString -Document $Document -ElementID $D.ID
+
+            $PropertyHash = @{
+                ManagementPack          = [System.Convert]::ToString($Document.ManagementPack.Manifest.Identity.Id)
+                Name                    = [System.Convert]::ToString($D.ID).Replace("'","")
+                Discovered              = [System.Convert]::ToString(($D.DiscoveryTypes.GetEnumerator().TypeID -join ",")).Replace("'","")
+                DiscoveryDisplayName    = [System.Convert]::ToString($DisplayStrings.Name).Replace("'","")
+                Frequency               = [System.Convert]::ToString($D.Datasource.Frequency).Replace("'","")
+                IntervalSeconds         = [System.Convert]::ToString($D.Datasource.IntervalSeconds).Replace("'","")
+                DiscoveryDescription    = [System.Convert]::ToString($DisplayStrings.Description).Replace("'","")
+                Enabled                 = [System.Convert]::ToString($D.Enabled).Replace("'","")
+                Target                  = [System.Convert]::ToString($D.Target).Replace("'","")
+                Category                = [System.Convert]::ToString($D.Category).Replace("'","")
+            } #End PropertyHash
+    
+            $NewObject = New-Object -TypeName PSObject -Property $PropertyHash
+            Write-Output $NewObject
+        } # Foreach $D
+    } # Foreach FN
+}
+End {}
+} # End Function
+
+Class ScomUnitMonitor {
+    [string]$Name;
+    [string]$MonitorDisplayName;
+    [string]$SCOMGuid;
+    [string]$ManagementPack;
+    [string]$Enabled;
+    [string]$IntervalSeconds;
+    [string]$Interval;
+    [string]$Target;
+    [string]$Category;
+    [string]$ParentMonitorID;
+    [string]$TypeID;
+    [string]$OperationalStates;
+    [string]$MonitorDescription;
+    [string]$Configuration;
+}
+
+Update-TypeData -TypeName ScomUnitMonitor -DefaultDisplayPropertySet Name,MonitorDisplayName,SCOMGuid,ManagementPack,Enabled -DefaultDisplayProperty Name -DefaultKeyPropertySet Name -Force
+
+Function Get-NRKMPUnitMonitor
+{
+[Cmdletbinding()]
+Param(
+    [OutputType([ScomUnitMonitor])]
+    [Parameter(Mandatory=$true,ValueFromPipeline=$true)]
+    [string[]]$FileName
+)
+
+Begin {}
+
+Process {
+    Foreach($FN in $FileName) {
+        Write-Verbose "Reading Management Pack backup $FN"
+        [XML]$Document = Get-Content $FN
+        Foreach ($M in $Document.ManagementPack.Monitoring.Monitors.UnitMonitor) {
+            $DisplayStrings = Get-NRKMPDisplayString -Document $Document -ElementID $M.ID
+            If ($DisplayStrings.Description) {
+                $DisplayStrings.Description = $DisplayStrings.Description.Replace("'","")
+            }  
+
+            If ($DisplayStrings.Name) {
+                $DisplayStrings.Name = $DisplayStrings.Name.Replace("'","")
+            }  
+
+            
+            $SCOMInstance = Get-SCOMMonitor -Name $M.ID
+            If ($SCOMInstance -ne $Null) {
+                $SCOMGuid = $SCOMInstance.Id.Guid
+            } Else {
+                $SCOMGuid = "Not found"
+            }
+            $Output = New-Object ScomUnitMonitor                     
+            
+            $Output.ManagementPack     = [System.Convert]::ToString($Document.ManagementPack.Manifest.Identity.Id)
+            $Output.Name               = [System.Convert]::ToString($M.ID).Replace("'","")
+            $Output.SCOMGuid           = [System.Convert]::ToString($SCOMGuid).Replace("'","")
+            $Output.MonitorDisplayName = [System.Convert]::ToString($DisplayStrings.Name).Replace("'","")
+            $Output.Interval           = [System.Convert]::ToString(($M.Configuration.Interval)).Replace("'","")
+            $Output.IntervalSeconds    = [System.Convert]::ToString(($M.Configuration.IntervalSeconds)).Replace("'","")
+            $Output.MonitorDescription = [System.Convert]::ToString($DisplayStrings.Description)
+            $Output.Enabled            = [System.Convert]::ToString($M.Enabled).Replace("'","")
+            $Output.Target             = [System.Convert]::ToString($M.Target).Replace("'","")
+            $Output.Category           = [System.Convert]::ToString($M.Category).Replace("'","")
+            $Output.ParentMonitorID    = [System.Convert]::ToString($M.ParentMonitorID).Replace("'","")
+            $Output.TypeID             = [System.Convert]::ToString($M.TypeID).Replace("'","")
+            $Output.OperationalStates  = [System.Convert]::ToString($M.OperationalStates.InnerXML).Replace("'","")
+            $Output.Configuration      = [System.Convert]::ToString($M.Configuration.InnerXML).Replace("'","")
+                
+            Write-Verbose "Found monitor: $($DisplayStrings.Name)"
+            Write-Output $Output
+
+        } # End Foreach M
+    } # End Foreach FN
+}
+
+End {}
+} # End Function
+
+Function Get-NRKMPOverride
+{
+[CmdletBinding()]
+Param(
+    [Parameter(Mandatory=$true,ValueFromPipeline=$true)]
+    [string[]]$FileName
+)
+
+Begin {}
+
+Process {
+    Foreach($FN in $FileName) {
+        Write-Verbose "Reading Management Pack backup $FN"
+        [XML]$Document = Get-Content $FN
+        $Overrides = $Document.ManagementPack.Monitoring.Overrides.ChildNodes
+         Foreach ($Type in @('Monitor','Rule')) {      
+            $Overrides | Where-Object { $_.$Type -ne $Null } | Foreach-Object {
+                $CurrentOverride = $_
+                # Look up values in display strings for OVERRIDE
+                $DisplayString = $Document.ManagementPack.LanguagePacks.LanguagePack.DisplayStrings.DisplayString | Where-Object {$_.ElementID -eq $CurrentOverride.ID -and $_.SubElementID -eq $null}
+                $Name = $DisplayString.Name
+                If ($Name -eq $Null) { $Name = $CurrentOverride.ID }
+                $Desc = $DisplayString.Description
+                If ($Desc -eq $Null) { $Desc = '' }
+                # Look up values in display strings for RULE/MONITOR
+                $DisplayString = $Document.ManagementPack.LanguagePacks.LanguagePack.DisplayStrings.DisplayString | Where-Object {$_.ElementID -eq $CurrentOverride.$Type -and $_.SubElementID -eq $null}
+                $OverridesDesc = $DisplayString.Description
+                If ($OverridesDesc -eq $Null) { $OverridesDesc = '' }
+
+                $PropertyHash = @{
+                    ManagementPack = Split-Path($MP) -leaf                    
+                    ID            = [System.Convert]::ToString($CurrentOverride.ID).Replace("'","")
+                    Name          = [System.Convert]::ToString($Name).Replace("'","")
+                    Description   = [System.Convert]::ToString($Desc).Replace("'","")
+                    OverridesType = [System.Convert]::ToString($Type).Replace("'","")
+                    OverridesName = [System.Convert]::ToString($CurrentOverride.$Type).Replace("'","")
+                    OverridesDesc = [System.Convert]::ToString($OverridesDesc).Replace("'","")      
+                    Parameter     = [System.Convert]::ToString($CurrentOverride.Parameter).Replace("'","")
+                    Property      = [System.Convert]::ToString($CurrentOverride.Property).Replace("'","")
+                    Value         = [System.Convert]::ToString($CurrentOverride.Value).Replace("'","")
+                    Context       = [System.Convert]::ToString($CurrentOverride.Context).Replace("'","")
+                    Enforced      = [System.Convert]::ToBoolean($CurrentOverride.Enforced)
+                    Module        = [System.Convert]::ToString($CurrentOverride.Module).Replace("'","")
+                } #End PropertyHash
+                Write-Output (New-Object -TypeName PSObject -Property $PropertyHash)               
+            }
+        }
+        
+    } # Foreach FN
+}
+End {}
+
+}

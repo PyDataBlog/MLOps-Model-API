@@ -1,0 +1,217 @@
+import abc
+import subprocess
+import logging
+
+from observables import BLOperator, MCObservable
+from data import BLDataChannel, GIDataChannel
+import util
+
+class Channel(metaclass=abc.ABCMeta):
+
+  ISOSPIN_MAP = {
+      'singlet': "0",
+      'doublet': "1h",
+      'triplet': "1",
+      'quartet': "3h",
+      'quintet': "2",
+      'sextet': "5h"
+  }
+
+  def __init__(self, *, particle_type=None, isospin, strangeness=None, laph_query="laph_query",
+               sigmond_query="sigmond_query"):
+    self.particle_type = particle_type
+    self.strangeness = strangeness
+    self.isospin = isospin
+
+    self.laph_query = laph_query
+    self.sigmond_query = sigmond_query
+
+    # @ADH - I think I am going to have the DataHandler deal with these in the future
+    self.raw_data_channels = list()
+
+  @staticmethod
+  def initialize(*, data_file, laph_query="laph_query", sigmond_query="sigmond_query",
+                 is_basic_laph=True):
+
+    if is_basic_laph:
+      query_result = subprocess.check_output([laph_query, '-i', data_file]).decode()
+      laph_xml = util.queryToXML(query_result)
+      operator = BLOperator.createFromXML(laph_xml.find(".//Operator"))
+
+      if 'special' in data_file.split('/'):
+
+        return SpecialChannel(particle_type=operator.particle_type, isospin=operator.isospin,
+                              strangeness=operator.strangeness, flavor=operator.flavor,
+                              laph_query=laph_query, sigmond_query=sigmond_query)
+
+      elif operator.psq > 0:
+        return MovingChannel(particle_type=operator.particle_type, isospin=operator.isospin,
+                             strangeness=operator.strangeness, psq=operator.psq,
+                             lg_irrep=operator.lg_irrep, laph_query=laph_query,
+                             sigmond_query=sigmond_query)
+      else:
+        return AtRestChannel(particle_type=operator.particle_type, isospin=operator.isospin,
+                             strangeness=operator.strangeness, lg_irrep=operator.lg_irrep,
+                             laph_query=laph_query, sigmond_query=sigmond_query)
+
+    else:
+      query_result = subprocess.check_output([sigmond_query, '-k', data_file]).decode()
+      try:
+        records = query_result.split('Record')
+        observable = MCObservable.createFromXML(util.queryToXML(records[1]))
+
+        if observable.psq > 0:
+          return MovingChannel(isospin=observable.isospin, psq=observable.psq,
+                               lg_irrep=observable.lg_irrep, laph_query=laph_query,
+                               sigmond_query=sigmond_query)
+        else:
+          return AtRestChannel(isospin=observable.isospin, lg_irrep=observable.lg_irrep,
+                               laph_query=laph_query, sigmond_query=sigmond_query)
+
+      except IndexError:
+        logging.warning("%s contains no records", data_file)
+
+      except AttributeError:
+        logging.warning("%s contains Observables", data_file)
+
+    return None
+
+  def addRawDataChannel(self, path, is_basic_laph=True):
+
+    if is_basic_laph:
+      self.raw_data_channels.append(BLDataChannel(path, self.laph_query))
+    else:
+      self.raw_data_channels.append(GIDataChannel(path, self.sigmond_query))
+
+  @property
+  @abc.abstractmethod
+  def channel_string(self):
+    pass
+
+  @property
+  def is_special(self):
+    return isinstance(self, SpecialChannel)
+
+  @property
+  def is_atrest(self):
+    return isinstance(self, AtRestChannel)
+
+  @property
+  def is_moving(self):
+    return isinstance(self, MovingChannel)
+
+  def __hash__(self):
+    return hash(self.__repr__())
+
+  def __str__(self):
+    return self.channel_string
+
+  # @ADH - Should be checking that 'other' is an instance of an object
+  #        derived from Channel. I'm not sure how to best do that right now.
+  #        So, this will suffice for the moment.
+  def __eq__(self, other):
+    return self.__repr__() == other.__repr__()
+
+  def __ne__(self, other):
+    return self.__repr__() != other.__repr__()
+
+  def __lt__(self, other):
+    return self.__repr__() < other.__repr__()
+
+  def __gt__(self, other):
+    return self.__repr__() > other.__repr__()
+
+  def __le__(self, other):
+    return self.__repr__() <= other.__repr__()
+
+  def __ge__(self, other):
+    return self.__repr__() >= other.__repr__()
+
+
+class SpecialChannel(Channel):
+
+  def __init__(self, *, particle_type, isospin, strangeness, flavor, laph_query="laph_query",
+               sigmond_query="sigmond_query"):
+    super().__init__(particle_type=particle_type, isospin=isospin, strangeness=strangeness,
+                     laph_query=laph_query, sigmond_query=sigmond_query)
+    
+    self.flavor = flavor
+
+  @property
+  def channel_string(self):
+    if self.particle_type == "boson":
+      particle_type = "B"
+    elif self.particle_type == "fermion":
+      particle_type = "F"
+
+    strangeness = str(self.strangeness).replace('-', 'm')
+
+    return "{p_type}_{flavor}_I{isospin}_S{strangeness}_special".format(
+        p_type=particle_type, flavor=self.flavor, isospin=self.ISOSPIN_MAP[self.isospin],
+        strangeness=strangeness)
+
+
+  def __repr__(self):
+    return "SP_{}".format(self.channel_string)
+
+
+class AtRestChannel(Channel):
+
+  def __init__(self, *, particle_type=None, isospin, strangeness=None, lg_irrep,
+               laph_query="laph_query", sigmond_query="sigmond_query"):
+    super().__init__(particle_type=particle_type, isospin=isospin, strangeness=strangeness,
+                     laph_query=laph_query, sigmond_query=sigmond_query)
+    self.psq = 0
+    self.lg_irrep = lg_irrep
+
+  @property
+  def channel_string(self):
+    if self.particle_type == "boson":
+      particle_type = "B_"
+    elif self.particle_type == "fermion":
+      particle_type = "F_"
+    else:
+      particle_type = ""
+
+    if self.strangeness is not None:
+      strangeness = "S{}_".format(self.strangeness).replace('-', 'm')
+    else:
+      strangeness = ""
+
+    return "{p_type}I{isospin}_{strangeness}P0_{irrep}".format(
+        p_type=particle_type, isospin=self.ISOSPIN_MAP[self.isospin], strangeness=strangeness,
+        irrep=self.lg_irrep)
+
+  def __repr__(self):
+    return "AR_{}".format(self.channel_string)
+
+
+class MovingChannel(Channel):
+
+  def __init__(self, *, particle_type=None, isospin, strangeness=None, psq, lg_irrep,
+               laph_query="laph_query", sigmond_query="sigmond_query"):
+    super().__init__(particle_type=particle_type, isospin=isospin, strangeness=strangeness,
+                     laph_query=laph_query, sigmond_query=sigmond_query)
+    self.psq = psq
+    self.lg_irrep = lg_irrep
+
+  @property
+  def channel_string(self):
+    if self.particle_type == "boson":
+      particle_type = "B_"
+    elif self.particle_type == "fermion":
+      particle_type = "F_"
+    else:
+      particle_type = ""
+
+    if self.strangeness is not None:
+      strangeness = "S{}_".format(self.strangeness).replace('-', 'm')
+    else:
+      strangeness = ""
+
+    return "{p_type}I{isospin}_{strangeness}PSQ{psq}_{irrep}".format(
+        p_type=particle_type, isospin=self.ISOSPIN_MAP[self.isospin], strangeness=strangeness,
+        psq=self.psq, irrep=self.lg_irrep)
+
+  def __repr__(self):
+    return "MV_{}".format(self.channel_string)

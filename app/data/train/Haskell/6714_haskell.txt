@@ -1,0 +1,150 @@
+{- This module was generated from data in the Kate syntax
+   highlighting file modelines.xml, version 1.2, by Alex Turbov (i.zaufi@gmail.com) -}
+
+module Text.Highlighting.Kate.Syntax.Modelines
+          (highlight, parseExpression, syntaxName, syntaxExtensions)
+where
+import Text.Highlighting.Kate.Types
+import Text.Highlighting.Kate.Common
+import Text.ParserCombinators.Parsec hiding (State)
+import Control.Monad.State
+import Data.Char (isSpace)
+import qualified Data.Set as Set
+
+-- | Full name of language.
+syntaxName :: String
+syntaxName = "Modelines"
+
+-- | Filename extensions for this language.
+syntaxExtensions :: String
+syntaxExtensions = ""
+
+-- | Highlight source code using this syntax definition.
+highlight :: String -> [SourceLine]
+highlight input = evalState (mapM parseSourceLine $ lines input) startingState
+
+parseSourceLine :: String -> State SyntaxState SourceLine
+parseSourceLine = mkParseSourceLine (parseExpression Nothing)
+
+-- | Parse an expression using appropriate local context.
+parseExpression :: Maybe (String,String)
+                -> KateParser Token
+parseExpression mbcontext = do
+  (lang,cont) <- maybe currentContext return mbcontext
+  result <- parseRules (lang,cont)
+  optional $ do eof
+                updateState $ \st -> st{ synStPrevChar = '\n' }
+                pEndLine
+  return result
+
+startingState = SyntaxState {synStContexts = [("Modelines","Normal")], synStLineNumber = 0, synStPrevChar = '\n', synStPrevNonspace = False, synStContinuation = False, synStCaseSensitive = True, synStKeywordCaseSensitive = True, synStCaptures = []}
+
+pEndLine = do
+  updateState $ \st -> st{ synStPrevNonspace = False }
+  context <- currentContext
+  contexts <- synStContexts `fmap` getState
+  st <- getState
+  if length contexts >= 2
+    then case context of
+      _ | synStContinuation st -> updateState $ \st -> st{ synStContinuation = False }
+      ("Modelines","Normal") -> (popContext) >> pEndLine
+      ("Modelines","Modeline") -> (popContext) >> pEndLine
+      ("Modelines","Booleans") -> (popContext) >> pEndLine
+      ("Modelines","Integrals") -> (popContext) >> pEndLine
+      ("Modelines","Strings") -> (popContext) >> pEndLine
+      ("Modelines","RemoveSpaces") -> (popContext) >> pEndLine
+      _ -> return ()
+    else return ()
+
+withAttribute attr txt = do
+  when (null txt) $ fail "Parser matched no text"
+  updateState $ \st -> st { synStPrevChar = last txt
+                          , synStPrevNonspace = synStPrevNonspace st || not (all isSpace txt) }
+  return (attr, txt)
+
+list_ModelineStartKeyword = Set.fromList $ words $ "kate:"
+list_Booleans = Set.fromList $ words $ "auto-insert-doxygen automatic-spell-checking backspace-indents block-selection bookmark-sorting bom byte-order-marker dynamic-word-wrap folding-markers icon-border indent-pasted-text keep-extra-spaces line-numbers newline-at-eof overwrite-mode persistent-selection replace-tabs-save replace-tabs replace-trailing-space-save smart-home space-indent show-tabs show-trailing-spaces tab-indents word-wrap wrap-cursor"
+list_True = Set.fromList $ words $ "on true 1"
+list_False = Set.fromList $ words $ "off false 0"
+list_Integrals = Set.fromList $ words $ "auto-center-lines font-size indent-mode indent-width tab-width undo-steps word-wrap-column"
+list_Strings = Set.fromList $ words $ "background-color bracket-highlight-color current-line-color default-dictionary encoding eol end-of-line font hl icon-bar-color mode scheme selection-color syntax word-wrap-marker-color"
+list_RemoveSpaces = Set.fromList $ words $ "remove-trailing-spaces"
+list_RemoveSpacesOptions = Set.fromList $ words $ "0 - none modified mod + 1 all * 2"
+
+regex_kate'2d'28mimetype'7cwildcard'29'5c'28'2e'2a'5c'29'3a = compileRegex True "kate-(mimetype|wildcard)\\(.*\\):"
+regex_'5b'5e'3b_'5d = compileRegex True "[^; ]"
+
+parseRules ("Modelines","Normal") =
+  (((pDetectSpaces >>= withAttribute CommentTok))
+   <|>
+   ((pKeyword " \n\t.()!+,<=>%&*/;?[]^{|}~\\" list_ModelineStartKeyword >>= withAttribute KeywordTok) >>~ pushContext ("Modelines","Modeline"))
+   <|>
+   ((pRegExpr regex_kate'2d'28mimetype'7cwildcard'29'5c'28'2e'2a'5c'29'3a >>= withAttribute KeywordTok) >>~ pushContext ("Modelines","Modeline"))
+   <|>
+   ((pLineContinue >>= withAttribute CommentTok) >>~ (popContext))
+   <|>
+   (currentContext >>= \x -> guard (x == ("Modelines","Normal")) >> pDefault >>= withAttribute CommentTok))
+
+parseRules ("Modelines","Modeline") =
+  (((pDetectSpaces >>= withAttribute CommentTok))
+   <|>
+   ((pKeyword " \n\t.()!+,<=>%&*/;?[]^{|}~\\" list_Booleans >>= withAttribute FunctionTok) >>~ pushContext ("Modelines","Booleans"))
+   <|>
+   ((pKeyword " \n\t.()!+,<=>%&*/;?[]^{|}~\\" list_Integrals >>= withAttribute FunctionTok) >>~ pushContext ("Modelines","Integrals"))
+   <|>
+   ((pKeyword " \n\t.()!+,<=>%&*/;?[]^{|}~\\" list_Strings >>= withAttribute FunctionTok) >>~ pushContext ("Modelines","Strings"))
+   <|>
+   ((pKeyword " \n\t.()!+,<=>%&*/;?[]^{|}~\\" list_RemoveSpaces >>= withAttribute FunctionTok) >>~ pushContext ("Modelines","RemoveSpaces"))
+   <|>
+   ((pLineContinue >>= withAttribute CommentTok) >>~ (popContext))
+   <|>
+   (currentContext >>= \x -> guard (x == ("Modelines","Modeline")) >> pDefault >>= withAttribute CommentTok))
+
+parseRules ("Modelines","Booleans") =
+  (((pDetectSpaces >>= withAttribute CommentTok))
+   <|>
+   ((pKeyword " \n\t.()!+,<=>%&*/;?[]^{|}~\\" list_True >>= withAttribute OtherTok))
+   <|>
+   ((pKeyword " \n\t.()!+,<=>%&*/;?[]^{|}~\\" list_False >>= withAttribute OtherTok))
+   <|>
+   ((pDetectChar False ';' >>= withAttribute FunctionTok) >>~ (popContext))
+   <|>
+   ((pLineContinue >>= withAttribute CommentTok) >>~ (popContext))
+   <|>
+   (currentContext >>= \x -> guard (x == ("Modelines","Booleans")) >> pDefault >>= withAttribute CommentTok))
+
+parseRules ("Modelines","Integrals") =
+  (((pDetectSpaces >>= withAttribute CommentTok))
+   <|>
+   ((pInt >>= withAttribute DecValTok))
+   <|>
+   ((pDetectChar False ';' >>= withAttribute FunctionTok) >>~ (popContext))
+   <|>
+   ((pLineContinue >>= withAttribute CommentTok) >>~ (popContext))
+   <|>
+   (currentContext >>= \x -> guard (x == ("Modelines","Integrals")) >> pDefault >>= withAttribute CommentTok))
+
+parseRules ("Modelines","Strings") =
+  (((pDetectSpaces >>= withAttribute StringTok))
+   <|>
+   ((pRegExpr regex_'5b'5e'3b_'5d >>= withAttribute StringTok))
+   <|>
+   ((pDetectChar False ';' >>= withAttribute FunctionTok) >>~ (popContext))
+   <|>
+   ((pLineContinue >>= withAttribute StringTok) >>~ (popContext))
+   <|>
+   (currentContext >>= \x -> guard (x == ("Modelines","Strings")) >> pDefault >>= withAttribute StringTok))
+
+parseRules ("Modelines","RemoveSpaces") =
+  (((pDetectSpaces >>= withAttribute CommentTok))
+   <|>
+   ((pKeyword " \n\t.()!+,<=>%&*/;?[]^{|}~\\" list_RemoveSpacesOptions >>= withAttribute OtherTok) >>~ (popContext))
+   <|>
+   ((pDetectChar False ';' >>= withAttribute FunctionTok) >>~ (popContext))
+   <|>
+   ((pLineContinue >>= withAttribute CommentTok) >>~ (popContext))
+   <|>
+   (currentContext >>= \x -> guard (x == ("Modelines","RemoveSpaces")) >> pDefault >>= withAttribute CommentTok))
+
+
+parseRules x = parseRules ("Modelines","Normal") <|> fail ("Unknown context" ++ show x)

@@ -1,0 +1,96 @@
+{-# LANGUAGE MultiParamTypeClasses, TypeSynonymInstances, FlexibleInstances #-}
+module FRP.Yampa.SDL.Graphic where
+
+import Control.Monad (void)
+import Graphics.UI.SDL as SDL
+import Graphics.UI.SDL.TTF
+
+type Screen = SDL.Surface
+
+newtype Graphic = Graphic { paintGraphic :: Screen -> IO () }
+
+type GraphicOpt = Rect -> Graphic
+type GraphicUpdate = (GraphicOpt, Rect)
+
+data Mask = Mask { maskClip :: Maybe Rect
+                 , maskX :: !Int
+                 , maskY :: !Int
+                 } deriving (Show, Eq)
+
+data Fill = Fill { fillClip :: Maybe Rect
+                 , fillColor :: !Color
+                 } deriving (Show, Eq)
+
+data Text = Text { textMsg :: !String
+                 , textFont :: !Font
+                 , textColor :: !Color
+                 } deriving (Show, Eq)
+
+instance Eq Color where
+    (Color r1 g1 b1) == (Color r2 g2 b2) = r1 == r2 && g1 == g2 && b1 == b2
+
+instance Show Color where
+    show (Color r g b) = "Color { " ++ show r ++ ", " ++ show g ++ ", " ++ show b ++ " }"
+
+class Draw canvas mask where
+    draw :: canvas -> mask -> Graphic
+
+over, under :: Graphic -> Graphic -> Graphic
+(Graphic x) `over` (Graphic y) = Graphic $ \s -> y s >> x s
+under = Prelude.flip over
+
+emptyG :: Graphic
+emptyG = Graphic $ \_ -> return ()
+
+render :: Graphic -> Graphic
+render (Graphic x) = Graphic $ \s -> x s >> SDL.flip s
+
+withinBox :: Rect -> Graphic -> GraphicOpt
+withinBox r g r' | r `intersect` r' = emptyG
+                 | otherwise = g
+
+overOpt :: GraphicOpt -> GraphicOpt -> GraphicOpt
+overOpt g1 g2 r = g1 r `over` g2 r
+
+overUpdate :: GraphicOpt -> GraphicUpdate -> GraphicUpdate
+overUpdate g1 (g2, r) = (g1 `overOpt` g2, r)
+
+intersect :: Rect -> Rect -> Bool
+intersect r1 r2 = xintersect && yintersect
+    where
+        xintersect = x1 `between` (x2, w2) || w1 `between` (x2, w2)
+        yintersect = y1 `between` (y2, h2) || h1 `between` (y2, h2)
+        x1 = rectX r1
+        x2 = rectX r2
+        y1 = rectY r1
+        y2 = rectY r2
+        w1 = x1 + rectW r1
+        w2 = x2 + rectW r2
+        h1 = y1 + rectH r1
+        h2 = y2 + rectH r2
+
+between :: (Ord a) => a -> (a, a) -> Bool
+between x (l, h) = x >= l && x <= h
+
+instance Draw SDL.Surface Mask where
+    draw src mask = Graphic $ \dst -> void $ blitSurface src clip dst offset
+        where
+            clip = maskClip mask
+            offset = Just $ Rect (maskX mask) (maskY mask) 0 0
+
+instance Draw Fill Mask where
+    draw fill mask = Graphic $ \dst -> pixel dst >>= \c -> void $ fillRect dst clip c
+        where
+            pixel dst = (mapRGB . surfaceGetPixelFormat) dst (colorRed color) (colorGreen color) (colorBlue color)
+            clip = fillClip fill
+            color = fillColor fill
+
+instance Draw Text Mask where
+    draw text mask = Graphic $ \dst -> void $ blitText dst
+        where
+            blitText dst = do
+                txt <- renderTextSolid (textFont text) (textMsg text) (textColor text)
+                blitSurface txt clip dst offset
+                freeSurface txt
+            clip = maskClip mask
+            offset = Just $ Rect (maskX mask) (maskY mask) 0 0

@@ -1,0 +1,1 @@
+cmd_drivers/usb/serial/usb_wwan.ko := /home/lithium/CodeSourcery/Sourcery_G++_Lite/bin/arm-none-linux-gnueabi-ld -EL -r  -T /home/lithium/kfhd/kernel/android-3.0/scripts/module-common.lds --build-id  -o drivers/usb/serial/usb_wwan.ko drivers/usb/serial/usb_wwan.o drivers/usb/serial/usb_wwan.mod.o

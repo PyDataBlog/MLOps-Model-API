@@ -1,0 +1,76 @@
+#!/usr/bin/env bash
+# vim: fdm=marker
+# join MPN feats into canonical kaldidata: realize all dynamic things
+#***************************************************************************
+# Copyright 2011-2015, cybeliak
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#***************************************************************************
+
+# Part of this script is from the general design of the Kaldi project
+# Part of this script is from (kaldi)/egs/wsj/s5/steps/compute_cmvn_stats.sh
+# which is released with Apache 2.0 license
+# http://kaldi.sourceforge.net/
+
+extract_feats=false
+
+source mpn_steps/common/include.sh || exit 7
+if [[ $# != 2 ]]; then
+   echo "Usage: $0 [options] <in-dir> <out-dir>"
+   exit 1;
+fi
+indir=$1
+dir=$2
+
+tmpdir="${TMPROOT:-$dir}/tmp-$(basename $0)"
+mkdir -p "$dir" "$tmpdir"
+
+# Cleaning up
+rm -f $dir/{feats.scp,cmvn.scp}
+
+# The main part {{{
+if [[ -f $indir/command_feats_aggregator && $extract_feats == true ]]; then
+  featsagg="$(mpn_common_feats_get_feats $indir $indir/feats.scp)"
+  echo "feats_aggregator=$featsagg"
+  eval "${featsagg//$'\n'/}" \
+    | copy-feats --compress=true ark:- ark,scp:$dir/feats.ark,- \
+    | LC_ALL=C sort -u > $dir/feats.scp
+else
+  install $indir/feats.scp $dir/
+fi
+
+# Generate fake CMVN statistics as default values, some of the kaldi scripts
+# need cmvn.scp to exist regardless of what feature it actually contains
+# from compute_cmvn_stats.sh --fake true
+dim=$(feat-to-dim scp:$dir/feats.scp -)
+cat $dir/spk2utt | awk -v dim=$dim '{print $1, "["; for (n=0; n < dim; n++) { printf("0 "); } print "1";
+    for (n=0; n < dim; n++) { printf("1 "); } print "0 ]";}' \
+  | copy-matrix ark:- ark,scp:$dir/cmvn.ark,$dir/cmvn.scp
+
+LC_ALL=C utils/fix_data_dir.sh $dir
+rm -rf $dir/.backup
+# }}}
+
+if [[ -d "$tmpdir" && -n "$tmpdir" ]]; then rm -rf "$tmpdir"; fi
+echo "Succeeded running $0 "; exit 0
+
+## SEC ## display
+printf "%s > %s" $(basename ${ARGS[0]}) $(basename ${ARGS[1]})
+## ENDSEC ##
+## SEC ## output
+1 kaldidata_canonical
+## ENDSEC ##
+## SEC ## input
+0 feats
+1 kaldidata
+## ENDSEC ##

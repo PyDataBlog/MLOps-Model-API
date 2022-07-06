@@ -1,0 +1,1580 @@
+\documentclass[dissertation.tex]{subfiles}
+\begin{document}
+\chapter{Algorithms}\label{cha:algorithm}
+In this chapter we analyze step-by-step the algorithms that implement
+the different parts of the program. We do this with the help of the
+test scene in \cref{fig:empty}.
+\image{scrEmpty.png}{Initial scene.}{fig:empty}
+
+The general idea is to use an open \bs curve of a certain degree
+interpolating the chosen starting and ending points, whose
+control polygon is a suitable modification of a polygonal chain
+extracted from a graph
+obtained with a \ac{VD} method. In \cref{sec:polChain} we
+explain in detail how to
+build such polygonal chain. The chain, before being used as a control
+polygon for the \bs, is refined and adjusted - as explained in
+detail in \cref{sec:obsAvoid} and \cref{sec:degreeInc} - in order to
+ensure that the associated \bs curve has no obstacle
+collision. Furthermore, in \cref{sec:knotSel} we implement a method
+for an optional adaptive 
+arrangement of the breakpoints of the \bs. Finally, \cref{sec:postPro}
+is devoted to an optional post-processing of the path.
+
+\section{Polygonal chain}\label{sec:polChain}\index{Polygonal chain}
+In the first phase, the purpose is to extract a suitable polygonal chain from
+the scene, such that the extremes coincide with the start point $\ve{s}$
+and the end point $\ve{e}$. In particular, we are interested in short length
+chains. We calculate the shortest path
+in a graph that is obtained by using an adaptation to three
+dimensions of a well known bidimensional method
+\cite{bhattacharya}\cite{ho-liu}\cite{seda-pich} that use
+\acp{VD} as base.
+
+We choose a Voronoi method because it builds a structure roughly
+equidistant from obstacles,resulting in a low probability of
+collisions between the curve and the obstacles.
+
+\subsection{Base Graph}\label{sec:baseGraph}\index{Graph}\index{$G$}
+First we
+start distributing points on the \acp{OTF} and on
+an invisible bounding box, as in \cref{fig:sites}.
+\imageDouble{scrSites-a.png}{scrSites-b.png}{Scene with Voronoi sites
+  (distributed only on the
+  obstacles surfaces on the left, and on obstacles and bounding box on
+  the right).}{fig:sites}
+The sites are distributed using a recursive method, for each triangle
+of the scene we add three points - one for each
+vertex, if not already added before - and then we calculate the area
+of the triangle. If the area is bigger than a threshold, we decompose
+the triangle in four triangles adding three more vertices on the
+midpoints of the edges of the original triangle as in
+\cref{fig:triangleDec}. We repeat the process recursively for
+each new triangle.
+\begin{myfig}{Decomposition of an \ac{OTF}.}{fig:triangleDec}
+  \begin{tikzpicture}[scale=2]
+    \coordinate (a1) at (1,0);
+    \coordinate (b1) at (2,1);
+    \coordinate (c1) at (3,0.3);
+
+    \path[obstacle] (a1) -- (b1) -- (c1) -- (a1);
+
+    \coordinate (dist) at (3.5,0);
+    \coordinate (a2) at ($ (a1) + (dist) $);
+    \coordinate (b2) at ($ (b1) + (dist) $);
+    \coordinate (c2) at ($ (c1) + (dist) $);
+
+    \path[obstacle] (a2) -- (b2) -- (c2) -- (a2);
+    \foreach \p in {a1,b1,c1,a2,b2,c2}
+    \filldraw[site] (\p) circle (2pt); 
+
+    \coordinate (ab) at ($ (a2)!0.5!(b2) $);
+    \coordinate (bc) at ($ (b2)!0.5!(c2) $);
+    \coordinate (ac) at ($ (a2)!0.5!(c2) $);
+
+    \path[obstacleTract] (ab) -- (bc) -- (ac) -- (ab);
+
+    \foreach \p in {ab,bc,ac}
+    \filldraw[siteHigh] (\p) circle (2pt); 
+  \end{tikzpicture}
+\end{myfig}
+
+We construct the \ac{VD} using the Fortune's algorithm
+\cite{fortune} on
+those points as input sites, and we build a graph
+$$G=(V,E)$$
+using the vertices
+of the Voronoi cells as graph nodes in $V$, and the edges of the cells\footnote{Rejecting potential
+  infinite edges.} as graph edges in $E$. Furthermore, we make $G$
+denser by adding all the diagonals as edges for every cell's face, in
+other words we
+connect every vertex to every other vertex of a face.
+
+Subsequently, we prune such graph deleting every edge that
+intersects an \ac{OTF} using the methods explained in
+\cref{sec:intersections}. The edge-pruning process considers a margin
+around the \acp{OTF} during the collision checks.
+\image{scrGraph.png}{Scene with pruned graph.}{fig:graph}
+
+The result, visible in \cref{fig:graph}, is a graph that embraces the
+obstacles like a cobweb where the possible paths are roughly
+equidistant from the obstacles.
+
+\imageDouble{voronoi2d-a.eps}{voronoi2d-b.eps}{Voronoi graph in 2D
+  before (left) and after (right) pruning.}{fig:voronoi2d}
+As visible
+in \cref{fig:voronoi2d},
+in the bidimensional scenario the equivalent method implies distributing
+the sites (the blue dots) in the edges of the polygonal obstacles and
+then pruning the 
+graph when an edge of the graph intersects an edge of the
+obstacle. The result is a sparse graph composed of chains around the
+obstacles (the green dots).
+
+We decide to extend the method in 3 dimensions distributing points in
+the whole \ac{OTF} surface. An alternative to this would be distributing
+points only along the edges of the obstacles.
+
+We attach the desired start and end
+points $\ve{s}$ and $\ve{e}$ on the obtained graph $G$ and we can obtain a path between the two points using an
+algorithm like Dijkstra \cite{dijkstra}\cite{knuth}. To attach $\ve{s}$
+and $\ve{e}$ we finds the vertex $\ve{v_n}\in V_{vis}\subseteq V$ such
+  that $dist(\ve{s},\ve{v_n})\leq dist(\ve{s},\ve{v_i})$, $\forall
+  \ve{v_i}\in V_{vis}$, where
+  \begin{equation*}
+    V_{vis}=\{\ve{v}\in V\ :\ \overline{\ve{s} \ve{v_i}}\ \text{do not
+      intersects any obstacle}\},
+  \end{equation*}
+  then adds $\ve{s}$ to $V$ and the edge $(\ve{s},\ve{v_n})$ to $E$.
+  Similarly for $\ve{e}$.
+
+Before using that path as a control polygon,
+we need to take into account the degree of the \bs and the
+position of the obstacles, the details are in \cref{sec:obsAvoid} and
+\cref{sec:degreeInc}.
+
+\subsubsection{Complexity considerations}\index{Complexity!$G$ creation}\index{$G$!complexity}
+Fortune's algorithm runs in time $\bigO(|\sitesSet|\log |\sitesSet|)$ \cite{deberg},
+where $\sitesSet$ is
+the set 
+of input sites. If we impose a maximum area $A$ for the obstacles
+\footnote{Inserting the obstacles in a progressive order, the area of the $i$-th
+obstacle cannot be a function $f(i)$ of the number of
+the obstacles.} then $|\sitesSet|=\bigO(|\obsSet|)$ where $\obsSet$ is the set of
+obstacles, because in the worst case we have that $|\sitesSet|=C\cdot A\cdot
+|\obsSet|$ for
+some constant $C$ that depends on the chosen density of sites per area.
+
+In conclusion, the time cost for the creation of the graph
+is
+\newcommand{\eqCostGraph}{\ensuremath{\bigO(|\obsSet|\log |\obsSet|)}}
+\begin{equation}
+  \label{eq:costGraph}
+  \eqCostGraph
+\end{equation}
+and the number of the vertices in the graph
+is 
+\begin{equation}
+  \label{eq:numV}
+  |V|=\bigO(|\sitesSet|)=\bigO(|\obsSet|)
+\end{equation}
+because the number of vertices in the resulting graph has the
+same order of magnitude of the number of input sites.
+
+If we formulate the hypothesis of having maximum degree $k$ in $G$ -
+i.e. each vertex in $V$ is connected to other $k$ vertices at most -
+then we have that
+\begin{equation}
+  \label{eq:numE}
+  |E|=\bigO(k|V|)=\bigO(k|\obsSet|).
+\end{equation}
+In the worst case $k=|V|$ and $|E|=\bigO(|V|^2)$ but for \acp{VD} in
+plane there is a property that if we have $n$ input sites
+that lay on a circumference, without any other site inside the
+circumference, then the center of the circumference is a vertex shared
+by $n$ cells (\cref{sec:voronoi} for details). The same property holds
+in the 3D case with respect to spheres.
+
+We can make the assumption
+that no more than three sites can lay 
+on a circumference, hence, no vertex can have more than three neighbours,
+or the same with four vertices in sphere. This assumption is
+plausible because we use floating point numbers for the coordinates of
+the vertices of the obstacles and it is unlikely that more than
+four points lay on a sphere.
+
+Moreover, the average numbers of faces in a \ac{VD}'s cell and,
+consequently, vertices
+in a face are
+bounded by a constant \cite{okabe}. Thus, we can make the assumption
+that we do not increase
+the maximum 
+graph degree by more than a constant when we make the graph
+denser by adding the faces' diagonals.
+
+With the previous two assumptions $k$ is a constant,
+and \cref{eq:numE} becomes
+\begin{equation*}
+  |E|=\bigO(|V|)=\bigO(|\obsSet|).
+\end{equation*}
+
+To prune the graph of every edge that intersects obstacles, we need
+to solve a system of three unknowns in three equations for every edge
+and every \ac{OTF}\footnote{See \cref{sec:intersectionST}.}, so
+we have a cost of
+\newcommand{\eqCostPruning}{\ensuremath{\bigO(k|\obsSet|^2)}}
+\begin{equation}
+  \label{eq:costPruning}
+  \bigO(|E|\cdot|\obsSet|)=\eqCostPruning
+\end{equation}
+and, if we make the assumption of $k$ constant, it becomes
+\begin{equation*}
+  \bigO(|\obsSet|^2).
+\end{equation*}
+
+\subsection{Graph's transformation}\label{sec:trigraph}\index{Graph!triple's graph}\index{$G_t$}
+Before calculating the shortest path on the chosen graph with Dijkstra
+\cite{dijkstra}\cite{knuth}, we
+transform it in a graph containing all the triples
+of three adjacent vertices in the original graph. This because we want
+to filter the triples for collisions as described in
+\cref{sec:inter1}. We call the transformed graph
+$$G_t=(V_t,E_t)$$
+where we have triples of vertices of $G$ in $V_t$.
+
+The original graph $G$ is not directed and it is weighted
+with the distance from vertex to vertex, whereas the transformed graph $G_t$ is
+directed and weighted. If in $G$ the nodes $\ve{a}$
+and $\ve{b}$ are
+neighbouring, and $\ve{b}$ and $\ve{c}$ are neighbouring, then $G_t$
+has the two nodes $(\ve{a},\ve{b},\ve{c})$ and $(\ve{c},\ve{b},\ve{a})$. In
+$G_t$ a node $(\ve{a_1},\ve{b_1},\ve{c_1})$ is a predecessor of
+$(\ve{a_2},\ve{b_2},\ve{c_2})$ if $\ve{b_1}=\ve{a_2}$ and $\ve{c_1}=\ve{b_2}$, and the weight of the arc
+from $(\ve{a_1},\ve{b_1},\ve{c_1})$ to $(\ve{a_2},\ve{b_2},\ve{c_2})$ in $G_t$ is
+equal to
+the weight of the arc from $\ve{a_1}$ to $\ve{b_1}(=\ve{a_2})$ in $G$.
+
+\begin{algo}{Create triples graph $G_t$}{alg:createTripleGraph}
+  \Function{createTriplesGraph}{$G$}
+  \State $V_t\Ass E_t\Ass \emptyset$
+  \ForAll{$(\ve{a},\ve{b})\in E$}\label{ln:tripleFor0}
+  \State $leftOut\Ass leftIn\Ass rightOut\Ass rightIn\Ass \emptyset$
+  \ForAll{$\ve{v}\in N_G(\ve{a})\setminus\{\ve{b}\}$}
+  \State $leftOut \Ass leftOut\cup \{(\ve{v},\ve{a},\ve{b})\}$
+  \State $leftIn \Ass leftIn\cup \{(\ve{b},\ve{a},\ve{v})\}$
+  \State $V_t \Ass V_t\cup \{(\ve{v},\ve{a},\ve{b}), (\ve{b},\ve{a},\ve{v})\}$
+  \EndFor
+  \ForAll{$\ve{v}\in N_G(\ve{b})\setminus\{\ve{a}\}$}
+  \State $rightOut \Ass rightOut\cup \{(\ve{v},\ve{b},\ve{a})\}$
+  \State $rightIn \Ass rightIn\cup \{(\ve{a},\ve{b},\ve{v})\}$
+  \State $V_t \Ass V_t\cup \{(\ve{v},\ve{b},\ve{a}), (\ve{a},\ve{b},\ve{v})\}$
+  \EndFor
+  \ForAll{$\ve{o}\in leftOut$}\label{ln:tripleFor1}
+  \ForAll{$\ve{i}\in rightIn$}
+  \State $E_t \Ass E_t\cup (\ve{o},\ve{i})$
+  \EndFor
+  \EndFor
+  \ForAll{$\ve{o}\in rightOut$}\label{ln:tripleFor2}
+  \ForAll{$\ve{i}\in leftIn$}
+  \State $E_t \Ass E_t\cup (\ve{o},\ve{i})$
+  \EndFor
+  \EndFor
+  \EndFor
+  \State $G_t\Ass(V_t,E_t)$
+  \State\Return $G_t$
+  \EndFunction
+\end{algo}
+The steps necessary to create $G_t$ are summarized in
+\cref{alg:createTripleGraph}. The input $G$ is the base graph
+that has vertices $V$ and edges $E$, $N_G(\ve{a})$ is the set of
+neighbours in $G$ of the vertex $\ve{a}$, and the output is $G_t$.
+
+The transformation of the graph is useful only for the obstacle
+avoidance algorithm of
+\cref{sec:inter1}, theoretically it is possible to bypass such
+transformation for the algorithm described in \cref{sec:inter2}.
+
+\subsubsection{Complexity considerations}\index{Complexity!$G_t$ creation}\index{$G_t$!complexity}
+If we suppose a maximum degree $k$ for each vertex in the graph $G$ -
+i.e. each vertex in $V$ can have $k$ edges insisting on
+it at most, then the number of vertices in the transformed graph $G_t$ is 
+\begin{equation}
+  \label{eq:numTriples}
+  |V_t|\leq |V|\cdot k\cdot(k-1)=\bigO(k^2|V|)
+\end{equation}
+because for each vertex $\ve{v}$ in $G$ we need to
+consider all the neighbours of $\ve{v}$ and the neighbours of the neighbours
+of $\ve{v}$ (excluded $\ve{v}$).
+
+For how we define the triples neighbour rule in $G_t$ we have
+that each triple is a predecessor of $k-1$ other triples at most. For
+instance, $(\ve{a},\ve{b},\ve{c})$ in $V_t$ is the predecessor of all the triples
+$(\ve{b},\ve{c},*)$ where $*$ can be one of the $k$ neighbours
+of $\ve{c}$ in $V$ excluded $\ve{b}$. Thus, the number of edges in $G_t$ is
+\begin{equation}
+  \label{eq:numEdgesTriples}
+  |E_t|\leq |V_t|\cdot (k-1)=\bigO(k|V_t|)=\bigO(k^3|V|).
+\end{equation}
+
+Furthermore, the time cost for the creation of $G_t$ is
+\newcommand{\eqCostVt}{\ensuremath{\bigO(k^3|\obsSet|)}}
+\begin{equation}
+  \label{eq:costVt}
+  \bigO(k^2|E|)=\eqCostVt
+\end{equation}
+because \cref{alg:createTripleGraph} scans all the edges $e$ on
+\cref{ln:tripleFor0} for creating the transformed
+graph and for each
+iteration
+the biggest cost is due to the two \emph{for} on \cref{ln:tripleFor1} and
+\cref{ln:tripleFor2}.
+
+\section{Obstacle avoidance}\label{sec:obsAvoid}
+Before using the polynomial chain extracted as
+explained in \cref{sec:polChain} as a control polygon for the
+\bs, we need to discuss a
+problem: every possible path in the graph $G$ is
+free from collisions by construction - in fact we prune the graph of
+every edge that intersects an obstacle - but this does not guarantee
+that the associated curve will not cross any obstacle. This concept is
+exemplified in
+\cref{fig:intersect}.
+\begin{myfig}{\bs that intersects an obstacle in the plane.}{fig:intersect}
+  \begin{tikzpicture}
+    \path[obstacle] (1,0) -- (2,1) -- (3,0) -- (1,0);
+    \draw[controlPoly] (0,0) -- (2,2) -- (4,0);
+    \draw[spline] (0,0) to [bend left=40] (4,0);
+
+    \filldraw[controlVert] (0,0) circle (2pt);
+    \filldraw[controlVert] (2,2) circle (2pt);
+    \filldraw[controlVert] (4,0) circle (2pt);
+  \end{tikzpicture}
+\end{myfig}
+
+In this chapter we formulate the hypothesis of using
+quadratic \bss\footnote{\bs curves with degree 2.}, in
+\cref{sec:degreeInc} we explain how it is possible to use curves with
+a higher degree. With this assumption, we can exploit the \acp{CHP}
+explained in \cref{sec:bsplineProp} and assert that the 
+resulting curve is contained inside the union of all the triangles of
+three consecutive control vertices of the control
+polygon. Using that property we can solve the problem of the
+collision, maintaining all the triangles associated to the control
+polygon free 
+from collision with \acp{OTF}. Note that the \ac{CHP} of quadratic
+\bss is also valid in space, hence, the convex hull is still composed
+of triangles, like the faces of the
+obstacles. This simplifies all the checks for collisions because they
+are all between triangles in space and we can use the methods
+described in \cref{sec:intersections}.
+
+We design two different algorithms to approach the collision
+problem. The first solution, described in \cref{sec:inter1}, implements
+a modified version of Dijkstra's
+algorithm that finds the shortest path from start to end in the graph
+such that all the triangles formed by three consecutive points in the path
+are free from collisions. The second solution, described in
+\cref{sec:inter2}, uses the classical Dijkstra's algorithm to find
+the shortest path from $s$ to $e$ in the graph $G$, checking later for
+collisions in the triangles formed of three consecutive points in such
+path. When a collision is found we add vertices to the path to manage that.
+
+\subsection{First solution: Dijkstra's algorithm in $G_t$}\label{sec:inter1}\index{Dijkstra}\index{Dijkstra in $G_t$}
+The first solution of the problem exploits the graph $G_t$ obtained as
+explained in \cref{sec:trigraph}. Before applying Dijkstra's algorithm
+to $G_t$ all the triples are filtered checking if the
+triangle composed of the vertices of the triple intersects an
+\ac{OTF}. If a triple intersects an obstacle then it is removed from the
+graph
+so that a path cannot pass from such vertices in that order.
+
+Note that if a triple $(\ve{a},\ve{b},\ve{c})$ is removed from $V_t$ - and
+consequently also the triple $(\ve{c},\ve{b},\ve{a})$ - this does not
+necessarily exclude
+the three vertices $\ve{a}$, $\ve{b}$, $\ve{c}$ from being part of the final
+polynomial chain. For instance, in
+\cref{fig:exampleTriples} we have a graph $G$ with vertices
+$\ve{a},\ve{b},\ve{c},\ve{d},\ve{e},\ve{f}$ and an obstacle that
+intersects triples on the transformed graph\footnote{In the plane, this graph cannot be
+  obtained using the procedure based on \acp{VD} explained in
+  \cref{sec:voronoi}, but a similar situation is plausible
+  considering Voronoi cells in space.} $G_t$. The triple
+$(\ve{a},\ve{b},\ve{c})$ and $(\ve{c},\ve{b},\ve{a})$ are removed from $G_t$ because
+the corresponding triangle intersects the obstacle, and the path
+$\ve{d}\rightarrow \ve{a}\rightarrow \ve{b}\rightarrow \ve{c}\rightarrow \ve{e}$ cannot be
+admissible. This doesn't preclude the nodes $\ve{a}$, $\ve{b}$ and $\ve{c}$ to be part
+of the final admissible path $\ve{d}\rightarrow \ve{a}\rightarrow \ve{b}\rightarrow \ve{e}\rightarrow \ve{c}\rightarrow \ve{f}$.
+\begin{myfig}{Example of triples.}{fig:exampleTriples}
+  \begin{tikzpicture}
+    \coordinate (D) at (-1,1);
+    \coordinate (A) at (0,0);
+    \coordinate (B) at (2,2);
+    \coordinate (C) at (4,0);
+    \coordinate (E) at (3,2);
+    \coordinate (F) at (5,1);
+    \path[obstacle] (1,-0.5) -- (2,1) -- (3,-0.5) -- (1,-0.5);
+    \draw[controlPoly] (D) -- (A) -- (B) -- (C) -- (F);
+    \draw[controlPoly] (B) -- (E) -- (C);
+
+    \filldraw[controlVert] (D) circle (2pt);
+    \filldraw[controlVert] (A) circle (2pt);
+    \filldraw[controlVert] (B) circle (2pt);
+    \filldraw[controlVert] (C) circle (2pt);
+    \filldraw[controlVert] (E) circle (2pt);
+    \filldraw[controlVert] (F) circle (2pt);
+
+    \node[above=0.5em] at (D) {$\ve{d}$};
+    \node[below=0.5em] at (A) {$\ve{a}$};
+    \node[above=0.5em] at (B) {$\ve{b}$};
+    \node[below=0.5em] at (C) {$\ve{c}$};
+    \node[above=0.5em] at (E) {$\ve{e}$};
+    \node[above=0.5em] at (F) {$\ve{f}$};
+  \end{tikzpicture}
+\end{myfig}
+
+On the cleaned transformed graph it is possible to find the shortest
+path
+$$
+P_t=(\ve{a_0},\ve{b_0},\ve{c_0}), (\ve{a_1},\ve{b_1},\ve{c_1}),\dots,(\ve{a_i},\ve{b_i},\ve{c_i}),\dots,(\ve{a_n},\ve{b_n},\ve{c_n})
+$$
+ using
+an algorithm like Dijkstra. Then the shortest
+path $P$ in $G$ is constructed by taking the central vertex $\ve{b_i}$
+of every 
+triple $(\ve{a_i},\ve{b_i},\ve{c_i})$ of $P_t$, plus the extremes $\ve{a_0}$ and $\ve{c_n}$
+of the first and last triple, obtaining
+$$
+P=\ve{a_0},\ve{b_0},\ve{b_1},\dots,\ve{b_i},\dots,\ve{b_{n-1}},\ve{b_n},\ve{c_n}.
+$$
+
+\imageDouble{scrSolution1a.png}{scrSolution1b.png}{Effects of
+  application of solution one.}{fig:sol11}[
+\node[imageLabel] at (0.7,0.62) {$\ve{a_1}$};
+\node[imageLabel] (B) at (0.35,0.4) {$\ve{b_1}$};
+\node[imageLabel] (C) at (0.2,0.4) {$\ve{c_1}$};
+\node[imageLabel] (O) at (0.8,0.2) {$Obs$};
+\path[imageArrow] (B) -- (0.36,0.555);
+\path[imageArrow] (C) -- (0.3,0.585);
+\path[imageArrow] (O) -- (0.6,0.3);
+][
+\node[imageLabel] (A) at (0.7,0.7) {$\ve{a_2}$};
+\node[imageLabel] (B) at (0.5,0.4) {$\ve{b_2}$};
+\node[imageLabel] (C) at (0.35,0.4) {$\ve{c_2}$};
+\node[imageLabel] (D) at (0.2,0.4) {$\ve{d_2}$};
+\node[imageLabel] (O) at (0.8,0.2) {$Obs$};
+\path[imageArrow] (A) -- (0.58,0.61);
+\path[imageArrow] (B) -- (0.44,0.52);
+\path[imageArrow] (C) -- (0.36,0.555);
+\path[imageArrow] (D) -- (0.3,0.585);
+\path[imageArrow] (O) -- (0.6,0.3);
+]
+\imageDouble{scrSolution1a2.png}{scrSolution1b2.png}{Effects of
+  application of solution one, other viewpoint.}{fig:sol12}[
+\node[imageLabel] at (0.2,0.1) {$\ve{a_1}$};
+\node[imageLabel] at (0.45,0.6) {$\ve{b_1}$};
+\node[imageLabel] at (0.65,0.85) {$\ve{c_1}$};
+\node[imageLabel] at (0.8,0.2) {$Obs$};
+][
+\node[imageLabel] at (0.15,0.2) {$\ve{a_2}$};
+\node[imageLabel] at (0.3,0.4) {$\ve{b_2}$};
+\node[imageLabel] at (0.45,0.6) {$\ve{c_2}$};
+\node[imageLabel] at (0.65,0.85) {$\ve{d_2}$};
+\node[imageLabel] at (0.8,0.2) {$Obs$};
+]
+In \cref{fig:sol11} and \cref{fig:sol12} the effect of the
+application of the first solution is shown. The triangle formed by the
+vertices $\ve{a_1}$, $\ve{b_1}$, $\ve{c_1}$ in the left picture of \cref{fig:sol11}
+is colliding with the obstacle $Obs$ in the back. In the right picture
+there
+is the path $\ve{a_2},\ve{b_2},\ve{c_2},\ve{d_2}$ obtained applying
+the solution - in this case no
+triangles in the
+path collide with obstacles. In \cref{fig:sol12} another
+point of view of pictures in \cref{fig:sol11} is visible.
+
+\subsubsection{Complexity considerations}\index{Complexity!Dijkstra's algorithm in $G_t$}\index{Dijkstra in $G_t$!complexity}
+For each triple and each \ac{OTF} we need to solve three $3\times 3$
+linear systems for the
+collision check\footnote{See
+  \cref{sec:intersectionsTriangleTriangle}.}, hence, in total
+the cost is
+\begin{equation*}
+  \bigO(|V_t|\cdot |\obsSet|)
+\end{equation*}
+and for \cref{eq:numV} and \cref{eq:numTriples} this is equal to
+\newcommand{\eqCostColl}{\ensuremath{\bigO(|\obsSet|^2 k^2)}}
+\begin{equation}
+  \label{eq:costColl}
+  \eqCostColl .
+\end{equation}
+
+The cost of applying Dijkstra's algorithm\footnote{In the worst case
+  where no triples are removed in the cleaning phase.} in $G_t$ is \cite{bondy}\cite{lavalle}
+\newcommand{\eqCostDijkstraTriples}{\ensuremath{\bigO(k^3|\obsSet|+k^2|\obsSet|\log(k^2|\obsSet|)}}
+\begin{equation}
+  \label{eq:costDijkstraTriples}
+  \begin{split}
+    \bigO(|E_t|+|V_t|\log |V_t|) &= \bigO(k^3|V|+k^2|V|\log(k^2|V|)\\
+    &= \eqCostDijkstraTriples.
+  \end{split}
+\end{equation}
+Such cost has two special cases:
+\begin{itemize}
+\item if $G$ is a \emph{clique} - i.e. each
+  node in $V$ is connected to every other node \cite{bondy} - then
+  $k=|V|-1$ and the cost is
+  \begin{equation*}
+    \bigO(|V|^4);
+  \end{equation*}
+\item if $k$ is constant - i.e. doesn't grow with $|V|$ - the
+  cost is
+  \begin{equation*}
+    \bigO(|V|\log|V|).
+  \end{equation*}
+\end{itemize}
+The latter case is the more plausible if we assume the hypothesis that
+no more than four input sites in space can be on the
+same sphere, in fact in that case
+every Voronoi cell cannot have a vertex with more than four edges
+connected to it (see \cref{sec:voronoi} for details).
+
+If we sum all the costs we obtain:
+\newcommand{\eqCostTotalOne}{\ensuremath{\bigO(k^2|\obsSet|^2+k^3|\obsSet|)}}
+\begin{equation}\label{eq:costTotalOne}
+  \eqCostTotalOne
+\end{equation}
+where all the other terms are absorbed in those two. If we have $k$
+constant, as we said before, then we have an overall cost of
+\newcommand{\eqCostTotalOneK}{\ensuremath{\bigO(|\obsSet|^2)}}
+\begin{equation}\label{eq:costTotalOneK}
+  \eqCostTotalOneK
+\end{equation}
+that originates from the collision-check controls.
+
+We can improve
+this result if we divide the algorithm in two parts:
+\begin{enumerate}
+\item first we 
+  can construct the graph with cost $\bigO(|\obsSet|^2)$;
+\item then we can
+  use the same graph in different situations\footnote{With specific starting
+    and ending points.} with cost $\bigO(|\obsSet|\log |\obsSet|)$, only for the
+  routing.
+\end{enumerate}
+
+\begin{table}
+  \centering
+  \begin{tabular}{|l|c|r|}
+    \hline
+    Description&Cost&Reference\\
+    \hline
+    \hline
+    Creation of $G$&\eqCostGraph&\cref{eq:costGraph}\\
+    Pruning of $G$&\eqCostPruning&\cref{eq:costPruning}\\
+    Creation of $G_t$&\eqCostVt&\cref{eq:costVt}\\
+    Pruning of $G_t$&\eqCostColl&\cref{eq:costColl}\\
+    Routing in $G_t$& \eqCostDijkstraTriples&\cref{eq:costDijkstraTriples}\\
+    \hline
+    Total&\eqCostTotalOne&\cref{eq:costTotalOne}\\
+    Total ($k$ constant)&\eqCostTotalOneK&\cref{eq:costTotalOneK}\\
+    \hline
+  \end{tabular}
+  \caption{Summary of the costs for solution one}
+  \label{tab:costsSol1}
+\end{table}
+On \cref{tab:costsSol1} we summarize all the terms that contributes to
+the total costs, and the total cost itself.
+
+\subsection{Second solution: Dijkstra's algorithm in $G$}\label{sec:inter2}\index{Dijkstra}\index{Dijkstra in $G$}
+The First solution is interesting from an algorithmic point of view,
+but it is not very practical. It ignores all the triples that
+intersect an obstacle, thus possible paths in $G$ are lost. 
+
+We develop a
+solution that uses another approach: obtain the shortest path 
+from the Voronoi's graph $G$ directly using Dijkstra's algorithm,
+without removing any triple. On this path
+- that we call $P$ - we
+check every triple of consecutive vertices, and if it collides with an
+\ac{OTF} then we take countermeasures (see
+\cref{sec:intersectionsTriangleTriangle} for the procedure implemented
+to identify collisions between two triangles). For instance, if the path
+is composed from the vertices
+\begin{equation*}
+  P=(\ve{v_0},\ve{v_1},\dots,\ve{v_n})
+\end{equation*}
+then we check every one of the triangles 
+\begin{eqnarray*}
+T_0 &=& \triangle \ve{v_0}\ve{v_1}\ve{v_2}\\
+T_1 &=& \triangle \ve{v_1}\ve{v_2}\ve{v_3}\\
+&\cdots&\\
+T_i &=& \triangle \ve{v_i}\ve{v_{i+1}}\ve{v_{i+2}}\\
+&\cdots&\\
+T_{n-3} &=& \triangle \ve{v_{n-3}}\ve{v_{n-2}}\ve{v_{n-1}}\\
+T_{n-2} &=& \triangle \ve{v_{n-2}}\ve{v_{n-1}}\ve{v_n}
+\end{eqnarray*}
+for intersections with \acp{OTF}. $\triangle \ve{v_i}\ve{v_j}\ve{v_k}$
+denotes the triangle having points $\ve{v_i}$, $\ve{v_j}$ and
+$\ve{v_k}$ as vertices.
+ 
+Consider that $G$ is pruned from all the edges that intersect any
+obstacle, thus none of the edges of the triangles $T_i$ can intersect
+an \ac{OTF}. The only possibility is that edges\footnote{If we ignore
+  special cases, two
+  edges for each \ac{OTF} at most.} of \ac{OTF} intersect a
+triangle $T_i$. Hence for each $T_i$ we have a (possibly empty) set of points
+of intersection between it and the edges of each \ac{OTF} - we call
+that set $O$.
+\begin{myfig}{$T_i$($=\triangle \ve{v_i}\ve{v_{i+1}}\ve{v_{i+2}}$) and the points
+    $\ve{o_1},\ve{o_2},\ve{o_3}$ of intersection between it and the edges of some \acp{OTF}.}{fig:triangleIntersection}
+  \begin{tikzpicture}
+    \coordinate (P) at (-1,0);
+    \coordinate (A) at (0,0);
+    \coordinate (B) at (4,5);
+    \coordinate (C) at (8,1);
+    \coordinate (D) at (9,1);
+    \coordinate (O1) at (barycentric cs:A=0.2,B=0.6,C=0.2);
+    \coordinate (O2) at (barycentric cs:A=0.5,B=0.3,C=0.2);
+    \coordinate (O3) at (barycentric cs:A=0.3,B=0.2,C=0.5);
+    \coordinate (W1) at (barycentric cs:A=0.4,B=0.6,C=0.);
+    \coordinate (W2) at (barycentric cs:A=0.,B=0.6,C=0.4);
+
+    \draw[controlPoly] (A) -- (B) -- (C);
+    \draw[controlPolyTract] (P) -- (A);
+    \draw[controlPolyTract] (C) -- (D);
+    \draw[controlPolyTractHigh] (W1) -- (W2);
+    \draw[controlPolyTractHigh] (A) -- (C);
+
+    \filldraw[controlVert] (A) circle (2pt);
+    \filldraw[controlVert] (B) circle (2pt);
+    \filldraw[controlVert] (C) circle (2pt);
+    \filldraw[obstaclePoint] (O1) circle (2pt);
+    \filldraw[obstaclePoint] (O2) circle (2pt);
+    \filldraw[obstaclePoint] (O3) circle (2pt);
+    \filldraw[controlVertHigh] (W1) circle (2pt);
+    \filldraw[controlVertHigh] (W2) circle (2pt);
+
+    \node[below=0.5em] at (A) {$\ve{v_i}$};
+    \node[above=0.5em] at (B) {$\ve{v_{i+1}}$};
+    \node[below=0.5em] at (C) {$\ve{v_{i+2}}$};
+    \node[below right=0.2em] (O1n) at (O1) {$\ve{o_1}$};
+    \node[below=0.2em] at (O1n) {$\scriptstyle(\equiv \ve{o_{near}})$};
+    \node[left=0.2em] at (O2) {$\ve{o_2}$};
+    \node[below=0.2em] at (O3) {$\ve{o_3}$};
+    \node[left=0.5em] at (W1) {$\ve{w_1}$};
+    \node[right=0.5em] at (W2) {$\ve{w_2}$};
+  \end{tikzpicture}
+\end{myfig}
+
+In \cref{fig:triangleIntersection} we have an example of the triangle
+\begin{equation*}
+  T_i = \triangle \ve{v_i}\ve{v_{i+1}}\ve{v_{i+2}} 
+\end{equation*}
+that is
+intersected by obstacles in the points
+\begin{equation*}
+  O = \{\ve{o_1},\ve{o_2},\ve{o_3}\}.
+\end{equation*}
+Each one of the points in $O$ is expressed in barycentric
+coordinates of the vertices $\ve{v_i}$, $\ve{v_{i+1}}$ and $\ve{v_{i+2}}$ of the
+triangle:
+\begin{eqnarray*}
+  \ve{o_1}&=&\alpha_1 \ve{v_i}+\beta_1 \ve{v_{i+1}}+\gamma_1 \ve{v_{i+2}}\\
+  \ve{o_2}&=&\alpha_2 \ve{v_i}+\beta_2 \ve{v_{i+1}}+\gamma_2 \ve{v_{i+2}}\\
+  \ve{o_3}&=&\alpha_3 \ve{v_i}+\beta_3 \ve{v_{i+1}}+\gamma_3 \ve{v_{i+2}}
+\end{eqnarray*}
+where $\alpha_i+\beta_i+\gamma_i=1$ for $i=1,2,3$.
+
+We want to avoid collisions adding vertices in the control
+polygon, such that consecutive triangles are free from obstacles. We
+obtain this by adding two new control vertices: 
+\begin{itemize}
+\item $\ve{w_1}$ between $\ve{v_i}$ and $\ve{v_{i+1}}$;
+\item $\ve{w_2}$ between $\ve{v_{i+1}}$ and $\ve{v_{i+2}}$.
+\end{itemize}
+We add those
+points in a way that makes the segment $\overline{\ve{w_1}\ve{w_2}}$
+parallel to the segment $\overline{\ve{v_i}\ve{v_{i+2}}}$ and 
+$\overline{\ve{w_1}\ve{w_2}}$ passing just above the obstacle point
+$\ve{o_{near}}$ that is the nearest
+to $\ve{v_{i+1}}$ ($\ve{o_1}$ in
+\cref{fig:triangleIntersection}). The degenerate triangles $\triangle \ve{v_i}\ve{w_1}\ve{v_{i+1}}$ and $\triangle
+\ve{v_{i+1}}\ve{w_2}\ve{v_{i+2}}$, and the not degenerate triangle
+$\triangle \ve{w_1}\ve{v_{i+1}}\ve{w_2}$ replace the original triangle
+$T_i$. They are built in a way that do not make them collide with obstacles.
+
+When we check for collisions between a segment and a triangle, we
+resolve a system of three unknowns in
+three equations and we extract the barycentric
+coordinates of
+the point of collision from the solutions. When we have all the
+coordinates of the points 
+in $O$, we can obtain $\ve{o_{near}}$ by picking the one with the biggest $\beta$
+and then, using the corresponding $\beta_{near}$, we can obtain
+\begin{eqnarray*}
+  W_1&=&\beta_{near} \ve{v_{i+1}}+(1-\beta_{near})\ve{v_i}\\
+  W_2&=&\beta_{near} \ve{v_{i+1}}+(1-\beta_{near})\ve{v_{i+2}}.
+\end{eqnarray*}
+
+\imageDouble{scrSolution2a.png}{scrSolution2b.png}{Effects of application of solution two.}{fig:sol21}[
+\node[imageLabel] at (0.7,0.62) {$\ve{v_i}$};
+\node[imageLabel] (B) at (0.45,0.4) {$\ve{v_{i+1}}$};
+\node[imageLabel] (C) at (0.2,0.4) {$\ve{v_{i+2}}$};
+\node[imageLabel] (O) at (0.8,0.2) {$Obs$};
+\path[imageArrow] (B) -- (0.36,0.555);
+\path[imageArrow] (C) -- (0.3,0.585);
+\path[imageArrow] (O) -- (0.6,0.3);
+][
+\node[imageLabel] (W1) at (0.75,0.7) {$\ve{w_1}$};
+\node[imageLabel] (W2) at (0.2,0.4) {$\ve{w_2}$};
+\node[imageLabel] (O) at (0.8,0.2) {$Obs$};
+\path[imageArrow] (W1) -- (0.61,0.6);
+\path[imageArrow] (W2) -- (0.31,0.58);
+\path[imageArrow] (O) -- (0.6,0.3);
+]
+\imageDouble{scrSolution2a2.png}{scrSolution2b2.png}{Effects of
+  application of solution two, other viewpoint.}{fig:sol22}[
+\node[imageLabel] at (0.2,0.1) {$\ve{v_i}$};
+\node[imageLabel] at (0.43,0.6) {$\ve{v_{i+1}}$};
+\node[imageLabel] at (0.62,0.85) {$\ve{v_{i+2}}$};
+\node[imageLabel] at (0.8,0.2) {$Obs$};
+][
+\node[imageLabel] at (0.2,0.1) {$\ve{v_i}$};
+\node[imageLabel] at (0.43,0.6) {$\ve{v_{i+1}}$};
+\node[imageLabel] at (0.62,0.85) {$\ve{v_{i+2}}$};
+\node[imageLabel] at (0.8,0.2) {$Obs$};
+\node[imageLabel] (W1) at (0.25,0.3) {$\ve{w_1}$};
+\node[imageLabel] (W2) at (0.5,0.75) {$\ve{w_2}$};
+\path[imageArrow] (W1) -- (0.3,0.15);
+\path[imageArrow] (W2) -- (0.66,0.79);
+\node[imageLabel] at (0.8,0.2) {$Obs$};
+]
+In \cref{fig:sol21} and \cref{fig:sol22} we can see the effects of the
+application of this
+solution to a piece of the curve. The original pieces of control
+polygon are on the left pictures; the triangle
+composed of those vertices
+collide with the obstacle on the back. The two new vertices $\ve{w_1}$
+and $\ve{w_2}$ are added to avoid the collision.
+
+\subsubsection{Complexity considerations}\index{Complexity!Dijkstra's algorithm in $G$}\index{Dijkstra in $G$!complexity}
+For this solution we still have the costs of \cref{eq:costGraph} and
+\cref{eq:costPruning} for
+the creation and pruning of the graph $G$. In addition, we need to
+apply Dijkstra's
+algorithm in $G$ to obtain $P$ with a cost \cite{bondy}\cite{lavalle}
+\begin{equation*}
+  \bigO(|E|+|V|\log |V|).
+\end{equation*}
+For \cref{eq:numV} and \cref{eq:numE} this cost is equal to
+\newcommand{\eqCostDijkstraG}{\ensuremath{\bigO(k|\obsSet|+|\obsSet|\log |\obsSet|)}}
+\begin{equation}\label{eq:costDijkstraG}
+  \eqCostDijkstraG
+\end{equation}
+and if we make the assumption of $k$ constant we have a cost
+\begin{equation*}
+  \bigO(|\obsSet|\log |\obsSet|).
+\end{equation*}
+
+We need to
+consider every face of obstacles in $\obsSet$ for every
+triangle in $P$ to check and remove the collisions in the path. The
+cost to do this is\footnote{If
+  $\#\acp{OTF}=\bigO(|\obsSet|)$ - i.e. the
+  number of \acp{OTF} does not grow faster than the number of obstacles.}
+$\bigO(|P|\cdot|\obsSet|)$ where $|P|$ means the number of vertices
+in $P$. In the worst case
+$|P|=\bigO(|V|)=\bigO(|\obsSet|)$, hence we have a cost
+\newcommand{\eqCostCleanPath}{\ensuremath{\bigO(|P|\cdot|\obsSet|)=\bigO(|\obsSet|^2)}}
+\begin{equation}\label{eq:costCleanPath}
+  \eqCostCleanPath .
+\end{equation}
+
+Summing up all the costs, we have 
+\newcommand{\eqCostTotalTwo}{\ensuremath{\bigO(k|\obsSet|^2)}}
+\begin{equation}\label{eq:costTotalTwo}
+  \eqCostTotalTwo
+\end{equation}
+and, if we consider $k$ constant,
+\newcommand{\eqCostTotalTwoK}{\ensuremath{\bigO(|\obsSet|^2)}}
+\begin{equation}\label{eq:costTotalTwoK}
+  \eqCostTotalTwoK .
+\end{equation}
+
+\begin{table}
+  \centering
+  \begin{tabular}{|l|c|r|}
+    \hline
+    Description&Cost&Reference\\
+    \hline
+    \hline
+    Creation of $G$&\eqCostGraph&\cref{eq:costGraph}\\
+    Pruning of $G$&\eqCostPruning&\cref{eq:costPruning}\\
+    Routing in $G$&\eqCostDijkstraG&\cref{eq:costDijkstraG}\\
+    Clean path&\eqCostCleanPath&\cref{eq:costCleanPath}\\
+    \hline
+    Total&\eqCostTotalTwo&\cref{eq:costTotalTwo}\\
+    Total ($k$ costant)&\eqCostTotalTwoK&\cref{eq:costTotalTwoK}\\
+    \hline
+  \end{tabular}
+  \caption{Summary of the costs for solution two.}
+  \label{tab:costsSol2}
+\end{table}
+On \cref{tab:costsSol2} we summarize all the terms that contribute to
+the total cost, and the total cost itself.
+
+The cost is comparable with the one of the first
+solution. Furthermore, in 
+this case we can divide the algorithm in two parts:
+\begin{enumerate}
+\item first we can construct $G$ with cost $\bigO(|\obsSet|^2)$;
+\item then we can use it for different
+  situations with cost $\bigO(|\obsSet|\log|\obsSet|+|P|\cdot|\obsSet|)$.
+\end{enumerate}
+
+\section{Degree increase}\label{sec:degreeInc}\index{Degree
+  increase}\index{\bss!higher degree}
+We have hitherto assumed we are dealing only with quadratic \bss{} -
+i.e. of degree $2$ - because,
+for the \ac{CHP} (\cref{sec:convexHull}), we need to check
+intersections only between  two triangles (one belonging to $P$ and the
+other to \acp{OTF}). If we want to use higher degree
+curves, we can modify the
+previous algorithms to deal with polyhedral convex hulls, but this
+implies an increase in complexity.
+
+We are interested in increasing the degree to achieve smooth
+curves with continue curvature and torsion. We adopt a compromise:
+we adapt the path obtained from the previous algorithms adding
+vertices and forcing the curve to remain in the same convex
+hull. However, this approach have the disadvantage that we cannot achieve a
+good torsion\footnote{We can improve this with the post process.}
+because the curve changes plane in an inflection point of
+the curvature.
+
+We modify 
+\begin{equation*}
+P=(\ve{v_0},\dots,\ve{v_n})  
+\end{equation*}
+adding a certain number of aligned new vertices
+$(\ve{w_0},\ve{w_1},\dots)$ between each pair 
+$(\ve{v_i},\ve{v_{i+1}})$ of vertices in $P$ for $i=0,\dots,n-1$. The
+number of $\ve{w_j}$
+between each pair $(\ve{v_i},\ve{v_{i+1}})$ depends on the desired
+grade of the curve. In fact we need $m-2$ new vertices between each
+$(\ve{v_i},\ve{v_{i+1}})$ for 
+  \bs curves of degree $m$.
+Thus the final modified path for a \bs curve of degree $m\ge 3$ is
+\begin{equation*}
+  \tilde{P}=(\ve{v_0},\ve{w_0},\dots,\ve{w_{m-3}},\ve{v_1},\dots,\ve{v_i},\ve{w_{i(m-2)}},\dots,\ve{w_{(i+1)(m-2)-1}},\ve{v_{i+1}},\dots,\ve{v_n}).
+\end{equation*}
+
+This strategy  is used in this project only to lift the degree from $2$ to $3$ or $4$.
+
+\begin{myfig}{Increase the degree $m$ from $2$ to $4$.}{fig:highDegree}
+  \begin{tikzpicture}
+    \coordinate (a) at (-2,0);
+    \coordinate (b) at (1,0);
+    \coordinate (c) at (3,3);
+    \coordinate (d) at (5,4);
+    \coordinate (e) at (7,1);
+    \coordinate (f) at (9,2);
+    \coordinate (g) at (12,2);
+
+    \coordinate (ab1) at ($ (a)!0.33!(b) $);
+    \coordinate (ab2) at ($ (b)!0.33!(a) $);
+    \coordinate (bc1) at ($ (b)!0.33!(c) $);
+    \coordinate (bc2) at ($ (c)!0.33!(b) $);
+    \coordinate (cd1) at ($ (c)!0.33!(d) $);
+    \coordinate (cd2) at ($ (d)!0.33!(c) $);
+    \coordinate (de1) at ($ (d)!0.33!(e) $);
+    \coordinate (de2) at ($ (e)!0.33!(d) $);
+    \coordinate (ef1) at ($ (e)!0.33!(f) $);
+    \coordinate (ef2) at ($ (f)!0.33!(e) $);
+    \coordinate (fg1) at ($ (f)!0.33!(g) $);
+    \coordinate (fg2) at ($ (g)!0.33!(f) $);
+
+    \foreach \x/\y/\z in {a/b/c,b/c/d,c/d/e,d/e/f,e/f/g}{
+      \path[convexHull] (\x) -- (\y) -- ($ (\y)!0.33!(\z) $) -- (\x);
+      \path[convexHull] ($ (\x)!0.33!(\y) $) -- (\y) -- ($ (\z)!0.33!(\y) $) -- ($ (\x)!0.33!(\y) $);
+      \path[convexHull] ($ (\y)!0.33!(\x) $) -- (\y) -- (\z) -- ($ (\y)!0.33!(\x) $);
+    }
+
+    \foreach \x/\y/\z in {a/b/c,b/c/d,c/d/e,d/e/f,e/f/g}{
+      \draw[convexHullBord] (\x) -- ($ (\y)!0.33!(\z) $);
+      \draw[convexHullBord] ($ (\x)!0.33!(\y) $) -- ($ (\z)!0.33!(\y) $);
+      \draw[convexHullBord] ($ (\y)!0.33!(\x) $) -- (\z);
+    }
+
+    \draw[controlPoly] (a) -- (b) -- (c) -- (d) -- (e) -- (f) -- (g);
+
+    \foreach \p in {a,b,c,d,e,f,g}
+    \filldraw[controlVert] (\p) circle (2pt);
+
+    \foreach \g in {ab1,ab2,bc1,bc2,cd1,cd2,de1,de2,ef1,ef2,fg1,fg2}
+    \filldraw[controlVertHigh] (\g) circle (2pt);
+
+    \node[below] at (a) {$\ve{v_{0}}$};
+    \node[below] at (b) {$\ve{v_{1}}$};
+    \node[above left] at (c) {$\ve{v_{2}}$};
+    \node[above] at (d) {$\ve{v_3}$};
+    \node[below right] at (e) {$\ve{v_4}$};
+    \node[above] at (f) {$\ve{v_5}$};
+    \node[below] at (g) {$\ve{v_6}$};
+
+    \node[below] at (ab1) {$\ve{w_0}$};
+    \node[below] at (ab2) {$\ve{w_1}$};
+    \node[below right] at (bc1) {$\ve{w_2}$};
+    \node[below right=2pt] at (bc2) {$\ve{w_3}$};
+    \node[above] at (cd1) {$\ve{w_4}$};
+    \node[above] at (cd2) {$\ve{w_5}$};
+    \node[above right] at (de1) {$\ve{w_6}$};
+    \node[below left=2pt] at (de2) {$\ve{w_7}$};
+    \node[below right] at (ef1) {$\ve{w_8}$};
+    \node[below right=2pt] at (ef2) {$\ve{w_9}$};
+    \node[above] at (fg1) {$\ve{w_{10}}$};
+    \node[above] at (fg2) {$\ve{w_{11}}$};
+  \end{tikzpicture}
+\end{myfig}
+An example of path
+\begin{equation*}
+  P=(\ve{v_0},\ve{v_1},\ve{v_2},\ve{v_3},\ve{v_4},\ve{v_5},\ve{v_6})
+\end{equation*}
+is visible in \cref{fig:highDegree}.
+We have the vertices of $P$ in green, the added vertices in red and
+the cyan area is the convex hull of the final curve.
+
+We want to adapt $P$ to quartic \bs curves, hence we need to add two new
+vertices between each pair of vertices $(\ve{v_i},\ve{v_{i+1}})$ for
+$i=0,\dots,6$. Those new vertices are
+\begin{equation*}
+  (\ve{w_0},\ve{w_1},\ve{w_2},\ve{w_3},\ve{w_4},\ve{w_5},\ve{w_6},\ve{w_7},\ve{w_8},\ve{w_9},\ve{w_{10}},\ve{w_{11}}).
+\end{equation*}
+
+Note that, with this algorithm, when we increase the degree from $2$
+to $m\ge 3$ we have that the convex hull containing a \bs curve of
+degree $m$ in
+$\tilde{P}$ is a subset of the convex hull containing a \bs curve
+of degree $2$
+in $P$. This happens because the polyhedrons of consecutive $m+1$ vertices in
+$\tilde{P}$ collapse in triangles contained inside the triangles
+of consecutive vertices in $P$. For instance, in \cref{fig:highDegree}
+the convex hull of the first $5$ vertices
+$\ve{v_0},\ve{w_0},\ve{w_1},\ve{v_1},\ve{w_2}$ of $\tilde{P}$
+coincides with the
+triangle $\triangle \ve{v_0}\ve{v_1}\ve{w_2}$ that is contained inside
+the triangle $\triangle \ve{v_0}\ve{v_1}\ve{v_2}$ of the first $3$
+vertices of $P$.
+
+One effect of the application of this method is that a curve of
+degree $m$ in $\tilde{P}$ touches
+every segment of the original control polygon $P$. This is because adding
+$m-2$ aligned vertices between each pair $(\ve{v_i},\ve{v_{i+1}})$
+will result in $m$ aligned vertices on each original segment
+(\cref{sec:alignedVertices}).
+
+\section{Knots selection}\label{sec:knotSel}\index{\bss!knot selection}
+In the previous sections we never discuss the criterion adopted to
+determine the extended knot vector $T$
+\begin{equation*}
+  T=\{t_0,\dots,t_{m-1},t_{m},\dots,t_{n+1},t_{n+2},\dots,t_{n+m+1}\}
+\end{equation*}
+associated to the \bs curve.
+
+In this section we discuss two
+methods implemented to establish $T$.
+
+First of all, we want
+the curve to interpolate
+the chosen start and end points that correspond to the extremes
+$\ve{v_0}$ and $\ve{v_n}$ of the extracted path $P$. We see in
+\cref{sec:clamped} that we can achieve such interpolation if we impose
+\begin{equation}\label{eq:externalKnotsFix}
+  \begin{split}
+    &t_0 = t_1 = \dots = t_{m} = a\\
+    &t_{n+1} = t_{n+2} = \dots = t_{n+m+1} = b
+  \end{split}
+\end{equation}
+where $a$ and $b$ are the extremes of the parametric domain of
+the curve.
+
+The constraint of \cref{eq:externalKnotsFix} is a mandatory
+choice, thus we cannot change it. Regarding the parametric domain, we
+choose it to be $[0,1]$ because changing the extremes do not change
+the behavior of the curve, only changing the ratios of the distances
+between the knots is effective \cite{farin}. We still need to chose how to select 
+the inner $n-m$ knots $t_{m+1},\dots,t_n$, and we develop two different
+ways to do this:
+\begin{enumerate}[label=\textbf{method \arabic*}]
+\item\label[void]{en:uniform} Use a uniform partition where $t_i-t_{i-1}=c$ for
+  $i=m+1,\dots,n+1$ for $c$ constant;
+\item\label[void]{en:adaptive} Use an adaptive partition, where we try
+  to create dense knots in
+  correspondence of points on the curve where we have dense control
+  vertices.
+\end{enumerate}
+
+\cref{en:uniform} is the easiest way to choose a knot vector
+and it is a common first choice in textbooks \cite{farin}\cite{docarmo},
+but it has the disadvantage of ignoring the geometry of the curve
+\cite{farin}. The steps to accomplish \cref{en:uniform} are quite
+straightforward: we need to pick the nodes
+\begin{equation*}
+  \frac{i}{n-m+1}
+\end{equation*}
+for $i=1,\dots,n-m$. Thus, we concentrate on \cref{en:adaptive}.
+
+\begin{myfig}{Optimal case for a quadratic curve (we want uniform partition).}{fig:adaptive1}
+  \begin{tikzpicture}
+    \coordinate (v0) at (0,0);
+    \coordinate (v1) at (2,0);
+    \coordinate (v2) at (4,0);
+    \coordinate (v3) at (6,0);
+    \coordinate (v4) at (8,0);
+    \coordinate (v5) at (10,0);
+
+    \coordinate (t0) at (0,-1);
+    \coordinate (t4) at (10,-1);
+    \coordinate (t1) at ($ (t0)!0.25!(t4) $);
+    \coordinate (t2) at ($ (t0)!0.5!(t4) $);
+    \coordinate (t3) at ($ (t0)!0.75!(t4) $);
+
+    \foreach \v/\w in {v0/w0,v1/w1,v2/w2,v3/w3,v4/w4,v5/w5}{
+      \coordinate (\w) at ($(t0)!(\v)!(t4)$);
+      \draw[controlToKnot] (\v) -- (\w);
+    }    
+
+    \draw[controlPoly] (v0) -- (v1) -- (v2) -- (v3) -- (v4) -- (v5);
+    \draw[knotPoly] (t0) -- (t1) -- (t2) -- (t3) -- (t4);
+
+    \foreach \v/\i in {v0/0,v1/1,v2/2,v3/3,v4/4,v5/5}{
+      \filldraw[controlVert] (\v) circle (2pt);
+      \node[above] at (\v) {$\ve{v_{\i}}$};
+    }
+
+    \foreach \t/\j/\pos in {t0/{0,1,2}/below,t1/3/above,t2/4/above,t3/5/above,t4/{6,7,8}/below}{
+      \filldraw[knot] (\t) circle (2pt);
+      \node[\pos] at (\t) {$t_{\j}$};
+    }
+
+    \foreach \w/\j in {w1/1,w2/2,w3/3,w4/4}{
+      \node[below] at (\w) {$\nu_{\j}$};
+    }
+    \node[below=15pt] at (w0) {$\nu_0$};
+    \node[below=15pt] at (w5) {$\nu_5$};
+    \node[left=20pt] at (v0) {$P$};
+    \node[left=20pt] at (t0) {$\tau$};
+
+    %\filldraw[color=yellow] ($ (w1)!0.25!(w2) $) circle (2pt);
+  \end{tikzpicture}
+\end{myfig}
+\begin{myfig}{General case for a quadratic (same distances between
+    $t_i$ and enclosing $\nu_j$, $\nu_{j+1}$ as \cref{fig:adaptive1}).}{fig:adaptive2}
+  \begin{tikzpicture}
+    \coordinate (v0) at (0,0);
+    \coordinate (v1) at (1,0);
+    \coordinate (v2) at (2,0);
+    \coordinate (v3) at (4,0);
+    \coordinate (v4) at (8,0);
+    \coordinate (v5) at (10,0);
+
+    \coordinate (t0) at (0,-1);
+    \coordinate (t4) at (10,-1);
+
+    \foreach \v/\w in {v0/w0,v1/w1,v2/w2,v3/w3,v4/w4,v5/w5}{
+      \coordinate (\w) at ($(t0)!(\v)!(t4)$);
+      \draw[controlToKnot] (\v) -- (\w);
+    }    
+
+    \coordinate (t1) at ($ (w1)!0.25!(w2) $);
+    \coordinate (t2) at ($ (w2)!0.5!(w3) $);
+    \coordinate (t3) at ($ (w3)!0.75!(w4) $);
+
+    \draw[controlPoly] (v0) -- (v1) -- (v2) -- (v3) -- (v4) -- (v5);
+    \draw[knotPoly] (t0) -- (t1) -- (t2) -- (t3) -- (t4);
+
+    \foreach \v/\i in {v0/0,v1/1,v2/2,v3/3,v4/4,v5/5}{
+      \filldraw[controlVert] (\v) circle (2pt);
+      \node[above] at (\v) {$\ve{v_{\i}}$};
+    }
+
+    \foreach \t/\j/\pos in {t0/{0,1,2}/below,t1/3/above,t2/4/above,t3/5/above,t4/{6,7,8}/below}{
+      \filldraw[knot] (\t) circle (2pt);
+      \node[\pos] at (\t) {$t_{\j}$};
+    }
+
+    \foreach \w/\j in {w1/1,w2/2,w3/3,w4/4}{
+      \node[below] at (\w) {$\nu_{\j}$};
+    }
+    \node[below=15pt] at (w0) {$\nu_0$};
+    \node[below=15pt] at (w5) {$\nu_5$};
+    \node[left=20pt] at (v0) {$P$};
+    \node[left=20pt] at (t0) {$\tau$};
+  \end{tikzpicture}
+\end{myfig}
+We start from the idea that if we have a control polygon with
+uniformly-spaced vertices -
+i.e. $\norm{\ve{v_1}-\ve{v_0}}=\norm{\ve{v_2}-\ve{v_1}}=\cdots=\norm{\ve{v_n}-\ve{v_{n-1}}}$
+- then we agree on a uniform partition of the knots
+($t_{m+1}-t_m=t_{m+2}-t_{m+1}=\cdots=t_{n+1}-t_n$). In
+\cref{fig:adaptive1} there is an example of a quadratic \bs curve with
+uniformly-spaced control polygon. The above segment is a
+\emph{rectified} 
+visualization of the control polygon with six control
+vertices
+$\ve{v_0},\dots,\ve{v_5}$. The segment below represents the
+partition of the domain from $a$ (on the left) to $b$
+(on the right), with the projections $\nu_0,\dots,\nu_5$ of the control
+vertices,
+scaled in length to the parametric domain axis\footnote{$\ve{v_0}$ is
+  projected to $a$, $\ve{v_5}$ is projected to $b$, and the ratios
+  between the distances between vertices are preserved.}, and the
+knots $t_0,\dots,t_8$ on it.
+
+Starting from this situation, if
+we have a generic control polygon with segments of different length, as
+in \cref{fig:adaptive2}, then we want each $t_i$ to keep the same
+distance, in ratio, between the surrounding $\nu_j$ and $\nu_{j+1}$,
+respect to the optimal case. For instance, in \cref{fig:adaptive1}
+$\frac{t_3-\nu_1}{\nu_2-\nu_1}=\frac{1}{4}$ and
+$\frac{\nu_2-t_3}{\nu_2-\nu_1}=\frac{3}{4}$, this means that in
+\cref{fig:adaptive2} the same values must be preserved.
+
+The problem now is how to calculate the values of $t_i$ in the general
+case. We consider only the inner part $\tau$ of the partition vector,
+included the extremes
+\begin{equation*}
+  \tau_i = t_{i+m}\qquad i=0,\dots,n-m+1
+\end{equation*}
+where $\tau_0=a=0$ and $\tau_{n-m+1}=b=1$. In \cref{fig:adaptive1} and
+\cref{fig:adaptive2}
+$\tau=(t_2,t_3,t_4,t_5,t_6)$. Now we calculate the positions of all
+$\tau_i$ respect to the $\nu_j$ in the optimal case. We can
+achieve that using as unit the uniform distance $\nu_j-\nu_{j-1}$ to
+calculate the positions of $\tau_i$. We specifically calculate
+\begin{equation}\label{eq:adaptivePos}
+  \tau_i^\nu=\frac{n}{n-m+1}\cdot i\qquad i=0,\dots,n-m+1
+\end{equation}
+obtaining the numbers $\tau_i^\nu$ whose integer part
+$\lfloor\tau_i^\nu\rfloor$ represents the index $j$ of the
+$\nu_j$ that is to the left of $\tau_i$, and the decimal part
+$(\tau_i^\nu-\lfloor\tau_i^\nu\rfloor)$ represents the distance from
+it: $\frac{\tau_i-\nu_j}{\nu_{j+1}-\nu_j}$.
+
+Now we calculate the projections $\nu_i$ in the
+\emph{generic} case.
+We start calculating the incremental distances between
+the vertices
+\begin{equation*}
+  \begin{cases}
+    d_0=0&\\
+    d_i=d_{i-1}+\norm{\ve{v_i}-\ve{v_{i-1}}}&\qquad i=1,\dots,n
+  \end{cases}
+\end{equation*}
+and, remembering that the parametric domain is $[0,1]$, we have
+\begin{equation}\label{eq:adaptiveProj}
+  \nu_i=\frac{d_i}{d_n}\qquad i=0,\dots,n.
+\end{equation}
+
+Using the positions in \cref{eq:adaptivePos} on the projection in
+\cref{eq:adaptiveProj}, we obtain the values
+\begin{equation*}
+  \tau_i=\nu_{\lfloor\tau_i^\nu\rfloor}+(\tau_i^\nu-\lfloor\tau_i^\nu\rfloor)(\nu_{\lfloor\tau_i^\nu\rfloor+1}-\nu_{\lfloor\tau_i^\nu\rfloor})\qquad i=0,\dots,n-m+1.
+\end{equation*}
+Finally, adding the duplicated knots, we obtain
+\begin{equation*}
+  t_i=\tau_{\min(n-m+1,\ \max(0,\ i-m))}\qquad i=0,\dots,n+m+1.
+\end{equation*}
+
+\section{Post processing}\label{sec:postPro}\index{Post process}
+The purpose of the post processing phase is to try to simplify the
+path $P=(\ve{v_0},\dots,\ve{v_n})$ obtained in the previous phase
+removing useless vertices, in order
+to achieve a smoother path.
+
+\begin{algo}{Post processing algorithm on path $P$.}{alg:postProcess}
+  \Procedure{postProcess}{$P$}
+  \For{$i\Ass 1,n-1$}
+  \If{$i=1$ \IfOr \IfNot $intersect\acs{OTF}(\triangle\ve{v_{i-2}}\ve{v_{i-1}}\ve{v_{i+1}})$}
+  \If{$i=n-1$ \IfOr \IfNot $intersect\acs{OTF}(\triangle\ve{v_{i-1}}\ve{v_{i+1}}\ve{v_{i+2}})$}
+  \State $P\Ass P\setminus\{\ve{v_i}\}$
+  \EndIf
+  \EndIf
+  \EndFor
+  \EndProcedure
+\end{algo}
+To obtain this, we realize \cref{alg:postProcess} that
+iterates through all the vertices, except the extremes, and checks if each
+$v_i$ can be removed without consequences. With
+consequences we mean that removing $v_i$ would cause a triangle
+in $P$ to intersect one of the \acp{OTF}.
+
+\begin{myfig}{Example of post process check that removes $\ve{v_i}$.}{fig:postProcess}
+  \begin{tikzpicture}
+    \coordinate (l1) at (0,0);
+    \coordinate (a) at (1,0);
+    \coordinate (b) at (3,3);
+    \coordinate (c) at (5,4);
+    \coordinate (d) at (7,1);
+    \coordinate (e) at (9,2);
+    \coordinate (l2) at (10,2);
+    \coordinate (o1) at (4,0);
+    \coordinate (o2) at (5,1.5);
+    \coordinate (o3) at (6,0);
+
+    \path[convexHull] (a) -- (b) -- (d) -- (a);
+    \path[convexHull] (b) -- (d) -- (e) -- (b);
+
+    \draw[controlPoly] (a)  -- (b);
+    \draw[controlPoly] (d)  -- (e);
+    \draw[controlPolyTract] (l1) -- (a);
+    \draw[controlPolyTract] (e) -- (l2);
+    \draw[controlPolyTractHigh] (b) -- (d);
+    \draw[controlPolyHigh] (b) -- (c) -- (d);
+
+    \path[obstacle] (o1) -- (o2) -- (o3) -- (o1);
+    \node at (barycentric cs:o1=0.3,o2=0.3,o3=0.3) {\acs{OTF}};
+
+    \foreach \p in {a,b,d,e}
+    \filldraw[controlVert] (\p) circle (2pt);
+    \filldraw[controlVertHigh] (c) circle (3pt);
+
+    \node[below] at (a) {$\ve{v_{i-2}}$};
+    \node[above left] at (b) {$\ve{v_{i-1}}$};
+    \node[above] at (c) {$\ve{v_i}$};
+    \node[below right] at (d) {$\ve{v_{i+1}}$};
+    \node[above] at (e) {$\ve{v_{i+2}}$};
+  \end{tikzpicture}
+\end{myfig}
+To clarify the concept, consider the
+simplification in 2-dimensional space in \cref{fig:postProcess}. The
+path to process 
+is
+\begin{equation*}
+  P=(\dots,\ve{v_{i-2}},\ve{v_{i-1}},\ve{v_{i}},\ve{v_{i+1}},\ve{v_{i+2}},\dots)
+\end{equation*}
+and we are
+considering removing $\ve{v_i}$ obtaining a modified path
+\begin{equation*}
+  \tilde{P}=(\dots,\ve{v_{i-2}},\ve{v_{i-1}},\ve{v_{i+1}},\ve{v_{i+2}},\dots).
+\end{equation*}
+Before doing, this we need to check if any triangle in $\tilde{P}$
+intersects any \ac{OTF}. In detail, we need to check only the two
+triangles $\triangle\ve{v_{i-2}}\ve{v_{i-1}}\ve{v_{i+1}}$ and
+$\triangle\ve{v_{i-1}}\ve{v_{i+1}}\ve{v_{i+2}}$ because the other
+triangles in $\tilde{P}$ are already present in $P$. For instance
+the obstacle in the figure do not intersects any of the triangles in
+$P$, but it intersects $\triangle\ve{v_{i-2}}\ve{v_{i-1}}\ve{v_{i+1}}$ in
+$\tilde{P}$.
+
+\subsection{Complexity considerations}\index{Post process!complexity}\index{Complexity!post process}
+We need to check if two triangles intersect
+with an \ac{OTF} for every vertex of $P$, hence we have a complexity of
+\begin{equation*}
+  \bigO(|P|\cdot|\obsSet|)=\bigO(|\obsSet|^2)
+\end{equation*}
+where $\obsSet$ is the set of obstacles and $|P|$ is the number of vertices
+in $P$.
+
+\section{Third solution: Simulated Annealing}\label{sec:inter3}\index{\acf{SA}}
+The solutions in \cref{sec:inter1} and \cref{sec:inter2} have two
+problems in common:
+\begin{itemize}
+\item both reject configurations in a prudent way
+  considering only the control polygon;
+\item and both do not optimize neither
+  length nor other quantities.
+\end{itemize}
+These solutions have also the following benefits:
+\begin{itemize}
+\item they produce paths that are obstacle-free from construction;
+\item the application of the post-processing often produces a reduction
+  in the curve length.
+\end{itemize}
+
+In this section, we describe a third
+approach based on
+probabilistic computation.
+    
+We can consider the problem of finding the shortest path as a constrained
+optimization problem, in which a certain configuration of the control
+vertices (and
+consequently the \bs) is the state of the system, and we aim to
+minimize both the length of the control polygon (and therefore the
+\bs\footnote{We give to the users also the possibility of selecting the
+  arc length as the quantity to minimize.}) and the peak in curvature and torsion of the \bs, under
+the constraint that the \bs must not intersect the obstacles. We
+are interested in optimizing the length of the curve and the maximum
+peaks of both curvature and torsion, because we want a path that is
+short but also fair. 
+
+\subsection{\acf{LR} applied to the project}\index{\acf{LR}}
+We can apply the concept explained in \cref{sec:lagrangianRelaxation}
+to the project.
+
+The variable space $X$ is composed of all the possible
+configurations of the path, or, in other words,it is defined by all
+the possible values of the vector $P=(\ve{v_1},\dots,\ve{v_n})$ of all
+$n$ ordered 
+vertices $\ve{v_i}=(x_i,y_i,z_i)$ of the
+path. The \cref{eq:opt} can be formulated as follows:
+\begin{equation*}
+  \begin{aligned}
+    & \underset{P}{\text{minimize}}
+    & & \alpha\cdot maxCurv(P)+\beta\cdot
+    maxTors(P)+\gamma\cdot normLen(P) \\
+    & \text{subject to}
+    & & \left|bspline(P)\cap \bigcup_{i\in I}obstacle_i\right| = 0,
+  \end{aligned}
+\end{equation*}
+where $maxCurv(P)$ is the curvature peak of the \bs
+constructed using $P$ as control polygon,
+$maxTors(P)$ is the absolute value of the torsion peak and
+$normLen(P)$ is the length of the control polygon
+$P$ normalized as a percentage of the length of the initial
+status\footnote{If the user chooses to minimize the
+  arc length, then $normLen(P)$ becomes the length of the \bs curve.}
+. $\alpha$, $\beta$ and $\gamma$ are fixed
+coefficients used to give different weights to 
+the curvature peak, torsion peak and length during the optimization
+process. The normalization of
+length is necessary to decouple the weight of the length from the
+length of the path.
+
+Curvature and torsion are obtained in a discrete form. The \bs curve is
+tabulated in a number of points that depends on the length of $P$
+by a multiplied constant, then for each point the curvature and
+torsion values 
+are calculated.
+
+Regarding the constraint, $bspline(P)$
+is the set of points of the \emph{\bs}, using $P$ as 
+control polygon, and 
+$obstacle_i$ is the area of the $i^{th}$ of $m$ obstacles, and
+$I=\{1,\dots,m\}$.
+
+Thus, we need to build the Lagrangian function corresponding to
+\cref{eq:lagrangianFun}.
+The constraint function is not negative and is calculated as the
+ratio
+\begin{equation}\label{eq:constraintLag}
+constraint(P) = \frac{\left|\ \{\ve{p} \in spline(P)\ : \exists i
+    \text{ s.t. } \ve{p}\in
+    obstacle_i\}\ \right|}{\left|\ \{\ve{p} \in
+    spline(P)\}\ \right|}.
+\end{equation}
+
+
+The points $\ve{p}$ of the spline are calculated in a discrete
+form, like curvature and torsion. Thus, the constraint depends on the
+tabulation of the curve and
+it is also possible to have borderline cases where the
+constraint does not reflect the real situation\footnote{For instance, if
+  we have very thin obstacles, a curve can pass through them having only few
+  points (or even none) inside.}.
+
+The
+function in \cref{eq:constraintLag} is not negative, thus the
+Lagrangian function, corresponding to 
+\cref{eq:lagrangianFun}, is
+\begin{equation}\label{eq:lagrangianFunProj}
+    L_d(P,\lambda)=gain(P)+\lambda\cdot constraint(P)
+\end{equation}
+where, for convenience,
+\begin{equation}\label{eq:gainLag}
+  gain(P) = \alpha\cdot maxCurv(P)+\beta\cdot
+    maxTors(P)+\gamma\cdot normLen(P).
+\end{equation}
+
+\subsection{Annealing phase}
+The purpose of the simulated annealing phase is to find the minimum
+saddle point in
+the curve represented by the
+\cref{eq:lagrangianFunProj}.
+\begin{algo}{Annealing}{alg:annealing}
+  \Procedure{annealing}{$\ve{x}$}
+  \State $\lambda\Ass initialLambda$\label{alg:annealing:initialize}
+  \State $T\Ass initialTemperature$\label{alg:annealing:initialize2}
+  \While{not $terminationCondition()$}\label{alg:annealing:while}
+  \ForAll{number of trials}\label{alg:annealing:for}
+  \State $changeLambda\Ass\True$ with $changeLambdaProb$\label{alg:annealing:lambdaProb}
+  \If{$changeLambda$}
+  \State $\lambda'\Ass neighbour(\lambda)$\label{alg:annealing:changeLambda}
+  \State $\lambda\Ass \lambda'$ with probability $\me^{-([energy(\ve{x},\lambda)-energy(\ve{x},\lambda')]^+/T)}$
+  \Else
+  \State $\ve{x}'\Ass neighbour(\ve{x})$\label{alg:annealing:changeX}
+  \State $\ve{x}\Ass \ve{x}'$ with probability $\me^{-([energy(\ve{x}',\lambda)-energy(\ve{x},\lambda)]^+/T)}$
+  \EndIf
+  \EndFor
+  \State $T\Ass T\cdot warmingRatio$\label{alg:annealing:cooling}
+  \EndWhile
+  \EndProcedure
+\end{algo}
+
+The \cref{alg:annealing} is the annealing process, and its input is the
+initial status of the system $\ve{x}$ - i.e. the initial configuration
+of the control polygon. It operates this way:
+\begin{enumerate}
+\item $\lambda$ and the
+  temperature are initialized on
+  \cref{alg:annealing:initialize} and \cref{alg:annealing:initialize2}
+  respectively;
+\item the \emph{while} on
+  \cref{alg:annealing:while} is the main loop and the terminating
+  condition is given by a minimum temperature or a minimum variation of
+  energy between two iterations;
+\item the \emph{for} at
+  \cref{alg:annealing:for} repeats the annealing move for a certain
+  number of trials, on each iteration the algorithm probabilistically
+  tries to make a move of the state of the system;
+  \begin{itemize}
+  \item first, on
+    \cref{alg:annealing:lambdaProb}, it chooses between moving in the
+    Lagrangian space or in the space of the path;
+  \item after that, based on the previous
+    choice, the algorithm probabilistically tries to move the system
+    in a neighbouring
+    state: in the
+    Lagrangian space at
+    \cref{alg:annealing:changeLambda} or in the path space at
+    \cref{alg:annealing:changeX};
+  \end{itemize}
+\item finally, at the end of every trial set,
+  at \cref{alg:annealing:cooling}, the temperature $T$ is cooled by
+  a certain factor.
+\end{enumerate}
+
+The termination condition in \cref{alg:annealing:while} is triggered by a
+minimum variation of energy $\Delta energy$ between two consecutive
+iterations of the cycle. The termination is also triggered when a
+minimum temperature is reached, this happens to impose a limit on the
+number of cycles.
+
+The choice of the neighbour is
+probabilistic. If the energy increases in the
+Lagrangian space or decreases in the path space, then the probability of
+choosing the new state is 1. If the energy decreases in the Lagrangian
+space or increases in the path space, then the new state is accepted
+with a probability that is:
+$$\exp(-\frac{\Delta energy}{T}).$$
+
+The $neighbour$ function depends on the input:
+\begin{itemize}
+  \item a neighbour of $\lambda$ is a value that is equal to $\lambda$
+    plus a uniform perturbation in range $[-maxLambdaPert, maxLambdaPert]$;
+  \item a neighbour of the path is obtained by randomly picking one of
+    the vertices $\ve{v_i}$ (except the extremes $\ve{v_0}$ and $\ve{v_n}$),
+    then uniformly choosing a direction and a distance
+    in a specific range and, finally, moving $\ve{v_i}$ by
+    the chosen values.
+\end{itemize}
+
+The $energy$ function is equivalent to $L_d$ in the
+\cref{eq:lagrangianFunProj}:
+\begin{equation}
+  \label{eq:annealingEnergy}
+  energy(\ve{x},\lambda)=gain(P)+\lambda\cdot constraint(P).
+\end{equation}
+
+The annealing process
+finds a saddle point by probabilistically increasing the energy when
+$\lambda$ is moved, and 
+decreasing the energy when the points are moved.
+
+\subsubsection{Complexity considerations}\index{\acf{SA}!complexity}\index{Complexity!\acf{SA}}
+For this solution, we still have the costs of \cref{eq:costGraph} and
+\cref{eq:costPruning} for
+the creation and pruning of the graph $G$. In addition, we need to
+apply Dijkstra's
+algorithm in $G$ to obtain the initial path $P$ with the cost of
+\cref{eq:costDijkstraG}.
+
+Regarding the annealing phase, for each \emph{step} (an
+iteration of \cref{alg:annealing:while} in \cref{alg:annealing}) we
+have a fixed number of \emph{trials} (the iterations of \cref{alg:annealing:for}). For each trial, we need to
+calculate the value of the energy of \cref{eq:annealingEnergy} that is
+the sum of the gain and the constraint.
+
+For the gain of \cref{eq:gainLag} we need to calculate the values of
+curvature and torsion for every tabulated point. Furthermore, there is
+also a cost\footnote{Only if
+  the users do not choose to minimize the arc length.} of
+$\bigO(|P|)$ to
+calculate the length of the control polygon. Thus, the cost for
+calculating the gain is
+\begin{equation*}
+  \bigO(|Sp|+|P|)
+\end{equation*}
+where $Sp$ is the set of the tabulated points of the curve. The number
+of points in $Sp$ depends on the length of the control polygon
+$len(P)$. Thus,
+we have a cost of $\bigO(len(P)+|P|)$, but in the worst case
+$|P|=\bigO(|V|)=\bigO(|\obsSet|)$, thus the cost is
+\newcommand{\eqCostGain}{\ensuremath{\bigO(len(P)+|P|)=\bigO(len(P)+|\obsSet|)}}
+\begin{equation}
+  \label{eq:costGain}
+  \eqCostGain.
+\end{equation}
+
+In regards to the constraint of \cref{eq:constraintLag}, we need to
+calculate if 
+every point 
+of the curve is inside an obstacle. This means a cost of
+\newcommand{\eqCostConstraint}{\ensuremath{\bigO(len(P)|\obsSet|)}}
+\begin{equation}
+  \label{eq:costConstraint}
+  \eqCostConstraint.
+\end{equation}
+
+Hence, the total cost for the calculation of the annealing phase is
+\begin{equation*}
+\bigO(\#steps\cdot\#trials\cdot(len(P)|\obsSet|)),
+\end{equation*}
+but the number of steps and trials are bounded by
+constants\footnote{Although such constants can be very high.}. Thus,
+the cost becomes
+\newcommand{\eqCostAnneal}{\ensuremath{\bigO(len(P)|\obsSet|)}}
+\begin{equation}
+  \label{eq:costAnneal}
+  \eqCostAnneal.
+\end{equation}
+
+The total cost for the solution is
+\newcommand{\eqCostTotalThree}{\ensuremath{\bigO(k|\obsSet|^2+len(P)|\obsSet|)}}
+\begin{equation}
+  \label{eq:costTotalThree}
+  \eqCostTotalThree.
+\end{equation}
+
+Similarly to the previous solutions, if we have that $k$ is a constant
+then the total cost becomes
+\newcommand{\eqCostTotalThreeK}{\ensuremath{\bigO(|\obsSet|^2+len(P)|\obsSet|)}}
+\begin{equation}
+  \label{eq:costTotalThreeK}
+  \eqCostTotalThreeK.
+\end{equation}
+
+\begin{table}
+  \centering
+  \begin{tabular}{|l|c|r|}
+    \hline
+    Description&Cost&Reference\\
+    \hline
+    \hline
+    Creation of $G$&\eqCostGraph&\cref{eq:costGraph}\\
+    Pruning of $G$&\eqCostPruning&\cref{eq:costPruning}\\
+    Routing in $G$&\eqCostDijkstraG&\cref{eq:costDijkstraG}\\
+    Gain&\eqCostGain&\cref{eq:costGain}\\
+    Constraint&\eqCostConstraint&\cref{eq:costConstraint}\\
+    Annealing&\eqCostAnneal&\cref{eq:costAnneal}\\
+    \hline
+    Total&\eqCostTotalThree&\cref{eq:costTotalThree}\\
+    Total ($k$ costant)&\eqCostTotalThreeK&\cref{eq:costTotalThreeK}\\
+    \hline
+  \end{tabular}
+  \caption{Summary of the costs for solution three}
+  \label{tab:costsSol3}
+\end{table}
+In \cref{tab:costsSol3} we summarize all the costs. It is
+difficult to quantitatively compare the cost of this solution with
+the previous 
+ones. This is due to the presence of the factor $len(P)$ that depends
+on the geometry of the scene. however, we can affirm that this solution is
+more complex than the previous two by a term
+$\bigO(len(P)|\obsSet|)$. 
+
+Furthermore, in this solution
+we can divide the algorithm in two parts:
+\begin{enumerate}
+\item first we can construct $G$ with cost $\bigO(|\obsSet|^2)$;
+\item then we can use it for different scenarios with cost
+  $|\obsSet|\log|\obsSet|+len(P)|\obsSet|$.
+\end{enumerate}
+
+
+\end{document}
+
+%%% Local Variables:
+%%% mode: latex
+%%% TeX-master: "../dissertation"
+%%% End:

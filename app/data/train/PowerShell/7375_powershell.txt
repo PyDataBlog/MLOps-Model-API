@@ -1,0 +1,59 @@
+Function New-WebApiProject([SolnInfo] $solnInfo, [WebCsprojInfo] $webCsprojInfo, [CsprojInfo] $modelCsprojInfo, [DbInfo] $dbInfo)
+{
+	Write-Host "### Making WebApi project" $webCsprojInfo.csprojName
+	&{dotnet new webapi -n $webCsprojInfo.csprojName -o $webCsprojInfo.csprojDir}
+	Confirm-LastExitCode
+
+	# Add proj to soln
+	Write-Host "### Add" $webCsprojInfo.csprojName "to solution" $solnInfo.nickName
+	&{dotnet sln $solnInfo.solnFile add $webCsprojInfo.csprojFile}
+	Confirm-LastExitCode
+
+	# Add nuget packages optionally, or dump all support code into the project locally
+	if($webCsprojInfo.useBoxTurtleCs -eq $true) {
+		Write-Host "### Add nuget packages to" $webCsprojInfo.csprojName
+		&{dotnet add $webCsprojInfo.csprojFile package BoxTurtleCs }
+		Confirm-LastExitCode
+	} else {
+		if($webCsprojInfo.useAgGrid -eq $true) {
+			New-AgSupportLocal $webCsprojInfo
+		}
+		Write-Host "### Add nuget package System.Linq.Dynamic.Core to " $webCsprojInfo.csprojName
+		&{dotnet add $webCsprojInfo.csprojFile package System.Linq.Dynamic.Core }
+	}
+
+	# Controllers folder, remove dummy "ValuesController"
+	Write-Host "### Remove $($webCsprojInfo.csprojName) scaffolding Controllers/ValuesController.cs"
+	if(Test-Path "$($webCsprojInfo.csprojDir)\Controllers\ValuesController.cs") {
+		Remove-Item "$($webCsprojInfo.csprojDir)\Controllers\ValuesController.cs"
+	}
+
+	# Disable typescript compilation
+	Write-Host "### Disable typescript compilation for $($webCsprojInfo.csprojName)"
+	$csprojXml = [xml] (type $webCsprojInfo.csprojFile)
+	$disableTypescriptXml = $csprojXml.CreateElement("TypeScriptCompiledBlock")
+	$disableTypescriptXml.PsBase.InnerText = "true"
+	$propertyGroupXml = $csprojXml.SelectSingleNode("Project").SelectSingleNode("PropertyGroup")
+	$propertyGroupXml.AppendChild($disableTypescriptXml)
+
+	# Also add this to make Visual Studio happy: <TypeScriptToolsVersion>2.3</TypeScriptToolsVersion>
+	# I have no idea what this does or what that verion means, but if we don't do it Visual Studio will ask me to do it.
+	$typeScriptToolsVersionXml = $csprojXml.CreateElement("TypeScriptToolsVersion")
+	$typeScriptToolsVersionXml.PsBase.InnerText = "2.3"
+	$propertyGroupXml.AppendChild($typeScriptToolsVersionXml)
+
+	# Tell Visual Studio to completely ignore angular stuff
+	[xml]$ignoreAngularXml = @"  
+		<ItemGroup>
+			<Compile Remove="angular\node_modules\**" />
+			<Content Remove="angular\node_modules\**" />
+			<EmbeddedResource Remove="angular\node_modules\**" />
+			<None Remove="angular\node_modules\**" />
+		</ItemGroup>
+"@
+
+	
+	$csprojXml.Project.AppendChild($csprojXml.ImportNode($ignoreAngularXml.ItemGroup, $true))
+	$csprojXml.Save($webCsprojInfo.csprojFile)	
+
+}

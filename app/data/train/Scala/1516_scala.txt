@@ -1,0 +1,133 @@
+package catherine
+
+import java.util
+
+import com.amazonaws.auth.DefaultAWSCredentialsProviderChain
+import com.amazonaws.services.autoscaling.model._
+import com.amazonaws.services.ec2.AmazonEC2Client
+import com.amazonaws.services.ec2.model.{Instance, Tag => _, _}
+import io.fabric8.kubernetes.client.DefaultKubernetesClient
+import io.fabric8.kubernetes.api.model._
+
+import scala.collection.JavaConversions._
+
+
+
+case class DescribeEBSResult(
+
+                           volumeId: String,
+                           volumeName: String,
+                           desiredSize: Int,
+                           volumeType: String,
+                           availabilityZone: String
+
+                         )
+
+
+/**
+  * Some notes: This class is where we define things that pertain to creating persistent volumes
+  * for kubernetes. This project provides support AWS EBS. Other services supported by kubernetes
+  * are as follows:
+  *  --GCEPersistentDisk
+  *  --AWSElasticBlockStore
+  *  --NFS
+  *  --iSCSI
+  *  --RBD (Ceph Block Device)
+  *  --Glusterfs
+  */
+
+
+/**
+  *
+  * @param volumeName Desired name of volume - can be service or user-specific depending on usage
+  */
+
+class Volumes(volumeName: String) {
+  val k8 = new DefaultKubernetesClient().inNamespace("default")
+  val ec2= new AmazonEC2Client(new DefaultAWSCredentialsProviderChain)
+
+
+  /**
+    *
+    * @param size The size of the volume, in GiBs
+    * @param availabilityZone Availability Zone of desired volume on AWS
+    * @return
+    */
+  def createEBS (size: Int, availabilityZone: String, encryption: Boolean) : CreateVolumeResult = {
+    val cvr = new CreateVolumeRequest()
+      .withAvailabilityZone(availabilityZone)
+      .withSize(size)
+      .withVolumeType("gp2")
+      .withEncrypted(encryption)
+    val ebs = ec2.createVolume(cvr)
+    ebs
+  }
+
+  def createPV (volumeId: String, size: Int) : PersistentVolume = {
+
+    val pv = k8
+      .persistentVolumes()
+      .createNew()
+      .withNewMetadata().withName(volumeName).endMetadata()
+      .withNewSpec()
+      .withNewAwsElasticBlockStore().withVolumeID(volumeId).withFsType("ext4").endAwsElasticBlockStore()
+      .withAccessModes("ReadWriteOnce")
+      .withCapacity(Map("storage" -> new Quantity(size.toString + "Gi")))
+      .withPersistentVolumeReclaimPolicy("Retain")
+      .endSpec().done()
+    pv
+  }
+
+
+  def createPVC (size: Int) : PersistentVolumeClaim = {
+
+    val pvc = k8.persistentVolumeClaims().createNew()
+      .withNewMetadata().withName(volumeName).endMetadata()
+      .withNewSpec()
+      .withVolumeName(volumeName)
+      .withAccessModes("ReadWriteOnce")
+      .withNewResources().withRequests(Map("storage" -> new Quantity(size.toString + "Gi"))).endResources()
+      .endSpec().done()
+
+    pvc
+  }
+
+  def destroyEBS()={
+    val volumeId = k8.persistentVolumes().withName(volumeName).get().getSpec.getAwsElasticBlockStore.getVolumeID
+    ec2.deleteVolume(new DeleteVolumeRequest().withVolumeId(volumeId))
+
+  }
+
+  def destroyPV()={
+    val pv  =k8.persistentVolumes().withName(volumeName).get()
+    k8.persistentVolumes().delete(pv)
+  }
+
+  def destroyPVC()={
+    val pvc  =k8.persistentVolumeClaims().withName(volumeName).get()
+    k8.persistentVolumeClaims().delete(pvc)
+  }
+
+  def createVolumeSet(size: Int, availabilityZone: String, encryption: Boolean) : Unit ={
+    val ebs = createEBS(size, availabilityZone, encryption)
+    createPV(ebs.getVolume.getVolumeId, size)
+    createPVC(size)
+
+
+  }
+
+  def describe(): DescribeEBSResult = {
+    val volumeId = k8.persistentVolumes().withName(volumeName).get().getSpec.getAwsElasticBlockStore.getVolumeID
+    val describeUserVolumes = new DescribeVolumesRequest().withVolumeIds(volumeId)
+
+    new DescribeEBSResult(
+      volumeId,
+      volumeName,
+      ec2.describeVolumes(describeUserVolumes).getVolumes.head.getSize,
+      ec2.describeVolumes(describeUserVolumes).getVolumes.head.getVolumeType,
+      ec2.describeVolumes(describeUserVolumes).getVolumes.head.getAvailabilityZone
+    )
+
+  }
+  //todo create method or come up with a way to return status of the request
+}

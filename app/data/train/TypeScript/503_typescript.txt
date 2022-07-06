@@ -1,0 +1,97 @@
+import {IFilesystem} from './Filesystem';
+
+export type Node = Directory | string;
+export type Directory = {[name: string]: Node};
+
+export class MockFilesystem implements IFilesystem {
+    files: Directory = {};
+
+    constructor(files?: Directory) {
+        this.files = files || {};
+    }
+
+    private get(path: string, create?: boolean): [Directory | undefined, string] {
+        if (!path.startsWith('/'))
+            throw new Error(`Path not absolute: '${path}'`);
+        let ret: string[] | undefined;
+        let node: Node = this.files;
+        const names = path.substr(1).split('/');
+        for (let i = 0; i < names.length - 1; i ++) {
+            let nextNode: Node | string;
+            if (names[i] in node) {
+                nextNode = node[names[i]];
+                if (typeof nextNode == 'string')
+                    return [undefined, ''];
+            } else if (create) {
+                nextNode = node[names[i]] = {} as Directory;
+            } else {
+                return [undefined, ''];
+            }
+            node = nextNode;
+        }
+        return [node, names[names.length-1]];
+    }
+
+    private getNode(path: string) {
+        let [dir, name] = this.get(path);
+        if (typeof dir == 'undefined' || !(name in dir))
+            return undefined;
+        return dir[name];
+    }
+
+    listFolders(path: string) {
+        let node = this.getNode(path);
+        if (typeof node == 'undefined' || typeof node == 'string')
+            return Promise.resolve(undefined);
+        const ret: string[] = [];
+        for (let name in node) {
+            if (typeof node[name] != 'string')
+                ret.push(name);
+        }
+        return Promise.resolve(ret);
+    }
+
+    // exists(path: string) {
+    //     const node = this.getNode(path);
+    //     return Promise.resolve(typeof node != 'undefined');
+    // }
+
+    read(path: string) {
+        const node = this.getNode(path);
+        if (typeof node == 'string')
+            return Promise.resolve(node);
+        if (typeof node == 'undefined')
+            return Promise.resolve(undefined);
+        return Promise.reject(new Error('cannot read folder'));
+    }
+
+    write(path: string, data: string) {
+        const [dir, name] = this.get(path, true);
+        if (typeof dir == 'undefined')
+            return Promise.reject(new Error('cannot make parents'));
+        dir[name] = data;
+        return Promise.resolve();
+    }
+
+    moveFolder(oldPath: string, newPath: string) {
+        const [oldDir, oldName] = this.get(oldPath);
+        if (typeof oldDir == 'undefined' || !(oldName in oldDir))
+            return Promise.reject(new Error('no such node'));
+        const [newDir, newName] = this.get(newPath, true);
+        if (typeof newDir == 'undefined')
+            return Promise.reject(new Error('cannot make parents'));
+        if (newName in newDir)
+            return Promise.reject(new Error('target already exists'));
+        newDir[newName] = oldDir[oldName];
+        delete oldDir[oldName];
+        return Promise.resolve();
+    }
+
+    delete(path: string) {
+        const [dir, name] = this.get(path);
+        if (typeof dir == 'undefined' || !(name in dir))
+            return Promise.reject(new Error('no such node'));
+        delete dir[name];
+        return Promise.resolve();
+    }
+}

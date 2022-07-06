@@ -1,0 +1,153 @@
+import logging
+
+from sys import exc_info
+from socket import socket, AF_INET, SOCK_STREAM, SOCK_DGRAM, SHUT_RD, SOL_SOCKET, SO_REUSEADDR, error as socketError
+from traceback import format_exception
+from struct import Struct
+
+from .common import *
+from .models import *
+from .exceptions import *
+
+
+class ClientHost():
+    def __init__(self, host):
+        self.host = host
+        self.active = 0
+        self.udpsocks = set()
+
+
+class ZeallectProxy(ZeallectSocketEntity):
+
+    def __init__(self, c):
+        self.config = c
+        self.remotedets = (c.host, int(c.port))
+
+    def run(self):
+
+        binding = (self.config.bindhost, int(self.config.bindport))
+
+        # create tcp socket/server
+        tcpsock = socket(AF_INET, SOCK_STREAM)
+        tcpsock.setsockopt(SOL_SOCKET, SO_REUSEADDR, 1)
+        tcpsock.bind(binding)
+        tcpsock.listen(5)
+
+        # create udp socket/server
+        udpsock = socket(AF_INET, SOCK_DGRAM)
+        udpsock.bind(binding)
+
+        # maps client UDP bindings to socket objects
+        #   destined for the server
+        self.udpmap = {}
+
+        self.sockets = {
+            tcpsock: None,
+            udpsock: None,
+        }
+
+        # maps tcp sockets and addresses to ClientHost objects
+        self.hostmap = {}
+
+        # shortcuts
+        remotedets = self.remotedets
+        socketdict = self.sockets
+        nextsocket = self.selectReadable()
+        ignore_exc = (None, socketError, EndOfStreamException)
+
+        self.alive = True
+        for sock in nextsocket:
+
+            # client -> us
+            if sock is udpsock:
+                data, details = sock.recvfrom(Z_SOCKET_RECV_SIZE)
+                host = details[0]
+                if host in self.hostmap:
+                    if details not in self.udpmap:
+                        newsock = socket(AF_INET, SOCK_DGRAM)
+                        self.udpmap[details] = newsock
+                        socketdict[newsock] = details
+                        self.hostmap[host].udpsocks.add(newsock)
+                    self.udpmap[details].sendto(data, remotedets)
+
+            # server -> us
+            elif SOCK_DGRAM == sock.type:
+                data, details = sock.recvfrom(Z_SOCKET_RECV_SIZE)
+                if details == remotedets:
+                    udpsock.sendto(data, socketdict[sock])
+
+            # client -> us (connect())
+            elif sock is tcpsock:
+                newsock, details = sock.accept()
+
+                # create connection to server
+                newservsock = socket(AF_INET, SOCK_STREAM)
+                newservsock.settimeout(Z_SOCKET_SERVER_TIMEOUT)
+                try:
+                    newservsock.connect(remotedets)
+                    socketdict[newsock] = newservsock
+                    socketdict[newservsock] = newsock
+
+                    host = details[0]
+                    if host not in self.hostmap:
+                        clienthost = ClientHost(host)
+                    else:
+                        clienthost = self.hostmap[host]
+                    clienthost.active += 1
+                    self.hostmap[newsock] = clienthost
+                    self.hostmap[newservsock] = clienthost
+                    self.hostmap[details[0]] = clienthost
+
+                    logging.info('Client connected from [/%s:%d]', *details)
+                except:
+                    logging.warning('Failed to create tcp relay for [/%s:%d]', *details)
+                    exception = exc_info()
+                    logging.warning(''.join(format_exception(*exception)))
+
+            # tcp relay
+            else:
+                try:
+                    data = sock.recv(Z_SOCKET_RECV_SIZE)
+                    if data:
+                        socketdict[sock].send(data)
+                    else:
+                        self.removeRelay(sock)
+                except:
+                    exception = exc_info()
+                    if exception[0] not in ignore_exc:
+                        logging.warning('An exception occurred while processing a socket!')
+                        logging.warning(''.join(format_exception(*exception)))
+                    self.removeRelay(sock)
+
+    def removeRelay(self, sock):
+        sockpair = self.sockets[sock]
+        for _sock in (sockpair, sock):
+            try:
+                _sock.shutdown(SHUT_RD)
+                _sock.close()
+            except socketError:
+                pass
+            self.sockets.pop(_sock)
+        clienthost = self.hostmap[sock]
+        if clienthost.active == 1:
+            logging.debug('Freeing up all UDP sockets to %s', clienthost.host)
+            # pop all udp socks that the host has connected
+            dets = map(self.sockets.pop, clienthost.udpsocks)
+            # pop all udp socks from the udpmap
+            map(self.udpmap.pop, dets)
+            # remove all referernces to the clienthost
+            self.hostmap.pop(sockpair)
+            self.hostmap.pop(sock)
+            self.hostmap.pop(clienthost.host)
+        else:
+            clienthost.active -= 1
+        logging.info('Client from %s disconnected', clienthost.host)
+
+    def disconnect(self):
+        socks = [s for s in self.sockets.keys() if SOCK_STREAM == s.type]
+        for sock in socks:
+            try:
+                sock.shutdown(SHUT_RD)
+                sock.close()
+            except socketError:
+                pass

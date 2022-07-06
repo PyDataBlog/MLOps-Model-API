@@ -1,0 +1,46 @@
+module TesML.Data where
+
+import TesML.Data.Types
+
+import qualified TesML.Data.Plugin as PL
+import qualified TesML.Data.RecordData as RD
+import qualified TesML.Data.RecordHeader as RH
+
+
+import Control.Monad.Trans.Except (ExceptT (ExceptT), runExceptT)
+
+import qualified Data.ByteString.Lazy as BSL
+import Data.Binary.Get ( runGet
+                       , runGetOrFail
+                       , skip
+                       )
+
+                        
+
+readPlugin :: FilePath -> ExceptT String IO PL.Plugin
+readPlugin pth = ExceptT $ fmap f $ BSL.readFile pth
+  where f bts = let r = runGetOrFail (PL.decoder pth) bts in
+                case r of Left (_, x, msg) -> Left $ "Decoder error at offset " ++ show x ++ ": " ++ msg
+                          Right (_, _, p) -> Right p
+
+
+readPluginSet :: [FilePath] -> ExceptT String IO PL.PluginSet
+readPluginSet fnames = fios >>= ExceptT . pure . foldr f (Right [])
+  where fios :: ExceptT String IO [PL.Plugin]
+        fios = sequenceA $ readPlugin <$> fnames
+
+        f :: PL.Plugin -> Either String PL.PluginSet -> Either String PL.PluginSet
+        f p eps = eps >>= PL.addPlugin p
+
+
+readRecordData' :: FilePath -> RH.RecordHeader -> IO (ReadResult RD.RecordData)
+readRecordData' pluginPath hdr = (runGet $ skipper >> decoder) <$> BSL.readFile pluginPath
+  where skipper = skip $ fromIntegral (RH.offset hdr + entryHeaderSize)
+        decoder = runExceptT $ RD.getDecoder $ RH.name hdr
+
+
+readRecordData :: PL.ModEntry RH.RecordHeader -> IO (ReadResult RD.RecordData)
+readRecordData (PL.ModEntry path _ hdr) = readRecordData' path hdr
+
+
+

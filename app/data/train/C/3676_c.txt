@@ -1,0 +1,307 @@
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <assert.h>
+
+#include <getopt.h>           
+
+#include <fcntl.h>             
+#include <unistd.h>
+#include <errno.h>
+#include <malloc.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/time.h>
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+
+#include <asm/types.h>         
+#include <linux/videodev2.h>
+
+#define CLEAR(x) memset (&(x), 0, sizeof (x))
+
+#define WIDTH 320
+#define HEIGHT 240
+struct buffer {
+        void *                  start;
+        size_t                  length;
+};
+
+static char *           dev_name        = "/dev/video2";//摄像头设备名
+static int              fd              = -1;
+struct buffer *         buffers         = NULL;
+static unsigned int     n_buffers       = 0;
+
+FILE *file_fd;
+struct bmp_file myfile;
+static unsigned long file_length;
+static unsigned char *file_name;
+
+struct file_header
+{
+  unsigned short bfType; // Picture tpye, must set to 19778
+
+  int bfSize; // The file size in bytes
+
+  int bfRev; // Reserved 
+
+  int bfOffBits; // the offset from the beginning of the file to the bitmap data.
+
+}__attribute__ ((packed)); 
+
+struct info_header
+{
+  int biSize; // info_header's size in bytes
+
+  int biWidth; // width in pixels
+
+  int biHeight;//height in pixels
+
+  short biPlanes; //the number of planes of the target device
+
+  short biBitCount; //the number of bits per pixel
+
+  int biCompression;//the type of compression
+
+  int biSizeImage; //
+
+  int biXPelsPerMeter;//usually set to zero
+
+  int biYPelsPerMeter;//usually set to zero
+
+  int biClrUsed;//the number of colors used in the bitmap
+
+  int biClrImportant;
+}__attribute__ ((packed)); 
+
+
+struct bmp_file
+{
+  struct file_header header;
+  struct info_header info;
+  unsigned char bits[WIDTH*HEIGHT*3];
+}__attribute__ ((packed));
+
+static void cvt_420p_to_rgb(int width, int height, const unsigned char *src, unsigned char *dst)
+{
+  int r, g, b;
+  int rdif, gdif, bdif, y;
+  int yy, uu, vv;
+  int xoff, yoff;
+  int numpix = width*height;
+  unsigned char *pout = dst + width*height*3;
+
+  for(yoff=0; yoff<height; yoff++)
+    {
+      for(xoff=0; xoff<width; xoff++)
+    {
+     yy = *(src+yoff*WIDTH+xoff);
+     uu = *(src+(yoff/2)*WIDTH/2+xoff/2+numpix);
+     vv = *(src+(yoff/2)*WIDTH/2+xoff/2+numpix+numpix/4);
+
+     uu -= 128;
+     vv -= 128;
+
+     r = yy + vv + ((vv*103)>>8);
+     g = yy - ((uu*88)>>8) - ((vv*183)>>8);
+     b = yy + uu + ((uu*198)>>8);
+
+     if(r>255) { r = 255; }
+     if(g>255) { g = 255; }
+     if(b>255) { b = 255; }
+     if(r<0) { r = 0;}
+     if(g<0) { g = 0;}
+     if(b<0) { b = 0;}
+
+     *pout = (unsigned char)b;
+     pout--;
+     *pout = (unsigned char)r;
+     pout--;
+     *pout = (unsigned char)g;
+     pout--;
+    }
+    }
+}
+
+
+//////////////////////////////////////////////////////
+//获取一帧数据
+//////////////////////////////////////////////////////
+static int read_frame (void)
+{
+struct v4l2_buffer buf;
+unsigned int i;
+
+CLEAR (buf);
+buf.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+buf.memory = V4L2_MEMORY_MMAP;
+
+ioctl (fd, VIDIOC_DQBUF, &buf); //出列采集的帧缓冲
+
+assert (buf.index < n_buffers);
+   printf ("buf.index dq is %d,/n",buf.index);
+
+//fwrite(buffers[buf.index].start, buffers[buf.index].length, 1, file_fd); //将其写入文件中
+	
+  cvt_420p_to_rgb(WIDTH, HEIGHT, buffers[buf.index].start, myfile.bits);
+
+  fwrite(&myfile, sizeof(struct bmp_file),1,file_fd);
+
+ioctl (fd, VIDIOC_QBUF, &buf); //再将其入列
+
+return 1;
+}
+
+int main (int argc,char ** argv)
+{
+struct v4l2_capability cap; 
+struct v4l2_format fmt;
+unsigned int i;
+enum v4l2_buf_type type;
+  
+
+  myfile.header.bfType = 19778;
+  myfile.header.bfSize = sizeof(struct bmp_file);
+  myfile.header.bfRev = 0;
+  myfile.header.bfOffBits = 54;
+
+  myfile.info.biSize = 0x28;
+  myfile.info.biWidth = WIDTH;
+  myfile.info.biHeight = HEIGHT;
+  myfile.info.biPlanes = 1;
+  myfile.info.biBitCount = 24;
+  myfile.info.biCompression = 0;
+  myfile.info.biSizeImage = 0;
+  myfile.info.biClrUsed = 256*256*256;
+  myfile.info.biClrImportant = 0;
+  myfile.info.biXPelsPerMeter = 2048;
+  myfile.info.biYPelsPerMeter = 2048;
+
+file_fd = fopen("test-mmap.bmp", "w");//图片文件名
+
+fd = open (dev_name, O_RDWR /* required */ | O_NONBLOCK, 0);//打开设备
+
+int ff=ioctl (fd, VIDIOC_QUERYCAP, &cap);               //获取摄像头参数
+	if(ff<0)
+		printf("failture VIDIOC_QUERYCAP\n");
+
+	struct v4l2_fmtdesc fmt1;
+    int ret;
+	memset(&fmt1, 0, sizeof(fmt1));
+	fmt1.index = 0;            //初始化为0
+	fmt1.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+	while ((ret = ioctl(fd, VIDIOC_ENUM_FMT, &fmt1)) == 0) 
+	{
+		fmt1.index++;
+		printf("{ pixelformat = '%c%c%c%c', description = '%s' }\n",fmt1.pixelformat & 0xFF, 
+				(fmt1.pixelformat >> 8) & 0xFF,(fmt1.pixelformat >> 16) & 0xFF, 
+				(fmt1.pixelformat >> 24) & 0xFF,fmt1.description);
+	}
+
+CLEAR (fmt);
+fmt.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+fmt.fmt.pix.width       = WIDTH; 
+fmt.fmt.pix.height      = HEIGHT;
+//fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YUYV; //no ok
+fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_NV12; //ok
+//fmt.fmt.pix.pixelformat = V4L2_PIX_FMT_YVU420;//ok
+fmt.fmt.pix.field       = V4L2_FIELD_INTERLACED;
+ioctl (fd, VIDIOC_S_FMT, &fmt); //设置图像格式
+
+file_length = fmt.fmt.pix.bytesperline * fmt.fmt.pix.height; //计算图片大小
+
+struct v4l2_requestbuffers req;
+CLEAR (req);
+req.count               = 4;
+req.type                = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+req.memory              = V4L2_MEMORY_MMAP;
+
+ioctl (fd, VIDIOC_REQBUFS, &req); //申请缓冲，count是申请的数量
+
+if (req.count < 2)
+   printf("Insufficient buffer memory/n");
+
+buffers = calloc (req.count, sizeof (*buffers));//内存中建立对应空间
+
+for (n_buffers = 0; n_buffers < req.count; ++n_buffers) 
+{
+   struct v4l2_buffer buf;   //驱动中的一帧
+   CLEAR (buf);
+   buf.type        = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+   buf.memory      = V4L2_MEMORY_MMAP;
+   buf.index       = n_buffers;
+
+   if (-1 == ioctl (fd, VIDIOC_QUERYBUF, &buf)) //映射用户空间
+    printf ("VIDIOC_QUERYBUF error/n");
+
+   buffers[n_buffers].length = buf.length;
+   buffers[n_buffers].start =
+   mmap (NULL /* start anywhere */,    //通过mmap建立映射关系
+    buf.length,
+    PROT_READ | PROT_WRITE /* required */,
+    MAP_SHARED /* recommended */,
+    fd, buf.m.offset);
+
+   if (MAP_FAILED == buffers[n_buffers].start)
+    printf ("mmap failed/n");
+        }
+
+for (i = 0; i < n_buffers; ++i) 
+{
+   struct v4l2_buffer buf;
+   CLEAR (buf);
+
+   buf.type        = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+   buf.memory      = V4L2_MEMORY_MMAP;
+   buf.index       = i;
+
+   if (-1 == ioctl (fd, VIDIOC_QBUF, &buf))//申请到的缓冲进入列队
+    printf ("VIDIOC_QBUF failed/n");
+}
+                
+type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+
+if (-1 == ioctl (fd, VIDIOC_STREAMON, &type)) //开始捕捉图像数据
+   printf ("VIDIOC_STREAMON failed/n");
+
+for (;;) //这一段涉及到异步IO
+{
+   fd_set fds;
+   struct timeval tv;
+   int r;
+
+   FD_ZERO (&fds);//将指定的文件描述符集清空
+   FD_SET (fd, &fds);//在文件描述符集合中增加一个新的文件描述符
+
+   /* Timeout. */
+   tv.tv_sec = 2;
+   tv.tv_usec = 0;
+
+   r = select (fd + 1, &fds, NULL, NULL, &tv);//判断是否可读（即摄像头是否准备好），tv是定时
+
+   if (-1 == r) {
+    if (EINTR == errno)
+     continue;
+    printf ("select err/n");
+                        }
+   if (0 == r) {
+    fprintf (stderr, "select timeout/n");
+    exit (EXIT_FAILURE);
+                        }
+
+   if (read_frame ())//如果可读，执行read_frame ()函数，并跳出循环
+   break;
+}
+
+unmap:
+for (i = 0; i < n_buffers; ++i)
+   if (-1 == munmap (buffers[i].start, buffers[i].length))
+    printf ("munmap error");
+close (fd);
+fclose (file_fd);
+exit (EXIT_SUCCESS);
+return 0;
+}
+
+
+

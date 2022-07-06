@@ -1,0 +1,119 @@
+#!/usr/bin/perl
+#
+# RRD script to display network statistics
+# 2003-2004,2011 (c) by Christian Garbs <mitch@cgarbs.de>
+# Licensed under GNU GPL.
+#
+# This script should be run every 5 minutes.
+#
+use strict;
+use warnings;
+
+package Rrdpi::Network;
+
+sub new
+{
+	my ($class, $conf) = @_;
+	my $self = {conf => $conf};
+	bless( $self, $class );
+	$self->{rrdParams} = $self->getRrdParams();
+	return $self;
+}
+
+sub getRrdParams
+{
+	my ($self) = @_;
+	 
+	my (@datafiles, @picbase, @titles);
+	map {push @datafiles, sprintf('%s/network-%s.rrd', $self->{conf}->{DBPATH}, $_->[1])} @{$self->{conf}->{NETWORK_DEVICES}};
+	map {push @picbase, sprintf('%s/network-%s-', $self->{conf}->{OUTPATH}, $_->[1])} @{$self->{conf}->{NETWORK_DEVICES}};
+	map {push @titles, $_->[1]} @{$self->{conf}->{NETWORK_DEVICES}};
+		
+	return {
+		name => 'network',
+		datafiles => \@datafiles,
+		picBase => \@picbase,
+		DS => ['in_bytes', 'in_packets', 'in_errors', 'in_drop', 'out_bytes', 'out_packets', 'out_errors', 'out_drop', 'out_collisions'],
+		rrdCreate => [
+			'DS:in_bytes:COUNTER:300:0:Nan',
+			'DS:in_packets:COUNTER:300:0:Nan',
+			'DS:in_errors:COUNTER:300:0:Nan',
+			'DS:in_drop:COUNTER:300:0:Nan',
+			'DS:out_bytes:COUNTER:300:0:Nan',
+			'DS:out_packets:COUNTER:300:0:Nan',
+			'DS:out_errors:COUNTER:300:0:Nan',
+			'DS:out_drop:COUNTER:300:0:Nan',
+			'DS:out_collisions:COUNTER:300:0:Nan',
+			
+			'RRA:MAX:0.5:1:600',
+			'RRA:MAX:0.5:6:700',
+			'RRA:MAX:0.5:24:775',
+			'RRA:MAX:0.5:288:797'		
+			 ],
+		graphTitles => \@titles,
+		rrdGraph => [
+			'--lazy',
+			'--imgformat=PNG',
+			'--title=TITLE interface statistics',
+			"--width=".$self->{conf}->{GRAPH_WIDTH},
+			"--height=".$self->{conf}->{GRAPH_HEIGHT},
+		    '--lower-limit=0',		
+			
+		    'DEF:in_bytes=DATAFILE:in_bytes:AVERAGE',
+		    'DEF:in_packets=DATAFILE:in_packets:AVERAGE',
+		    'DEF:in_errors=DATAFILE:in_errors:AVERAGE',
+		    'DEF:in_drop=DATAFILE:in_drop:AVERAGE',
+		    'DEF:out_bytes=DATAFILE:out_bytes:AVERAGE',
+		    'DEF:out_packets=DATAFILE:out_packets:AVERAGE',
+		    'DEF:out_errors=DATAFILE:out_errors:AVERAGE',
+		    'DEF:out_drop=DATAFILE:out_drop:AVERAGE',
+		    'DEF:out_collisions=DATAFILE:out_collisions:AVERAGE',			
+			
+		    'LINE1:in_bytes#000000:avg input [bytes/sec]',
+		    'LINE1:in_packets#00F0F0:avg input [packets/sec]',
+		    'LINE1:in_errors#F0F000:avg input errors [errors/sec]',
+		    'LINE1:in_drop#F000F0:avg dropped input packets [packets/sec]',
+		    'LINE1:out_bytes#00F000:avg output [bytes/sec]',
+		    'LINE1:out_packets#0000F0:avg output [packets/sec]',
+		    'LINE1:out_errors#F00000:avg output errors [erros/sec]',
+		    'LINE1:out_drop#666666:avg dropped output packets [packets/sec]',
+		    'LINE1:out_collisions#DDDDDD:avg output collisions [colls/sec]',
+		    'COMMENT:\n',		
+			]
+		};
+}
+
+sub gather 
+{	
+	my ($self) = @_;
+	
+	# get traffic data (only open NETDEV once)
+	open NETDEV, '<', '/proc/net/dev' or die "can't open /proc/net/dev: $!";
+	my (undef, undef, @netdev) = <NETDEV>;
+	close NETDEV or die "can't close /proc/net/dev: $!";
+	my %device;
+	foreach ( @netdev ) {
+    	my ($dev, $data) = split /:/;
+    	$dev =~ tr/ //d;
+    	$device{$dev} = [ split /\s+/, ' '.$data ];
+	}
+
+	my $stat=[];
+	# iterate over all given devices
+	for my $i (@{$self->{conf}->{NETWORK_DEVICES}}) 
+	{
+    	# get current variables
+    	my ($name, $descr) = @{$i};
+
+    	# update database
+    	if ( exists $device{$name} ) {
+			my @d = @{$device{$name}};
+			push @{$stat}, "N:$d[1]:$d[2]:$d[3]:$d[4]:$d[9]:$d[10]:$d[11]:$d[12]:$d[14]";
+        } else {
+			push @{$stat}, 'N:U:U:U:U:U:U:U:U:U';
+    	}
+ 	}
+	return $stat;
+}
+
+1;

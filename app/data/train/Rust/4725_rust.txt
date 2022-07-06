@@ -1,0 +1,45 @@
+use std::io::Write;
+
+use nickel::{Continue, FormBody, Halt, MediaType, Middleware, MiddlewareResult, Request, Response};
+use redis::Commands;
+
+use api::consumer::response::BADSESSION;
+use api::rds::RedisExtension;
+use api::routes::CONSUMER_HANDSHAKE;
+
+pub const SESSION_KEY: &'static str = "audioscrobbler:session";
+
+pub struct SessionMiddleware;
+
+impl<D> Middleware<D> for SessionMiddleware {
+    fn invoke<'mw, 'conn>(&self,
+                          req: &mut Request<'mw, 'conn, D>,
+                          mut rep: Response<'mw, D>)
+                          -> MiddlewareResult<'mw, D> {
+        // Verify the scrobble session id, to be used in all now-playing and submission requests.
+        if req.path_without_query()
+            .map(|p| p.starts_with(CONSUMER_HANDSHAKE) && p.len() > CONSUMER_HANDSHAKE.len())
+            .unwrap_or(false) {
+            if !match try_with!(rep, req.redis_conn()).get::<&'static str, String>(SESSION_KEY) {
+                Ok(sid) => {
+                    try_with!(rep, req.form_body())
+                        .get("s")
+                        .map(|value| value == sid)
+                        .unwrap_or(false)
+                }
+                Err(_) => false,
+            } {
+                warn!("Consumer: Invalid session ID, abort!");
+                rep.set(MediaType::Txt);
+                let mut stream = try!(rep.start());
+                if let Err(err) = stream.write_all(BADSESSION.as_bytes()) {
+                    return stream.bail(format!("Failed to halt session: {}", err));
+                } else {
+                    return Ok(Halt(stream));
+                }
+            }
+        }
+
+        Ok(Continue(rep))
+    }
+}

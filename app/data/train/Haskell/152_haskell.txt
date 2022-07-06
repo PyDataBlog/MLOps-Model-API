@@ -1,0 +1,56 @@
+module AI where
+
+import Control.Monad
+import Data.Array.MArray
+import Data.Array.IO
+import Data.Word
+import System.Random
+
+type Index    = Int
+type Value    = Int
+type Weight   = Value
+type Neurons  = IOArray Index Value
+type Synapses = [(Index, Index, Weight)] -- src, dst, weight
+type Goals    = [Index]
+type Brain    = (Neurons, Synapses, Goals)
+
+type Score = Int
+type Population = [(Score, Brain)]
+
+newRandomBrain :: Int -> Int -> Goals -> IO Brain
+newRandomBrain nbNeurons nbSynapses goals = do
+    neurons  <- newArray (0, nbNeurons) 0
+    synapses <- replicateM nbSynapses $ do
+        source      <- randomRIO (0, nbNeurons)
+        destination <- randomRIO (0, nbNeurons)
+        weight      <- randomRIO (minBound, maxBound)
+        return (source, destination, weight)
+    return (neurons, synapses, goals)
+
+think :: Brain -> [Value] -> IO [Value]
+think (neurons, synapses, goals) inputs = do
+    -- Clear existing neurons
+    (l, h) <- getBounds neurons
+    forM_ [l..h] $ \i -> do
+        writeArray neurons i 0
+    -- Write inputs
+    forM_ (zip [1..] inputs) $ \(i, v) -> do
+        writeArray neurons i v
+    -- Fire the synapses again
+    forM_ synapses $ \(src, dst, weight) -> do
+        result <- readArray neurons src
+        writeArray neurons dst (result + weight)
+    -- Yield goals
+    forM goals $ \i -> do
+        readArray neurons i
+
+createPopulation :: Int -> Int -> Int -> Goals -> IO Population
+createPopulation amount nbNeurons nbSynapses goals = replicateM amount $ do
+    brain <- newRandomBrain nbNeurons nbSynapses goals
+    return (0, brain)
+    
+testPopulation :: Population -> ([Value] -> IO Score) -> [Value] -> IO Population
+testPopulation population fitness inputs = forM population $ \(oldScore, brain) -> do
+    outputs <- think brain inputs
+    score   <- fitness outputs
+    return (oldScore + score, brain)

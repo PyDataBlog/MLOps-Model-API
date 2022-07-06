@@ -1,0 +1,82 @@
+﻿param($scriptName, $scriptPath)
+
+if( [string]::IsNullOrEmpty($scriptName) ) {
+	Write-Host "no script name"
+	exit
+}
+
+if( [string]::IsNullOrEmpty($scriptPath) ) {
+	Write-Host "no script path"
+	exit
+}
+
+if( !(([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole] "Administrator")) )
+{   
+	$arguments = "& '" + $myinvocation.mycommand.definition + "'"
+	Start-Process powershell -Verb runAs -ArgumentList $arguments
+	exit
+}
+
+$sched = New-Object -ComObject Schedule.Service
+$sched.Connect()
+$f = $sched.GetFolder("\")
+$o = $null
+
+###################################################################################################
+# Create Task
+
+$exists = (($f.GetTasks(0) | ? { $_.Name -eq $scriptName }) -ne $null )
+if( !$exists ) {
+	$xml = @"
+<?xml version="1.0" encoding="UTF-16"?>
+<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+<RegistrationInfo>
+ <Date>2013-07-31T14:00:00</Date>
+ <Author>$(${env:computername})\administrator</Author>
+</RegistrationInfo>
+<Triggers>
+ <LogonTrigger>
+   <Enabled>true</Enabled>
+   <UserId>$(${env:computername})\administrator</UserId>
+   <Delay>PT30S</Delay>
+ </LogonTrigger>
+</Triggers>
+<Principals>
+ <Principal id="Author">
+   <RunLevel>HighestAvailable</RunLevel>
+   <UserId>$(${env:computername})\administrator</UserId>
+   <LogonType>InteractiveToken</LogonType>
+ </Principal>
+</Principals>
+<Settings>
+ <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+ <DisallowStartIfOnBatteries>true</DisallowStartIfOnBatteries>
+ <StopIfGoingOnBatteries>true</StopIfGoingOnBatteries>
+ <AllowHardTerminate>true</AllowHardTerminate>
+ <StartWhenAvailable>false</StartWhenAvailable>
+ <RunOnlyIfNetworkAvailable>false</RunOnlyIfNetworkAvailable>
+ <IdleSettings>
+   <StopOnIdleEnd>true</StopOnIdleEnd>
+   <RestartOnIdle>false</RestartOnIdle>
+ </IdleSettings>
+ <AllowStartOnDemand>true</AllowStartOnDemand>
+ <Enabled>true</Enabled>
+ <Hidden>false</Hidden>
+ <RunOnlyIfIdle>false</RunOnlyIfIdle>
+ <WakeToRun>false</WakeToRun>
+ <ExecutionTimeLimit>P3D</ExecutionTimeLimit>
+ <Priority>7</Priority>
+</Settings>
+<Actions Context="Author">
+ <Exec>
+   <Command>C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe</Command>
+   <Arguments>-v 2.0 -command ".'$($scriptPath)'"</Arguments>
+   <WorkingDirectory>c:\_root</WorkingDirectory>
+ </Exec>
+</Actions>
+</Task>
+"@	
+	
+	#http://msdn.microsoft.com/en-us/library/windows/desktop/aa382575(v=vs.85).aspx
+	$f.RegisterTask("\$($scriptName)", $xml, 6 <#Create_of_Update#>, $null, $null, 3)
+}

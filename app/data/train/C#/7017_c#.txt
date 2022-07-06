@@ -1,0 +1,372 @@
+﻿/**Copyright (C) 2013 Rory Burks
+ *
+ *  Permission is hereby granted, free of charge, to any person obtaining a
+ * copy of this software and associated documentation files (the "Software"),
+ * to deal in the Software without restriction, including without limitation
+ * the rights to use, copy, modify, merge, publish, distribute, sublicense,
+ * and/or sell copies of the Software, and to permit persons to whom the
+ * Software is furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in
+ * all copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+ * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS
+ * IN THE SOFTWARE.
+* */
+
+// ExportComposite.cs
+//
+// A wrapper for the method to export projects to file.
+
+// !!! TODO !!! : exporting the chunk data could be made general rather than 
+//  duplicated for each resource by creating an exportFromMemort(stream)
+//  prototype in RSContentContainer, and then implementing it in each
+//  data type.
+
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text;
+
+using Rockslide_Content_Pipeline.Data_Types;
+using System.Windows.Forms;
+using System.IO;
+
+using System.Diagnostics;
+
+namespace Rockslide_Content_Pipeline.IO
+{
+
+
+public static class ExportComposite
+{
+    /// <summary>
+    /// Exports the composite project file to the given file.
+    /// </summary>
+    /// <returns>true if export was successful</returns>
+    public static bool exportCompositeFile(string file_name, RSComposite composite)
+    {
+        BinaryWriter writer = null;
+
+        // Lists which keep track of the data's position and size so they
+        //  can be filled in the Resource Table on a second pass
+        List<uint> seek_locations = new List<uint>();
+        List<int> chunk_sizes = new List<int>();
+        UInt32[] resource_count = new UInt32[RSComposite.CONTENT_NUM];
+
+        try
+        {
+            writer = new BinaryWriter(File.Open(file_name, FileMode.Create));
+
+            // Write Magic Number
+            byte[] magic_number =  Encoding.ASCII.GetBytes("RSCD_002");
+            writer.Write(magic_number, 0, 8);
+
+            for (int i = 0; i < RSComposite.CONTENT_NUM; ++i)
+            {
+                resource_count[i] = 0;
+                writer.Write((UInt32)(0));  // Placeholder for resource counts
+            }
+
+            // Write the Resource Table (with room for the seeks to be filled later)
+            for (int i = 0; i < RSComposite.CONTENT_NUM; ++i)
+            {
+                foreach (TreeNode node in composite.roots[i].Nodes)
+                {
+                    _rec_writeResourceHeader( node, composite, writer, 
+                                              ref resource_count[i], i);
+                }
+            }
+
+            // Write each individual data chunk
+            foreach (TreeNode node in composite.roots[(int)RSComposite.ContentType.Model].Nodes)
+            {
+                _rec_writeModelData(node, composite, writer, seek_locations, chunk_sizes);
+            }
+            foreach (TreeNode node in composite.roots[(int)RSComposite.ContentType.Texture].Nodes)
+            {
+                _rec_writeTextureData(node, composite, writer, seek_locations, chunk_sizes);
+            }
+
+
+            // Go back and fill the seek locations
+            writer.Seek(8, SeekOrigin.Begin);
+                
+            for (int i = 0; i < RSComposite.CONTENT_NUM; ++i)
+                writer.Write(resource_count[i]);
+
+            for (int i = 0; i < RSComposite.CONTENT_NUM; ++i)
+            {
+                foreach (TreeNode node in composite.roots[i].Nodes)
+                    _rec_fillHeader(node, composite, writer, seek_locations, chunk_sizes, i);
+            }
+
+            writer.Close();
+        }
+        catch (Exception e)
+        {
+            MessageBox.Show("Exception in Exporting Composite: " + e.Message);
+            return false;
+        }
+        finally
+        {
+            if( writer != null)
+                writer.Close();
+        }
+        return true;
+    }
+
+    /// <summary>
+    /// Writes the entry data for the given node, then recursively goes 
+    /// through all its children, writing their data in depth-first tree
+    /// form.
+    /// </summary>
+    /// <param name="working_root">The entry node.</param>
+    /// <param name="composite">The file containing all the resources.</param>
+    /// <param name="writer">The data stream to write to.</param>
+    /// <param name="resource_count">Working count of how many resources have been written so far.</param>
+    /// <param name="type">The type of resource we're currently working with (in int form).</param>
+    private static void _rec_writeResourceHeader( TreeNode working_root, 
+                                                  RSComposite composite, 
+                                                  BinaryWriter writer, 
+                                                  ref uint resource_count, 
+                                                  int type)
+    {
+        if (working_root.Name == composite.file_identifier[type])
+        {
+            writer.Write((byte)1);  // Type - Resource
+            resource_count++;
+
+            Debug.Assert(((RSContentContainer)working_root.Tag).id == working_root.Text);
+
+            byte[] name = Encoding.ASCII.GetBytes(working_root.Text);
+            writer.Write(name);     // Identifier
+            writer.Write((byte)0);  // Null-termination
+
+            writer.Write((UInt32)0);    // Placeholder for seek location
+            writer.Write((UInt32)0);    // Placeholder for chunk size
+
+            Debug.Assert(working_root.Nodes.Count == 0);
+            return;
+        }
+        else
+        {
+            Debug.Assert(working_root.Name == composite.folder_identifier[type]);
+
+            writer.Write((byte)0);  // Type - Folder
+
+            byte[] name = Encoding.ASCII.GetBytes(working_root.Text);
+            writer.Write(name);
+            writer.Write((byte)0);  // Null-termination
+
+            foreach (TreeNode node in working_root.Nodes)
+                _rec_writeResourceHeader(node, composite, writer, ref resource_count, type);
+
+            writer.Write((byte)255);  // Type - End of Folder
+            resource_count += 2;
+        }
+    }
+
+
+    /// <summary>
+    /// Recursively writes each texture file to the stream, writing it 
+    /// from the appropriate place where it exists.
+    /// </summary>
+    /// <param name="seek_locations">
+    /// An array to store the seek locations so that they can be written in the second pass.
+    /// </param>
+    /// <param name="chunk_sizes">
+    /// An array to store the chunk sizes so that they can be written in the second pass.
+    /// </param>
+    private static void _rec_writeTextureData( TreeNode working_root, 
+                                               RSComposite composite, 
+                                               BinaryWriter writer,
+                                               List<uint> seek_locations, 
+                                               List<int> chunk_sizes)
+    {
+        if (working_root.Name == composite.file_identifier[(int)RSComposite.ContentType.Texture])
+        {
+            RSTexture tex = (RSTexture)working_root.Tag;
+            seek_locations.Add((uint)writer.BaseStream.Position);
+
+            if( tex.data_location == RSContentContainer.DataLocation.File &&
+                tex.filename != "" && File.Exists( tex.filename))
+            {
+                // File :  Read the file into a data buffer, then write 
+                //      that buffer to the stream
+                byte[] data = File.ReadAllBytes(tex.filename);
+
+                writer.Write(data);
+            }
+            else if (tex.data_location == RSContentContainer.DataLocation.Memory &&
+                        tex.image != null)
+            {
+                // Memory :  Because image.Save can only write from the 0 offset,
+                //  we must save to a temporary file then copy that file into the 
+                //  composite.
+                string temp_file = Path.GetTempFileName();
+                tex.image.Save( temp_file, tex.image.RawFormat);
+
+                byte[] data = File.ReadAllBytes(temp_file);
+                writer.Write(data);
+
+                File.Delete(temp_file);
+            }
+            else if (tex.data_location == RSContentContainer.DataLocation.CompositeFile &&
+                        tex.filename != "" && File.Exists(tex.filename) )
+            {
+                // Composite : open the composite file, seek to the correct
+                //      position, then read the described amount of chunks.
+                BinaryReader reader = new BinaryReader(File.OpenRead(tex.filename));
+
+                // Verify that file is big enough to contain the chunk described
+                if (reader.BaseStream.Length <= (Int64)tex.seek_location + (Int64)tex.chunk_size)
+                {
+                    reader.BaseStream.Seek(tex.seek_location, SeekOrigin.Begin);
+
+                    byte[] data = reader.ReadBytes(tex.chunk_size);
+                }
+                else Debug.Write("Bad composite.");
+
+                reader.Close();
+            }
+
+            // Verify that the file has not exceeded 4GB (otherwise our
+            //  uint32 seek positions will corrupt).
+            if (writer.BaseStream.Position > uint.MaxValue)
+            {
+                writer.Seek(0, SeekOrigin.Begin);
+                writer.Write((UInt64)0);    // Clear Magic number to signify that the file is corrupt/incomplete
+                throw new Exception(ControlStrings.ErrorFileTooBig);
+            }
+
+            // Calculate the chunk size based on the present and previous positions.
+            chunk_sizes.Add( (int)(writer.BaseStream.Position - seek_locations.Last()));
+
+            return;
+        }
+        else
+        {
+            foreach (TreeNode node in working_root.Nodes)
+                _rec_writeTextureData(node, composite, writer, seek_locations, chunk_sizes);
+        }
+    }
+
+    /// <summary>
+    /// Recursively writes each model file to the stream, writing it 
+    /// from the appropriate place where it exists.
+    /// </summary>
+    /// <param name="seek_locations">
+    /// An array to store the seek locations so that they can be written in the second pass.
+    /// </param>
+    /// <param name="chunk_sizes">
+    /// An array to store the chunk sizes so that they can be written in the second pass.
+    /// </param>
+    private static void _rec_writeModelData( TreeNode working_root, 
+                                             RSComposite composite, 
+                                             BinaryWriter writer,
+                                             List<uint> seek_locations, 
+                                             List<int> chunk_sizes)
+    {
+        if (working_root.Name == composite.file_identifier[(int)RSComposite.ContentType.Model])
+        {
+            RSModel model = (RSModel)working_root.Tag;
+            seek_locations.Add((uint)writer.BaseStream.Position);
+
+            if (model.data_location == RSContentContainer.DataLocation.File &&
+                model.filename != "" && File.Exists(model.filename))
+            {
+                // File :  Read the file into a data buffer, then write 
+                //      that buffer to the stream
+                byte[] data = File.ReadAllBytes(model.filename);
+
+                writer.Write(data);
+            }
+            else if (model.data_location == RSContentContainer.DataLocation.Memory &&
+                        model.data != null)
+            {
+                // Export Model
+                ExportModel.exportModel(writer.BaseStream, model);
+            }
+            else if (model.data_location == RSContentContainer.DataLocation.CompositeFile &&
+                        model.filename != "" && File.Exists(model.filename))
+            {
+                // Composite : open the composite file, seek to the correct
+                //      position, then read the described amount of chunks.
+                BinaryReader reader = new BinaryReader(File.OpenRead(model.filename));
+
+                // Verify that file is big enough to contain the chunk described
+                if (reader.BaseStream.Length <= (Int64)model.seek_location + (Int64)model.chunk_size)
+                {
+                    reader.BaseStream.Seek(model.seek_location, SeekOrigin.Begin);
+
+                    byte[] data = reader.ReadBytes(model.chunk_size);
+                }
+                else Debug.Write("Bad composite.");
+
+                reader.Close();
+            }
+
+            // Verify that the file has not exceeded 4GB (otherwise our
+            //  uint32 seek positions will corrupt).
+            if (writer.BaseStream.Position > uint.MaxValue)
+            {
+                writer.Seek(0, SeekOrigin.Begin);
+                writer.Write((UInt64)0);    // Clear Magic number to signify that the file is corrupt/incomplete
+                throw new Exception(ControlStrings.ErrorFileTooBig);
+            }
+
+            // Calculate the chunk size based on the present and previous positions.
+            chunk_sizes.Add((int)(writer.BaseStream.Position - seek_locations.Last()));
+
+            return;
+        }
+        else
+        {
+            foreach (TreeNode node in working_root.Nodes)
+                _rec_writeModelData(node, composite, writer, seek_locations, chunk_sizes);
+        }
+    }
+
+
+    /// <summary>
+    /// Go back and fill the Resource Table with the provided seek locations
+    /// and chunk sizes (called once for each resource type).
+    /// </summary>
+    private static void _rec_fillHeader( TreeNode working_root, 
+                                         RSComposite composite, 
+                                         BinaryWriter writer,
+                                         List<uint> seek_locations, 
+                                         List<int> chunk_sizes, 
+                                         int type)
+    {
+        if (working_root.Name == composite.file_identifier[type])
+        {
+            writer.Seek(1, SeekOrigin.Current);
+            while (writer.BaseStream.ReadByte() != 0) ;
+
+
+            writer.Write(seek_locations[0]);
+            writer.Write(chunk_sizes[0]);
+
+            seek_locations.RemoveAt(0); // More of a queue than a list, but w/e
+            chunk_sizes.RemoveAt(0);
+            return;
+        }
+        else
+        {
+            writer.Seek(1, SeekOrigin.Current);
+            while (writer.BaseStream.ReadByte() != 0) ;
+
+            foreach (TreeNode node in working_root.Nodes)
+                _rec_fillHeader(node, composite, writer, seek_locations, chunk_sizes, type);
+        }
+    }
+}
+
+}

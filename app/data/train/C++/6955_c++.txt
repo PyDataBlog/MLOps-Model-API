@@ -1,0 +1,134 @@
+#include "engine.h"
+
+#include <arpa/inet.h>
+#include "buffer.h"
+#include "event_handler.h"
+#include "session.h"
+#include "tlog.h"
+
+using namespace std;
+using namespace boss;
+
+static uint32_t g_pkg_id = getpid() + time(NULL);
+
+int CProxyAcceptor::OnReadOver(CReactor *pReactor)
+{
+    try
+    {
+        CProxyFront *pTcpConn = new CProxyFront(m_iConnFd);
+        TLOG_DBG("connnect from [%s@%u]", pTcpConn->GetPeerIp(), pTcpConn->GetPeerPort());
+        pTcpConn->Wait(pReactor);
+    }
+    catch ( ... )
+    {
+        close(m_iConnFd);
+    }
+    return  0;
+}
+
+int CProxyFront::OnReadOver(CReactor *pReactor)
+{
+    StHead oHead;
+    m_oBuffer.GetHead(oHead);
+
+    StSession stSession;
+    bzero(&stSession, sizeof(stSession));
+
+    m_dwSeesionId = ++g_pkg_id;
+
+    stSession.dwPkgId       = m_dwSeesionId;
+    stSession.dwPkgIdBefore = oHead.dwSeqNo;
+    stSession.pLeft         = this;
+    stSession.pRight        = SESSION->GetServer(oHead);
+    if ( !stSession.pRight )
+    {
+        return -1;
+    }
+    stSession.pRight->SetSession(m_dwSeesionId);
+
+    m_oBuffer.SetSeqNo(stSession.dwPkgId);
+    SESSION->AddSession(stSession);
+    ++m_dwIncomplete;
+
+    TLOG_MSG(">>>session[%u],client seq[%u], front[%u],back[%u],from[%s:%u],to[%s:%u]"
+             , stSession.dwPkgId, stSession.dwPkgIdBefore
+             , stSession.pLeft->GetSeqNo(), stSession.pRight->GetSeqNo()
+             , stSession.pLeft->GetPeerIp(), stSession.pLeft->GetPeerPort()
+             , stSession.pRight->GetPeerIp(), stSession.pRight->GetPeerPort());
+
+    CBuffer *pBuffer = new CBuffer();
+    m_oBuffer.Transfer(pBuffer);
+    stSession.pRight->AddPkg(pBuffer, pReactor);
+    return 0;
+}
+
+int CProxyFront::OnWriteOver(CReactor *pReactor)
+{
+    --m_dwIncomplete;
+    return -1;
+}
+
+CProxyFront::~CProxyFront()
+{
+    //ÇåÀísession
+    //if (m_dwIncomplete > 0) //·ÇÕý³£½áÊø£¬±éÀúsessionÖÐÕÒµ½×Ô¼ºÉ¾³ý£¬Õý³£½áÊø²»»á½øÈëÕâÀï
+    //{
+    //TLOG_MSG("delete front tcp [%u][%p]", GetSeqNo(), this);
+    SESSION->Destroy(m_dwSeesionId);
+    //}
+}
+
+int CProxyBack::OnReadOver(CReactor *pReactor)
+{
+    StHead oHead;
+    m_oBuffer.GetHead(oHead);
+
+    StSession *pSession = NULL;
+    if (oHead.dwSeqNo != 0)
+    {
+        pSession = SESSION->GetSession(oHead.dwSeqNo);
+    }
+    else  //async cmd
+    {
+        pSession = SESSION->GetSession(this);
+    }
+
+    if ( !pSession )
+    {
+        TLOG_ERR("can't find the session client maybe closed![%u]", oHead.dwSeqNo);
+        return -1;//¹Ø±Õºó¶ËÁ¬½Ó
+    }
+
+    TLOG_MSG("<<<session[%u],client seq[%u], front[%u],back[%u],from[%s:%u],to[%s:%u]"
+             , pSession->dwPkgId, pSession->dwPkgIdBefore
+             , pSession->pLeft->GetSeqNo(), pSession->pRight->GetSeqNo()
+             , pSession->pRight->GetPeerIp(), pSession->pRight->GetPeerPort()
+             , pSession->pLeft->GetPeerIp(), pSession->pLeft->GetPeerPort());
+
+    m_oBuffer.SetSeqNo(pSession->dwPkgIdBefore);
+    CBuffer *pBuffer = new CBuffer();
+    m_oBuffer.Transfer(pBuffer);
+    pSession->pLeft->AddPkg(pBuffer, pReactor);
+    //SESSION->DeleteSession(oHead.dwSeqNo);
+    --m_dwIncomplete;
+    return 0;
+}
+
+int CProxyBack::OnWriteOver(CReactor *pReactor)
+{
+    ++m_dwIncomplete;
+    return 0;
+}
+
+CProxyBack::~CProxyBack()
+{
+	SESSION->DeleteSession(m_dwSeesionId);
+    //ÇåÀísession
+    // char szName[40] = {0};
+    // snprintf(szName, sizeof(szName), "%s:%u", m_sPeerIp.c_str(), m_dwPort);
+    // SESSION->DeleteServer(szName);
+    //if (m_dwIncomplete > 0) //·ÇÕý³£½áÊø£¬±éÀúsessionÖÐÕÒµ½×Ô¼ºÉ¾³ý£¬Õý³£½áÊø²»»á½øÈëÕâÀï
+    //{
+    //TLOG_MSG("delete backword tcp [%u][%p]", GetSeqNo(), this);
+    //}
+}

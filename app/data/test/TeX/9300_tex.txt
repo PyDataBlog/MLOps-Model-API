@@ -1,0 +1,332 @@
+\documentclass[final]{beamer}
+\mode<presentation>
+{
+  \usetheme{Cleartk}
+}
+
+\usepackage{color}
+\usepackage{times}
+\usepackage{amsmath,amssymb}
+\usepackage{sfmath} % for sans serif math fonts; wget http://dtrx.de/od/tex/sfmath.sty
+\usepackage[english]{babel}
+\usepackage[latin1]{inputenc}
+\usepackage[size=custom,height=91.44,width=60.96,scale=1.0]{beamerposter}
+\usepackage{booktabs,array}
+\usepackage{listings}
+\usepackage{xspace}
+\usepackage{fp}
+\usepackage{ifthen}
+\usepackage{listings}
+
+\usepackage{graphicx}
+
+\listfiles
+\newcommand*{\signstream}{SignStream\texttrademark\xspace}
+\newcommand{\code}[1]{\texttt{\small #1}}
+
+
+\lstset{
+  language=Java,
+  basicstyle=\scriptsize\ttfamily,
+  keywordstyle=\color{red!60!blue}\ttfamily\bfseries,
+  commentstyle=\color{green!50!black}\ttfamily,
+}
+
+
+
+
+\graphicspath{{/u/figures/}}
+
+% Display a grid to help align images
+%\beamertemplategridbackground[1cm]
+
+\title{\Huge ClearTK 2.0: Design Patterns for Machine Learning in UIMA\\[0.2ex]}
+
+\author{Steven Bethard\inst{1}, Philip Ogren\inst{2}, Lee Becker\inst{2}}
+\institute[] % (optional, but mostly needed)
+{
+  \inst{1}%
+  University of Alabama at Birmingham, Birmingham, AL, USA
+  \\
+  \inst{2}%
+  University of Colorado Boulder, Boulder, CO, USA
+}
+
+\date[May. 29th, 2014]{May. 29th, 2014}
+
+\begin{document}
+
+
+\begin{frame}[fragile]
+
+\vspace{-1cm}
+\begin{columns}[t]
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  \begin{column}{.45\linewidth}
+    \begin{block}{Overview}
+      \begin{itemize}
+      \item ClearTK: machine learning in the UIMA framework
+
+        \begin{itemize}
+        \item Common interface to SVMlight, LIBLINEAR, OpenNLP MaxEnt, Mallet, \ldots
+        \item Rich feature extraction library
+        \item Evaluation of machine learning classifiers
+        \item UIMA wrappers for Stanford CoreNLP, CLEAR Parser, \ldots
+        \end{itemize}
+
+      \bigskip
+      \item Reflections on 5 years of code-base evolution:
+        \begin{itemize}
+        \item best practices for UIMA components that rely on machine learning 
+        \item design patterns for more robust and accessible NLP frameworks
+        \end{itemize}
+      \end{itemize}
+    \end{block}
+    
+
+    \begin{block}{Annotators should be conceptually simple}
+      \begin{itemize}
+      \item Annotators should focus on a \code{process} method that:
+        \begin{itemize}
+        \item Extracts annotations that were previously stored
+        \item Uses these annotations in machine learning models
+        \item Creates new annotations and adds them to the store
+        \end{itemize}
+      \bigskip
+      \item Original ClearTK used callbacks, obfuscating flow:
+\begin{lstlisting}
+public class ClassifierAnnotator<T> implements InstanceConsumer<T> {
+  public void process(JCas jCas) throws AnalysisEngineProcessException {
+    this.annotationHandler.process(jCas, this);
+  }
+}
+public class NamedEntityChunker implements AnnotationHandler<T> {
+  public void process(JCas jCas, InstanceConsumer<T> consumer) {
+    ...
+  }
+}
+\end{lstlisting}
+      \item Modern ClearTK leverages standard UIMA \code{process} method:
+\begin{lstlisting}
+public class NamedEntityChunker extends CleartkSequenceAnnotator<String> {
+  ...
+  public void process(JCas jCas) throws AnalysisEngineProcessException {
+    for (Sentence sentence : JCasUtil.select(jCas, Sentence.class)) {
+      // extract features for each token in the sentence
+      List<Token> tokens = JCasUtil.selectCovered(jCas, Token.class, sentence);
+      List<List<Feature>> featureLists = new ArrayList<>();
+      for (Token token : tokens) {
+        List<Feature> features = new ArrayList<>();
+        features.addAll(this.extractor.extract(jCas, token));
+        features.addAll(this.contextExtractor.extract(jCas, token));
+        featureLists.add(features);
+      }
+      // during training, convert annotations from the CAS into BIO labels
+      if (this.isTraining()) {
+        List<NamedEntityMention> namedEntityMentions = JCasUtil.selectCovered(
+            jCas, NamedEntityMention.class, sentence);
+        List<String> outcomes = this.chunking.createOutcomes(
+            jCas, tokens, namedEntityMentions);
+        this.dataWriter.write(Instances.toInstances(outcomes, featureLists));
+      }
+      // during classification, convert BIO labels into annotations in the CAS
+      else {
+        List<String> outcomes = this.classifier.classify(featureLists);
+        this.chunking.createChunks(jCas, tokens, outcomes);
+      }
+    }
+  }
+}
+\end{lstlisting}
+    \end{itemize}
+    \end{block}
+
+    \begin{block}{Collection readers should be minimal}
+      \begin{itemize}
+              \item UIMA allows only a single \code{CollectionReader} per pipeline
+              \item Original ClearTK provided CollectionReaders for each corpus
+                      \begin{itemize}
+                      \item Difficult to import from multiple corpora simultaneously
+                      \item Difficult to parse annotations from corpora in parallel
+                      \end{itemize}
+              \item Modern ClearTK recommends:
+                      \begin{itemize}
+                      \item Use only the \code{URICollectionReader}
+                      \item Implement file format parsing in \code{AnalysisEngine}s
+                      \end{itemize}
+      \end{itemize}
+    \end{block}
+
+
+    \begin{block}{Code should be type system agnostic}
+    \begin{itemize}
+        \item ClearTK, DKPro, OpenNLP all define \code{Token}, etc. differently
+        \item Good frameworks should work with any annotation types
+    \bigskip
+        \item In ClearTK:
+        \begin{itemize}
+            \item Machine learning framework is type system independent:
+\begin{lstlisting}
+this.classifier.classify(Arrays.asList(
+    new Feature("text", annotation.getCoveredText(),
+    new Feature("size", annotation.getCoveredText().length(),
+));
+\end{lstlisting}
+            \item Experimental type system independent interfaces (\code{cleartk-clearnlp}):
+\begin{lstlisting}
+@Beta
+public interface TokenOps<TOKEN_TYPE> {
+  TOKEN_TYPE createToken(JCas jCas, int begin, int end);
+  List<TOKEN_TYPE> selectTokens(JCas jCas, Annotation coveringAnnotation);
+  String getPos(JCas jCas, TOKEN_TYPE token);
+  ...
+}
+\end{lstlisting}
+        \end{itemize}
+    \end{itemize}
+                    
+    \end{block}
+
+
+  \end{column}
+
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+  % Begin second column
+  %%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+
+  \begin{column}{.45\linewidth}
+    
+
+
+    \begin{block}{Pipelines should look like pipelines}
+        \begin{itemize}
+            \item Should be easy to see what components are in a pipeline
+            \item Original ClearTK evaluation broke pipeline into many pieces
+\begin{lstlisting}
+public interface CleartkPipelineProvider {
+  public List<AnalysisEngine> getTrainingPipeline(String name);
+  public void trainingPipelineComplete(String name, List<AnalysisEngine> engines);
+  public void trainingComplete();
+  public void train(String name, String... trainingArguments);
+  ...
+}
+\end{lstlisting}
+            \item Modern ClearTK evaluation makes it easy to see flow:
+\begin{lstlisting}
+public void train(CollectionReader collectionReader, File outputDirectory) {
+  // assemble the training pipeline
+  AggregateBuilder aggregate = new AggregateBuilder();
+  aggregate.add(UriToDocumentTextAnnotator.getDescription());
+  aggregate.add(MascGoldAnnotator.getDescription());
+  aggregate.add(PosTaggerAnnotator.getDescription());
+  aggregate.add(AnalysisEngineFactory.createEngineDescription(
+      NamedEntityChunker.class,
+      PARAM_IS_TRAINING, true,
+      PARAM_OUTPUT_DIRECTORY, outputDirectory,
+      PARAM_DATA_WRITER_CLASS_NAME, MalletCrfStringOutcomeDataWriter.class));
+  // run the pipeline over the training corpus
+  SimplePipeline.runPipeline(
+      collectionReader, aggregate.createAggregateDescription());
+  // train a Mallet CRF model on the training data
+  Train.main(outputDirectory);
+}
+\end{lstlisting}
+    \end{itemize}
+
+    \end{block}
+
+
+
+
+
+    \begin{block}{Modules should match natural subsets}
+            \begin{itemize}
+                    \item Better module organization $\Rightarrow$ better dependency management
+                    \item Organize around programmer needs not annotations or corpora
+            \end{itemize}
+            \bigskip
+            \begin{center}\small
+                    \begin{tabular*}{.90\linewidth}{ll|ll}
+                    \cline{1-4}
+                    \cline{1-4}
+                    \multicolumn{2}{c|}{\textbf{Original ClearTK Organization}}  & \multicolumn{2}{c}{\textbf{Modern ClearTK Organization}}\\
+                    \cline{1-4}
+                    \cline{1-4}
+                    Machine          & chunker          & Machine          & ml\\
+                    Learning         & ml               & Learning         & ml-opennlp-maxent \\
+                                     & ml-grmm          &                  & ml-svmlight \\
+                                     & ml-libsvm        &                  & ml-tksvmlight \\
+                                     & ml-mallet        &                  & ml-liblinear \\ 
+                                     & ml-opennlp-maxent &                 & ml-libsvm \\
+                                     & ml-svmlight       &                 & ml-libsvm-tk\\
+                                     &                           &                 & ml-mallet \\
+                                     &                           &                 & ml-crfsuite \\
+                                     &                           &                 & ml-weka \\
+                    \cline{1-4}
+                    Evaluation       & eval              & Evaluation      & eval \\
+                    \cline{1-4}
+                    Linguistic       & named-entity  & Type System & type-system \\
+                    Phenomena            & semantic-roles & Dependent  & corpus \\
+                                         & stanford-corenlp &                    & feature\\
+                                        \cline{3-4}
+                                         & syntax           & Wrappers & snowball \\
+                                         & syntax-berkeley  &                    & opennlp-tools \\
+                                         & syntax-dependency &                   & berkeleyparser\\
+                                         & syntax-dependency-clear &             & clearnlp\\
+                                         & syntax-dependency-malt &              & maltparser\\
+                                         & syntax-opennlp &                      & stanford-corenlp\\
+                                        \cline{3-4}
+                                         & timeml         & Home-grown & token \\
+                                         & token          & Components            & summarization\\
+                                         &                        &                       & timeml \\
+                                         &                        &                       & examples \\
+                    \cline{1-4}
+                    \end{tabular*}
+            \end{center}
+
+
+    \end{block}
+
+    \begin{block}{Users need help past the UIMA overhead}
+
+            \begin{itemize}
+                    \item New ClearTK users just want to extract features, train a classifier
+                    \bigskip
+                    \item UIMA's expects a developer to first:
+                            \begin{itemize}
+                                    \item declare a type system
+                                    \item configure autogeneration of Java classes from the type system
+                                    \item write code to import training data into the CAS
+                                    \item manage parameters for annotator initialization
+                                    \item instantiate the AnalysisEngine for execution
+                                    \item \ldots
+                            \end{itemize}
+                    \bigskip
+                    \item One successful ClearTK adoption model:
+                            \begin{itemize}
+                                    \item Have an expert create UIMA scaffold for a task
+                                    \item Allow novices to implement feature extraction
+                            \end{itemize}
+
+            \end{itemize}
+    \end{block}
+
+    \begin{block}{Acknowledgments}
+            \footnotesize
+            This research was supported in part by the Strategic Health IT Advanced Research Projects (SHARP) Program (90TR002) from the Office of the National Coordinator for Health Information Technology, and by Grant Number R01LM010090 from the National Library Of Medicine. The content is solely the responsibility of the authors and does not necessarily represent the official views of the Office of the National Coordinator for Health Information Technology, the National Library Of Medicine or the National Institutes of Health.
+    \end{block}
+    
+  \end{column}
+
+\end{columns}
+\vfill
+\end{frame}
+
+\end{document}
+
+
+%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%%
+%%% Local Variables: 
+%%% mode: latex
+%%% TeX-PDF-mode: t

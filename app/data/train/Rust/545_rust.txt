@@ -1,0 +1,614 @@
+// Copyright 2016 Kyle Mayes
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+#![feature(plugin, plugin_registrar, rustc_private)]
+
+#![cfg_attr(feature="clippy", plugin(clippy))]
+#![cfg_attr(feature="clippy", warn(clippy))]
+
+#![allow(plugin_as_library)]
+#![plugin(synthax)]
+
+extern crate rustc_plugin;
+extern crate syntax;
+extern crate synthax;
+
+use syntax::print::pprust;
+use syntax::abi::{Abi};
+use syntax::ast::{ForeignItemKind, Unsafety, Visibility};
+use syntax::codemap::{ExpnInfo, MacroAttribute, NameAndSpan, DUMMY_SP};
+use syntax::ext::base::{DummyResolver, ExtCtxt};
+use syntax::ext::expand::{ExpansionConfig};
+use syntax::parse::{ParseSess};
+use syntax::parse::token::{BinOpToken, DelimToken, Lit, Token};
+use syntax::symbol::{Symbol};
+
+//================================================
+// Macros
+//================================================
+
+// assert_ast_eq! ________________________________
+
+macro_rules! assert_ast_eq {
+    ($print:ident, $left:expr, $right:expr) => (assert_eq!(pprust::$print($left), $right));
+}
+
+//================================================
+// Functions
+//================================================
+
+fn with_context<F: Fn(&ExtCtxt)>(f: F) {
+    let session = ParseSess::new();
+    let config = ExpansionConfig::default("".into());
+    let mut resolver = DummyResolver;
+    let mut context = ExtCtxt::new(&session, config, &mut resolver);
+    let info = ExpnInfo {
+        call_site: DUMMY_SP,
+        callee: NameAndSpan {
+            format: MacroAttribute(Symbol::intern("test")),
+            allow_internal_unstable: false,
+            span: None,
+        },
+    };
+    context.bt_push(info);
+    f(&context);
+}
+
+#[test]
+fn test_quote_token_trees() {
+    with_context(|c| {
+        let tts = quote_token_trees!(c, =);
+        assert_eq!(tts.len(), 1);
+        assert!(tts[0].eq_token(Token::Eq));
+
+        let tts = quote_token_trees!(c, +);
+        assert_eq!(tts.len(), 1);
+        assert!(tts[0].eq_token(Token::BinOp(BinOpToken::Plus)));
+
+        let tts = quote_token_trees!(c, 322);
+        assert_eq!(tts.len(), 1);
+        let lit = Lit::Integer(Symbol::intern("322"));
+        assert!(tts[0].eq_token(Token::Literal(lit, None)));
+
+        let tts = quote_token_trees!(c, 322u32);
+        assert_eq!(tts.len(), 1);
+        assert!(tts[0].eq_token(Token::Literal(lit, Some(Symbol::intern("u32")))));
+
+        let tts = quote_token_trees!(c, foo);
+        assert_eq!(tts.len(), 1);
+        assert!(tts[0].eq_token(Token::Ident(c.ident_of("foo"))));
+
+        let tts = quote_token_trees!(c, 'bar);
+        assert_eq!(tts.len(), 1);
+        assert!(tts[0].eq_token(Token::Lifetime(c.ident_of("'bar"))));
+
+        let tts = quote_token_trees!(c,
+            /// Documentation.
+        );
+        assert_eq!(tts.len(), 1);
+        assert!(tts[0].eq_token(Token::DocComment(Symbol::intern("/// Documentation."))));
+
+        let tts = quote_token_trees!(c, foo + bar);
+        assert_eq!(tts.len(), 3);
+        assert!(tts[0].eq_token(Token::Ident(c.ident_of("foo"))));
+        assert!(tts[1].eq_token(Token::BinOp(BinOpToken::Plus)));
+        assert!(tts[2].eq_token(Token::Ident(c.ident_of("bar"))));
+
+        let tts = quote_token_trees!(c, (foo + bar));
+        assert_eq!(tts.len(), 5);
+        assert!(tts[0].eq_token(Token::OpenDelim(DelimToken::Paren)));
+        assert!(tts[1].eq_token(Token::Ident(c.ident_of("foo"))));
+        assert!(tts[2].eq_token(Token::BinOp(BinOpToken::Plus)));
+        assert!(tts[3].eq_token(Token::Ident(c.ident_of("bar"))));
+        assert!(tts[4].eq_token(Token::CloseDelim(DelimToken::Paren)));
+    });
+}
+
+#[test]
+fn test_quote_arg() {
+    with_context(|c| {
+        let arg = quote_arg!(c, foo: i32);
+        assert_ast_eq!(arg_to_string, &arg, "foo: i32");
+
+        let tts = quote_token_trees!(c, foo: i32);
+        let arg = quote_arg!(c, $($tts)*);
+        assert_ast_eq!(arg_to_string, &arg, "foo: i32");
+
+        let pat = quote_pat!(c, foo);
+        let ty = quote_ty!(c, i32);
+        let arg = quote_arg!(c, $pat: $ty);
+        assert_ast_eq!(arg_to_string, &arg, "foo: i32");
+    });
+}
+
+#[test]
+fn test_quote_arm() {
+    with_context(|c| {
+        let arm = quote_arm!(c, foo if bar => { baz });
+        assert_ast_eq!(arm_to_string, &arm, " foo if bar => { baz }");
+
+        let pat = quote_pat!(c, foo);
+        let guard = quote_expr!(c, bar);
+        let body = quote_expr!(c, { baz });
+        let arm = quote_arm!(c, $pat if $guard => $body);
+        assert_ast_eq!(arm_to_string, &arm, " foo if bar => { baz }");
+    });
+}
+
+#[test]
+fn test_quote_attribute() {
+    with_context(|c| {
+        let attribute = quote_attribute!(c, #![feature(quote)]);
+        assert_ast_eq!(attribute_to_string, &attribute, "#![feature(quote)]");
+
+        let meta = quote_meta_item!(c, feature(quote));
+        let attribute = quote_attribute!(c, #![$meta]);
+        assert_ast_eq!(attribute_to_string, &attribute, "#![feature(quote)]");
+    });
+}
+
+#[test]
+fn test_quote_bare_fn_ty() {
+    with_context(|c| {
+        let ty = quote_bare_fn_ty!(c, extern "C" fn(foo: i32) -> f32);
+        assert_eq!(ty.unsafety, Unsafety::Normal);
+        assert_eq!(ty.abi, Abi::C);
+        assert_eq!(ty.lifetimes.len(), 0);
+        assert_ast_eq!(fn_block_to_string, &ty.decl, "|foo: i32| -> f32");
+
+        let decl = quote_fn_decl!(c, (foo: i32) -> f32);
+        let ty = quote_bare_fn_ty!(c, extern "C" fn $decl);
+        assert_eq!(ty.unsafety, Unsafety::Normal);
+        assert_eq!(ty.abi, Abi::C);
+        assert_eq!(ty.lifetimes.len(), 0);
+        assert_ast_eq!(fn_block_to_string, &ty.decl, "|foo: i32| -> f32");
+    });
+}
+
+#[test]
+fn test_quote_block() {
+    with_context(|c| {
+        let block = quote_block!(c, { let foo = bar; });
+        assert_ast_eq!(block_to_string, &block, "{ let foo = bar; }");
+
+        let stmt = quote_stmt!(c, let foo = bar;).unwrap();
+        let block = quote_block!(c, { $stmt });
+        assert_ast_eq!(block_to_string, &block, "{ let foo = bar; }");
+
+        let expr = quote_expr!(c, foo);
+        let block = quote_block!(c, { $stmt $expr });
+        assert_ast_eq!(block_to_string, &block, "{ let foo = bar; foo }");
+    });
+}
+
+#[test]
+fn test_quote_expr() {
+    with_context(|c| {
+        let expr = quote_expr!(c, 17 + 322);
+        assert_ast_eq!(expr_to_string, &expr, "17 + 322");
+
+        let left = quote_lit!(c, 17);
+        let op = Token::BinOp(BinOpToken::Plus);
+        let right = quote_lit!(c, 322);
+        let expr = quote_expr!(c, $left $op $right);
+        assert_ast_eq!(expr_to_string, &expr, "17 + 322");
+
+        let exprs = vec![left, right];
+        let expr = quote_expr!(c, $($exprs) +*);
+        assert_ast_eq!(expr_to_string, &expr, "17 + 322");
+
+        let left = quote_field!(c, a: 322);
+        let right = quote_field!(c, b: 17);
+        let expr = quote_expr!(c, Struct { $left, $right });
+        assert_ast_eq!(expr_to_string, &expr, "Struct{a: 322, b: 17,}");
+
+        let fields = vec![left, right];
+        let expr = quote_expr!(c, Struct { ${fields[0]}, ${fields[1]} });
+        assert_ast_eq!(expr_to_string, &expr, "Struct{a: 322, b: 17,}");
+
+        let expr = quote_expr!(c, Struct { $($fields), * });
+        assert_ast_eq!(expr_to_string, &expr, "Struct{a: 322, b: 17,}");
+
+        let expr = quote_expr!(c, Struct { $(${&fields[..1]}), * });
+        assert_ast_eq!(expr_to_string, &expr, "Struct{a: 322,}");
+
+        let idents = vec![c.ident_of("foo"), c.ident_of("baz")];
+        let ident = c.ident_of("bar");
+        let expr = quote_expr!(c, $($idents + ($ident * 2)) +*);
+        assert_ast_eq!(expr_to_string, &expr, "foo + (bar * 2) + baz + (bar * 2)");
+    });
+}
+
+#[test]
+fn test_quote_field() {
+    with_context(|c| {
+        let field = quote_field!(c, foo: 322);
+        assert_eq!(field.ident.node.name, "foo");
+        assert_ast_eq!(expr_to_string, &field.expr, "322");
+
+        let ident = c.ident_of("foo");
+        let expr = quote_expr!(c, 322);
+        let field = quote_field!(c, $ident: $expr);
+        assert_eq!(field.ident.node.name, "foo");
+        assert_ast_eq!(expr_to_string, &field.expr, "322");
+    });
+}
+
+#[test]
+fn test_quote_field_pat() {
+    with_context(|c| {
+        let pat = quote_field_pat!(c, ref mut foo);
+        assert_eq!(pat.ident.name, "foo");
+        assert_ast_eq!(pat_to_string, &pat.pat, "ref mut foo");
+        assert!(pat.is_shorthand);
+
+        let pat = quote_field_pat!(c, foo: ref mut foo);
+        assert_eq!(pat.ident.name, "foo");
+        assert_ast_eq!(pat_to_string, &pat.pat, "ref mut foo");
+        assert!(!pat.is_shorthand);
+    });
+}
+
+#[test]
+fn test_quote_fn_decl() {
+    with_context(|c| {
+        let decl = quote_fn_decl!(c, (foo: i32) -> f32);
+        assert_ast_eq!(fn_block_to_string, &decl, "|foo: i32| -> f32");
+
+        let arg = quote_arg!(c, foo: i32);
+        let ty = quote_ty!(c, f32);
+        let decl = quote_fn_decl!(c, ($arg) -> $ty);
+        assert_ast_eq!(fn_block_to_string, &decl, "|foo: i32| -> f32");
+
+        let idents = vec![c.ident_of("foo"), c.ident_of("bar")];
+        let ty1 = quote_ty!(c, i32);
+        let ty2 = quote_ty!(c, i64);
+        let tys = vec![ty1, ty2];
+        let decl = quote_fn_decl!(c, ($($idents: $tys), *) -> $ty);
+        assert_ast_eq!(fn_block_to_string, &decl, "|foo: i32, bar: i64| -> f32");
+
+        let ty = quote_ty!(c, i32);
+        let tys = vec![ty];
+        let decl = quote_fn_decl!(c, ($($idents: $($tys), *), *) -> f32);
+        assert_ast_eq!(fn_block_to_string, &decl, "|foo: i32, bar: i32| -> f32");
+
+        let arg1 = quote_arg!(c, foo: i32);
+        let arg2 = quote_arg!(c, bar: i64);
+        let args = vec![arg1, arg2];
+        let decl = quote_fn_decl!(c, ($($args), *) -> f32);
+        assert_ast_eq!(fn_block_to_string, &decl, "|foo: i32, bar: i64| -> f32");
+    });
+}
+
+#[test]
+fn test_quote_foreign_item() {
+    with_context(|c| {
+        let item = quote_foreign_item!(c, fn foo(bar: i32, ...) -> f32;);
+        assert_eq!(item.ident.name, "foo");
+        match item.node {
+            ForeignItemKind::Fn(ref decl, ref generics) => {
+                assert!(decl.variadic);
+                assert_ast_eq!(fn_block_to_string, decl, "|bar: i32| -> f32");
+                assert_ast_eq!(generics_to_string, generics, "");
+            },
+            _ => panic!("expected foreign fn"),
+        }
+
+        let item = quote_foreign_item!(c, static mut foo: i32;);
+        assert_eq!(item.ident.name, "foo");
+        match item.node {
+            ForeignItemKind::Static(ref ty, ref mutable) => {
+                assert!(mutable);
+                assert_ast_eq!(ty_to_string, ty, "i32");
+            },
+            _ => panic!("expected foreign static"),
+        }
+    });
+}
+
+#[test]
+fn test_quote_foreign_mod() {
+    with_context(|c| {
+        let item = quote_foreign_mod!(c, extern { fn foo(bar: i32, ...) -> f32; });
+        assert_eq!(item.items.len(), 1);
+        assert_eq!(item.items[0].ident.name, "foo");
+        match item.items[0].node {
+            ForeignItemKind::Fn(ref decl, ref generics) => {
+                assert!(decl.variadic);
+                assert_ast_eq!(fn_block_to_string, decl, "|bar: i32| -> f32");
+                assert_ast_eq!(generics_to_string, generics, "");
+            },
+            _ => panic!("expected foreign fn"),
+        }
+
+        let item = quote_foreign_mod!(c, extern { static mut foo: i32; });
+        assert_eq!(item.items.len(), 1);
+        assert_eq!(item.items[0].ident.name, "foo");
+        match item.items[0].node {
+            ForeignItemKind::Static(ref ty, ref mutable) => {
+                assert!(mutable);
+                assert_ast_eq!(ty_to_string, ty, "i32");
+            },
+            _ => panic!("expected foreign static"),
+        }
+    });
+}
+
+#[test]
+fn test_quote_generics() {
+    with_context(|c| {
+        let generics = quote_generics!(c, <'foo, Bar: Baz>);
+        assert_ast_eq!(generics_to_string, &generics, "<'foo, Bar: Baz>");
+
+        let lftm = quote_lifetime!(c, 'foo);
+        let ident = c.ident_of("Bar");
+        let bound = c.ident_of("Baz");
+        let generics = quote_generics!(c, <$lftm, $ident: $bound>);
+        assert_ast_eq!(generics_to_string, &generics, "<'foo, Bar: Baz>");
+    });
+}
+
+#[test]
+fn test_quote_impl_item() {
+    with_context(|c| {
+        let item = quote_impl_item!(c, fn foo(&self, bar: i32) { });
+        assert_ast_eq!(impl_item_to_string, &item, "fn foo(&self, bar: i32) { }");
+
+        let ident = c.ident_of("foo");
+        let arg = quote_arg!(c, bar: i32);
+        let block = quote_block!(c, { });
+        let item = quote_impl_item!(c, fn $ident(&self, $arg) $block);
+        assert_ast_eq!(impl_item_to_string, &item, "fn foo(&self, bar: i32) { }");
+    });
+}
+
+#[test]
+fn test_quote_item() {
+    with_context(|c| {
+        let item = quote_item!(c, struct Foo { bar: i32 }).unwrap();
+        assert_ast_eq!(item_to_string, &item, "struct Foo {\n    bar: i32,\n}");
+
+        let ident = c.ident_of("Foo");
+        let item = quote_item!(c, struct $ident { bar: i32 }).unwrap();
+        assert_ast_eq!(item_to_string, &item, "struct Foo {\n    bar: i32,\n}");
+
+        let ident = c.ident_of("foo");
+
+        let decl = quote_fn_decl!(c, (bar: i32));
+        let item = quote_item!(c, fn $ident $decl { }).unwrap();
+        assert_ast_eq!(item_to_string, &item, "fn foo(bar: i32) { }");
+
+        let decl = quote_fn_decl!(c, (bar: i32) -> f32);
+        let item = quote_item!(c, fn $ident $decl { }).unwrap();
+        assert_ast_eq!(item_to_string, &item, "fn foo(bar: i32) -> f32 { }");
+
+        let decl = quote_fn_decl!(c, (bar: i32) -> !);
+        let item = quote_item!(c, fn $ident $decl { }).unwrap();
+        assert_ast_eq!(item_to_string, &item, "fn foo(bar: i32) -> ! { }");
+
+        let item = quote_foreign_item!(c, fn foo<T>(bar: i32, ...) -> f32;);
+        let item = quote_item!(c, extern { $item }).unwrap();
+        assert_ast_eq!(item_to_string, &item, "extern \"C\" {\n    fn foo<T>(bar: i32, ...) -> f32;\n}");
+
+        let item = quote_foreign_item!(c, static mut foo: i32;);
+        let item = quote_item!(c, extern { $item }).unwrap();
+        assert_ast_eq!(item_to_string, &item, "extern \"C\" {\n    static mut foo: i32;\n}");
+
+        let item = quote_foreign_mod!(c, extern { static mut foo: i32; });
+        let item = quote_item!(c, $item).unwrap();
+        assert_ast_eq!(item_to_string, &item, "extern \"C\" {\n    static mut foo: i32;\n}");
+
+        let field1 = quote_struct_field!(c, #[foo] foo: i32);
+        let field2 = quote_struct_field!(c, pub bar: f32);
+        let fields = vec![field1, field2];
+        let item = quote_item!(c, struct Struct { $($fields), * }).unwrap();
+            assert_ast_eq!(item_to_string, &item, r#"struct Struct {
+    #[foo]
+    foo: i32,
+    pub bar: f32,
+}"#);
+
+
+        let variant1 = quote_variant!(c, #[foo] Foo);
+        let variant2 = quote_variant!(c, Bar(i32));
+        let variant3 = quote_variant!(c, #[baz] Baz { #[baz] baz: i32 });
+        let variants = vec![variant1, variant2, variant3];
+        let item = quote_item!(c, enum Enum { $($variants), * }).unwrap();
+        assert_ast_eq!(item_to_string, &item, r#"enum Enum {
+
+    #[foo]
+    Foo,
+    Bar(i32),
+
+    #[baz]
+    Baz {
+        #[baz]
+        baz: i32,
+    },
+}"#);
+    });
+}
+
+#[test]
+fn test_quote_lifetime() {
+    with_context(|c| {
+        let lftm = quote_lifetime!(c, 'foo);
+        assert_ast_eq!(lifetime_to_string, &lftm, "'foo");
+    });
+}
+
+#[test]
+fn test_quote_lit() {
+    with_context(|c| {
+        let lit = quote_lit!(c, 322u32);
+        assert_ast_eq!(lit_to_string, &lit, "322u32");
+    });
+}
+
+#[test]
+fn test_quote_local() {
+    with_context(|c| {
+        let local = quote_local!(c, let foo: i32 = baz);
+        assert_ast_eq!(pat_to_string, &local.pat, "foo");
+        assert_ast_eq!(ty_to_string, local.ty.as_ref().unwrap(), "i32");
+        assert_ast_eq!(expr_to_string, local.init.as_ref().unwrap(), "baz");
+    });
+}
+
+#[test]
+fn test_quote_meta_item() {
+    with_context(|c| {
+        let meta = quote_meta_item!(c, foo(bar, baz));
+        assert_ast_eq!(meta_item_to_string, &meta, "foo(bar, baz)");
+
+        let ident = c.ident_of("foo");
+        let left = quote_meta_item!(c, bar);
+        let right = quote_meta_item!(c, baz);
+        let meta = quote_meta_item!(c, $ident($left, $right));
+        assert_ast_eq!(meta_item_to_string, &meta, "foo(bar, baz)");
+
+        let ident = c.ident_of("foo");
+        let meta1 = quote_meta_item!(c, bar);
+        let meta2 = quote_meta_item!(c, baz);
+        let metas = vec![meta1, meta2];
+        let meta = quote_meta_item!(c, $ident($($metas), *));
+        assert_ast_eq!(meta_item_to_string, &meta, "foo(bar, baz)");
+    });
+}
+
+#[test]
+fn test_quote_pat() {
+    with_context(|c| {
+        let pat = quote_pat!(c, (foo, bar));
+        assert_ast_eq!(pat_to_string, &pat, "(foo, bar)");
+
+        let left = c.ident_of("foo");
+        let right = c.ident_of("bar");
+        let pat = quote_pat!(c, ($left, $right));
+        assert_ast_eq!(pat_to_string, &pat, "(foo, bar)");
+
+        let idents = vec![left, right];
+        let pat = quote_pat!(c, ($(ref $idents), *));
+        assert_ast_eq!(pat_to_string, &pat, "(ref foo, ref bar)");
+
+        let pat = quote_field_pat!(c, ref mut bar);
+        let pat = quote_pat!(c, Foo { $pat, baz: ref baz });
+        assert_ast_eq!(pat_to_string, &pat, "Foo { bar: ref mut bar, baz: ref baz }");
+    });
+}
+
+#[test]
+fn test_quote_path() {
+    with_context(|c| {
+        let path = quote_path!(c, ::foo::bar<'a>::baz<T>);
+        assert_ast_eq!(path_to_string, &path, "::foo::bar<'a>::baz<T>");
+
+        let one = c.ident_of("foo");
+        let two = c.ident_of("bar");
+        let three = c.ident_of("baz");
+        let path = quote_path!(c, ::$one::$two<'a>::$three<T>);
+        assert_ast_eq!(path_to_string, &path, "::foo::bar<'a>::baz<T>");
+    });
+}
+
+#[test]
+fn test_quote_stmt() {
+    with_context(|c| {
+        let stmt = quote_stmt!(c, let foo = bar;).unwrap();
+        assert_ast_eq!(stmt_to_string, &stmt, "let foo = bar;");
+
+        let ident = c.ident_of("foo");
+        let ty = quote_ty!(c, i32);
+        let expr = quote_expr!(c, bar);
+        let stmt = quote_stmt!(c, let $ident: $ty = $expr;).unwrap();
+        assert_ast_eq!(stmt_to_string, &stmt, "let foo: i32 = bar;");
+
+        let local = quote_local!(c, let foo: i32 = bar);
+        let stmt = quote_stmt!(c, $local;).unwrap();
+        assert_ast_eq!(stmt_to_string, &stmt, "let foo: i32 = bar;");
+    });
+}
+
+#[test]
+fn test_quote_struct_field() {
+    with_context(|c| {
+        let field = quote_struct_field!(c, pub foo: i32);
+        assert_eq!(field.vis, Visibility::Public);
+        assert_eq!(field.ident.unwrap().name, "foo");
+        assert_ast_eq!(ty_to_string, &field.ty, "i32");
+
+        let ident = c.ident_of("foo");
+        let ty = quote_ty!(c, i32);
+        let field = quote_struct_field!(c, pub $ident: $ty);
+        assert_eq!(field.vis, Visibility::Public);
+        assert_eq!(field.ident.unwrap().name, "foo");
+        assert_ast_eq!(ty_to_string, &field.ty, "i32");
+    });
+}
+
+#[test]
+fn test_quote_trait_item() {
+    with_context(|c| {
+        let item = quote_trait_item!(c, fn foo(&self, bar: i32) { });
+        assert_ast_eq!(trait_item_to_string, &item, "fn foo(&self, bar: i32) { }");
+
+        let ident = c.ident_of("foo");
+        let arg = quote_arg!(c, bar: i32);
+        let item = quote_trait_item!(c, fn $ident(&self, $arg) { });
+        assert_ast_eq!(trait_item_to_string, &item, "fn foo(&self, bar: i32) { }");
+    });
+}
+
+#[test]
+fn test_quote_ty() {
+    with_context(|c| {
+        let ty = quote_ty!(c, i32);
+        assert_ast_eq!(ty_to_string, &ty, "i32");
+
+        let ty = quote_bare_fn_ty!(c, extern "C" fn(foo: i32) -> f32);
+        let ty = quote_ty!(c, $ty);
+        assert_ast_eq!(ty_to_string, &ty, r#"extern "C" fn(foo: i32) -> f32"#);
+    });
+}
+
+#[test]
+fn test_quote_variant() {
+    with_context(|c| {
+        let variant = quote_variant!(c, Foo);
+        assert_ast_eq!(variant_to_string, &variant, "Foo");
+
+        let variant = quote_variant!(c, Foo = 322);
+        assert_ast_eq!(variant_to_string, &variant, "Foo = 322");
+
+        let variant = quote_variant!(c, Foo(i32));
+        assert_ast_eq!(variant_to_string, &variant, "Foo(i32)");
+
+        let variant = quote_variant!(c, Foo { bar: i32 });
+        assert_ast_eq!(variant_to_string, &variant, "Foo {\n    bar: i32,\n}");
+    });
+}
+
+#[test]
+fn test_quote_where_clause() {
+    with_context(|c| {
+        let clause = quote_where_clause!(c, where Foo: Bar + 'static);
+        assert_ast_eq!(where_clause_to_string, &clause, " where Foo: Bar + 'static");
+
+        let ident = c.ident_of("Foo");
+        let bound = c.ident_of("Bar");
+        let lftm = quote_lifetime!(c, 'static);
+        let clause = quote_where_clause!(c, where $ident: $bound + $lftm);
+        assert_ast_eq!(where_clause_to_string, &clause, " where Foo: Bar + 'static");
+    });
+}

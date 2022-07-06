@@ -1,0 +1,22 @@
+---
+published: true
+title: Bad Web Design: A Matter of Perspective?
+layout: post
+---
+![](http://i.imgur.com/CH30Xd1.jpg)
+
+I read a very interesting (and surprising) article from the [Washington Post](https://www.washingtonpost.com/news/the-intersect/wp/2016/05/09/the-hottest-trend-in-web-design-is-intentionally-ugly-unusable-sites/) recently. The piece, entitled ‘The Hottest Trend in Web Design is Making Intentionally Ugly, Difficult Sites’, caught me off guard. I had so many questions I didn’t even know where to start.
+
+Since when has it been a hot trend? Am I completely out the loop? What is, objectively, an ugly or difficult website? Is it an American thing? So many questions, but no answers yet. I’m fully aware of the millennial mindset that dictates anything ugly and tacky holds a certain appealing charm. It was the same in the 90’s (albeit unintentionally) and this design aesthetic has now permeated many other aspects of culture and creativity: music, clothing, and now, it seems, even web design is part of this trend.
+
+Has The Washington Post not realised this until now? On the one hand, it’s great they are exploring the effect this is having on web design. However, they also wonder where such a mindset could come from. Even I, as a baby-boomer era curmudgeon, know fully well of the irreverent culture of today’s youth.
+
+Good web design, on the other hand, is a matter of some importance to many people. It represents money and investment, something that is not taken lightly in the world of business. My trusty [Brighton web agency](http://neptik.com/) gets my business because they are good, but I’m finding it hard to think of a situation where such investments would be given to an agency or designer that makes ugly or difficult sites. Surely, despite trends or fads, this would be bad for brand, business, and most important, the end user.
+
+Ugly web design sounds less like an actual practice and more like a joke, especially in a business context. So yes, I wasn’t on board with the idea at first, at all. As usual however, my curiosity got the better of me and I decided to inspect some of the websites the article had included as examples. First was [Adult Swim](http://www.adultswim.com/) which, coincidentally, serves as one of the jewels in the off-kilter millennial crown. You wouldn’t even know what Adult Swim does by looking at their website, and I actually ended up admiring it. It certainly fits the brand and actually helps them stick out in my mind. The site is creative and represents the kind of humour one may find hanging out on Tumblr with the hipsters (the cool kids apparently).
+
+Like I said, I’m no expert on what millennials do. I do have two millennial kids, but we rarely discuss postmodern attitudes to design so my knowledge is somewhat limited. Although, as the article later states, this attitude to web design is less about postmodernism and irreverence, and more in honour of brutalism. This is a language I understand, as I’ve always been interested in brutalism as [a form of architecture](http://www.dezeen.com/2014/09/10/dezeen-guide-to-brutalist-architecture-owen-hopkins/). In this regard I think brutalist web design fails to achieve what it sets out for. The brutal design aesthetic in general is more inspired by bleak gothic styles, whilst brutalism in web design is clearly anchoring onto the randomness of bad 90’s design, and is anything but bleak.
+
+Another website I found fascinating is [tilde.town](http://tilde.town/), which from the outset suggests, merely with its URL, that it will be an unconventional website. It serves to provide a variety of odd functions, including free HTML hosting, a sprawling IRC network, and random poetry and ASCII art generation. The owner, Nathaniel Smith, says he doesn’t believe in web best practice, using Craigslist as an example of an ugly yet very successful website.
+
+At this point, I had built some form of admiration for bad web design in this context. I found myself realising that this ‘brutalist’ approach to web design was actually a response to real trends of web design. Moving homepage images? Infinite scrolling? I’d now seen these 100 times over and was definitely getting sick of it. If bad web design is an attempt at something different, I’m up for breaking the rules.

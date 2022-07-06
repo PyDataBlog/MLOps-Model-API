@@ -1,0 +1,140 @@
+<?php
+namespace Anax\Questions;
+
+/**
+ * A controller for question-related pages
+ *
+ */
+class QuestionsController implements \Anax\DI\IInjectionAware
+{
+    
+	use \Anax\DI\TInjectable;
+ 	
+	public function initialize()
+	{
+	    $this->questions = new \Anax\Questions\Question();
+	    $this->questions->setDI($this->di);
+	    $this->textFilter = new \Anax\Utils\CTextFilter();
+	    $this->comments = new \Anax\Questions\Comments();
+	    $this->comments->setDI($this->di);
+	}
+
+	public function listAction($tagId = null)
+	{
+	    $all   = $this->questions->getQuestionsWithAuthor($tagId);
+	    $title = ($tagId) ? $this->questions->getTagName($tagId) : "Senaste frågorna";
+
+	    foreach ($all as $q) {
+	    	$q->tags = $this->questions->getTagsForQuestion($q->ID);
+	    }
+	 
+	    $this->theme->setTitle("List all questions");
+	    $this->views->add('question/list', [
+	        'questions' => $all,
+	        'title' => $title
+	    ]);
+	    $this->views->add('question/list-sidebar', [], 'sidebar');
+	}
+
+	public function viewAction($id = null) {
+		$question 	= $this->questions->findQuestionWithAuthor($id);
+		$qComments  = $this->comments->getCommentsForQuestion($id);
+		$tags 		= $this->questions->getTagsForQuestion($id);
+		$answers 	= $this->questions->getAnswersForQuestions($id);
+
+		foreach ($qComments as $c) {
+			$c->content = $this->textFilter->doFilter($c->content, 'markdown');
+		}
+
+		foreach($answers AS $a) {
+			$a->comments = $this->comments->getCommentsForAnswer($a->ID);
+			$a->content = $this->textFilter->doFilter($a->content, 'markdown');
+			foreach ($a->comments as $c) {
+				$c->content = $this->textFilter->doFilter($c->content, 'markdown');
+			}
+		}
+
+		$question->content = $this->textFilter->doFilter($question->content, 'markdown');
+		$this->theme->setTitle("Fråga");
+		$this->views->add('question/view', [
+			'question' => $question,
+			'questionComments' => $qComments, 
+			"tags" => $tags,
+			'answers' => $answers,
+		]);
+	}
+
+	public function newAction() {
+		$tags = $this->questions->getTags();
+		$this->theme->setTitle("Skapa ny fråga");
+		$this->views->add('question/create', ["tags" => $tags], 'main');
+
+		$this->views->add('question/create-sidebar', [], 'sidebar');
+	}
+
+	public function createAction() {
+		$tags = array();
+		$dbTagCount = $this->questions->getTagCount();
+
+		for ($i=1; $i <= $dbTagCount; $i++) { 
+			$tag = $this->request->getPost('tag'.$i);
+			if($tag) {
+				$tags[] = $i;
+			}
+		}
+		$question = array(
+			"title" => $this->request->getPost('title'),
+			"content" => $this->request->getPost('content'),
+			"author" => $this->session->get("user")->id
+		);
+
+		if($this->questions->createQuestion($question, $tags)) {
+			$url = $this->url->create('questions/list');
+  		    $this->response->redirect($url);
+		} else {
+			die("Ett fel uppstod. Var god försök att lägga till din fråga igen!");
+		}
+	}
+
+	public function tagsAction() {
+		$tags = $this->questions->getTags();
+		$this->theme->setTitle("Taggar");
+		$this->views->add('question/tags', ["tags" => $tags]);
+	}
+
+	public function answerAction() {
+		$answer = array();
+		$answer["author"] = $this->session->get("user")->id;
+		$answer["content"] = $this->request->getPost('content');
+		$answer["question"] = $this->request->getPost('questionId');
+		
+
+		$this->questions->createAnswer($answer);
+		$url = $this->url->create('questions/view/'.$answer["question"]);
+	    $this->response->redirect($url);
+	}
+
+	public function commentAction() {
+		$type = addslashes($this->request->getPost('type'));
+		$id = $this->request->getPost('ID');
+		$question = $type == 'question' ? $id : 0;
+		$answer = ($type == 'answer') ? $id : 0;
+		$author = $this->session->get('user')->id;
+		$now = date("Y-m-d H:i:s");
+
+		$comment = array(
+			"content" => addslashes($this->request->getPost('content')),
+			"question" =>  $question,
+			"answer" => $answer,
+			"author" => $author,
+			"created" => $now
+		);
+
+		$this->comments->create($comment);
+
+		$questionId = $this->request->getPost('questionId');
+		$url = $this->url->create('questions/view/'.$questionId);
+	    $this->response->redirect($url);
+	}
+}
+?>

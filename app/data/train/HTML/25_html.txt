@@ -1,0 +1,308 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset='UTF-8'>
+    <script src='matrices.js'></script>
+    <style>
+.indent {
+    padding-left: 2em;
+}
+    </style>
+  </head>
+  <body>
+<h3>Color space:</h3>
+Spec: <select id='e_color_space'>
+    <option value='rec601' selected>Rec601</option>
+    <option value='rec709'>Rec709</option>
+    <option value='rec2020'>Rec2020/Rec2100</option>
+</select>
+<div class='indent'>
+    Kr: <input id='e_kr'>
+    <br>
+    Kg: <input id='e_kg'>
+    <br>
+    Kb: <input id='e_kb'>
+</div>
+<br>Array order:
+<select id='e_array_major'>
+    <option value='row' selected>Row-major (common)</option>
+    <option value='column'>Column-major (for OpenGL)</option>
+</select>
+<br>Precision: <input id='e_precision' value='5'>
+<pre id='e_color_space_output'>-</pre>
+<hr>
+<h3>Quantization</h3>
+Bits: <input id='e_bits'>
+<br>Range:
+<select id='e_range_type'>
+    <option value='narrow' selected>Narrow</option>
+    <option value='full'>Full</option>
+</select>
+<div class='indent'>
+    Yquant: [ <input id='e_yq_min'> , <input id='e_yq_max'> ]
+    <br>
+    Cb, Cr: [ <input id='e_uvq_min'> , <input id='e_uvq_max'> ] (<span id='e_uvq_info'></span>)
+</div>
+<pre id='e_quant_output'>-</pre>
+<hr>
+<h3>Conversion:</h3>
+<pre id='e_matrix_output'>-</pre>
+YCbCr: <input id='e_y' value=100> <input id='e_cb' value=100> <input id='e_cr' value=100>
+<br>
+RGB: <input id='e_r'> <input id='e_g'> <input id='e_b'>
+
+<script>
+'use strict';
+
+function round(x) {
+    const precision = parseInt(e_precision.value);
+    const pointsPow = Math.pow(10, precision);
+    return Math.round(x * pointsPow) / pointsPow;
+}
+
+function matToOutputVar(var_name, x) {
+    const precision = parseInt(e_precision.value);
+    if (e_array_major.value === 'column') {
+        x = matTrans(x);
+    }
+    return var_name + ' =\n' + matString(x, precision);
+};
+
+// -
+
+function getRangeInfo() {
+    const bits = parseInt(e_bits.value);
+    const normalizer = (1 << bits) - 1;
+
+    const cbcr_neg_1 = parseFloat(e_uvq_min.value);
+    const cbcr_pos_1 = parseFloat(e_uvq_max.value);
+    const cbcr0 = (cbcr_neg_1 + cbcr_pos_1) / 2;
+    return {
+        y0: parseFloat(e_yq_min.value) / normalizer,
+        y1: parseFloat(e_yq_max.value) / normalizer,
+        cbcr0: cbcr0 / normalizer,
+        cbcr1: cbcr_pos_1 / normalizer,
+    };
+}
+
+// -
+
+// Make these easy to use in console:
+let yuvFromRgb, rgbFromYuv;
+let ycbcrFromYuv;
+let ycbcrFromRgb, rgbFromYcbcr;
+
+function refreshQuant() {
+    const r = getRangeInfo();
+
+    ycbcrFromYuv = [ [r.y1-r.y0, 0, 0, r.y0],
+                     [0, r.cbcr1-r.cbcr0, 0, r.cbcr0],
+                     [0, 0, r.cbcr1-r.cbcr0, r.cbcr0] ];
+
+    const yuvFromRgb_4x4 = matResized(yuvFromRgb, 4, 4);
+    ycbcrFromRgb = matMul(ycbcrFromYuv, yuvFromRgb_4x4);
+    rgbFromYcbcr = matInv(ycbcrFromRgb);
+
+    //const back = matInv(rgbFromYcbcr);
+    //console.log('ycbcrFromRgb-1-1', fnMatToString(back));
+
+    const bits = parseInt(e_bits.value);
+    const normalizer = (1 << bits) - 1;
+    const cbcrDiff = r.cbcr1 - r.cbcr0;
+
+    function roundNorm(x) {
+        return round(x*normalizer);
+    }
+    e_quant_output.textContent = [
+        `Yq: [${roundNorm(r.y0)}, ${roundNorm(r.y1)}]`,
+        `Cb, Cr: ${roundNorm(r.cbcr0)} +/- ${roundNorm(cbcrDiff)}` +
+        `  => [${roundNorm(r.cbcr0-cbcrDiff)}, ${roundNorm(r.cbcr0+cbcrDiff)}]`,
+        '',
+        `Y: [${round(r.y0)}, ${round(r.y1)}]`,
+        `U, V: ${round(r.cbcr0)} +/- ${round(cbcrDiff)}` +
+        `  => [${round(r.cbcr0-cbcrDiff)}, ${round(r.cbcr0+cbcrDiff)}]`,
+        '',
+        matToOutputVar('ycbcrFromYuv', ycbcrFromYuv)
+    ].join('\n');
+
+    e_matrix_output.textContent = [
+        matToOutputVar('ycbcrFromRgb', ycbcrFromRgb),
+        '',
+        matToOutputVar('rgbFromYcbcr', rgbFromYcbcr),
+    ].join('\n');
+
+    lastConvertFunc();
+}
+
+[
+    e_yq_min, e_yq_max, e_uvq_min, e_uvq_max,
+].forEach(e => {
+    e.addEventListener('change', refreshQuant);
+});
+
+// -
+
+function refreshUvqInfo() {
+    const r = getRangeInfo();
+    const bits = parseInt(e_bits.value);
+    const normalizer = (1 << bits) - 1;
+    const cbcr0 = r.cbcr0 * normalizer;
+    const cbcrDiff = (r.cbcr1 - r.cbcr0) * normalizer;
+    e_uvq_info.textContent = `${round(cbcr0)} +/- ${round(cbcrDiff)}`;
+}
+e_uvq_min.addEventListener('change', refreshUvqInfo);
+e_uvq_max.addEventListener('change', refreshUvqInfo);
+
+// -
+
+function refreshRangeInfo() {
+    const bits = parseInt(e_bits.value);
+    const normalizer = (1 << bits) - 1;
+
+    if (e_range_type.value == 'full') {
+        // rec2020 defines these:
+        // Y: D = Round((2^n-1) * E) | E = [0.0, 1.0]
+        // AKA Dy = 255*Ey + 0
+        // Cb,Cr: D = Round((2^n-1) * E + 2^(n-1)) | E = [-0.5, 0.5]
+        // AKA Dcb,Dcr = 255*Ey + 128, or 128 +/- 127.5. (512 +/- 511.5)
+        // Next, it then specifies peak/achrome/peak as 1/512/1023,
+        // but by its formulas, +0.5 => round(1023*0.5+512) = round(512+511.5)
+        // = round(1023.5) = *1024*. Uhh, oops!
+
+        // It seems to me what they wanted instead was 512 +/- 511, or:
+        // Cb,Cr: D = Round((2^n-2) * E + 2^(n-1))
+
+        e_yq_min.value = 0;
+        e_yq_max.value = normalizer;
+        e_uvq_min.value = 1;
+        e_uvq_max.value = normalizer;
+    } else {
+        let y0 = 16;
+        let y1 = 235; // 16+219
+        let cbcr0 = 128;
+        let cbcr1 = 240; // 128+224/2
+
+        // 10- and 12-bit narrow are just scaled 8-bit narrow.
+        y0 <<= bits - 8;
+        y1 <<= bits - 8;
+        cbcr0 <<= bits - 8;
+        cbcr1 <<= bits - 8;
+
+        e_yq_min.value = y0;
+        e_yq_max.value = y1;
+        e_uvq_min.value = cbcr0 - (cbcr1 - cbcr0);
+        e_uvq_max.value = cbcr1;
+    }
+
+    refreshUvqInfo();
+    refreshQuant();
+}
+e_bits.addEventListener('change', refreshRangeInfo);
+e_range_type.addEventListener('change', refreshRangeInfo);
+
+// -
+
+function refreshColorSpace() {
+    const kr = parseFloat(e_kr.value);
+    const kg = parseFloat(e_kg.value);
+    const kb = parseFloat(e_kb.value);
+
+    const uRange = 1-kb;
+    const vRange = 1-kr;
+    yuvFromRgb = [ [kr, kg, kb],
+                   [-kr/uRange, -kg/uRange, (1-kb)/uRange],
+                   [(1-kr)/vRange, -kg/vRange, -kb/vRange] ];
+
+    rgbFromYuv = matInv(yuvFromRgb);
+    e_color_space_output.textContent = [
+        matToOutputVar('yuvFromRgb', yuvFromRgb),
+        '',
+        matToOutputVar('rgbFromYuv', rgbFromYuv),
+    ].join('\n');
+
+    refreshRangeInfo();
+}
+e_kr.addEventListener('change', refreshColorSpace);
+e_kg.addEventListener('change', refreshColorSpace);
+e_kb.addEventListener('change', refreshColorSpace);
+
+// -
+
+function presetColorSpace() {
+    const colorSpace = e_color_space.value;
+    if (colorSpace === 'rec601') {
+        e_kr.value = 0.299;
+        e_kg.value = 0.587;
+        e_kb.value = 0.114;
+        e_bits.value = 8;
+    } else if (colorSpace === 'rec709') {
+        e_kr.value = 0.2126;
+        e_kg.value = 0.7152;
+        e_kb.value = 0.0722;
+        e_bits.value = 8;
+    } else if (colorSpace === 'rec2020') {
+        e_kr.value = 0.2627;
+        e_kg.value = '0.6780'; // String to preserve the trailing zero.
+        e_kb.value = 0.0593;
+        e_bits.value = 10;
+    }
+    refreshColorSpace();
+}
+e_color_space.addEventListener('change', presetColorSpace);
+
+// -
+
+[e_array_major, e_precision].forEach(e => {
+    e.addEventListener('change', () => {
+        refreshColorSpace();
+        refreshQuant();
+    });
+});
+
+// -
+
+function convert(srcElems, destFromSrc, destElems) {
+    const bits = parseInt(e_bits.value);
+    const normalizer = (1 << bits) - 1;
+
+    const src = srcElems.map(e => parseFloat(e.value) / normalizer);
+    src.push(1);
+    const dest = matMulVec(destFromSrc, src);
+
+    for (let i = 0; i < 3; i++) {
+        let val = dest[i];
+        //val = Math.max(0, Math.min(val, 1)); // clamp to [0,1]
+        destElems[i].value = round(val*normalizer);
+    }
+}
+
+// -
+
+const RGB_ELEMS = [e_r, e_g, e_b];
+const YCBCR_ELEMS = [e_y, e_cb, e_cr];
+
+
+function fromRgb() {
+    convert(RGB_ELEMS, ycbcrFromRgb, YCBCR_ELEMS);
+    lastConvertFunc = fromRgb;
+}
+
+function fromYcbcr() {
+    convert(YCBCR_ELEMS, rgbFromYcbcr, RGB_ELEMS);
+    lastConvertFunc = fromYcbcr;
+}
+
+let lastConvertFunc = fromYcbcr;
+
+RGB_ELEMS.forEach(e => e.addEventListener('change', fromRgb));
+YCBCR_ELEMS.forEach(e => e.addEventListener('change', fromYcbcr));
+
+// -
+
+presetColorSpace();
+refreshQuant();
+
+</script>
+
+  </body>
+</html>

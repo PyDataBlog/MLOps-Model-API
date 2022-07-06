@@ -1,0 +1,558 @@
+// PatternDlg.cpp : implementation file
+//
+
+#include "stdafx.h"
+#include "ColorEyeI.h"
+#include "PatternDlg.h"
+
+#include <cstdlib>
+#include <ctime>
+// #include "xMsrPoint.h"
+#include "EnterValueDlg.h"
+#include "ReadBarCodeDialog.h"
+#include "TranScripter.h"
+#include "MainFrm.h"
+#include "ColorEyeIDoc.h"
+#include "OmdHead.h"
+#include "MsrTableDlg.h"
+
+#ifdef _DEBUG
+#define new DEBUG_NEW
+#undef THIS_FILE
+static char THIS_FILE[] = __FILE__;
+#endif
+
+#ifdef _DEBUG
+#define DebugCode( code_fragment ) { code_fragment }
+#else
+#define DebugCode( code_fragment )
+#endif
+/////////////////////////////////////////////////////////////////////////////
+// CPatternDlg dialog
+
+
+CPatternDlg::CPatternDlg(const initType& it, CWnd* pParent /*=NULL*/)
+: CDialog(CPatternDlg::IDD, pParent), InitDataType(it)
+{
+	//{{AFX_DATA_INIT(CPatternDlg)
+		// NOTE: the ClassWizard will add member initialization here
+	//}}AFX_DATA_INIT
+    initCa210();
+    initDataDlgType();
+	
+    TranScripter Ts;
+    m_Goal.SetRadius(Ts.Cm2pixel(2.25));
+}
+
+void CPatternDlg::initCa210()
+{
+    CMainFrame* pMainFrm = dynamic_cast<CMainFrame*>(AfxGetMainWnd());
+    ASSERT_VALID(pMainFrm);
+    
+    m_pCA210 = pMainFrm->m_pCa210;
+    m_pCA210->SetOnline(TRUE);
+    m_pCA210->LinkMemory();
+    initLCMSize();
+}
+
+void CPatternDlg::initDataDlgType() const
+{
+    CDialog *dlgData = 0;
+
+    switch(InitDataType)
+    {
+    case MsrForItem:  dlgData = new CMsrItemDlg();   break;
+	case MsrForTable: dlgData = new CMsrTableDlg();  break;
+	default:
+		CString str("Pattern Dialogªì©l¤Æ¶q´ú¸ê®Æ¥X°ÝÃD");
+		AfxMessageBox(str);
+    }
+
+	ASSERT(dlgData);
+	dlgData->DoModal();
+	delete dlgData;
+}
+
+void CPatternDlg::DoDataExchange(CDataExchange* pDX)
+{
+	CDialog::DoDataExchange(pDX);
+	//{{AFX_DATA_MAP(CPatternDlg)
+		// NOTE: the ClassWizard will add DDX and DDV calls here
+	//}}AFX_DATA_MAP
+}
+
+
+BEGIN_MESSAGE_MAP(CPatternDlg, CDialog)
+	//{{AFX_MSG_MAP(CPatternDlg)
+    ON_WM_CTLCOLOR()
+    ON_WM_PAINT()
+    ON_WM_TIMER()
+    ON_WM_SHOWWINDOW()
+	//}}AFX_MSG_MAP
+END_MESSAGE_MAP()
+
+/////////////////////////////////////////////////////////////////////////////
+// CPatternDlg message handlers
+
+BOOL CPatternDlg::OnInitDialog() 
+{
+    // TODO: Add extra initialization here
+    c_bStatusBar    = TRUE;
+
+    c_bMsrBegin     = FALSE;
+    c_bMsrEnd       = FALSE;
+    c_bMsrEndnMsred = FALSE;
+    c_bRunMsrAI     = TRUE;
+    c_bUnCntCA210   = FALSE;
+
+    ColorRef tempClr(255, 0, 127); //²`¬õ¦â
+    m_Goal.SetArcColor(tempClr.Shift(5));
+
+    return TRUE;  // return TRUE unless you set the focus to a control
+                  // EXCEPTION: OCX Property Pages should return FALSE
+}
+
+HBRUSH CPatternDlg::OnCtlColor(CDC* , CWnd* , UINT ) 
+{
+    //¥Ã»·³£¤£»Ý­n­×§ï
+    m_BkBrush.DeleteObject();
+    m_BkBrush.CreateSolidBrush(m_BkColor.oRGB());
+    return m_BkBrush;
+}
+
+void CPatternDlg::OnPaint() 
+{
+    /*
+    NextGoal
+    ¹B§@°Ñ¼Æ
+        Goal°T®§
+        NextGoal°T®§
+        iteratorªº°T®§
+        Ã¸¹Ï°Ñ¼Æ
+    ª¬ºA¦C
+        ¾Þ§@»¡©ú
+        ª¬ºA
+    ¥D­n¶q´ú«ü¥Ü
+        ¦Ê¤À¤ñÅã¥Ü
+        Goal
+    ¶q´ú¥Ø¼Ð«ü¥Ü
+        ¼Æ¾ÚÅã¥Ü
+    zero calªº¦r
+    endªº¦r
+    */
+
+    const int wordHight(18);
+    CPaintDC dc(this); // device context for painting
+    CString temp;
+    dc.SetBkMode(OPAQUE);
+    dc.SetBkColor(m_BkColor.oRGB());
+
+    if (m_itor->m_pBackGorund != 0)
+        m_itor->m_pBackGorund->Draw(dc);
+    //DrawCrsTlkRect(dc);
+
+DebugCode(
+          dc.SetTextColor(m_BkColor.Shift());
+
+        int lineIndex(0);
+        //Pattern¹B§@°Ñ¼Æ
+        //Goal°T®§
+        temp.Format("  Goal%s", m_Goal.showMe());
+        TextOut(dc, 0, wordHight*lineIndex++, temp, temp.GetLength());
+        
+        //Áä½L°T®§
+//         KeyMessage.Format("nChar = %d, nRepCnt = %d, nFlags = %d", key1, key2, key3);
+//         TextOut(dc, 0, wordHight*lineIndex++, KeyMessage, 40);
+
+        //iteratorªº°T®§
+        CString IsEndstr ( m_itor == m_RNA.Begin()? "Begin" : m_itor == m_RNA.End() ? "End" : "Other" );
+
+        temp.Format("­¡¥N¾¹¸ê°T: itor.begin = 0x%x, itor.end = 0x%x, itor(¦ì§} / ¦ì¸m) = 0x%x / %s", \
+			m_RNA.Begin(), m_RNA.End(), m_itor, IsEndstr);
+        TextOut(dc, 0, wordHight*lineIndex++, temp, temp.GetLength());
+
+        temp.Format("PatternDlgºX¼Ð: IsShowGoal: %d, IsShowStateBar: %d, ²Ä¤@ÂI = %d, ³Ì«á¤@ÂI = %d, ³Ì«á¤@ÂI¶q§¹ = %d, ¦Û°Ê¶q´ú¼Ò¦¡ = %d, ³sµ²CA-210 = %d", \
+                     m_Goal.isVisible(), c_bStatusBar, c_bMsrBegin, c_bMsrEnd, c_bMsrEndnMsred, !c_bRunMsrAI, c_bUnCntCA210);
+        TextOut(dc, 0, wordHight*lineIndex++, temp, temp.GetLength());
+
+        temp.Format("³o¤@ÂIªº¸ê°T: %s", m_itor->ShowMe());
+        TextOut(dc, 0, wordHight*lineIndex++, temp, temp.GetLength());
+)
+
+    //ª¬ºA¦C
+    if (c_bStatusBar)
+    {
+        dc.SetTextColor(m_BkColor.Shift());
+        //¾Þ§@»¡©ú¡]¥ª¡^
+        temp.Format("¤W¤@ÂI: ¡ö, ¤U¤@ÂI: ¡÷, §ì­È+¤U¤@ÂI: Enter, ¦Û°Ê¶q´ú: ¡õ");
+        TextOut(dc, 0, GetSystemMetrics(SM_CYSCREEN) - wordHight*1, temp, temp.GetLength());
+        //ª¬ºA¡]¥k¡^
+        temp.Format("³s½uª¬ºA: %s, ¥Ø«e¶q´ú: %s,  ¸ÑªR«×: %d¡Ñ%d,  Channel: %s,  LCM size: %2.1f inch", \
+            m_pCA210->isOnline() ? "³s½u" : "Â÷½u" , m_itor->GetDescrip(), GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN), m_pCA210->GetChData(), m_pCA210->GetLcmSize());//LCM Size³o¼Ë§ì·|¦³°ÝÃD
+        TextOut(dc, GetSystemMetrics(SM_CXSCREEN) - (int)(temp.GetLength()*6.7), GetSystemMetrics(SM_CYSCREEN) - wordHight*1, temp, temp.GetLength());
+    }
+
+    //¥D­n¶q´ú«ü¥Ü
+    m_Goal.Draw(dc);//¶q´ú¥Ø¼Ð
+
+    if (c_bMsrEnd && c_bRunMsrAI && c_bMsrEndnMsred)
+    {
+        temp.Format("«öESCÂ÷¶}¡C");    
+        dc.SetTextColor(m_BkColor.Invrt());
+        if ((m_Goal.GetCenter().x == GetSystemMetrics(SM_CXSCREEN)/2) && (m_Goal.GetCenter().y == GetSystemMetrics(SM_CYSCREEN)/2))
+            TextOut(dc, GetSystemMetrics(SM_CXSCREEN)/2 - 75, GetSystemMetrics(SM_CYSCREEN)/2-8-m_Goal.GetRadius()*2, temp, temp.GetLength());
+        else
+            TextOut(dc, GetSystemMetrics(SM_CXSCREEN)/2 - 75, GetSystemMetrics(SM_CYSCREEN)/2-8, temp, temp.GetLength());
+    }
+
+    if (c_bUnCntCA210)
+        temp.Format("¥¼³s±µCA-210¡C");
+    else
+        temp.Format("");
+
+    dc.SetTextColor(m_BkColor.Invrt());
+    TextOut(dc, GetSystemMetrics(SM_CXSCREEN)/2 - 75, GetSystemMetrics(SM_CYSCREEN)/2-8, temp, temp.GetLength());
+
+    // TODO: Add your message handler code here
+    // Do not call CDialog::OnPaint() for painting messages
+}
+
+void CPatternDlg::initLCMSize() const
+{
+    if (atoi(m_pCA210->GetLcmSize()) == 0)
+    {
+        CEnterValueDlg dlgEnterValue("µLªk§P§OLCM Size", "LCM Size");
+
+        do{
+			dlgEnterValue.DoModal();
+            m_pCA210->SetLcmSize(dlgEnterValue.m_strValue);
+		}while (dlgEnterValue.m_strValue.IsEmpty()); //¤ÏÂÐ¬d¬O¤£¬OªÅ¦r¦ê
+    }
+}
+
+void CPatternDlg::initDocument()
+{
+    CMainFrame* pMainFrm = dynamic_cast<CMainFrame*>(AfxGetMainWnd());
+    ASSERT_VALID(pMainFrm);
+    
+    CColorEyeIDoc* pDoc = dynamic_cast<CColorEyeIDoc*>(pMainFrm->GetActiveDocument());
+    ASSERT_VALID(pDoc);
+
+	pDoc->GetFileHead().iCHID  ( pMainFrm->m_pCa210->GetChStrNo()    );
+	pDoc->GetFileHead().iPrb   ( pMainFrm->m_pCa210->GetProb()       );
+	pDoc->GetFileHead().iMsrDvc( pMainFrm->m_pCa210->GetDeviceType() );
+	pDoc->GetFileHead().iInch  ( pMainFrm->m_pCa210->GetLcmSize()    );
+	
+
+    m_RNA  = pDoc->GetMsrRNA();
+    m_itor = m_RNA.Begin();
+
+    //SetPanelID
+    if (m_RNA.Size())
+    {
+        CReadBarCodeDialog dlgReadBarCode;
+        dlgReadBarCode.DoModal();
+    }
+}
+
+void CPatternDlg::LoadedCartridge()
+{
+    // TODO: Add extra validation here
+    m_Goal.SetWnd(GetActiveWindow()); //GetActiveWindow()»Ýµ¥«Øºc¦¡§¹¦¨¤~¥i¥H§ì¨ú
+    initDocument();
+
+    //MsrItem«ö¤U¡u½T©w¡vÁÙ¬O¡u¨ú®ø¡v
+    if (m_RNA.IsEmpty())
+        ShowWindow(SW_HIDE);
+    else
+    {
+        //++BeginItor;
+        trigger();
+
+        ShowWindow(SW_MAXIMIZE);
+        SetFocus();
+    }
+	checkMsrLimit();
+}
+
+void CPatternDlg::trigger()
+{
+    m_itor->m_pBackGorund->NT_SetWnd(GetActiveWindow());
+    m_itor->m_pBackGorund->NT_SetCa(m_pCA210);
+
+    setBkColor(m_itor->GetBkColor());
+
+    m_Goal.SetData(m_itor->GetBullet());
+    m_Goal.SetPrcntColor(m_BkColor.Shift());
+
+    m_Goal.SetCenter(m_itor->GetPointPosi());  //¹v¦ì¸m
+    m_Goal.SetPercent(0);
+
+    m_Goal.Animation();
+}
+
+void CPatternDlg::checkMsrLimit()
+{
+    c_bMsrBegin     = (  m_itor   == m_RNA.Begin()) ? TRUE : FALSE;
+    c_bMsrEnd       = (  m_itor+1 == m_RNA.End()  ) ? TRUE : FALSE;
+    c_bMsrEndnMsred = (  c_bMsrEnd && !m_itor->GetBullet().IsEmpty() ) ? TRUE : FALSE;//­Y²{¦b¬O³Ì«á¤@ÂI¡A¨Ã¥B³Ì«á¤@ÂI¤w¸g¶q¤F
+}
+
+BOOL CPatternDlg::PreTranslateMessage(MSG* pMsg) 
+{
+    // TODO: Add your specialized code here and/or call the base class
+    if (pMsg->message == WM_KEYDOWN)
+    {
+        switch(pMsg->wParam)
+        {
+            case VK_SPACE:  eventSwCntCa210();    break;//ªÅ¥ÕÁä¡G¤Á´«³s½u
+            case VK_DOWN:   eventRunMsrAi();      break;//¤U   ¡G¦Û°Ê¶q´ú¼Ò¦¡
+            case VK_RIGHT:  eventGoNextGoal();    break;//¥k   ¡G¸õ¤U¤@­ÓÂI
+            case VK_LEFT:   eventGoPrvsGoal();    break;//¥ª   ¡G¤W¤@­ÓÂI
+            case VK_RETURN: eventCatchMsrValue(); break;//Enter¡G§ì­È§ì§ì§ì!!!!
+            case VK_ESCAPE: eventExitDialog();    break;//ESC  ¡G¸õÂ÷Patten Dialog
+        }
+        return TRUE;
+    }
+    return CDialog::PreTranslateMessage(pMsg);
+}
+
+const CaState CPatternDlg::recoil()
+{
+    //¼È¦s¥Ø«eªº¿Ã¹õÅã¥Ü/ÁôÂÃª¬ºA
+    BOOL OldDrawGold  = m_Goal.isVisible();
+    BOOL OldStatusBar = c_bStatusBar;
+
+    //©T©wÃö±¼©Ò¦³¿Ã¹õÅã¥Ü/ÁôÂÃª¬ºA
+    c_bStatusBar = FALSE;
+    m_Goal.Visible(FALSE);
+
+    Invalidate();
+    UpdateWindow();
+
+    Sleep(70);
+
+    const CaState camsrResult(m_pCA210->Measure());
+
+    m_itor->SetBullet(m_pCA210->GetMsrData());
+	m_Goal.SetData(m_itor->GetBullet());
+
+    //«ì´_¥Ø«eªº¿Ã¹õÅã¥Ü/ÁôÂÃª¬ºA
+    m_Goal.Visible(OldDrawGold);
+    c_bStatusBar    = OldStatusBar;
+
+    Invalidate();
+    UpdateWindow();
+
+    return camsrResult;
+}
+
+void CPatternDlg::OnTimer(UINT nIDEvent) 
+{
+    //ÀË¬d³s½u
+//    c_bUnCntCA210 = FALSE;
+    /*
+        ¨â­ÓªùÂe
+        1. ¶q´úªùÂe­È
+           0  «G«×0¡A¥Ø«e0-Cal
+           1  ¼Ð·ÇªùÂe­È¤º¡GÄ~Äò¶q´ú+¦Ê¤À¤ñ¡÷ 2.
+           2  ¼Ð·ÇªùÂe­È¥~¡GÄ~Äò¶q´ú-¦Ê¤À¤ñ
+           3  ¥¼³s½u
+
+        2. ¦Ê¤À¤ñ
+           0 ¤p©ó0
+           1 ¼Ð·Ç½d³ò ¡÷2.
+           2 ¤j©ó100
+    */
+    if (m_pCA210->isOnline())
+    {
+        srand(time(NULL));
+        switch( m_pCA210->MsrAI( (float)0.005 ) )
+        //check isRemote, isZeroCal, isRightPosition, and
+        //return a status to say is MsrAiValue in spec.
+        {
+            case MA_InDeviation://¼Ð·ÇªùÂe­È¤º¡GÄ~Äò¶q´ú+¦Ê¤À¤ñ
+				msrKernel();
+                break;
+            case MA_OutDeviation://¼Ð·ÇªùÂe­È¥~¡GÄ~Äò¶q´ú-¦Ê¤À¤ñ
+                m_Goal.SetPercent(m_Goal.GetPercent() - rand()%25+rand()%25+1);
+                 //m_Percent -= rand()%25+rand()%25+1;
+                break;
+            case MA_nonMsr:
+                eventRunMsrAi(FALSE);
+                AfxMessageBox("ÀË¬d±´ÀY¡G­nÂà¨ìMEAS\nÀË¬d¥D¾÷¡GREMOTE¿O­n«G\n¥i¥H¶¶§Q¦Û°Ê¶q´ú¡I");
+                break;
+        }
+        Invalidate();
+        UpdateWindow();
+    }
+    else
+        c_bUnCntCA210 = TRUE;
+    CDialog::OnTimer(nIDEvent);
+}
+
+void CPatternDlg::msrKernel()
+{
+	int percent(m_Goal.GetPercent());
+	if (percent < 0)
+    {
+		m_Goal.SetPercent(rand()%20+10);
+    }
+    else if (percent >= 0 && percent <100)
+    {
+		percent = m_Goal.GetPercent() + rand()%50+rand()%50+1;
+		m_Goal.SetPercent(( percent > 100 ) ? 100 : percent);
+    }
+    else if (percent >= 100)
+    {
+		eventRunMsrAi(FALSE);
+		if ((eventCatchMsrValue() == 1) //³Ì½ÆÂøªº¨BÆJ
+			|| (c_bMsrEndnMsred == FALSE))
+			eventRunMsrAi(TRUE);
+    }
+    else
+        ASSERT(0);
+}
+
+void CPatternDlg::eventGoPrvsGoal()
+{
+    //¤W¤@­ÓÂI
+    if (!c_bMsrBegin)
+    {
+        ++m_itor;
+        if (m_itor != m_RNA.Begin())    m_itor--;
+        if (m_itor != m_RNA.Begin())    m_itor--;
+        
+        trigger(); //¥¦·|µ¥©ó0¡A´N¬O±q³Ì«á¤@¦^ªð¦^¤@¦¸  
+
+        Invalidate();
+    }
+	checkMsrLimit();
+	m_Goal.ShowLabel(TRUE);
+
+}
+
+BOOL CPatternDlg::eventGoNextGoal()
+{
+    //¤U¤@­ÓÂI
+    if (!c_bMsrEnd)
+    {
+        //­pºâ¤U¤@Áû
+        ++m_itor;
+        if (m_itor == m_RNA.End()) m_itor--;
+        if (m_itor == m_RNA.End()) m_itor--;
+
+        //­«·sµe°é°é+°Êµe
+        trigger();
+        Invalidate();
+    }
+	checkMsrLimit();
+	m_Goal.ShowLabel(c_bMsrEndnMsred);
+
+    return !c_bMsrEnd;
+}
+
+UINT CPatternDlg::eventCatchMsrValue()
+{
+    //§ì­È§ì§ì§ì!!!!
+    //³Ì«á¤@ÂIªº¸Ü´N°±¤î¦Û°Ê
+    //¤£µM´N¬O¤U¤@ÂI
+    m_Goal.ShowLabel(FALSE);
+    if (m_itor->GetBkStatus() == BGS_NitsNeg || m_itor->GetBkStatus() == BGS_NitsPos)
+	{
+        m_itor->m_pBackGorund->NT_colorReviseByNits(m_BkColor);
+		m_NitsLv.Format("%d", m_BkColor.R());
+	}
+    /*
+    recoil() 
+    0 ¨S³s½u
+    1 ³s½u
+    2 ©|¥¼Zero Cal
+    3 ÀÉ¦ì¤£¦bMEAS
+    4 ¶q´ú¥¿±` ·í§@1
+    ³Ì«á¤@ÂI  5
+    */
+    switch(recoil())
+    {
+    case CA_Offline:        
+        MessageBox("¨S³s½u¡AµLªk¶q´ú");  
+        return 0;
+    case CA_ZeroCalMode:    
+        MessageBox("ÀÉ¦ì¤£¦bMEAS");     
+        return 3;
+    case CA_MsrMode:
+    default:
+        if (!eventGoNextGoal())
+            return 5;//¬O§_¬°³Ì«á¤@ÂI
+        else
+            return 1;
+    }
+}
+
+void CPatternDlg::eventRunMsrAi(int isRun)
+{
+//¤£­nÀH·N§ó°Ê¡I= =+
+    //Ãö´Nµ¹¥¦¶}¡A¶}´Nµ¹¥¦Ãö
+    //«ü©w±±¨î TRUE FALSE
+    // 2 : Switch Mode
+    // 1 : Assign Run Mode
+    // 0 : Assign Off Mode
+    c_bRunMsrAI = (isRun == 2) ? c_bRunMsrAI ? FALSE : TRUE : !isRun;
+
+    switch(isRun)
+    {
+    default:
+        if (!c_bRunMsrAI)
+        {
+    case 1://¦Û°Ê¶q´ú±Ò©lÂI
+            SetTimer(1, 180, NULL);
+            if (isRun)    break;
+        }
+        else
+        {
+    case 0:
+            KillTimer(1);
+            m_Goal.SetPercent(0);
+
+            if (!isRun)    break;
+        }
+    }
+}
+
+void CPatternDlg::eventSwCntCa210()
+{
+    //¤Á´«³s½u
+    m_pCA210->SetOnline(m_pCA210->isOnline() ? FALSE : TRUE);
+    Invalidate();
+}
+
+void CPatternDlg::eventExitDialog()
+{
+    if(c_bRunMsrAI)
+        KillTimer(1);
+
+    ShowWindow(SW_HIDE);
+    
+    CMainFrame* pMainFrm = dynamic_cast<CMainFrame*>(AfxGetMainWnd());
+    ASSERT_VALID(pMainFrm);
+    
+    CColorEyeIDoc* pDoc = dynamic_cast<CColorEyeIDoc*>(pMainFrm->GetActiveDocument());
+    ASSERT_VALID(pDoc);
+    
+	pDoc->UpdateDocRNA(m_RNA);
+	pDoc->GetFileHead().iNitsLv(m_NitsLv);
+    pDoc->UpdateAllViews(NULL);
+}
+
+void CPatternDlg::setBkColor(const ColorRef& clr)
+{
+    m_BkColor = clr;
+    Invalidate();
+    UpdateWindow();
+}
+
+void CPatternDlg::OnShowWindow(BOOL bShow, UINT nStatus) 
+{
+    CDialog::OnShowWindow(bShow, nStatus);
+    m_pCA210->SetOnline(bShow);    
+}

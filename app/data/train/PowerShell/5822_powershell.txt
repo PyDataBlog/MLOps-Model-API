@@ -1,0 +1,190 @@
+﻿<#
+.SYNOPSIS
+    Modifies an existing Eventbrite ticket type using the v1 API.
+
+.DESCRIPTION
+    Updates an existing ticket type, returning the ID of the updated 
+    ticket. Only the fields passed as arguments will be modified.
+
+.PARAMETER Id
+    The ticket type ID (required)
+
+.PARAMETER IsDonation
+    0 for fixed-price tickets, 1 for donations.
+
+.PARAMETER Name
+    The ticket name.
+
+.PARAMETER Description
+    The ticket description.
+
+.PARAMETER Price
+    The ticket price. Enter 0.00 for free tickets. 
+    Leave blank for a donation. If tickets are already sold, price will not change.
+
+.PARAMETER Quantity
+    The number of tickets available. Not required for donations.
+
+.PARAMETER Start
+    The date and time when ticket sales start, in ISO 8601 format (e.g., "2007-12-31 23:59:59")
+
+.PARAMETER End
+    The date and time when ticket sales stop, in ISO 8601 format (e.g., "2007-12-31 23:59:59")
+
+.PARAMETER IncludeFee
+    0 to add the Eventbrite service fee on top of ticket price, or 1 to include it in the ticket price.
+
+.PARAMETER Minimum
+    The minimum number of tickets per order.
+
+.PARAMETER Maximum
+    The maximum number of tickets per order. 
+
+.PARAMETER Hide
+    Show or hide the ticket type. Valid options: (y or n)
+
+.PARAMETER AccessToken
+    Your Eventbrite API oAuth token.
+
+    See: https://www.eventbrite.com/myaccount/apps/
+
+.EXAMPLE
+
+    $TicketParams=@{
+        Id = $ticket.id
+        Minimum=1
+        Maximum=1
+        Description = "Select this option if you plan to attend in person."
+    }
+    Set-EventbriteTicket @TicketParams -Verbose
+
+.LINK
+    http://developer.eventbrite.com/doc/tickets/ticket_update/
+
+#>
+function Set-EventbriteTicket
+{
+    [CmdletBinding()]
+    Param (
+        
+        [Parameter(Mandatory,ValueFromPipelineByPropertyName)]
+        [int64]
+        $Id,
+        
+        [Parameter()]
+        [string]
+        $Name,
+
+        [Parameter()]
+        [string]
+        $Description,
+
+        [Parameter()]
+        [DateTime]
+        $Start,
+
+        [Parameter()]
+        [DateTime]
+        $End,
+        
+        [Parameter()]
+        [double]
+        $Price,
+
+        [Parameter()]
+        [int]
+        $Quantity,
+
+        [Parameter()]
+        [int]
+        $Minimum,
+
+        [Parameter()]
+        [int]
+        $Maximum,
+
+        [Parameter()]
+        [ValidateSet(0,1)]
+        [int]
+        $IncludeFee,
+
+        [Parameter()]
+        [ValidateSet(0,1)]
+        [int]
+        $IsDonation,
+
+        [Parameter()]
+        [ValidateSet("y","n")]
+        [string]
+        $Hide,
+
+        [Parameter()]
+        [string]
+        $AccessToken = (Get-EventbriteConnection).access_token
+
+    )
+
+    begin
+    {
+    
+        $root   = "https://www.eventbrite.com"
+        $format = "json"
+        $method = "ticket_update"
+        $uri    = "$root/$format/$method`?"
+    
+        $RequestParameters = @{
+            Uri = $uri
+            Headers = @{
+                Authorization = 'Bearer ' + $AccessToken
+            }
+        }
+    }
+    Process
+    {
+        foreach($ticket_id in $Id)
+        {
+           
+            Write-Verbose "$($MyInvocation.MyCommand.Name) :: Building URI from bound parameters"
+
+            Remove-PSBoundCommonParameters $PSBoundParameters | foreach {
+            
+                Write-Verbose "$($MyInvocation.MyCommand.Name) :: Adding `'$($_.Key)`' to URI with value `'$($_.Value)`'"
+                switch($_)
+                {
+                    {$_.Key -eq 'Id'}    {$RequestParameters.Uri += "&$(Format-Parameter $_.Key)=$ticket_id"}
+                    {$_.Key -eq 'Start'} {$RequestParameters.Uri += "&$(Format-Parameter $_.Key)=$(Format-Date $_.Value)"}
+                    {$_.Key -eq 'End'}   {$RequestParameters.Uri += "&$(Format-Parameter $_.Key)=$(Format-Date $_.Value)"}
+                    Default              {$RequestParameters.Uri += "&$(Format-Parameter $_.Key)=$($_.Value)"}
+                }
+            }
+
+            try
+            {
+                $result = Invoke-RestMethod @RequestParameters -ErrorAction Stop
+            }
+            catch
+            {
+                Write-Error $_.exception.message
+                continue
+            }
+
+            if($result.error)
+            {
+                Write-Error $result.error.error_message
+                continue
+            }
+            elseif($result.process)
+            {
+                $PsResult = $result.process
+                $PsResult.PSTypeNames.Clear()
+                $PsResult.PSTypeNames.Add('Eventbrite.Ticket.Response')
+                $PsResult
+            }
+            else
+            {
+                Write-Error $result
+                continue
+            }
+        }
+    }
+}

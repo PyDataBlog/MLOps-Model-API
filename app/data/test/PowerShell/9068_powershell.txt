@@ -1,0 +1,466 @@
+$Script:NS = "PwSh.OS"
+
+function Get-OperatingSystem {
+    [CmdletBinding(DefaultParameterSetName="ROOT")]Param (
+		[Parameter(ParameterSetName = "ROOT", Mandatory = $true, ValueFromPipeLine = $true)][string]$Root,
+		[Parameter(ParameterSetName = "ONLINE", Mandatory = $true, ValueFromPipeLine = $true)][switch]$Online
+    )
+	Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		switch ($PSCmdlet.ParameterSetName) {
+			# 'ONLINE' { return Get-OperatingSystemObject -Online:$Online }
+			'ONLINE' { return Get-OnlineOperatingSystem }
+			'ROOT' { return Get-OperatingSystemObject -Root $Root }
+		}
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}
+
+<#
+.SYNOPSIS
+Get an operating system object.
+
+.DESCRIPTION
+Returns an Operating System object.
+An Operating System object is an object containing full identification of an Operating System.
+That is its version, build number, codename, and so on.
+
+.NOTES
+General notes
+#>
+function Get-OperatingSystemObject {
+    [CmdletBinding(DefaultParameterSetName="ROOT")]Param (
+		[Parameter(ParameterSetName = "ROOT", Mandatory = $true, ValueFromPipeLine = $true)][string]$Root,
+		[Parameter(ParameterSetName = "ONLINE", Mandatory = $true, ValueFromPipeLine = $true)][switch]$Online,
+		[switch]$ShowMissing
+    )
+    Begin {
+		# eenter($MyInvocation.MyCommand)
+		switch ($PSCmdlet.ParameterSetName) {
+			'ONLINE' {
+				if ($env:SystemDrive) {
+					$Root = $env:SystemDrive
+				} else {
+					$Root = '/'
+				}
+			}
+		}
+		# edevel("PWSHFW_PATH = " + $Global:PWSHFW_PATH)
+		$os = [ordered]@{}
+		# ewarn "Get-OperatingSystemObject() use custom classes and custom object type."
+		# ewarn "It may not work under certain circumstances."
+		# ewarn "Windows 10 Pro and Scheduled Tasks are known to not work properly."
+		# ewarn "Please migrate your script to use Get-OperatingSystem instead."
+    }
+
+    Process {
+		# 1st load all the classes we got.
+		Get-ChildItem -Path $($Global:PWSHFW_PATH + "/classes/os") -Filter "*.ps1" -Recurse | ForEach-Object {
+			# edevel("Loading os class found at " + $_.FullName)
+			. "$($_.FullName)"
+		}
+
+		# Then, load default values from osObject
+		# edevel("osObject")
+		$os.platform = [osObject]::identifyOsPlatform($Root)
+		$os.kernel = [osObject]::identifyOsKernel('$Root')
+		$os.family = [osObject]::identifyOsFamily('$Root')
+		$os.distrib = [osObject]::identifyOsDistrib('$Root')
+		$os.releaseId = [osObject]::identifyOsReleaseid('$Root')
+		# edevel($os | ConvertTo-Json)
+
+		# Then try to override each attribut with a possible more specific code as we load more specialized classes
+		# edevel("platformOsObject")
+		try {
+			$os.kernel = Invoke-Expression $("[" + ($os.platform | ConvertTo-CamelCase) + "PlatformOsObject]::identifyOsKernel('$Root')")
+			$os.family = Invoke-Expression $("[" + ($os.platform | ConvertTo-CamelCase) + "PlatformOsObject]::identifyOsFamily('$Root')")
+			$os.distrib = Invoke-Expression $("[" + ($os.platform | ConvertTo-CamelCase) + "PlatformOsObject]::identifyOsDistrib('$Root')")
+			$os.releaseId = Invoke-Expression $("[" + ($os.platform | ConvertTo-CamelCase) + "PlatformOsObject]::identifyOsReleaseid('$Root')")
+		} catch {
+			if ($ShowMissing) { ewarn("[" + ($os.platform | ConvertTo-CamelCase) + "PlatformOsObject] is missing or incomplete.") }
+		}
+		# edevel($os | ConvertTo-Json)
+		# edevel("kernelOsObject")
+		try {
+			$os.family = Invoke-Expression $("[" + ($os.kernel | ConvertTo-CamelCase) + "KernelOsObject]::identifyOsFamily('$Root')")
+			$os.distrib = Invoke-Expression $("[" + ($os.kernel | ConvertTo-CamelCase) + "KernelOsObject]::identifyOsDistrib('$Root')")
+			$os.releaseId = Invoke-Expression $("[" + ($os.kernel | ConvertTo-CamelCase) + "KernelOsObject]::identifyOsReleaseid('$Root')")
+		} catch {
+			if ($ShowMissing) { ewarn("[" + ($os.kernel | ConvertTo-CamelCase) + "PlatformOsObject] is missing or incomplete.") }
+		}
+		# edevel($os | ConvertTo-Json)
+		# edevel("familyOsObject")
+		try {
+			$os.distrib = Invoke-Expression $("[" + ($os.family | ConvertTo-CamelCase) + "FamilyOsObject]::identifyOsDistrib('$Root')")
+			$os.releaseId = Invoke-Expression $("[" + ($os.family | ConvertTo-CamelCase) + "FamilyOsObject]::identifyOsReleaseid('$Root')")
+		} catch {
+			if ($ShowMissing) { ewarn("[" + ($os.family | ConvertTo-CamelCase) + "PlatformOsObject] is missing or incomplete.") }
+		}
+		# edevel($os | ConvertTo-Json)
+		# edevel("distribOsObject")
+		try {
+			$os.releaseId = Invoke-Expression $("[" + ($os.distrib | ConvertTo-CamelCase) + "DistribOsObject]::identifyOsReleaseid('$Root')")
+		} catch {
+			if ($ShowMissing) { ewarn("[" + ($os.distrib | ConvertTo-CamelCase) + "PlatformOsObject] is missing or incomplete.") }
+		}
+		# edevel($os | ConvertTo-Json)
+
+		# finnally, try to load object from the more specific to the more generic
+		$distribClassFile = $Global:PWSHFW_PATH + "/classes/os/platform/" + ($os.platform | ConvertTo-CamelCase) + "/kernel/" + ($os.kernel | ConvertTo-CamelCase) + "/family/" + ($os.family | ConvertTo-CamelCase) + "/distrib/" + ($os.distrib | ConvertTo-CamelCase) + "/" + ($os.distrib | ConvertTo-CamelCase) + "DistribOsObject.ps1"
+		$familyClassFile = $Global:PWSHFW_PATH + "/classes/os/platform/" + ($os.platform | ConvertTo-CamelCase) + "/kernel/" + ($os.kernel | ConvertTo-CamelCase) + "/family/" + ($os.family | ConvertTo-CamelCase) + "/" + ($os.family | ConvertTo-CamelCase) + "FamilyOsObject.ps1"
+		$kernelClassFile = $Global:PWSHFW_PATH + "/classes/os/platform/" + ($os.platform | ConvertTo-CamelCase) + "/kernel/" + ($os.kernel | ConvertTo-CamelCase) + "/" + ($os.kernel | ConvertTo-CamelCase) + "KernelOsObject.ps1"
+		$platformClassFile = $Global:PWSHFW_PATH + "/classes/os/platform/" + ($os.platform | ConvertTo-CamelCase) + "/" + ($os.platform | ConvertTo-CamelCase) + "PlatformOsObject.ps1"
+		# $osClassFile = $Global:PWSHFW_PATH + "/classes/os/osObject.ps1"
+		# edevel("?? " + $distribClassFile)
+		if (fileExist -Name  $distribClassFile) {
+			. "$distribClassFile"
+			# edevel("OK => " + $distribClassFile)
+			$obj = Invoke-Expression $("[" + ($os.distrib | ConvertTo-CamelCase) + "DistribOsObject]::new('$Root')")
+			return $obj
+		}
+		# edevel("?? " + $familyClassFile)
+		if (fileExist -Name  $familyClassFile) {
+			. "$familyClassFile"
+			# edevel("OK => " + $familyClassFile)
+			$obj = Invoke-Expression $("[" + ($os.family | ConvertTo-CamelCase) + "FamilyOsObject]::new('$Root')")
+			return $obj
+		}
+		# edevel("?? " + $kernelClassFile)
+		if (fileExist -Name  $kernelClassFile) {
+			. "$kernelClassFile"
+			# edevel("OK => " + $kernelClassFile)
+			$obj = Invoke-Expression $("[" + ($os.kernel | ConvertTo-CamelCase) + "KernelOsObject]::new('$Root')")
+			return $obj
+		}
+		# edevel("?? " + $platformClassFile)
+		if (fileExist -Name  $platformClassFile) {
+			. "$platformClassFile"
+			# edevel("OK => " + $platformClassFile)
+			$obj = Invoke-Expression $("[" + ($os.platform | ConvertTo-CamelCase) + "PlatformOsObject]::new('$Root')")
+			return $obj
+		}
+
+		return $null
+    }
+
+    End {
+        # eleave($MyInvocation.MyCommand)
+    }
+}
+
+<#
+.SYNOPSIS
+Get informations about currently running Operating System
+
+.DESCRIPTION
+Try to get concise yet useful and formatted informations about running OS. The way we get informations must run in constrained language mode.
+
+.EXAMPLE
+$os = Get-OnlineOpratingSystem
+
+.NOTES
+General notes
+#>
+
+function Get-OnlineOperatingSystem {
+    # [CmdletBinding()]Param (
+    # )
+    Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+		# $os = @{}
+		$os = New-Object -TypeName PSObject -Property @{
+			platform = "unknown"
+			mainstream = "unknown"
+			kernel = "unknown"
+			kernelVersion = "0.0.0.0"
+			family = "unknown"
+			distrib = "unknown"
+			edition = ""
+			installType = "unknown"
+			version = ""
+			releaseId = ""
+			productName = "unknown"
+			codeName = "unknown"
+			# longCodeName = "unknown"
+			name = "unknown"
+			arch = "x86"
+			Online = $true
+			Root = "/"
+			SystemRoot = "/"
+			# $files = @{}
+			# $folders = @{}
+			packages = [ordered]@{}
+		}
+    }
+
+	Process {
+		if ($PSVersionTable.PSVersion.Major -lt 6) {
+			# Powershell 1-5 is only on windows
+			$IsWindows = $true
+		}
+
+		# handle 3 mainstream operating systems Windows - macOS - linux
+		if ($IsLinux) {
+			$os.platform = "Unix"
+			$os.mainstream = "Linux"
+			$os.kernel = "linux"
+			$null = Load-Module -fullyqualifiedName "$($Global:PWSHFW_PATH)/Includes/OS.Unix/OS.Unix.psd1" -Force
+			$null = Load-Module -fullyqualifiedName "$($Global:PWSHFW_PATH)/Includes/OS.Linux/OS.Linux.psd1" -Force
+			$os.kernelVersion = (OS.Linux\Get-OSKernelVersion -Online)
+			$os.family = (OS.Linux\Get-OSFamily -Online)
+			$family = (get-culture).TextInfo.ToTitleCase($os.family) -replace '[\s\p{P}]'
+			$null = Load-Module -fullyqualifiedName "$($Global:PWSHFW_PATH)/Includes/OS.$family/OS.$family.psd1" -Force -Policy Optional
+			$os.distrib = (OS.Linux\Get-OSDistrib -Online)
+			$distrib = (get-culture).TextInfo.ToTitleCase($os.distrib) -replace '[\s\p{P}]'
+			$null = Load-Module -fullyqualifiedName "$($Global:PWSHFW_PATH)/Includes/OS.$distrib/OS.$distrib.psd1" -Force -Policy Optional
+			$os.edition = (OS.Linux\Get-OSEdition -Online)
+			$os.installType = (Get-OSInstalltype -Online)
+			$os.version = (OS.Linux\Get-OSVersion -Online)
+			$os.releaseId = (OS.Linux\Get-OSReleaseID -Online)
+			$os.productName = (OS.Linux\Get-OSProductName -Online)
+			$os.codeName = (OS.Linux\Get-OSCodeName -Online)
+			$os.arch = (Get-OSArch -Online)
+			$os.online = $true
+			$os.root = '/'
+			$os.systemRoot = '/'
+			$os | Add-Member -NotePropertyName files -NotePropertyValue (OS.Linux\Get-WellKnownFiles -Root $os.root)
+			$os | Add-Member -NotePropertyName folders -NotePropertyValue (OS.Linux\Get-WellKnownFolders -Root $os.root)
+			$os.packages = (Get-OSPackagesList -Online)
+		}
+
+		if ($isMacos) {
+			$null = Load-Module -fullyqualifiedName "$($Global:PWSHFW_PATH)\Includes\OS.Unix\OS.Unix.psd1" -Force
+			$null = Load-Module -fullyqualifiedName "$($Global:PWSHFW_PATH)\Includes\OS.Macos\OS.Macos.psd1" -Force
+			$os.platform = "Unix"
+			$os.mainstream = "macOS"
+			$os.kernel = "Darwin"
+			$os.kernelVersion = (OS.Macos\Get-OSKernelVersion -Online)
+			$os.distrib = "macOS"
+			$osIdentity = OS.Macos\Get-OSIdentity -Online
+			$os.family = "macOS"
+			# $os.edition =
+			$os.installType = "Desktop"
+			$os.version = $osIdentity.ProductVersion
+			$os.releaseId = OS.Macos\Get-OSReleaseId -version $os.version
+			$os.codeName = OS.Macos\Get-OSCodeName -ReleaseId $os.releaseId
+			$os.productName = $osIdentity.ProductName + " " + $os.version + " (" + $os.codename + ")"
+			$os.arch = OS.Macos\Get-OSArch -Online
+			$os.online = $true
+			$os.root = '/'
+			$os.systemRoot = '/'
+			$os | Add-Member -NotePropertyName files -NotePropertyValue (OS.Macos\Get-WellKnownFiles -Root $os.root)
+			$os | Add-Member -NotePropertyName folders -NotePropertyValue (OS.Macos\Get-WellKnownFolders -Root $os.root)
+			$os.packages = (Get-OSPackagesList -Online)
+		}
+
+		if ($isWindows) {
+			$null = Load-Module -fullyqualifiedName "$($Global:PWSHFW_PATH)\Includes\OS.Windows\OS.Windows.psd1" -Force
+			# $os.platform = "Windows"
+			# $os.mainstream = "Windows"
+			# $os.kernel = "WinNT"
+			# $os.buildNumber = OS.Windows\Get-OSKernelVersion -Online
+			# $os.distrib = OS.Windows\Get-OSDistrib -Online
+			# $os.edition = OS.Windows\Get-OSEdition -Online
+			# $os.installType = OS.Windows\Get-OSInstalltype -Online
+			# $os.version = OS.Windows\Get-OSVersion -Online
+			# $os.releaseId = OS.Windows\Get-OSReleaseID -Online
+			# $os.productName = OS.Windows\Get-OSProductName -Online
+			# $os.codeName = OS.Windows\Get-OSCodeName -Online
+			# $os.arch = OS.Windows\Get-OSArch -Online
+			# $os.online = $true
+			# $os.root = $env:SystemDrive
+			# $os.systemRoot = $env:SystemRoot
+			# $os.files = OS.Windows\Get-WellKnownFiles -Root $os.root
+			# $os.folders = OS.Windows\Get-WellKnownFolders -Root $os.root
+			$os.platform = "Windows"
+			$os.mainstream = "Windows"
+			$os.kernel = "WinNT"
+			$os.kernelVersion = (OS.Windows\Get-OSKernelVersion -Online)
+			$os.version = (OS.Windows\Get-OSVersion -Online)
+			$os.installType = (OS.Windows\Get-OSInstalltype -Online)
+			$os.releaseId = (OS.Windows\Get-OSReleaseID -Online)
+			$osIdentity = $os | Get-WindowsIdentity
+			# for Windows before Windows 10
+			if ([System.String]::IsNullOrEmpty($os.releaseId)) { $os.releaseId = $osIdentity.releaseId}
+			# for Windows Server after Windows 2012r2
+			if ($os.installType -eq 'Server') {
+				if (-not([string]::IsNullOrEmpty($osIdentity.releaseId))) { $os.releaseId = $osIdentity.releaseId }
+			}
+			$os.family = $osIdentity.family
+			$os.distrib = $osIdentity.distrib
+			$os.codeName = $osIdentity.codename
+			$os.edition = (OS.Windows\Get-OSEdition -Online)
+			$os.productName = (OS.Windows\Get-OSProductName -Online)
+			$os.arch = (OS.Windows\Get-OSArch -Online)
+			$os.online = $true
+			$os.root = ($env:SystemDrive)
+			$os.systemRoot = ($env:SystemRoot)
+			$os | Add-Member -NotePropertyName files -NotePropertyValue (OS.Windows\Get-WellKnownFiles -Root $os.root)
+			$os | Add-Member -NotePropertyName folders -NotePropertyValue (OS.Windows\Get-WellKnownFolders -Root $os.root)
+		}
+
+		$os.name = ($os.distrib + ' ' + $os.releaseId)
+
+		# return $os | Sort-HashTable
+		return $os
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}
+
+<#
+.SYNOPSIS
+Load online operating system's dictionaries.
+
+.DESCRIPTION
+Dictionaries contain OS specific commands to do abstract OS layer from user's scripts.
+This function load them according to a predefined hierarchy.
+
+.PARAMETER Platform
+Platform os OS
+
+.PARAMETER Family
+Family of OS
+
+.PARAMETER Distrib
+Distribution name of OS
+
+.PARAMETER ReleaseId
+Release number of OS
+
+.PARAMETER Force
+Force to (re-)load module
+
+.EXAMPLE
+Get-OperatingSystem -Online | Load-Dictionaries
+
+.EXAMPLE
+Load-Dictionaries -Platform Windows -Family Desktop -Distrib "Windows 10"
+
+.EXAMPLE
+Load-Dictionaries -Platform Linux -Family Debian -Distrib Ubuntu
+
+.EXAMPLE
+Load-Dictionaries -Platform MacOS
+
+.NOTES
+General notes
+#>
+
+function Load-Dictionaries {
+	[CmdletBinding()]Param (
+		[Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)][AllowNull()][string]$Platform,
+		[Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)][AllowNull()][string]$Kernel,
+		[Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)][AllowNull()][string]$Family,
+		[Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)][AllowNull()][string]$Distrib,
+		[AllowNull()][AllowEmptyString()]
+		[Parameter(Mandatory = $true, ValueFromPipelineByPropertyName = $true)][AllowNull()][string]$ReleaseId,
+		[Parameter()][switch]$Force
+	)
+	Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+		# edevel("Platform = $Platform")
+		# edevel("Family = $Family")
+		# edevel("Distrib = $Distrib")
+		# edevel("ReleaseId = $ReleaseId")
+	}
+
+	Process {
+		# edevel("Platform = $Platform")
+		# edevel("Family = $Family")
+		# edevel("Distrib = $Distrib")
+		# edevel("ReleaseId = $ReleaseId")
+		$p = (get-culture).TextInfo.ToTitleCase($platform) -replace '[\s\p{P}]'
+		$k = (get-culture).TextInfo.ToTitleCase($Kernel) -replace '[\s\p{P}]'
+		$f = (get-culture).TextInfo.ToTitleCase($Family) -replace '[\s\p{P}]'
+		$d = (get-culture).TextInfo.ToTitleCase($Distrib) -replace '[\s\p{P}]'
+		$r = (get-culture).TextInfo.ToTitleCase($ReleaseId) -replace '[\s\p{P}]'
+
+		## Load PwSh Dictionaries
+		# with fullyQualifiedName we are able to load Modules from devel folder
+		# and I forgot that Dictionaries folder is not included in PsModulePath at install time
+		$dict = "Dict.OS"
+		$null = Load-Module -Policy Optional -FullyQualifiedName $($Global:PWSHFW_PATH + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		if ($null -ne $Platform) {
+			$dict = "Dict.$p"
+			$null = Load-Module -Policy Optional -FullyQualifiedName $($Global:PWSHFW_PATH + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		}
+		if ($null -ne $Kernel) {
+			$dict = "Dict.$p.$k"
+			Load-Module -Policy Optional -FullyQualifiedName $($Global:PWSHFW_PATH + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		}
+		if ($null -ne $Family) {
+			$dict = "Dict.$p.$k.$f"
+			$null = Load-Module -Policy Optional -FullyQualifiedName $($Global:PWSHFW_PATH + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		}
+		if ($null -ne $Distrib) {
+			$dict = "Dict.$p.$k.$f.$d"
+			$null = Load-Module -Policy Optional -FullyQualifiedName $($Global:PWSHFW_PATH + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		}
+		if ($null -ne $ReleaseId) {
+			$dict = "Dict.$p.$k.$f.$d.$r"
+			$null = Load-Module -Policy Optional -FullyQualifiedName $($Global:PWSHFW_PATH + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		}
+
+		## Load User's script Dictionaries
+		if ($null -ne $Platform) {
+			$dict = "Dict.$p"
+			$null = Load-Module -Policy Optional -FullyQualifiedName $($Global:DIRNAME + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		}
+		if ($null -ne $Kernel) {
+			$dict = "Dict.$k"
+			$null = Load-Module -Policy Optional -FullyQualifiedName $($Global:DIRNAME + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		}
+		if ($null -ne $Distrib) {
+			$dict = "Dict.$d"
+			$null = Load-Module -Policy Optional -FullyQualifiedName $($Global:DIRNAME + "/Dictionaries/" + $dict + "/" + $dict + ".psd1") -Force:$Force
+		}
+
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}
+
+function Get-OSPackage {
+	[CmdletBinding(DefaultParameterSetName='byPackageName')]Param (
+		[Parameter(Mandatory = $true, ValueFromPipeLine = $true)]$InputObject,
+		[Parameter(Mandatory = $true, ValueFromPipeLine = $false, ParameterSetName = 'byPackageName')][string]$Name,
+		[Parameter(Mandatory = $true, ValueFromPipeLine = $false, ParameterSetName = 'byFileName')][string]$Filename
+	)
+	Begin {
+		# eenter($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+
+	Process {
+		switch ($PSCmdlet.ParameterSetName) {
+			'byPackageName' {
+				# $oPackage = $InputObject.packages.'$name'
+				# break
+			}
+			'byFileName' {
+				$name = Get-OSPackagenameFromFilename -Online:$InputObject.Online -Root $InputObject.Root -Filename $Filename
+			}
+		}
+
+		if ($null -ne $name) {
+			return $InputObject.packages."$name"
+		} else {
+			return $null
+		}
+	}
+
+	End {
+		# eleave($Script:NS + '\' + $MyInvocation.MyCommand)
+	}
+}
+

@@ -1,0 +1,133 @@
+# Copyright © 2019 José Alberto Orejuela García (josealberto4444)
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
+import configparser
+import datetime
+import json
+import os.path
+import re
+import requests
+import youtube_dl
+
+def read_config(section, key):
+    config = configparser.ConfigParser()
+    config.read('config.cfg')
+    return config[section][key]
+
+def is_invalid(date):
+    try:
+        datetime.datetime.strptime(date, '%Y-%m-%d')
+    except ValueError:
+        return "Incorrect date format, should be YYYY-MM-DD."
+    else:
+        return False
+
+class Apod:
+
+    def __init__(self, *args):
+        self.api_key = read_config('NASA_API', 'api_key')
+        if args:
+            self.date = args[0]
+        else:
+            self.date = ''
+            self.date = self.ask_api()['date']
+        self.filename = 'data/' + self.date
+        self.error = False
+        self.consult()
+        if not self.error:
+            self.title = self.api_response['title']
+            self.media_type = self.api_response['media_type']
+            if self.media_type == 'image':
+                self.hdlink = self.api_response['hdurl']
+            self.link = self.api_response['url']
+            self.explanation()
+
+    def ask_api(self):
+        baseurl = 'https://api.nasa.gov/planetary/apod'
+        payload = {'api_key': self.api_key, 'date': self.date}
+        r = requests.get(baseurl, params=payload)
+        return r.json()
+
+    def consult(self):
+        if os.path.exists('data/' + self.date + '.json'):
+            with open(self.filename + '.json', 'rt') as f:
+                self.api_response = json.load(f)
+        else:
+            self.api_response = self.ask_api()
+            if 'code' in self.api_response:
+                if self.api_response['code'] == 400:
+                    self.error = self.api_response['msg']
+                else:
+                    self.error = self.api_response['code'] + ': ' + self.api_response['msg']
+            else:
+                with open(self.filename + '.json', 'wt') as f:
+                    json.dump(self.api_response, f)
+
+    def get_userpage(self):
+        shortdate = self.date.replace('-', '')
+        shortdate = shortdate[2:]
+        url = 'https://apod.nasa.gov/apod/ap' + shortdate + '.html'
+        payload = {}
+        r = requests.get(url, params=payload)
+        return r.text
+
+    def scrap_explanation(self, pagesource):
+        re_explanation = re.compile("Explanation: </b>(.*?)<p>", flags=re.DOTALL) # Compile regex for extracting explanation.
+        explanation = re_explanation.search(pagesource).groups()[0] # Extract explanation.
+        explanation = explanation.replace('/\n', '/') # Fix split URLs along several lines.
+        explanation = explanation.replace('\n>', '>') # Fix split HTML tags.
+        explanation = explanation.replace('<a/>', '</a>') # Fix typos (they seem to write the HTML by hand, yes).
+        explanation = explanation.replace('\n', ' ') # Delete all newlines.
+        explanation = re.sub('\s+', ' ', explanation).strip() # Substitute repeated spaces and strips the ones at the beginning and the end of the string.
+        explanation = re.sub(r'<a([^>]*)href=["\'](?!http)([^"\']*)["\']([^>]*)>', r'<a\1href="https://apod.nasa.gov/apod/\2"\3>', explanation) # Change relative paths to absolute.
+        return explanation
+
+    def save_explanation(self, explanation):
+        with open(self.filename + '.html', 'wt') as f:
+            f.write(explanation)
+
+    def explanation(self):
+        filename = self.filename + '.html'
+        if os.path.exists(filename):
+            with open(filename, 'rt') as f:
+                self.explanation = f.read()
+            self.html = True
+        else:
+            try:
+                userpage = self.get_userpage()
+                explanation = self.scrap_explanation(userpage)
+            except:
+                explanation = self.api_response['explanation']
+                self.html = False
+            else:
+                self.save_explanation(explanation)
+                self.html = True
+            self.explanation = explanation
+
+# TO-DO: Check if already downloaded first
+#    def download_media():
+#        if self.media_type == 'image':
+#            link = self.api_response['hdurl']
+#            r = requests.get(link)
+#            extension = os.path.splitext(link)[1]
+#            filename = self.filename + extension
+#            with open(filename, 'wb') as f:
+#                for chunk in r.iter_content(chunk_size=128):
+#                    f.write(chunk)
+#        elif self.media_type == 'video':
+#            filename = self.filename + '.%(ext)s'
+#            ydl_opts = {'outtmpl': filename, 'quiet': True}
+#            with youtube_dl.YoutubeDL(ydl_opts) as ydl:
+#                ydl.download([api_response['url']])

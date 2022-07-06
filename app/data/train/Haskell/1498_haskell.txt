@@ -1,0 +1,522 @@
+module PulseLambda.Parser
+( tokenStreamToAst
+, OpPrec(..)
+, PrecDirection(..)
+, standardOps
+) where
+import PulseLambda.Location
+import PulseLambda.Error
+import PulseLambda.TokenStream
+import PulseLambda.Ast
+import Data.Int
+import Data.Word
+import Data.Maybe
+
+
+data OpPrec = OpPrec
+    { getOperator :: String
+    , getFunctionName :: String
+    , getPrecDirection :: PrecDirection
+    , getPrecedence :: Word32
+    }
+    deriving (Eq, Show)
+
+data PrecDirection = LeftPrec | RightPrec deriving (Eq, Show)
+
+data IncompleteOp = IncompleteOp
+    { getIncompleteOpLocation :: Location
+    , getIncompleteOpPrec :: OpPrec
+    } deriving (Show)
+
+data OpPosition = PrefixOp | PostfixOp | InfixOp | CallOp {getCallOp :: [Node]} deriving (Show)
+
+instance Eq OpPosition where
+    PrefixOp == PrefixOp = True
+    PostfixOp == PostfixOp = True
+    InfixOp == InfixOp = True
+    CallOp _ == CallOp _ = True
+    _ == _ = False
+
+data Operator = Operator
+    { getOperatorLocation :: Location
+    , getOperatorPrec :: OpPrec
+    , getOperatorPosition :: OpPosition
+    } deriving (Show)
+
+
+standardOps :: [OpPrec]
+standardOps =
+    [ OpPrec ">" "isGreaterThanStrict" LeftPrec 10000
+    , OpPrec "<" "isLessThanStrict" LeftPrec 10000
+    , OpPrec ">=" "isGreaterOrEqualToStrict" LeftPrec 10000
+    , OpPrec "<=" "isLessOrEqualToStrict" LeftPrec 10000
+    , OpPrec "==" "isEqualToStrict" LeftPrec 10000
+    , OpPrec "!=" "isDifferentOfStrict" LeftPrec 10000
+    , OpPrec ">~" "isGreaterThan" LeftPrec 10000
+    , OpPrec "<~" "isLessThan" LeftPrec 10000
+    , OpPrec ">~=" "isGreaterOrEqualTo" LeftPrec 10000
+    , OpPrec "<~=" "isLessOrEqualTo" LeftPrec 10000
+    , OpPrec "~=" "isEqualTo" LeftPrec 10000
+    , OpPrec "!~=" "isDifferentOf" LeftPrec 10000
+    , OpPrec "++" "concat" LeftPrec 15000
+    , OpPrec ":" "buildList" LeftPrec 16000
+    , OpPrec "+" "sum" LeftPrec 20000
+    , OpPrec "-" "subtract" LeftPrec 20000
+    , OpPrec "*" "multiply" LeftPrec 40000
+    , OpPrec "/" "divide" LeftPrec 40000
+    , OpPrec "/:" "remain" LeftPrec 40000
+    , OpPrec "/-" "modulus" LeftPrec 40000
+    , OpPrec "^" "power" LeftPrec 80000
+    , OpPrec "!" "factorialOrLogicalNot" LeftPrec 160000
+    , OpPrec "()" "#call" LeftPrec 500000
+    , OpPrec "&&" "#and" LeftPrec 50000
+    , OpPrec "||" "#or" LeftPrec 2500
+    ]
+
+searchOpPrec :: [OpPrec] -> String -> Maybe OpPrec
+searchOpPrec [] _ = Nothing
+searchOpPrec (x:xs) op = if getOperator x == op
+    then Just x
+    else searchOpPrec xs op
+
+setOpPrec :: [OpPrec] -> OpPrec -> [OpPrec]
+setOpPrec [] prec = [prec]
+setOpPrec (precIn:precs) prec = if getOperator precIn == getOperator prec
+        then prec:precs
+        else precIn:setOpPrec precs prec
+
+getOpPrec :: [OpPrec] -> Token -> OpPrec
+getOpPrec [] (Token loc (OperatorToken op)) =
+    throwParsingError loc $ "Unknwon operator `" ++ op ++ "`."
+getOpPrec (x:xs) (Token loc (OperatorToken op)) = if getOperator x == op
+    then x
+    else getOpPrec xs $! Token loc $! OperatorToken op
+
+tokenStreamToAst :: TokenStream -> [OpPrec] -> TokenValue -> (Node, TokenStream, [OpPrec])
+tokenStreamToAst stream precs endToken
+    | currTokVal == endToken = (Node currTokLoc $! SetOfExp [], goNext stream, precs)
+    | getTokenValue endedToken == endToken = (Node currTokLoc $! SetOfExp (if isNothing maybeNode
+        then []
+        else [node]),
+        newStream, newPrecs)
+    | isNothing maybeNode = next
+    | otherwise = (Node nextLoc $! SetOfExp $! node:exps, nextStream, nextPrec)
+    where
+        (Token currTokLoc currTokVal) = getCurrToken stream
+        (maybeNode, endedToken, newStream, newPrecs) = parseLine stream precs [NewlineToken, endToken]
+        (Just node) = maybeNode
+        next = tokenStreamToAst newStream newPrecs endToken
+        (Node nextLoc (SetOfExp exps), nextStream, nextPrec) = next
+
+parseSetOfExps :: TokenStream -> [OpPrec] -> (Node, TokenStream, [OpPrec])
+parseSetOfExps stream precs = tokenStreamToAst (goNext stream) precs closeCrlBracket
+
+parseLine :: TokenStream -> [OpPrec] -> [TokenValue] -> (Maybe Node, Token, TokenStream, [OpPrec])
+parseLine stream precs endToks
+    | currTokVal == operatorKw =
+        let (lastTok, newStream, newPrecs) = parseOperatorStatement stream precs endToks
+        in (Nothing, lastTok, newStream, newPrecs)
+    | currTokVal `elem` endToks = (Nothing, currTok, goNext stream, precs)
+    | otherwise = parseExpression stream precs endToks
+    where
+        currTok = getCurrToken stream
+        currTokVal = getTokenValue currTok
+
+parseIf :: TokenStream -> [OpPrec] -> [TokenValue] -> (Node, Token, TokenStream, [OpPrec])
+parseIf stream precs endToks
+    | isNothing maybeCond =
+        throwParsingError condTokLoc
+            $! "Expecting expression, but found "
+            ++ show condTokVal ++ "."
+    | isNothing maybeThen =
+        throwParsingError endThenTokLoc
+            $! "Expecting expression, but found "
+            ++ show endThenTokVal ++ "."
+    | isNothing maybeElse =
+        throwParsingError endElseTokLoc
+            $! "Expecting expression, but found "
+            ++ show endElseTokVal ++ "."
+    | otherwise = (node, elseTok, elseStream, elsePrecs)
+    where
+        (Token currTokLoc _) = getCurrToken stream
+        skippedStream = goNext stream
+        (maybeCond, Token condTokLoc condTokVal, condStream, condPrecs) =
+            parseExpression skippedStream precs [thenKw]
+        (Just cond) = maybeCond
+        (maybeThen, Token endThenTokLoc endThenTokVal, thenStream, thenPrecs) =
+            parseExpression condStream condPrecs [elseKw]
+        (Just thenStmt) = maybeThen
+        (maybeElse, elseTok, elseStream, elsePrecs) =
+            parseExpression thenStream thenPrecs endToks
+        (Token endElseTokLoc endElseTokVal) = elseTok
+        (Just elseStmt) = maybeElse
+        node = Node currTokLoc (Condition cond thenStmt elseStmt)
+
+
+parseOperatorStatement :: TokenStream -> [OpPrec] -> [TokenValue] -> (Token, TokenStream, [OpPrec])
+parseOperatorStatement stream precs endToks
+    | (not . isOperatorToken) opTokVal = throwParsingError opTokLoc
+        $! "Expecting operator token, but found " ++ show opTokVal ++ "."
+    | (not . isIdentifierToken) funcTokVal = throwParsingError funcTokLoc
+        $! "Expecting identifier, found " ++ show funcTokVal ++ "."
+    | termTokVal `notElem` endToks = throwParsingError funcTokLoc
+        $! "Expecting " ++ showListOfTokens endToks ++ ", found " ++ show funcTokVal ++ "."
+    | otherwise =
+        ( terminationTok
+        , goNext terminationStream
+        , setOpPrec precs $! OpPrec
+            (stringFromTokenValue opTokVal)
+            (stringFromTokenValue funcTokVal)
+            precDirection
+            precVal
+        )
+    where
+        opStream = goNext stream
+        (Token opTokLoc opTokVal) = getCurrToken opStream
+        funcStream = skipExpected (goNext opStream) [asKw]
+        (Token funcTokLoc funcTokVal) = getCurrToken funcStream
+        precDirectionStream = goNext funcStream
+        (Token precDirectionTokLoc precDirectionTokVal) = getCurrToken precDirectionStream
+        precValStream = goNext precDirectionStream
+        (Token precValTokLoc precValTokVal) = getCurrToken precValStream
+        terminationStream = goNext precValStream
+        terminationTok = getCurrToken terminationStream
+        (Token _ termTokVal) = terminationTok
+        precVal :: Word32
+        precVal
+            | isIntToken precValTokVal = (fromIntegral . intFromTokenValue) precValTokVal
+            | isLargeIntToken precValTokVal = (fromIntegral . integerFromTokenValue) precValTokVal
+            | isNaturalToken precValTokVal = (fromIntegral . wordFromTokenValue) precValTokVal
+            | otherwise = throwParsingError precValTokLoc
+                $! "Expecting an integral literal, found " ++ show precValTokVal
+        precDirection
+            | precDirectionTokVal == leftKw = LeftPrec
+            | precDirectionTokVal == rightKw = RightPrec
+            | otherwise =  throwParsingError precDirectionTokLoc
+                $! "Expecting " ++ show leftKw
+                ++ " or " ++ show rightKw ++ ", found "
+                ++ show precDirectionTokVal
+
+-- sy stands for shunting yard
+parseExpression :: TokenStream -> [OpPrec] -> [TokenValue] -> (Maybe Node, Token, TokenStream,  [OpPrec])
+parseExpression stream precs endToks = parseShuntingYard stream precs [] [] [] False
+    where
+        addOperandToStack optrStack opndStack [] opnd = (optrStack, opnd:opndStack)
+        addOperandToStack optrStack [] [IncompleteOp loc prec] opnd =
+            (Operator loc prec PrefixOp:optrStack, [opnd])
+        addOperandToStack optrStack [] (IncompleteOp loc prec:xs) opnd =
+            (Operator loc prec PrefixOp:newOptrStack, newOpndStack)
+            where
+                (newOptrStack, newOpndStack) = addOperandToStack optrStack [] xs opnd
+        addOperandToStack optrStack (inStack:opnds) [IncompleteOp loc prec] opnd =
+            let (newOptrStack, newOpndStack) = addOperatorToStack optrStack (inStack:opnds) $! Operator loc prec InfixOp
+            in (newOptrStack, opnd:newOpndStack)
+        addOperandToStack optrStack (inStack:opnds) (x:y:incmps) opnd
+            | biggerPrec =
+                let (newOptrStack, newOpndStack) = remaining
+                in (Operator xLoc xPrec PrefixOp:newOptrStack, newOpndStack)
+            | null incmps =
+                let (Just node) = finalize optrStack (inStack:opnds) [y]
+                in addOperandToStack [] [node] [x] opnd
+            | otherwise =
+                let (newOptrStack, newOpndStack) = remaining
+                in addOperandToStack newOptrStack newOpndStack [x] opnd
+            where
+                biggerPrec = xPrecVal > yPrecVal || xPrecVal == yPrecVal && xDir == LeftPrec && xDir == yDir
+                remaining = addOperandToStack optrStack (inStack:opnds) (y:incmps) opnd
+                (IncompleteOp xLoc xPrec) = x
+                (OpPrec _ _ xDir xPrecVal) = xPrec
+                (IncompleteOp _ yPrec) = y
+                (OpPrec _ _ yDir yPrecVal) = yPrec
+        addIncompleteOpToStack optrStack opndStack incmpStack optr = (optrStack, opndStack, optr:incmpStack)
+        addOperatorToStack [] opnd optr = ([optr], opnd)
+        addOperatorToStack (inStack:optrs) opndStack optr
+            | biggerPrec = (optr:inStack:optrs, opndStack)
+            | inType == PostfixOp = case opndStack of
+                (opnd:opnds) -> addOperatorToStack optrs (Node inLoc (FunctionCall
+                    (Node inLoc $! VarMention inFname)
+                    [opnd, Node loc NullLiteral]):opnds) optr
+            | inType == PrefixOp = case opndStack of
+                (opnd:opnds) -> addOperatorToStack optrs (Node inLoc (FunctionCall
+                    (Node inLoc $! VarMention inFname)
+                    [Node loc NullLiteral, opnd]):opnds) optr
+            | inType == InfixOp = case opndStack of
+                (x:y:opnds) -> addOperatorToStack optrs (Node inLoc (FunctionCall
+                    (Node inLoc $! VarMention inFname)
+                    [y, x]):opnds) optr
+            | otherwise = case opndStack of
+                (opnd:opnds) -> addOperatorToStack optrs (Node inLoc (FunctionCall opnd args):opnds) optr
+            where
+                biggerPrec = inPrecVal < precVal || inPrecVal == precVal && inDir == RightPrec && dir == inDir
+                (Operator loc prec _) = optr
+                (Operator inLoc inPrec inType) = inStack
+                (OpPrec _ inFname inDir inPrecVal) = inPrec
+                (OpPrec _ _ dir precVal) = prec
+                (CallOp args) = inType
+        finalize [] [] [] = Nothing
+        finalize [] [node] [] = Just node
+        finalize (Operator loc (OpPrec op _ _ _) _:_) [] _ = throwParsingError loc
+            $! "Unexpected " ++ show (OperatorToken op) ++ "."
+        finalize _ [] (IncompleteOp loc (OpPrec op _ _ _):_) = throwParsingError loc
+            $! "Unexpected " ++ show (OperatorToken op) ++ "."
+        finalize (Operator loc (OpPrec _ fname _ _) PostfixOp:ops) (x:xs) [] = finalize ops
+            (Node loc (FunctionCall (Node loc $! VarMention fname) [x, Node loc NullLiteral]):xs) []
+        finalize (Operator loc (OpPrec _ fname _ _) PrefixOp:ops) (x:xs) [] = finalize ops
+            (Node loc (FunctionCall (Node loc $! VarMention fname) [Node loc NullLiteral, x]):xs) []
+        finalize (Operator loc (OpPrec _ fname _ _) InfixOp:ops) (x:y:xs) [] = finalize ops
+            (Node loc (FunctionCall (Node loc $! VarMention fname) [y, x]):xs) []
+        finalize (Operator loc _ (CallOp args):ops) (x:xs) [] = finalize ops
+            (Node loc (FunctionCall x args):xs) []
+        finalize optrStack opndStack (IncompleteOp loc opPrec:ops) =
+            finalize newOptrStack (node:newOpndStack) ops
+            where
+                (optr:newOptrStack, opnd:newOpndStack) =
+                    addOperatorToStack optrStack opndStack $! Operator loc opPrec PostfixOp
+                (Just node) = finalize [optr] [opnd] []
+        -- finalize optrStack opndStack incmpStack = error $! "optr:" ++ show optrStack ++ "\nopnd: " ++ show opndStack ++ "\nincmpStack:" ++ show incmpStack
+        parseShuntingYard syStream syPrecs optrStack opndStack incmpStack isPreviousValue
+            | currTokVal `elem` endToks = (finalize optrStack opndStack incmpStack, currTok, goNext skippedStream, syPrecs)
+            | isPreviousValue = if currTokVal == openParen
+                then
+                    let (args, newStream, newPrecs) = parseCallArgs syStream syPrecs
+                        (newOptrStack, newOpndStack) = addOperatorToStack optrStack opndStack
+                            $! Operator currTokLoc
+                            (getOpPrec newPrecs $! Token currTokLoc $! OperatorToken "()")
+                            $! CallOp args
+                    in parseShuntingYard newStream newPrecs newOptrStack newOpndStack incmpStack True
+                else nextWithOp
+            | isJust readMaybeValue =
+                let (Just (node, newStream, newPrecs)) = readMaybeValue
+                    (newOptrStack, newOpndStack) = addOperandToStack optrStack opndStack incmpStack node
+                in parseShuntingYard newStream newPrecs newOptrStack newOpndStack [] True
+            | isJust readMaybeEndingValue =
+                let (Just (node, lastTok, newStream, newPrecs)) = readMaybeEndingValue
+                    (newOptrStack, newOpndStack) = addOperandToStack optrStack opndStack incmpStack node
+                in (finalize newOptrStack newOpndStack [], lastTok, newStream, newPrecs)
+            | otherwise = nextWithOp
+            where
+                skippedStream = skipln syStream
+                currTok = getCurrToken skippedStream
+                (Token currTokLoc currTokVal) = currTok
+                nextWithOp
+                    | currTokVal /= assignOp =
+                        let (incompleteOp, newStream, newPrecs) = if isOperatorToken currTokVal
+                                then (IncompleteOp currTokLoc $! getOpPrec syPrecs currTok, advance syStream, syPrecs)
+                                else throwParsingError currTokLoc $! "Unexpected " ++ show currTokVal ++ "."
+                            (newOptrStack, newOpndStack, newIncmpStack) =
+                                addIncompleteOpToStack optrStack opndStack incmpStack incompleteOp
+                        in parseShuntingYard newStream newPrecs newOptrStack newOpndStack newIncmpStack False
+                    | (not . null) incmpStack || null opndStack = unexpectedError
+                    | otherwise = case (getExpression . head) opndStack of
+                        (VarMention var) -> case parseExpression (advance syStream) syPrecs endToks of
+                            (Just assigned, lastTok, newStream, newPrecs) ->
+                                let assignment = Node currTokLoc (Assign var assigned)
+                                in (finalize optrStack (assignment:tail opndStack) [], lastTok, newStream, newPrecs)
+                            (Nothing, Token lastTokLoc lastTokVal, _, _) -> throwParsingError lastTokLoc
+                                $! "Unexpected " ++ show lastTokVal ++ "."
+                        _ -> unexpectedError
+                    where
+                        unexpectedError =
+                            throwParsingError currTokLoc $! "Unexpected " ++ show assignOp ++ "."
+                readMaybeEndingValue
+                    | currTokVal == ifKw =
+                        let (ifExp, lastTok, newStream, newPrecs) = parseIf syStream syPrecs endToks
+                        in Just (ifExp, lastTok, skipln newStream, newPrecs)
+                    | currTokVal == lambdaKw =
+                        let (funcExp, lastTok, newStream, newPrecs) = parseFunction syStream syPrecs endToks
+                        in Just (funcExp, lastTok, skipln newStream, newPrecs)
+                    | currTokVal == constKw =
+                        let (constExp, lastTok, newStream, newPrecs) = parseConst syStream syPrecs
+                        in Just (constExp, lastTok, skipln newStream, newPrecs)
+                    | otherwise = Nothing
+                readMaybeValue
+                    | isIdentifierToken currTokVal = nodeWith parseVar
+                    | isStringToken currTokVal = nodeWith parseString
+                    | isCharToken currTokVal = nodeWith parseChar
+                    | isNaturalToken currTokVal = nodeWith parseNatural
+                    | isIntToken currTokVal = nodeWith parseInt
+                    | isLargeIntToken currTokVal = nodeWith parseLargeInt
+                    | isRealToken currTokVal = nodeWith parseReal
+                    | currTokVal == openParen =
+                        let (maybeNode, _, newStream, newPrecs) =
+                                parseExpression (goNext syStream) syPrecs [closeParen]
+                            node = fromMaybe (Node currTokLoc NullLiteral) maybeNode
+                        in Just (node, skipln newStream, newPrecs)
+                    | currTokVal == openSqrBracket =
+                        let (list, newStream, newPrecs) = parseList syStream syPrecs
+                        in Just (list, skipln newStream, newPrecs)
+                    | currTokVal == openCrlBracket =
+                        let (setOfExp, newStream, newPrecs) = parseSetOfExps syStream syPrecs
+                        in Just (setOfExp, skipln newStream, newPrecs)
+                    | otherwise = Nothing
+                    where
+                        nodeWith func = Just (func currTok, advance syStream, syPrecs)
+        (advance, skipln) = if NewlineToken `elem` endToks
+            then (goNext, id)
+            else (skipWhileIsNewline . goNext, skipWhileIsNewline)
+        parseConst constStream constPrecs
+            | (not . isIdentifierToken) identfTokVal =
+                throwParsingError identfTokLoc
+                    $! "Expecting identifier, but found "
+                    ++ show identfTokVal ++ "."
+            | isNothing maybeExp =
+                throwParsingError lastTokLoc
+                    $! "Expecting expression, but found " ++ show lastTokVal
+            | otherwise = (Node location $! ConstantDeclare constName expr, lastTok, newStream, newPrecs)
+            where
+                location = (getTokenLocation . getCurrToken) constStream
+                skippedStream = advance constStream
+                (Token identfTokLoc identfTokVal) = getCurrToken skippedStream
+                constName = stringFromTokenValue identfTokVal
+                expStream = skipln $! skipExpected (advance skippedStream) [assignOp]
+                (maybeExp, lastTok, newStream, newPrecs) = parseExpression expStream constPrecs endToks
+                (Token lastTokLoc lastTokVal) = lastTok
+                (Just expr) = maybeExp
+
+
+parseVar :: Token -> Node
+parseVar (Token loc (IdentifierToken identf)) = Node loc (VarMention identf)
+
+parseString :: Token -> Node
+parseString (Token loc (StringToken str)) = Node loc (StringLiteral str)
+
+parseChar :: Token -> Node
+parseChar (Token loc (CharToken char)) = Node loc (CharLiteral char)
+
+parseNatural :: Token -> Node
+parseNatural (Token loc (NaturalToken nat)) = Node loc (NaturalLiteral nat)
+
+parseInt :: Token -> Node
+parseInt (Token loc (IntToken int)) = Node loc (IntLiteral int)
+
+parseLargeInt :: Token -> Node
+parseLargeInt (Token loc (LargeIntToken int)) = Node loc (LargeIntLiteral int)
+
+parseReal :: Token -> Node
+parseReal (Token loc (RealToken int)) = Node loc (RealLiteral int)
+
+parseFunction :: TokenStream -> [OpPrec] -> [TokenValue] -> (Node, Token, TokenStream, [OpPrec])
+parseFunction stream precs endToks = if isNothing maybeBody
+    then throwParsingError lastTokLoc
+        $! "Expecting expression, but found "
+        ++ show lastTokVal ++ "."
+    else (Node fLoc $! FunctionLiteral args body, lastTok, newerStream, newerPrecs)
+    where
+        (Token fLoc _) = getCurrToken stream
+        (args, newStream, newPrecs) = parseArgsDeclare (goNext stream) precs
+        (maybeBody, lastTok, newerStream, newerPrecs) = parseExpression newStream newPrecs endToks
+        (Token lastTokLoc lastTokVal) = lastTok
+        (Just body) = maybeBody
+
+parseArgsDeclare :: TokenStream -> [OpPrec] -> ([Node], TokenStream, [OpPrec])
+parseArgsDeclare stream precs = if currTokVal == closeParen
+    then ([], goNext skippedStream, precs)
+    else parseArg skippedStream precs
+    where
+        skippedStream = skipExpected stream [openParen]
+        (Token tokLoc currTokVal) = getCurrToken skippedStream
+        parseArg argStream argPrecs
+            | (not . isIdentifierToken) argTokVal =
+                throwParsingError argTokLoc
+                    $! "Expecting identifier, but found "
+                    ++ show argTokVal ++ "."
+            | skpdArgTokVal == openSqrBracket =
+                let streamAfterExpected = skipExpected (goNext stream) [closeSqrBracket]
+                    (Token tokLocAfterExpected tokValAfterExpected) = getCurrToken streamAfterExpected
+                in if tokValAfterExpected == closeParen
+                    then
+                        ( [Node argTokLoc $! VariadicArgDeclare identifier]
+                        , goNext streamAfterExpected
+                        , argPrecs
+                        )
+                    else
+                        throwParsingError tokLocAfterExpected
+                        $! "Expecting " ++ show closeParen
+                        ++ ", but found " ++ show tokValAfterExpected
+                        ++ " (Variadic Argument must be the last declared argument)."
+            | lastTokVal == closeParen =
+                ( [Node argTokLoc $! ArgDeclare identifier defaultValue]
+                , streamAfterDefault
+                , precsAfterDefault
+                )
+            | lastTokVal == commaSeparator =
+                let (args, finalStream, finalPrecs) = parseArg streamAfterDefault precsAfterDefault
+                in
+                    ( Node argTokLoc (ArgDeclare identifier defaultValue):args
+                    , finalStream
+                    , finalPrecs
+                    )
+            | otherwise =
+                throwParsingError lastTokLoc
+                $! "Expecting " ++ show closeParen ++ ", "
+                ++ show commaSeparator ++ ", "
+                ++ show assignOp ++ " or "
+                ++ show openSqrBracket ++ ", found "
+                ++ show lastTokVal ++ "."
+            where
+                (Token argTokLoc argTokVal) = getCurrToken argStream
+                identifier = stringFromTokenValue argTokVal
+                skippedArgStream = goNext argStream
+                skpdArgTok = getCurrToken skippedArgStream
+                (Token _ skpdArgTokVal) = skpdArgTok
+                (defaultValue, Token lastTokLoc lastTokVal, streamAfterDefault, precsAfterDefault)
+                    | skpdArgTokVal /= assignOp =
+                        (Node argTokLoc NullLiteral, skpdArgTok, goNext skippedArgStream, argPrecs)
+                    | isJust maybeNode = (node, lastReadTok, newStream, newPrecs)
+                    | otherwise =
+                        throwParsingError lastReadTokLoc
+                        $! "Expected expression, but found "
+                        ++ show lastReadTokVal ++ "."
+                    where
+                        (maybeNode, lastReadTok, newStream, newPrecs) =
+                            parseExpression (goNext skippedArgStream) argPrecs [commaSeparator, closeParen]
+                        (Token lastReadTokLoc lastReadTokVal) = lastReadTok
+                        (Just node) = maybeNode
+
+parseList :: TokenStream -> [OpPrec] -> (Node, TokenStream, [OpPrec])
+parseList stream precs = (Node location $! ListLiteral nodes, newStream, newPrecs) where
+    location = (getTokenLocation . getCurrToken) stream
+    (nodes, newStream, newPrecs) = parseSequence stream precs closeSqrBracket
+
+
+parseCallArgs :: TokenStream -> [OpPrec] -> ([Node], TokenStream, [OpPrec])
+parseCallArgs stream precs = parseSequence stream precs closeParen
+
+parseSequence :: TokenStream -> [OpPrec] -> TokenValue -> ([Node], TokenStream, [OpPrec])
+parseSequence stream precs endTok =  if currTokVal == endTok
+    then ([], goNext skippedStream, precs)
+    else readMembers skippedStream precs
+    where
+        skippedStream = goNext stream
+        currTokVal = (getTokenValue . getCurrToken) skippedStream
+        readMembers memberStream memberPrecs
+            | isNothing maybeNode =
+                throwParsingError (getTokenLocation lastTok)
+                $! "Expecting an expression, but found "
+                ++ show lastTok ++ "."
+            | lastTokVal == commaSeparator =
+                let (nodes, newerStream, newerPrecs) = readMembers newStream newPrecs
+                in (node:nodes, newerStream, newerPrecs)
+            | otherwise = ([node], newStream, newPrecs)
+            where
+                (maybeNode, lastTok, newStream, newPrecs) = parseExpression
+                    memberStream
+                    memberPrecs
+                    [ commaSeparator
+                    , endTok
+                    ]
+                (Just node) = maybeNode
+                lastTokVal = getTokenValue lastTok
+
+skipExpected :: TokenStream -> [TokenValue] -> TokenStream
+skipExpected stream [] = stream
+skipExpected stream (tok:toks) = if currTokVal == tok
+    then skipExpected (goNext stream) toks
+    else throwParsingError currTokLoc
+        $! "Expecting "
+        ++ show tok
+        ++ ", but found "
+        ++ show currTokVal
+        ++ "."
+    where
+        (Token currTokLoc currTokVal) = getCurrToken stream

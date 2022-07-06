@@ -1,0 +1,632 @@
+\section{Abduction and Bi-Abduction}
+\label{sec:topic}
+
+In this section, we first discuss informally how to compare the quality of different solutions for the same abduction question.
+Afterwards, we present a proof system and the corresponding algorithm to solve the abduction problem.
+Based on the abduction procedure (and the frame inference problem), we present a way to solve the bi-abduction problem. 
+Finally, we show how bi-abduction can be applied to realize compositional analysis.
+
+\subsection{Solutions for the Abduction Question}
+\label{sec:abduction_solutions}
+As described in the introduction, we want to solve the following problem:
+
+\begin{definition}[Abduction problem for symbolic heaps]\ \\
+Given: Symbolic heaps $A$ and $G$\\
+Goal: Find a missing symbolic heap $M$ (the anti-frame) such that the entailment 
+\[
+A\ *\ M\ \vdash\ G
+\]
+is true.
+\end{definition}
+
+Similarly to the abduction problem in classical logic, we observe that in general there is no unique solution, which raises the question what constitutes a good, or even optimal solution.
+Some bad solutions are obvious:
+For instance, we obtain a valid solution by choosing $M = \texttt{false}$ or $M = \neg A$.\footnote{However, in som cases an inconsistent solution is reasonable, as illustrated in example 3.9.}
+
+
+%???erwaehnen dass malloc failen kann!
+To get some intuition for what constitutes a good solution, recall the example from Section \ref{sec:introduction}:
+\\
+\\
+\lstinline|0: struct node* calling_proc(struct node* y){|\\
+\lstinline|1:   struct node* x;|\\
+\lstinline|2:   x = malloc(sizeof(struct node));|\\
+\lstinline|3:   x->tail = 0;|\\
+C:\quad $\{x \mapsto 0\}$\\
+\lstinline|4:   called_proc(x, y);|\\
+\lstinline|5:   return x;|\\
+\lstinline|6: }|\\
+
+For condition C, we need to ask the abduction question $x \mapsto 0 * M \vdash ls(x,0) * ls(y,0)$.
+For this example, it seems obvious that we want to infer $M = ls(y,0)$.
+However, the more convoluted solution $M' = \exists Z.y \mapsto Z * ls(Z,0)$ is valid, too.
+Intuitively, we prefer $M$ to $M'$ for a simple reason:
+$M'$ has a bigger symbolic heap than $M$.
+Another alternative solution is $M'' = y \mapsto 0$.
+In this case $M$ is a better solution than $M''$ because $M'' \vdash M$, but $M \nvdash M''$.
+To see why this is relevant, recall that we want to solve the abduction question to generate useful pre/post specs for \lstinline|calling_proc|.
+In this case, the assertion $M$ is propagated to the precondition of \lstinline|calling_proc|,\footnote{In Section \ref{sec:biabduction_analysis} we demonstrate how that works.}
+which means that we obtain a precondition which is not as weak as possible, i.e. our analysis loses precision through this choice.
+
+
+Those examples are meant to convey an intuition why some solutions are obviously better than others.\footnote{A formal approach regarding an optimal solution is sketched in \cite{csa}. We do not discuss this idea here, since it is not necessary to understand the proof system in the next section.}
+But in some cases, it is unclear which solution is ideal.
+Consider the following example, where the pre/post spec of \lstinline|called_proc2| is $\{ls(x,0)\}/\{\emp{}\}$.
+\\
+\\
+\lstinline|void calling_proc2(struct node* y){|\\
+\lstinline|  ...|\\
+\verb|  |$\{ls(y,0)\}$\\%dafuq verbb???
+\lstinline|  called_proc2(x);|\\
+\lstinline|  ...|\\
+\lstinline|}|\\
+
+At first glance, an obvious solution to the abduction question $ls(y) * M \vdash ls(x,0) * \texttt{true}$ is $M = ls(y,0)$.
+(In the context of bi-abduction, we append '$*\ \texttt{true}$' to the abduction goal, as described in Section \ref{sec:biabduction}.)
+However, an even simpler solution would be $M' = (x = y)$.
+Which of the two solutions is better obviously depends on the precedent part of \lstinline|calling_proc2|:
+If \lstinline|calling_proc2| uses aliasing for x and y, then $(x=y) \land \emp{}$ is the only useful solution.
+Otherwise, we need $ls(y,0)$ as the solution.
+It turns out that for realistic cases, the aliasing case is rarely needed.\footnote{\cite{csa} describe on p. 26:17 why the analysis can nonetheless deal with aliasing in some cases.}
+Therefore, $ls(y,0)$ is in practice the better solution.
+If we had disjunction, another useful solution would be $M'' = (x=y \lor ls(y,0))$.
+However, disjunctions are forbidden in symbolic heaps for a good reason: 
+Introducing large disjunctions (in this case pairwise comparison of pointers) quickly leads to performance problems on large code bases, which is the intended use of the approach under examination.
+
+The goal of the algorithm which we present in the following section is not to find the best solution in every case.
+Instead, it was designed to be fast and deliver useful solutions to those cases which usually come up in practice.
+
+
+\subsection{An Algorithm for Abduction}
+\label{sec:abduction_algorithm}
+
+To solve the abduction question, we define a proof system, which is depicted in Figure \ref{fig:proofrules}.
+Its rules contain judgements of the form $H_1 * [M] \rhd H_2$, where $M$ is the abduced (i.e. the ''missing'') fact.
+We use the '$\rhd$' to indicate the entailment which we want to prove, and we use the []-brackets to denote the missing information which we want to find.
+
+\begin{figure}[htb]
+	\begin{center}
+ 	  \includegraphics[width=0.8\linewidth]{proofrules.png}
+	\end{center}
+	\caption{The proof rules for the abduction algorithm \cite{csa}. Here, FreeLVar($E_1$) denotes the free logical variables in $E_1$.}
+	\label{fig:proofrules}
+\end{figure}
+
+The proof rules are organized such that they give us a way to find M.
+So those rules do not only allow us to prove the correctness of a solution to the abduction problem, they also give us a procedure to find the solution in the first place.
+The algorithm which applies those rules to find a solution is depicted in Figure \ref{fig:abductionalgo}.
+
+\begin{figure}[htb]
+	\begin{center}
+ 	  \includegraphics[width=0.95\linewidth]{abductionalgo.png}
+	\end{center}
+	\caption{The abduction algorithm using the proof rules from Figure \ref{fig:proofrules}.}
+	\label{fig:abductionalgo}
+\end{figure}
+
+Roughly, it works by recursively trying to apply the rules in Figure \ref{fig:proofrules} in top-down order.
+Note that the rules have the form
+\[
+\frac{H'_1\ *\ [M']\ \rhd\ H'_2 \qquad \text{Cond}}{H_1\ *\ [M]\ \rhd\ H_2}
+\]
+Each rule is applied bottom-up: To answer the entailment question $H_1\ *\ M \vdash H_2$, we make a recursive call to answer the smaller question $H'_1\ *\ M' \vdash H'_2$.
+The solution of the simpler question can then be used to compute the solution of the original question.
+However, the rule can be applied only if the side condition Cond is satisfied.
+For instance, for the rule \texttt{remove}, we need to check two plain entailment questions.
+For this purpose, we need a theorem prover, which we do not discuss here.\footnote{Theorem provers for separation logic have been discussed \cite{berdine2005b},\cite{nguyen2008} and implemented\cite{csa} before.}
+To understand in detail how the algorithm works, we will now look at some examples.
+
+\subsection{Examples for the Abduction Algorithm}
+
+As described in Figure \ref{fig:abductionalgo}, we try to recursively apply the rules from the proof system until we reach either \baseemp{} or \basetrue{}.
+In some cases, it is entirely obvious that we do not need to ask the abduction question, since the assertion in our analysis and the required assertion at a call site match up.
+Here is such a case where we can immediately use \baseemp{}:
+\\
+
+\begin{example}[\baseemp{}]
+Let \lstinline|foo| have the spec $\{\emp\}/\{\emp\}$ and consider an analysis having the assertion $\{\emp\}$ before calling \lstinline|foo|.
+Then we have to consider the following abduction question:
+\[
+\emp\ *\ M\ \rhd\ \emp
+\]
+\end{example}
+\label{ex:baseemp}
+To find the answer to this abduction question, our algorithm tries to apply all rules from top to bottom.
+The only matching rule is \baseemp{}, so according to this rule, the algorithm returns the simple solution $M = \emp$, since the right side of the question contains neither existential quantifications nor a pure formula (To be precise, the pure formula in this case is \true, which we omit by convention).
+
+Note that our proof system has two different base rules (\baseemp{} and \basetrue{}), only one of which applies in Example 3.1.
+As we will explain in Section \ref{sec:biabduction}, for real program analysis we ask abduction questions with $*\true$ in the consequent.
+With this modification, we consider the previous example once more:
+
+\begin{example}[\basetrue{}]
+Let \lstinline|foo| have the spec $\{\emp\}/\{\emp\}$ and consider an analysis having the assertion $\{\emp\}$ before calling \lstinline|foo|.
+We then consider the following abduction question:
+\[
+\emp\ *\ M\ \rhd\ \emp\ *\ \true
+\]
+\end{example}
+\label{ex:basetrue}
+
+Now {\baseemp} does not apply any more since \emp{} is not equivalent to $\emp\ *\ \true$.
+But \true{} is equivalent to $\emp\ *\ \true$, and therefore the rule {\basetrue} matches.
+As in the previous example, the algorithm returns the simple solution $M = \emp$.
+
+Next, we consider an example where, as with the previous examples, we do not need to infer any missing information.
+But in this case, the base rules are not sufficient to answer the abduction question:
+
+\begin{example}[\match{}]
+Let \lstinline|foo| have the spec $\{x \mapsto 0\}/\{\emp\}$ and consider an analysis having the assertion $\{x \mapsto 0\}$ before calling \lstinline|foo|.
+We consider the following abduction question:
+\[
+x \mapsto 0\ *\ M\ \rhd\ x \mapsto 0
+\]
+\end{example}
+\label{ex:listcomplete}
+
+Again, the algorithm rightly infers $M = \true \land \emp$.
+But before using \baseemp{}, it needs to somehow determine that $x \mapsto 0 \vdash x \mapsto 0$.
+For this purpose, it applies the rule \match{}:
+
+\begin{prooftree}
+\AxiomC{}
+\RightLabel{\baseemp{}}
+\UnaryInfC{$(0 = 0 \land \emp{})\ *\ [\emp{}]\ \rhd\ \emp{}$}
+\RightLabel{\match{}}
+\UnaryInfC{$x \mapsto 0\ *\ [\emp]\ \rhd\ x \mapsto 0$}
+\end{prooftree}
+
+In this proof, the last applied rule is \baseemp{}.
+Again, if we append $* \true$ to the consequent, we get the same result except that the proof terminates by applying \basetrue{}:
+
+\begin{prooftree}
+\AxiomC{}
+\RightLabel{\basetrue{}}
+\UnaryInfC{$(0 = 0 \land \emp{})\ *\ [\emp{}]\ \rhd\ \true{}$}
+\RightLabel{\match{}}
+\UnaryInfC{$x \mapsto 0\ *\ [\emp]\ \rhd\ x \mapsto 0\ *\ \true{}$}
+\end{prooftree}
+
+If neither \match{}, nor \lsright{} and \lsleft{} applied, then the algorithm would finally try to apply \missing{}.
+Note that \missing{} cannot be applied in this case because the side condition $x \mapsto 0\ *\ x \mapsto 0$ is inconsistent.
+
+We observe that if there is a solution for the abduction question $H_1\ *\ M\ \rhd\ H_2$, then our algorithm uses the same steps to find the same solution for the slightly modified question $H_1\ *\ M\ \rhd\ H_2\ *\ \true{}$.
+However, examples 3.7 and 3.8 show that the implication does not hold in the reverse direction.
+
+
+%%%b) ??? vielleicht das noch hinzufuegen, wenn es nicht eh noch spaeter kommt, wovon ich atm ausgehe!
+%%%Look at what happens if we have {x -> 0} as precondition. 
+%%%This is a special case of ls(x,0), and the same thing happens as in a):
+%%% the beginning is subtracted from the list, and we obtain ls(0,0) which is then removed.
+
+
+%Example 4 ???
+
+Next, we examine our example from Section \ref{sec:intro_abduction}
+Contrary to the previous examples, in this case the abduction question cannot be trivially answered with $M = \emp{}$.
+
+\begin{example}[\lsright{}, \missing{}]
+Consider the following abduction question:
+\[
+x \mapsto 0\ *\ M\ \rhd\ ls(x,0)\ *\ ls(y,0)
+\]
+\end{example}
+\label{ex:inferlist}
+
+To construct a proof and find the missing assumption $M = ls(y,0)$, our algorithm needs four steps:
+
+\begin{prooftree}
+\AxiomC{}
+\RightLabel{\baseemp{}}
+\UnaryInfC{$\emp\ *\ [\emp]\ \rhd\ \emp$}
+\RightLabel{\missing{}}
+\UnaryInfC{$\emp\ *\ [ls(y,0)]\ \rhd\ ls(y,0)$}
+\RightLabel{\remove{}}
+\UnaryInfC{$\emp\ *\ [ls(y,0)]\ \rhd\ ls(0,0)\ *\ ls(y,0)$}
+\RightLabel{\lsright{}}
+\UnaryInfC{$x \mapsto 0\ *\ [ls(y,0)]\ \rhd\ ls(x,0)\ *\ ls(y,0)$}
+\end{prooftree}
+
+With the first two steps, the algorithm subtracts the $x \mapsto 0$-subformula from both sides, and then removes $ls(0,0)$.\footnote{Note that we would get the same result for $ls(x,0)$ instead of $x \mapsto 0$ in the antecedent.}
+Subsequently, the rule \missing{} is applied to move $ls(y,0)$ to the anti-frame.
+
+%in this context, $ls(x,0)$ is treated the same way as $x \mapsto 0$ in example \ref{ex:listcomplete}.
+
+In this example, it is obvious that $ls(y,0)$ would be the desired solution.
+In particular, it is obvious that the subformula $ls(0,0)$ should be removed, since it is effectively equivalent to \emp.
+%wirklich? ist sie???
+In contrast, consider the following example:
+
+\begin{example}[Try to apply \remove{} before \missing{}]
+Consider the following abduction question:\footnote{This examples is similar to Example 3.3 from \cite{csa} on p.26:16.}
+\[
+y \mapsto z\ *\ M\ \rhd\ ls(y,z)\ *\ \true
+\]
+\end{example}
+\label{ex:missingremoveorder}
+
+Here, a sensible solution would be $M = \emp$.
+But in this case, another reasonable solution would be $ls(z,z)$.\footnote{This example is similar to \ref{ex:listcomplete}, except that the list segments end at $z$ instead of $0$.}
+And indeed, we can use our proof system to show this alternative solution's validity:
+
+\begin{prooftree}
+\AxiomC{}
+\RightLabel{\basetrue{}}
+\UnaryInfC{$\emp{}\ *\ [\emp{}]\ \rhd\ \true$}
+\RightLabel{\missing{}}
+\UnaryInfC{$\emp{}\ *\ [ls(z,z)]\ \rhd\ ls(z,z)\ *\ \true$}
+\RightLabel{\lsright{}}
+\UnaryInfC{$y \mapsto z\ *\ [ls(z,z)]\ \rhd\ ls(y,z)\ *\ \true$}
+\end{prooftree}
+
+But we still prefer the simpler solution $M = \emp{}$.
+This example shows why \missing{} is the last rule which the algorithm tries to apply.
+Before moving parts of the antecedent to the anti-frame, the algorithm tries to simplify the abduction question as much as possible by using \remove{}, \match{}, \lsright{} and \lsleft{}.
+Thanks to this ordering, the algorithm infers the simpler solution $\emp{}$ instead of $ls(z,z)$:
+
+\begin{prooftree}
+\AxiomC{}
+\RightLabel{\basetrue{}}
+\UnaryInfC{$\emp\ *\ [\emp]\ \rhd\ \true$}
+\RightLabel{\remove{}}
+\UnaryInfC{$\emp\ *\ [\emp]\ \rhd\ ls(z,z)\ *\ \true$}
+\RightLabel{\lsright{}}
+\UnaryInfC{$y \mapsto z\ *\ [\emp]\ \rhd\ ls(y,z)\ *\ \true$}
+\end{prooftree}
+
+%Similarly, there is a rule \lsleft{}, which we need in the following case:
+%\begin{example}
+%Consider the following abduction question:
+%\[
+%ls(x,x \mapsto y\ *\ M\ \rhd\ x \mapsto y\ *\ \true
+%\]
+%\end{example}
+%\label{ex:lsleft}
+%lsleft ls-left
+%d' = true
+%d = emp
+%E0 = 0
+%E = 5
+%gTg
+
+%Find some example to demonstrate ls-left, not in paper!!!
+%ich hab den eindruck, das stimmt gar nicht:
+%delta = emp
+%M = emp
+%delta' = emp
+%E = 1
+%E0 = 2
+
+Finally, we examine an example to show the application of the \match{} rule if logical variables are involved:
+
+\begin{example}[\match{} with logical variables]
+Consider the following abduction question:
+\[
+x \mapsto y\ *\ M\ \rhd\ x \mapsto X\ *\ ls(X,z)\ *\ ls(z,a)\ *\ \true
+\]
+\end{example}
+\label{ex:inferlist}
+
+In order to not end up with an inconsistent solution, our algorithm needs to infer that $X = y$.
+For this purpose, we use the \match{} rule.
+The remainder of the proof is straightforward:
+
+\begin{prooftree}
+\AxiomC{}
+\RightLabel{\basetrue{}}
+\UnaryInfC{$(y=X \land \emp)\ *\ [\emp]\ \rhd\ \true$}
+\RightLabel{\missing{}}
+\UnaryInfC{$(y=X \land \emp)\ *\ [ls(z,a)]\ \rhd\ ls(z,a)\ *\ \true$}
+\RightLabel{\missing{}}
+\UnaryInfC{$(y=X \land \emp)\ *\ [ls(X,z)\ *\ ls(z,a)]\ \rhd\ ls(X,z)\ *\ ls(z,a)\ *\ \true$}
+\RightLabel{\match{}}
+\UnaryInfC{$x \mapsto y\ *\ [y = X \land ls(X,z)\ *\ ls(z,a)]\ \rhd\ x \mapsto X\ *\ ls(X,z)\ *\ ls(z,a)\ *\ \true$}
+\end{prooftree}
+
+After applying \match{}, we use \missing{} twice to move both $ls(X,z)$ and $ls(z,a)$ to the anti-frame.
+Note that the algorithm ignores the fact that $ls(X,z)\ *\ ls(z,a)$ could be simplified to the equivalent formula $ls(X,a)$ because it is not necessary to infer a reasonable solution.
+If desired, this generalization can still happen after using the abduction algorithm.\footnote{For this purpose, \cite{csa} describe the function abstract$^\#$.}
+
+
+%Example 6
+%We demonstrate the match-rule now:
+%H1 = x -> y
+%H2 = x -> X and X -> z
+%In this case, the match-rule fires instantly, binding X to y.
+%In a second step, we detect that X -> z is missing.
+%Applying the missing-rule draws it into the anti-frame, completing the proof.
+
+%??? ich glaub, example 8 hier war eine nutzlose idee. da wird eigentlich nix neues gezeigt, aber es wirft die frage auf, warum die beiden listensegmente nicht zusammengeschubst werden. vermutlich werden sie das auch, aber es steht aus platzgruenden nur nicht im algo...
+% ich glaub ich merge das mit ex 6
+%Example 8
+%So far, we looked at small examples to show isolated aspects.
+%Now we show that the algorithm does not become more complicated, if we need to infer more information.
+%Consider
+%H1 = {x -> y} * y -> b
+%H2 = (x -> X) * ls(X,z) * ls(z,a)
+%this uses first the match rule to instantiate X with y.
+%Then, the ls-right rule subtracts y->b from ls(X,z) (really?)
+%and we obtain ls(b,z) * ls(z,a), both of which are moved to the anti-frame by the missing-rule.
+
+The following example is an example for the possibility of aliasing as discussed in the previous section. 
+
+\begin{example}[No disjunction, simple solution]
+Consider the following abduction question:
+\[
+x \mapsto 3\ *\ [M]\ \rhd\ y \mapsto 3\ *\ \true
+\]
+\end{example}
+\label{ex:noaliasingtrue}
+
+Sensible solutions for $M$ would be $y \mapsto 3$ and $x = y$, and also $(y \mapsto 3) \lor (x = y)$ if we had disjunction.
+Since our proof system contains no rule to assume aliasing, our algorithm uses \missing{} to infer $M = y \mapsto 3$:
+
+\begin{prooftree}
+\AxiomC{}
+\RightLabel{\basetrue{}}
+\UnaryInfC{$x \mapsto 3\ *\ [\emp]\ \rhd\ \true$}
+\RightLabel{\missing{}}
+\UnaryInfC{$x \mapsto 3\ *\ [y \mapsto 3]\ \rhd\ y \mapsto 3\ *\ \true$}
+\end{prooftree}
+
+Now we look at a slightly modified example:
+
+\begin{example}[No disjunction, no solution]
+Consider the following abduction question:
+\[
+x \mapsto 3\ *\ [M]\ \rhd\ y \mapsto 3
+\]
+\end{example}
+\label{ex:noaliasingemp}
+
+In this case, $x = y$ is a solution, but our algorithm cannot find it.
+The rule \missing{} can still be applied, but for the remaining question $x \mapsto 3\ \rhd\ \emp$, no rule applies (and no solution exists).
+Here, we observe why appending the subformula $*\true$ to the consequent lets us find a solution.
+This subformula acts as a placeholder for an arbitrarily large part of the heap.
+As a consequence, we can use \missing{} to move any number of subformulae to the anti-frame.
+
+Note that the side condition of \missing{} prevents the algorithm from moving parts to the anti-frame which make the antecedent inconsistent.
+
+\begin{example}[Inconsistent solution]
+Consider the following abduction question:
+\[
+x \mapsto 3\ *\ [M]\ \rhd\ x \mapsto 4\ *\ \true
+\]
+\end{example}
+\label{ex:inconsistency}
+
+For this example, we cannot apply \missing{}, since its side condition $x \mapsto 3\ *\  \mapsto 4 \vdash \false$ is satisfied.
+In fact, the algorithm does not try \missing{} because it tries \match{} before, which applies in this case:
+
+\begin{prooftree}
+\AxiomC{}
+\RightLabel{\basetrue{}}
+\UnaryInfC{$(3 = 4)\ *\ [\emp]\ \rhd\ \true$}
+\RightLabel{\match{}}
+\UnaryInfC{$x \mapsto 3\ *\ [3 = 4 \land \emp]\ \rhd\ x \mapsto 4\ *\ \true$}
+\end{prooftree}
+
+The delivered solution $M = (3 = 4 \land \emp)$ is inconsistent. 
+To prevent this outcome, we could add the side condition $E_0 = E_1 \nvdash false$ to the rule \match{}.
+But then the algorithm would futilely try to apply the other rules, although it is certain that any valid solution must lead to an inconsistent antecedent.
+
+%For another example where our algorithm does not find a solution, we present the following case:
+%
+%Example 10
+%evtl. 3.5 wenn ich es mal verstehe.
+%...
+
+
+%Idee: x maps to 5, x maps to 5 <- kann man das ableiten? mal pruefen, wie sich der algo mit so einfachen werten verhaelt.
+%^ich glaub das geht nicht. lol. haeae???
+%laut continue_along_path muesste sowas aber ableitbar sein! wie???
+%ach ne doch nicht, der holt nur missing.
+%also: y=0 geht nur mit emp. y=5 und 5->bla muesste aber gehen?
+%lol alles quatsch, dafuer gibts doch grade die matchregel...
+
+\subsection{From Abduction to Bi-Abduction}
+\label{sec:biabduction}
+
+As we explained in Section \ref{sec:introduction}, abduction is not enough for realistic program analysis, since it only allows us to infer missing parts of the heap.
+In realistic examples, we often have ''leftover'' parts of the heap, which are not necessary for the procedure call in question.
+For such cases, we need to solve the following problem:
+
+\begin{definition}[Bi-Abduction problem for symbolic heaps.]\ \\
+Given: Symbolic heaps $A$ and $G$\\
+Goal: Find a missing symbolic heap $M$ (the anti-frame) and a leftover symbolic heap $L$ (the frame) satisfying the entailment
+\[
+A\ *\ M\ \vdash\ G\ *\ L
+\]
+\end{definition}
+
+It might be possible to define another proof system to solve this problem.
+But an easier way is to reuse the abduction algorithm to find $M$, and then rely on simple frame inference to obtain $L$.
+Consider the example from the introduction which gives rise to the following bi-abduction question: 
+\[
+x \mapsto 0 * z \mapsto 0 * M\ \rhd\ ls(x,0) * ls(y,0) * L
+\]
+We first try to infer the missing heap $M$.
+For this purpose, we provisionally ignore the missing frame, and ask the abduction question $x \mapsto 0 * z \mapsto 0 * M\ \rhd\ ls(x,0) * ls(y,0) * \true$, where we replace $L$ with the placeholder $true$.
+Thus, we obtain $M = ls(y,0)$ as the anti-frame.
+For the next step, we need to solve an instance of the frame inference problem:
+
+\begin{definition}[Frame inference problem for symbolic heaps.]\ \\
+Given: Symbolic heaps $H_0$ and $H_1$\\
+Goal: Find a missing symbolic heap $L$ (the frame) satisfying the entailment 
+\[
+H_0\ \vdash\ H_1\ *\ L
+\]
+\end{definition}
+
+Several frame inference procedures have been described in previous papers.\footnote{For example, in \cite{berdine2005b}, \cite{jstar} and \cite{nguyen2008}.}
+Since the specifics of those procedures are independent of the bi-abduction procedure, we will not describe their workings and simply assume a frame inference procedure as a parameter to the our bi-abduction algorithm.
+To compute the solution for our example, we solve the frame problem for $H_0 = x \mapsto 0 * z \mapsto 0 * ls(y,0)$ and $H_1 = ls(x,0) * ls(y,0)$.
+We then obtain the solution $M = ls(y,0), L = z \mapsto 0$ for our bi-abduction question.
+
+Note that to make this procedure work, it is essential that we append $*\true$ to the consequent of the abduction question.
+Otherwise, we do not leave enough space for the frame, and we do not get a solution:
+$x \mapsto 0 * z \mapsto 0 * ls(y,0)\ \vdash\ ls(x,0) * ls(y,0)$ is not a valid entailment.
+By appending $*\true$, we obtain a valid solution for the abduction question because the entailment $ls(z,0) \vdash \true$ holds.
+
+To sum up, the bi-abduction algorithm takes symbolic heaps $A$ and $G$ as input and consists of the following two steps:
+First, it uses the abduction algorithm to compute the solution $M$ to the abduction question $A\ *\ M\ \rhd\ G\ *\ true$.
+Second, it uses a given frame inference procedure to compute the solution $L$ to the frame inference question $A\ *\ M\ \rhd\ G\ *\ L$.
+It then returns $(M,L)$ as its result.
+The bi-abduction algorithm fails if either of the two steps fails or if $A * M$ is inconsistent, 
+
+In the next section, we examine how we can use the bi-abduction procedure for real program analysis.
+
+\subsection{Using Bi-Abduction for Compositional Analysis}
+\label{sec:biabduction_analysis}
+The bi-abduction procedure enables us to analyze a larger program based on the pre/post specs of the smaller procedures which it consists of.
+For programs without recursion, a general recipe for compositional analysis is this:\footnote{For programs with recursion a similar, but more complicated scheme is necessary\cite{csa}.}
+\\
+\\
+
+\begin{enumerate}
+\item Start at the leaves of the call tree and compute pre/post specs for those procedures.
+\item Go up in the tree. Compute pre/post specs for new procedures, which use those procedures for which pre/post specs were previously obtained.
+\end{enumerate}
+
+In order to accomplish such a bottom-up analysis, we need to find a way to compute pre/post specs for a procedure without knowing its calling context.
+Recall the second example from Section \ref{sec:introduction};
+Figure \ref{fig:solution} shows the complete analysis which we obtain for this example.
+
+\begin{figure}[h]
+\lstinline|0: void calling_proc(struct node* y){|\\
+\lstinline|1:   struct node* x, z;|\\
+A:\quad $\{ls(y,0)\}$\\
+\lstinline|2:   x = malloc(sizeof(struct node)); //abduced: emp. framed: emp.| \\
+A':\quad \!\!\! $\{ls(y,0) * x \mapsto -\}$\\
+\lstinline|2+:  x->tail = 0; //abduced: emp. framed: emp.|\\
+B:\quad $\{ls(y,0) * x \mapsto 0\}$\\
+\lstinline|3:   z = malloc(sizeof(struct node)); //abduced: emp. framed: |$x \mapsto 0$.\\
+B':\quad \!\!\! $\{ls(y,0) * x \mapsto 0 * z \mapsto -\}$\\
+\lstinline|3+:  z->tail = 0; //abduced: emp. framed: |$x \mapsto 0$.\\
+C:\quad $\{ls(y,0) * x \mapsto 0\ *\ z \mapsto 0 \}$\\
+\lstinline|4:   called_proc(x, y); //abduced: ls(y,0). framed:| $z \mapsto 0$.\\
+D:\quad $\{x \mapsto 0\ *\ z \mapsto 0 \}$\\
+\lstinline|5:   called_proc(x, z); //abduced: emp. framed: emp.|\\
+E:\quad $\{ls(x,0)\}$\\
+\lstinline|6:   return x;|\\
+\lstinline|7: }|\\
+\caption{Complete analysis of the example from Section \ref{sec:introduction}.}
+\label{fig:solution}
+\end{figure}
+
+%Consider the example from Section \ref{sec:intro_abduction} once more:
+%\\
+%\\
+%\lstinline|0: void calling_proc(struct node* y){|\\
+%\lstinline|1:   struct node* x, z;|\\
+%\lstinline|2:   x = malloc(sizeof(struct node));| \quad $I_2$\\
+%\lstinline|3:   x->tail = 0;| \qquad \qquad  \qquad \qquad \qquad $I_3$\\
+%\lstinline|4:   z = malloc(sizeof(struct node));| \quad $I_4$\\
+%\lstinline|5:   z->tail = 0;| \qquad \qquad  \qquad \qquad \qquad $I_5$\\
+%C:\quad $\{x \mapsto 0\ *\ z \mapsto 0 \}$\\
+%\lstinline|6:   called_proc(x, y);|\\
+%\lstinline|7:   called_proc(x, z);|\\
+%\lstinline|8:   return x;|\\
+%\lstinline|9: }|\\
+%\\
+Assume we are conducting a forward analysis and we want to proceed with condition C.
+We will use the following rule, which follows from the frame rule (see Section \ref{sec:frame_rule}) and the rule of consequence from Hoare Logic:
+
+\begin{prooftree}
+\AxiomC{\{$Pre$\}\ C\ \{$Post$\}}
+\AxiomC{$P * M \vdash Pre * L$}
+\RightLabel{Frame Rule (Bi-Abductive Analysis Version)}
+\BinaryInfC{$\{P * M\}\ C\ \{Post * L\}$}
+\end{prooftree}
+
+To use this rule for program analysis, we have to read it bottom-up.
+Recall that the specification for \lstinline|called_proc| is $\{Pre\}/\{Post\} = \{ls(x,0) * ls(y,0)\} / \{ls(x,0){}\}$.
+Now we use the bi-abduction procedure to find a solution to the question $x \mapsto 0 * z \mapsto 0 * M\ \rhd\ ls(x,0) * ls(y,0) * L$, where $P = x \mapsto 0 * z \mapsto 0$ and $Pre = ls(x,0) * ls(y,0)$.
+For this we obtain the solution $M = ls(y,0), L = z \mapsto 0$.
+According to the new frame rule, we can then continue our analysis with the assertion D $ = Post * L = ls(x,0) * z \mapsto 0$.
+
+For the second invocation of \lstinline|called_proc|, note that its precondition and condition D match up.
+As expected, the bi-abduction procedure returns the solution $L = M = \emp{}$ to the question $ls(x,0) * z \mapsto 0  * M \rhd ls(x,0) * ls(z,0)$.
+Thus, we obtain the assertion E = $ls(x,0)$.
+
+So far, we explained how to get from the intermediate condition D to the postcondition of \lstinline|calling_proc|.
+But how do we get to D in the first place, and how do we obtain the precondition of the said procedure?
+
+To analyze the complete method, we need a way to handle the invocation of malloc and the dereferencing of x and z.
+For this purpose, we can use the following specs:\footnote{Slightly simplified from \cite{localreasoning} and adapted to the C programming language. Here, we assume that malloc cannot fail, and that struct node* has only one component, i.e. 'tail'.}
+
+\begin{itemize}
+\item $\{\emp{}\}\ \texttt{malloc}()\ \{ret \mapsto -\}$
+\item $\{x \mapsto - \land y = Y\}\ \lstinline|x->tail| = y\ \{ret \mapsto -\}$
+\item $\{x \mapsto -\}\ \texttt{free(x)}\ \{\emp{}\}$
+\item $\{x \mapsto X\}\ \texttt{return x}\ \{x \mapsto X \land ret = X\}$
+\end{itemize}
+
+Equipped with those specs, we now try to conduct a forwards analysis on \lstinline|calling_proc|.
+This proof uses the ''tight interpretation of triples'' to guarantee correctness and in particular to avoid memory corruptness \cite{seplogic2002}.
+Recall that we want to find a pre/post spec which is independent of any calling context.
+Therefore it is necessary that such a spec only mentions the footprint of the procedure under examination.
+To accomplish this, we can start our analysis with a state A that makes minimal assumptions:
+
+\[
+y = Y \land \emp{}
+\]
+
+In line 2 of Figure \ref{fig:solution}, we first use bi-abduction to check if our approach can cope with the invocation of \lstinline|malloc|.
+In this case, the bi-abduction procedure rightly infers that both anti-frame and frame are \emp{}.
+After that (in line 2+), we again need bi-abduction to compare the current condition $x \mapsto -$ with the precondition of the assign statement.
+As with the first invocation of \lstinline|malloc|, those match up perfectly.
+
+In line 3, the same thing happens with z.
+The only difference is that in this case the frame is non-empty, i.e. the bi-abduction procedure infers as the frame the assertions about x. 
+Thus, we arrive at the condition C.
+
+Now, something different happens:
+We try to proceed with our analysis (as discussed above), but this time bi-abduction infers the non-empty anti-frame $ls(y,0)$.
+This raises the question how we proceed with our analysis now.
+One possible solution would be to restart the analysis of \lstinline|calling_proc| with the precondition A$*ls(y,0)$.
+The problem with this solution is that it would be inefficient to restart the analysis every time we encounter the problem of missing memory.
+
+Fortunately, separation logic's frame rule allows us to skip the re-execution of the analysis.
+Note that our first attempt at an analysis already gave us a pre/post pair $\{H_0\}\pi\{H_1\}$ for the path $\pi = I_2;I_3;I_4;I_5$.
+Then it follows from the frame rule that $\{H_0 * M\} \pi \{H_1 * M\}$ holds, too.
+Thus, we can simply append the missing memory portion $M$ to the precondition and continue with our analysis.
+In the end, we obtain the proof as depicted in Figure \ref{fig:solution} and the pre/post spec $\{ls(y,0\}$\lstinline|calling_proc|$\{ls(x,0)\}$.
+%\\
+%\\
+%\lstinline|0: void calling_proc(struct node* y){|\\
+%\lstinline|1:   struct node* x, z;|\\
+%A:\quad $\{ls(y,0)\}$\\
+%\lstinline|2:   x = malloc(sizeof(struct node)); //abduced: emp. framed: emp.| \\
+%A:\quad $\{ls(y,0) * x \mapsto -\}$\\
+%\lstinline|2:   x->tail = 0; //abduced: emp. framed: emp.|\\
+%B:\quad $\{ls(y,0) * x \mapsto 0\}$\\
+%\lstinline|3:   z = malloc(sizeof(struct node)); //abduced: emp. framed: |$x \mapsto 0$.\\
+%B:\quad $\{ls(y,0) * x \mapsto 0 * z \mapsto -\}$\\
+%\lstinline|3:   z->tail = 0; //abduced: emp. framed: |$x \mapsto 0$.\\
+%C:\quad $\{ls(y,0) * x \mapsto 0\ *\ z \mapsto 0 \}$\\
+%\lstinline|4:   called_proc(x, y); //abduced: ls(y,0). framed:| $z \mapsto 0$.\\
+%D:\quad $\{x \mapsto 0\ *\ z \mapsto 0 \}$\\
+%\lstinline|5:   called_proc(x, z); //abduced: emp. framed: emp.|\\
+%E:\quad $\{ls(x,0)\}$\\
+%\lstinline|6:   return x;|\\
+%\lstinline|7: }|\\
+%\\
+
+Finally, we briefly look at an example, where a called procedure has more than one pre/post spec.
+Assume we have a procedure '\lstinline|void safe_reset(int* y)|' with the pre/post specs $\{y = 0 \land \emp{}\}/\{y = 0 \land \emp{}\}$ and $\{y \neq 0 \land y \mapsto -\}/\{y \neq 0 \land y \mapsto 0\}$.
+Now we want to analyse a procedure which uses \lstinline|safe_reset|.
+Again, we start with the initial condition $y = Y \land \emp{}$:
+\\
+\\
+\\
+\lstinline|0: void this_uses_safe_reset(struct node* y){|\\
+A:\quad $\{\emp{}\}$\\
+\lstinline|1:   safe_reset(y);|\\
+\lstinline|2: }|\\
+\\
+The analysis checks if the condition \emp{} matches with the two preconditions of \lstinline|safe_reset|.
+After using bi-abduction once, the analysis learns that A and the first pre/post spec are compatible: the abduced anti-frame is $y = 0 \land \emp{}$.
+A standard whole-program forward analysis would now ignore the remaining specs, since no advantages would be gained by also considering the second spec.
+But because in a compositional analysis we do not know the calling context, our goal is to find as many valid pre/post specs as possible.
+Therefore, our analysis considers both specs for \lstinline|safe_reset| and finally infers two pre/post specs for \lstinline|this_uses_safe_reset|, too.\footnote{In this (crafted) example, \lstinline|safe_reset| has the same specs as \lstinline|this_uses_safe_reset|.}
+

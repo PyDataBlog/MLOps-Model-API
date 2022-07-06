@@ -1,0 +1,1286 @@
+
+
+-- {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+-- {-# LANGUAGE MultiParamTypeClasses #-}
+-- {-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE RecordWildCards #-}
+-- {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+-- {-# LANGUAGE MultiWayIf #-}
+-- {-# LANGUAGE OverloadedStrings #-}
+-- {-# LANGUAGE RecordWildCards #-}
+
+
+-- {-# OPTIONS_GHC -Wall #-}
+-- {-# OPTIONS_GHC -fno-warn-unused-matches #-}
+-- {-# OPTIONS_GHC -fno-warn-orphans #-}
+-- {-# OPTIONS_GHC -fno-warn-missing-signatures #-}
+-- {-# OPTIONS_GHC -fno-warn-unused-do-bind #-}
+-- {-# OPTIONS_GHC -fno-warn-incomplete-patterns #-}
+-- {-# OPTIONS_GHC -fno-warn-incomplete-uni-patterns #-}
+-- {-# OPTIONS_GHC -fno-warn-name-shadowing #-}
+
+
+
+{-# LANGUAGE CPP #-}
+-- {-# OPTIONS_GHC -cpp -DPiForallInstalled #-}
+
+
+
+-- |
+-- Copyright :  (c) Andreas Reuleaux 2015
+-- License   :  BSD2
+-- Maintainer:  Andreas Reuleaux <rx@a-rx.info>
+-- Stability :  experimental
+-- Portability: non-portable
+--
+-- basic refactorings: renaming,
+-- built upon the zipper navigation in the syntax tree,
+
+
+{-
+
+
+usage
+
+
+renaming of simple expressions
+
+runExcept $ renameExpr "y" "YY" $ lam "y" $ V "x"
+
+
+* in the simpler Either monad, like so:
+  pp $  fromRight' $ (ezipper $ Mod m) >>= navigate [Decl 1, Rhs, Binding]
+
+* or in the the Refactor monad, which has state as well
+  pp $ fromRight' $ refactor $ (rzipper $ Mod m) >>= navigate [Decl 1, Rhs, Binding] >>= rename "a" "b"
+
+
+one would just navigate to the relevant piece of the syntax tree, like
+
+
+
+
+
+
+-- top make the tree, list pair a zipper here (for printing the top lvl)
+pp $ fromRight' $ refactor $ (rzipper $ Mod m) >>= top >>= rename "a" "b"
+
+
+**
+
+
+
+
+
+
+next things TODO:
+see if renaming Zero to Z works - I doubt it - but make it work
+
+
+
+-}
+
+
+
+
+
+module Pire.Refactor.Refactor
+       (
+         module Pire.Refactor.Refactor
+       )
+
+       where
+
+
+import Pire.Syntax.Expr
+
+import Pire.Syntax.GetNm
+-- import Pire.Syntax.Binder
+import Pire.Syntax.MkVisible
+
+import Pire.Syntax.Smart
+import Pire.Syntax.Decl
+import Pire.Syntax.Modules
+import Pire.Syntax.Nm
+
+-- import Pire.Modules
+-- import Pire.Untie
+
+import Pire.Syntax.Telescope
+import Pire.Syntax.Constructor
+
+import Pire.Refactor.Navigation
+import Pire.Pretty.Common
+import Pire.Utils
+
+import Bound
+import Bound.Term
+
+
+
+
+
+
+#ifdef MIN_VERSION_GLASGOW_HASKELL
+#if MIN_VERSION_GLASGOW_HASKELL(7,10,3,0)
+-- ghc >= 7.10.3
+-- import Control.Monad.Except
+#else
+-- older ghc versions, but MIN_VERSION_GLASGOW_HASKELL defined
+#endif
+#else
+-- MIN_VERSION_GLASGOW_HASKELL not even defined yet (ghc <= 7.8.x)
+import Control.Applicative
+#endif
+
+
+
+
+import Control.Monad.Except
+
+import Control.Lens
+
+-- import System.IO.Silently
+
+
+import Pire.Syntax.Pattern
+
+
+-- import Data.Bitraversable
+-- import Data.Bifunctor
+-- import Control.Monad.Trans.Either
+
+
+import Pire.Forget (forgetExp, forgetMatch)
+
+import Control.Monad.State.Strict
+
+
+import Debug.Trace
+
+
+
+
+#ifdef PiForallInstalled
+-- import PiForall.Environment
+-- import PiForall.TypeCheck
+#endif
+
+
+#ifdef DocTest
+-- fromRight'
+import Data.Either.Combinators
+import Pire.Syntax.Eps
+import Pire.NoPos
+import Pire.Text2String (t2s)
+import Pire.Parser.ParseUtils (parse, module_)
+import Pire.Modules (getModules_)
+
+
+import Pire.Refactor.LineColumnNavigation (lineColumn)
+import Pire.Refactor.ForgetZipper (forgetZ)
+import Pire.Parser.Expr (expr)
+#endif
+
+
+-- --------------------------------------------------
+-- renaming exprs
+
+
+
+{-|
+
+see if a variable is a binding variable in an expression
+
+>>> "x" `isBindingVarIn` (lam "x" $ V "y")
+True
+>>> "y" `isBindingVarIn` (lam "x" $ V "y")
+False
+
+
+The next example (cf. @samples/Nat.pi@) - seems fine to me (but test coverage is
+maybe not exhaustive enough, think eg. of some case, where we would
+have to recurse into the rhs of a match: @Zero -> \\x. n@, ie. recurse
+into the @lambda: \\x. n@ then, etc.) let @c@ be a case expression:
+
+@
+case n of
+  Zero -> Zero
+  Succ n' -> n'
+@
+
+>>> let c = Case (V "n") [Match (PatCon "Zero" []) (Scope (DCon "Zero" [] (Annot Nothing))),Match (PatCon "Succ" [(RuntimeP, PatVar "n'")]) (Scope (V (B 0)))] (Annot Nothing)
+
+
+>>> "y" `isBindingVarIn` c
+False
+
+OK?
+
+>>> "Succ" `isBindingVarIn` c
+False
+
+
+>>> "n'" `isBindingVarIn` c
+True
+
+
+
+
+-}
+
+
+-- Show a at least for debugging with Debug.Trace.trace below
+
+-- isBindingVarIn :: (Eq a, Disp (Expr a a)) => a -> Expr a a -> Bool
+isBindingVarIn :: (Eq a, MkVisible a, Disp (Expr a a), Show a) => a -> Expr a a -> Bool
+
+_ `isBindingVarIn` (V _) = False
+
+y `isBindingVarIn` (Ws_ v _) = y `isBindingVarIn` v
+
+-- do we really need this ?
+y `isBindingVarIn` (BndV _ ex) = y `isBindingVarIn` ex
+
+
+_ `isBindingVarIn` (Nat _) = False
+
+_ `isBindingVarIn` (Nat_ {}) = False
+
+
+y `isBindingVarIn` (l :@ r) = y `isBindingVarIn` l || y `isBindingVarIn` r
+
+y `isBindingVarIn` (Lam y' sc)
+  | y == y' = True
+  | otherwise = y `isBindingVarIn` (instantiate1 (V y') sc)
+
+y `isBindingVarIn` (Lam_ _ bndr _ sc)
+  | y == y' = True
+-- -- | otherwise = y `isBindingVarIn` (instantiate1 (Ws_ (V y') $ Ws "") sc)
+  | otherwise = y `isBindingVarIn` (instantiate1 (V y') sc)
+  where y' = name' bndr
+
+
+
+y `isBindingVarIn` (LamPAs ns sc)
+  | y `elem` ns' = True
+  | otherwise = y `isBindingVarIn` (instantiate (\i -> V $ ns !! i ^. _2) sc)
+  where ns' = (^. _2) <$> ns
+
+
+
+y `isBindingVarIn` (LamPAs_ _ ns _ sc)
+  | y `elem` ns' = True
+  | otherwise = y `isBindingVarIn` (instantiate (\i -> V $ ns !! i ^. _2 & name') sc)
+  where ns' = name' . (^. _2) <$> ns
+
+
+-- y `isBindingVarIn` (Lam' y' sc)
+--   | y == y' = True
+--   | otherwise = y `isBindingVarIn` (instantiate1 (V y') sc)
+
+
+y `isBindingVarIn` (Position _ ex) = y `isBindingVarIn` ex
+
+
+y `isBindingVarIn` (Paren ex) = y `isBindingVarIn` ex
+y `isBindingVarIn` (Paren_ _ ex _) = y `isBindingVarIn` ex
+
+
+-- TODO: rethink, if this is what we really want!
+
+
+
+y `isBindingVarIn` (Case ex matches _)
+  | y `isBindingVarIn` ex = True
+
+  -- -- | y `elem` ns'  = True
+  | y `elem` ns'  = False
+
+
+  | y `elem` ns'' = True
+
+  -- -- | otherwise = False
+  | otherwise = any (\match -> y `isThisBindingVarInMatch` match) matches
+
+                
+  where
+    ps = [p | (Match p _) <- matches]
+    -- scopes = [s | (Match _ s) <- matches]
+
+    -- ns' eg. ["Zero", "Succ"]
+    ns' = name' <$> ps
+    
+    -- ns''  eg. ["n'"] given some "Succ n'" - rethink
+    -- ns'' = (name' <$>) $ (fst <$>) $ concat $ argPatterns <$> ps
+    ns'' = (name' <$>) $ (snd <$>) $ concat $ argPatterns <$> ps
+        
+
+           -- instantiate the scope - cf pretty printing of Match
+           -- maybe this helper function should be more powerful, and cover some of the case above ?
+
+    -- c `isThisBindingVarInMatch` (Match p sc) = c `isBindingVarIn` instantiate (\i -> V $ (argPatterns p) !! i ^. _1 & name') sc
+    c `isThisBindingVarInMatch` (Match p sc) = c `isBindingVarIn` instantiate (\i -> V $ (argPatterns p) !! i ^. _2 & name') sc
+
+
+
+
+-- is this too simple, maybe ?
+y `isBindingVarIn` c@(Case_ {}) = y `isBindingVarIn` (forgetExp c)
+
+
+
+-- needed, even for the Case doctest cases above
+-- but rethink/refine !
+-- too simple ?
+
+-- y `isBindingVarIn` (TCon tm args) = False
+_ `isBindingVarIn` (TCon {}) = False
+_ `isBindingVarIn` (TCon_ {}) = False
+
+
+
+
+_ `isBindingVarIn` (DCon {}) = False
+_ `isBindingVarIn` (DCon_ {}) = False
+
+
+
+
+_ `isBindingVarIn` (LitBool {}) = False
+_ `isBindingVarIn` (LitBool_ {}) = False
+
+
+
+_ `isBindingVarIn` (TyBool  {}) = False
+_ `isBindingVarIn` (TyBool_ {}) = False
+
+
+
+
+_ `isBindingVarIn` (Refl  {}) = False
+_ `isBindingVarIn` (Refl_ {}) = False
+
+-- rethink !
+y `isBindingVarIn` (Subst ex1 ex2      _) = y `isBindingVarIn` ex1 || y `isBindingVarIn` ex2
+y `isBindingVarIn` (Subst_ _ ex1 _ ex2 _) = y `isBindingVarIn` ex1 || y `isBindingVarIn` ex2 
+
+
+y `isBindingVarIn` (Ann ex1 ex2) = y `isBindingVarIn` ex1 || y `isBindingVarIn` ex2
+y `isBindingVarIn` (Ann_ ex)     = y `isBindingVarIn` ex
+
+
+y `isBindingVarIn` (TyEq ex1 ex2)    = y `isBindingVarIn` ex1 || y `isBindingVarIn` ex2
+y `isBindingVarIn` (TyEq_ ex1 _ ex2) = y `isBindingVarIn` ex1 || y `isBindingVarIn` ex2
+
+
+y `isBindingVarIn` (Let y' ex sc)
+  | y == y' = True
+  | y `isBindingVarIn` ex = True
+  | otherwise = y `isBindingVarIn` (instantiate1 (V y') sc)
+
+-- too simple ?
+y `isBindingVarIn` l@(Let_ {}) = y `isBindingVarIn` (forgetExp l)
+  
+
+y `isBindingVarIn` (PiP _ nm ex sc)
+  | y == nm = True
+  | y `isBindingVarIn` ex = True
+  | otherwise = y `isBindingVarIn` (instantiate1 (V nm) sc)
+
+
+
+y `isBindingVarIn` (PiP_ _ ex _ sc)
+  | y == nm = True
+  | y `isBindingVarIn` ex = True
+  | otherwise = y `isBindingVarIn` (instantiate1 (V nm) sc)
+  where nm = name' ex
+
+
+-- too simple ?
+_ `isBindingVarIn` (InferredAnnBnd_ {}) = False
+
+
+-- too simple ?
+_ `isBindingVarIn` (WitnessedAnnBnd_ {}) = False
+
+_ `isBindingVarIn` (WitnessedAnnEx_ {}) = False
+
+
+
+
+y `isBindingVarIn` (Brackets_ _ ex _) = y `isBindingVarIn` ex
+
+
+_ `isBindingVarIn` (Type_ {}) = False
+_ `isBindingVarIn` (Type {})  = False
+
+
+y `isBindingVarIn` (Contra ex _) = y `isBindingVarIn` ex
+y `isBindingVarIn` (Contra_ _ ex _) = y `isBindingVarIn` ex
+
+
+
+-- _ `isBindingVarIn` ex = error $ "isBindingVarIn, missing..." ++ ppS ex
+
+_ `isBindingVarIn` ex = trace (show ex) $ error $ "isBindingVarIn, missing..." ++ ppS ex
+
+
+
+
+{-|
+helper function, hidden in a where clause in the above @isBindingVarIn@ already, but easier to test separately here
+-}
+
+c `isBindingVarInMatch` (Match p sc) = c `isBindingVarIn` instantiate (\i -> V $ (argPatterns p) !! i ^. _1 & name') sc
+c `isBindingVarInMatch` m@(Match_ {}) = c `isBindingVarInMatch` (forgetMatch m)
+    
+    
+
+
+{-|
+helper function to create expressions in the
+@Either RefactorError@ monad, for convenience in the ghci / cabal repl,
+could just use @Right@ instead, but would need
+@-XFlexibleContexts@ then
+ -}
+
+eexpr :: t -> Either RefactorError t
+eexpr t = Right t
+
+
+
+{-|
+
+renaming expressions, with the simple @renameExpr'@ function (takes just an expression):
+
+>>> renameExpr' "x" "z" $ lam "y" $ V "x"
+Right (Lam "y" (Scope (V (F (V "z")))))
+
+or with @renameExpr@ in the @Refactoring@ monad (cf. below):
+
+>>> (eexpr $ lam "y" $ V "x") >>= renameExpr "x" "z"
+Right (Lam "y" (Scope (V (F (V "z")))))
+>>> 
+
+continuing with the simpler @renameExpr'@:
+
+>>> renameExpr' "a" "x" $ lam "y" $ V "x"
+Left (NameCaptureFV "x" "\\y . x")
+
+>>> renameExpr' "x" "y" $ lam "y" $ V "x"
+Left (NameCaptureBindingVar "y" "\\y . x")
+
+>>> let l = lam "a" $ lam "b" $ lam "c" $ lam "y" $ V "x"
+>>> pp l
+\a . \b . \c . \y . x
+
+no effect if @y@ is bound
+
+>>> pp $ fromRight' $ renameExpr' "y" "YY" $ l
+\a . \b . \c . \y . x
+
+works fine if @x@ is free
+
+>>> pp $ fromRight' $ renameExpr' "x" "zzz" $ l
+\a . \b . \c . \y . zzz
+
+detect name capture deep down inside
+
+>>> renameExpr' "x" "b" $ l
+Left (NameCaptureBindingVar "b" "\\a . \\b . \\c . \\y . x")
+
+another example:
+
+>>> let l' = lam "a" $ V "foo" :@ (lam "c" $ V "a" :@ V "c")
+>>> pp l'
+\a . foo (\c . a c)
+>>> renameExpr' "a" "c" $ l'
+Left (NameCaptureBindingVar "c" "\\a . foo (\\c . a c)")
+
+
+
+
+further example, similar to the above, but parsed and not desugared: @LamPAs@
+
+>>> let l = nopos $ t2s $ parse expr "\\a b . \\c . \\y . x"
+>>> l
+LamPAs [(RuntimeP,"a",Annot Nothing),(RuntimeP,"b",Annot Nothing)] (Scope (LamPAs [(RuntimeP,"c",Annot Nothing)] (Scope (LamPAs [(RuntimeP,"y",Annot Nothing)] (Scope (V (F (V (F (V (F (V "x"))))))))))))
+>>> renameExpr' "a" "c" $ l
+Left (NameCaptureBindingVar "c" "\\a b . \\c . \\y . x")
+
+
+ -}
+
+
+
+
+-- Show a at least for debugging `isBindingVar` with Debug.Trace
+renameExpr' :: (Disp (Expr a a), Disp a, Eq a, MkVisible a, Show a) =>
+               a -> a -> Expr a a -> Either RefactorError (Expr a a)
+
+
+renameExpr' old new lambda@(Lam x sc)
+  | new `elem` fv sc             = Left $ NameCaptureFV         (ppS new) (ppS lambda)
+  | new `isBindingVarIn` lambda  = Left $ NameCaptureBindingVar (ppS new) (ppS lambda)
+  | otherwise, x == old = return $ Lam new sc'
+  | otherwise, x /= old = return $ Lam x   sc'
+  where (Lam _ sc') = substituteVar old new lambda
+
+
+
+renameExpr' old new lambda@(LamPAs_ lamtok xs dot' sc)
+  --   | new `elem` fv sc          = throwError $ NameCaptureFV $ ppS newlam
+  | new `elem` fv sc            = Left $ NameCaptureFV         (ppS new) (ppS lambda)
+  | new `isBindingVarIn` lambda = Left $ NameCaptureBindingVar (ppS new) (ppS lambda)
+
+  -- -- | otherwise, old        `elem` [x ^. _2 & name' | x <- xs]  = return $ LamPAs_ lamtok xsnew dot' sc'
+  -- -- | otherwise, (not $ old `elem` [x ^. _2 & name' | x <- xs]) = return $ LamPAs_ lamtok xs  dot' sc'
+
+  -- [July 2016] getting rid of this tracing
+  -- -- | otherwise, old        `elem` [x ^. _2 & name' | x <- xs]  = trace "#1" $ return $ bimap (\tt -> if tt==old then new else tt) (\tt -> if tt==old then new else tt) $ LamPAs_ lamtok xsnew dot' sc'
+  -- -- | otherwise, (not $ old `elem` [x ^. _2 & name' | x <- xs]) = trace "#2" $ return $ bimap (\tt -> if tt==old then new else tt) (\tt -> if tt==old then new else tt) $ LamPAs_ lamtok xs  dot' sc'
+
+  -- -- this would benefit from a helper function (\tt -> if tt==old then new else tt) I guess
+  
+  | otherwise, old        `elem` [x ^. _2 & name' | x <- xs]  = return $ bimap (\tt -> if tt==old then new else tt) (\tt -> if tt==old then new else tt) $ LamPAs_ lamtok xsnew dot' sc'
+  | otherwise, (not $ old `elem` [x ^. _2 & name' | x <- xs]) = return $ bimap (\tt -> if tt==old then new else tt) (\tt -> if tt==old then new else tt) $ LamPAs_ lamtok xs  dot' sc'
+
+
+
+  where
+    sc' = scopepl $ substituteVar old new lambda
+
+    -- using lens to short cut
+    -- xsnew = [(eps, if name' bndr == old then bndr `replaceInBndr` new else bndr, ann) | (eps, bndr, ann) <- xs]
+    xsnew = [over _2 (\b -> if name' b == old then b `replaceInBndr` new else b) x | x <- xs]
+
+    bndr `replaceInBndr` n = fmap (\tt -> if tt==old then n else tt) bndr
+    
+
+
+
+
+-- renameExpr' old new l@(Lam' x sc)
+--   | new `elem` fv sc        = Left $ NameCaptureFV         (ppS new) (ppS l)
+--   | new `isBindingVarIn` l  = Left $ NameCaptureBindingVar (ppS new) (ppS l)
+--   | otherwise, x == old = return $ Lam' new sc'
+--   | otherwise, x /= old = return $ Lam' x   sc'
+--   where (Lam' _ sc') = substituteVar old new l
+
+
+
+
+
+renameExpr' old new expr@(Case {})
+  | new `isBindingVarIn` expr  = Left $ NameCaptureBindingVar (ppS new) (ppS expr)
+
+    -- -- | otherwise = return $ expr'
+                                 
+    -- -- | otherwise = trace (show "# renameExpr'...(Case {}), in otherwise") $ return $ Case ex' (renameMatch old new <$> matches') annot'
+  | otherwise = return $ Case ex' (renameMatch old new <$> matches') annot'
+                                 
+  where
+    -- expr' = substituteVar old new expr
+    (Case ex' matches' annot') = substituteVar old new expr
+    
+
+
+
+
+renameExpr' old new expr
+  | new `isBindingVarIn` expr  = Left $ NameCaptureBindingVar (ppS new) (ppS expr)
+  | otherwise = return $ expr'
+  where expr' = substituteVar old new expr
+
+
+
+
+-- Show at least for debugging with Debug.Trace.trace below
+
+
+
+{-|
+
+we want @renameExpr@ to work in whatever monad, just requiring the @Refactoring@ interface,
+(so @renameZ'@/@renameZ@ can be in line with the other navigation functions)
+
+for examples of its usage cf. the simpler function @renameExpr'@ above
+
+-}
+
+
+-- not sure if it is a good idea (if we really need) to make renameExpr
+-- rely on the simpler renameExpr' function, that works just in Either ?
+-- anyway, it makes the doctests above simpler:
+
+-- we *can* use
+--   (eexpr $ V "a" :@ V "b") >>= renameExpr "a" "xx"
+-- but we can just as well use the simpler:
+--   renameExpr' "a" "xx" $ V "a" :@ V "b"
+
+
+
+renameExpr :: (Refactoring m, Disp (Expr a a), Disp a, Eq a, MkVisible a, Show a) =>
+              a -> a -> Expr a a -> m (Expr a a)
+              
+renameExpr old new ex
+  | Left  l <- renameExpr' old new ex = rthrow l
+  | Right r <- renameExpr' old new ex = rsucceed r
+
+
+
+
+
+
+
+
+
+
+-- --------------------------------------------------
+-- renaming decls
+
+
+{-|
+
+rename in declarations, the @Nat@ at position 19 8 of @pitestfiles/Lec3.pi@ to @Natural@ eg., as used throughout, and in (data type) decl 18 in particular:
+
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 19 8 >>= repr
+Parsing File "pitestfiles/Lec3.pi"
+Nat
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 19 8 >>= upToBinding2 >>= \(old, z) -> renameZ old "Natural" z >>= toDecl 18 >>= repr
+Parsing File "pitestfiles/Lec3.pi"
+data Beautiful (n : Natural) : Type where
+   B0 of [n = 0]
+   B3 of [n = 3]
+   B5 of [n = 5]
+   Bsum of (m1:Natural)(m2:Natural)(Beautiful m1)(Beautiful m2)[n = plus m1 m2]
+<BLANKLINE>
+<BLANKLINE>
+
+
+likewise @Zero@ occurs at position 21 3 in the context of the definition of @plus@:
+
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 21 3 >>= repr
+Parsing File "pitestfiles/Lec3.pi"
+Zero
+
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 21 3 >>= navigate [Up, Up, Up, Up, Up] >>= repr
+Parsing File "pitestfiles/Lec3.pi"
+plus = \ x y. case x of 
+   Zero -> y
+   Succ x' -> Succ (plus x' y)
+<BLANKLINE>
+<BLANKLINE>
+
+
+and we can rename @Nat@ to @Natural@ again (on the module level), and turn our attention to decl 3, where the naturals are actually defined,
+either in white space aware or abstract syntax (forgetZ):
+
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 21 3 >>= upToBinding2 >>= \(old, z) -> renameZ old "Natural" z >>= toDecl 3 >>= repr
+Parsing File "pitestfiles/Lec3.pi"
+data Nat : Type where
+  Natural
+  Succ of (Nat)
+<BLANKLINE>
+<BLANKLINE>
+
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 21 3 >>= upToBinding2 >>= \(old, z) -> forgetZ z >>= renameZ old "Natural" >>= toDecl 3 >>= repr
+Parsing File "pitestfiles/Lec3.pi"
+data Nat : Type where
+  Natural
+  Succ of (_1 : Nat)
+
+
+-}
+
+
+-- Show at least for debugging with Debug.Trace.trace below
+
+renameDecl :: (Refactoring m, Disp (Expr a a), Disp a, Eq a, MkVisible a, Show a) =>
+              a -> a -> Decl a a -> m (Decl a a)
+
+
+renameDecl old new (Def x expr)
+  | x == old  = do {
+      ; expr' <- renameExpr old new expr
+      ; return $ Def new expr'
+      }
+  | otherwise = do {
+      ; expr' <- renameExpr old new expr
+      ; return $ Def x expr'
+      }
+
+
+
+renameDecl old new (Def_ nm eq expr)
+  | name' nm == old  = do {
+      ; expr' <- renameExpr old new expr
+      ; return $ Def_ (Nm1_ new ws) eq expr'
+      }
+  | otherwise = do {
+      ; expr' <- renameExpr old new expr
+      ; return $ Def_ nm eq expr'
+      }
+  where (Nm1_ _ ws) = nm
+
+
+    -- recall:
+    -- signature decls
+    -- eg. foo : bar
+    
+renameDecl old new (Sig nm ex)
+  | nm == old  = do {
+    ; expr' <- renameExpr old new ex
+    ; return $ Sig new expr'
+    }
+  | otherwise = do {
+    ; expr' <- renameExpr old new ex
+    ; return $ Sig nm expr'
+    }
+
+
+renameDecl old new (Sig_ nm colontok ex)
+  | name' nm == old  = do {
+    ; expr' <- renameExpr old new ex
+    ; return $ Sig_ (Nm1_ new ws) colontok expr'
+    }
+  | otherwise = do {
+    ; expr' <- renameExpr old new ex
+    ; return $ Sig_ nm colontok expr'
+    }
+  where (Nm1_ _ ws) = nm
+
+
+    {-
+     data type decls, eg.
+     
+     data Nat : Type where
+       Zero
+       Succ of (Nat)
+     -}
+
+
+                      -- start out w/ no renaming at all
+  -- renameDecl _ _ d@(Data {}) = return d
+  -- renameDecl _ _ d@(Data_ {}) = return d
+
+
+
+
+
+renameDecl old new (Data tt tele constrdefs) = 
+  -- Data <$> (pure $ if tt == old then new else tt) <*> (renameTele old new tele) <*> pure constrdefs
+  Data <$> (pure $ if tt == old then new else tt) <*> (renameTele old new tele) <*> pure (renameConstructorDef old new <$> constrdefs)
+
+
+
+
+
+renameDecl old new (Data_ datatok nm tele colontok ex wheretoken maybo constrdefsAndMaySemiCola maybc ) = 
+  Data_
+  <$> pure datatok
+  <*> (pure $ if name' nm == old then (Nm1_ new ws) else nm)
+  <*> (renameTele old new tele)
+  <*> pure colontok
+  <*> pure ex
+  <*> pure wheretoken
+  <*> pure maybo
+  -- need to do renaming in constructor defs as well
+  <*> pure [(renameConstructorDef old new cd, semi) | (cd, semi) <- constrdefsAndMaySemiCola]
+  <*> pure maybc
+  where
+    (Nm1_ _ ws) = nm
+
+
+
+
+
+
+
+-- TODO to be completed for the remaining constraint constructors
+
+
+-- --   | ConsWildInParens_  Eps (Token 'ParenOpenTy t) (Binder t) (Expr t a) (Token 'ParenCloseTy t) (Telescope t a)
+
+-- --   | ConsInBrackets_    Eps (Token 'BracketOpenTy t) (Nm t) (Token 'ColonTy t) (Expr t a) (Token 'BracketCloseTy t) (Telescope t a)
+
+
+-- --     -- need this as well - cf. equal_
+-- --     -- should keep = as well
+-- --   | Constraint_ (Token 'BracketOpenTy t) (Expr t a) (Token 'EqualTy t) (Expr t a) (Token 'BracketCloseTy t) (Telescope t a)
+
+
+
+renameTele _ _ EmptyTele = pure EmptyTele
+
+renameTele old new (Cons eps tt ex tele) =
+  Cons <$> pure eps <*> pure (if tt==old then new else tt) <*> (renameExpr old new ex) <*> (renameTele old new tele)
+
+
+renameTele old new (ConsInParens_ eps po nm col ex pc tele) =
+  ConsInParens_
+  <$> pure eps
+  <*> pure po
+  <*> (pure $ if name' nm == old then (Nm1_ new ws) else nm)
+  <*> pure col
+  <*> (renameExpr old new ex)
+  <*> pure pc
+  <*> (renameTele old new tele)
+  where (Nm1_ _ ws) = nm
+
+
+renameTele old new (Constraint ex1 ex2 tele) =
+  Constraint <$> (renameExpr old new ex1) <*> (renameExpr old new ex2) <*> (renameTele old new tele)
+
+  
+renameConstructorDef old new cd@(ConstructorDef {}) =
+  bimap (\tt -> if tt==old then new else tt) (\somea -> if somea==old then new else somea) cd
+  
+renameConstructorDef old new cd@(ConstructorDef' {}) =
+  bimap (\tt -> if tt==old then new else tt) (\somea -> if somea==old then new else somea) cd
+
+  
+renameConstructorDef old new cd@(ConstructorDef_ {}) =
+  bimap (\tt -> if tt==old then new else tt) (\somea -> if somea==old then new else somea) cd
+
+  
+renameConstructorDef old new cd@(ConstructorDef'_ {}) =
+  bimap (\tt -> if tt==old then new else tt) (\somea -> if somea==old then new else somea) cd
+
+
+
+
+
+{-|
+
+rename in matches, looks fine to me:
+
+
+>>> renameMatch "Zero" "ZZ" <$> [Match (PatCon "Zero" []) (Scope (LitBool True)),Match (PatCon "Succ" [(RuntimeP, PatVar "n")]) (Scope (LitBool False))]
+[Match (PatCon "ZZ" []) (Scope (LitBool True)),Match (PatCon "Succ" [(RuntimeP,PatVar "n")]) (Scope (LitBool False))]
+
+
+and in @Lec3.pi@, at position 21 5, there is @Zero@ 
+
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 21 5 >>=  focus
+Parsing File "pitestfiles/Lec3.pi"
+Zero
+
+this is defined at the module level (somewhere up the syntax tree ie.: @upToBinding2@), and used in the case expression of decl 5 as well:
+
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 21 5 >>= upToBinding2 >>= \(old, z) -> forgetZ z >>= toDecl 5 >>= focus
+Parsing File "pitestfiles/Lec3.pi"
+is_zero = \x .
+            case x of
+              Zero -> True
+              (Succ n) -> False
+
+now renaming @Zero@ to @ZZ@ works fine:
+
+>>> (pp . fromRight' <$>) $ module_ "pitestfiles/Lec3.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m) >>= lineColumn 21 5 >>= upToBinding2 >>= \(old, z) -> forgetZ z >>= toDecl 5 >>= renameZ old "ZZ" >>= focus
+Parsing File "pitestfiles/Lec3.pi"
+is_zero = \x .
+            case x of
+              ZZ -> True
+              (Succ n) -> False
+
+
+-}
+
+
+
+  
+renameMatch old new cd@(Match {}) =
+  bimap (\tt -> if tt==old then new else tt) (\somea -> if somea==old then new else somea) cd
+  
+renameMatch old new cd@(Match_ {}) =
+  bimap (\tt -> if tt==old then new else tt) (\somea -> if somea==old then new else somea) cd
+
+
+
+
+
+
+
+
+-- --------------------------------------------------
+-- rename in the zipper
+
+-- similar to upToBinding'/upToBinding
+-- two function here:
+-- renameZ takes an old and a new name
+-- renameZ' just takes a new name (and gets the old name from the state)
+
+
+
+
+
+{-|
+
+@renameZ old new z@
+
+rename an @old@ name to a @new@ new in zipper @z@.
+
+this function does not require @MonadState (RefactorState a) m@
+(but two names: the @old@ one, as well as the @new@ one)
+
+some examples, starting with the deliberatly simple @Test.pi@ module:
+
+>>> tst <- (runExceptT $ getModules_ ["samples"] "Test") >>= return . last . fromRight'
+Parsing File "samples/Nat.pi"
+Parsing File "samples/Nat.pi"
+Parsing File "samples/Sample.pi"
+Parsing File "samples/Test.pi"
+>>> pp $ fromRight' $ refactor $ (rzipper $ Mod $ t2s $ tst) >>= lineColumn 21 9 >>= repr
+a
+
+see what @a@ we are talking about (at position 21 9), navigating there step by step:
+
+>>> pp $ fromRight' $ refactor $ (rzipper $ Mod $ t2s $ tst) >>= navigate [Decl 6] >>= repr
+j = \y . a (\a . x (\a . a))
+<BLANKLINE>
+
+>>> pp $ fromRight' $ refactor $ (rzipper $ Mod $ t2s $ tst) >>= navigate [Decl 6, Rhs] >>= repr
+\y . a (\a . x (\a . a))
+<BLANKLINE>
+
+>>> pp $ fromRight' $ refactor $ (rzipper $ Mod $ t2s $ tst) >>= navigate [Decl 6, Rhs, Rhs] >>= repr
+a (\a . x (\a . a))
+<BLANKLINE>
+
+>>> pp $ fromRight' $ refactor $ (rzipper $ Mod $ t2s $ tst) >>= navigate [Decl 6, Rhs, Rhs, Lhs] >>= repr
+a 
+
+
+in any case, this is the @a@ bound at the top level, thus renaming changes it throughout the module
+(but not the deeper locally bound instances).
+
+
+>>> (pp . fromRight' <$>) refactor $ (rzipper $ Mod $ t2s $ tst) >>= lineColumn 21 9 >>= upToBinding >>= renameZ "a" "A" >>= focus
+<BLANKLINE>
+-- leading ws, module copied from M.pi, do not touch though: used in the doctests
+<BLANKLINE>
+module Main where
+<BLANKLINE>
+import   Nat
+import Sample
+<BLANKLINE>
+A = \x . 2
+<BLANKLINE>
+b = \x [ y ] z .  x  2
+<BLANKLINE>
+k = \x . frec x
+<BLANKLINE>
+<BLANKLINE>
+f = \x . A x
+g = \x . c x
+<BLANKLINE>
+hh = \ yy . A (\a . x a)
+<BLANKLINE>
+j = \y . A (\a . x (\a . a))
+frec = \y . frec (\a . x (\a . a))
+<BLANKLINE>
+
+
+cf this very example renamed with @renameZ'@ below.
+
+
+as of February 2016: can now rename by means of @upToBinding2@, which works with the simpler @ezipper@
+like so (rename @pred@ to @predecessor@):
+
+@pred@ can be found at position 21 3, its definition at the module level:
+
+>>> (pp . fromRight' <$>) $  module_ "pitestfiles/Nat.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m)  >>= lineColumn 21 3 >>= focus
+Parsing File "pitestfiles/Nat.pi"
+pred
+
+>>> (pp . fromRight' <$>) $  module_ "pitestfiles/Nat.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m)  >>= lineColumn 21 3 >>= upToBinding2 >>= focus
+Parsing File "pitestfiles/Nat.pi"
+pred
+
+renaming @pred@ to @predecessor@ - throughout the module ie. (the result thus too long to be shown here, but you can try this out yourself):
+
+>>> (pp . fromRight' <$>) $  module_ "pitestfiles/Nat.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m)  >>= lineColumn 21 3 >>= upToBinding2 >>= \(old, z) -> renameZ old "predecessor" z >>= repr
+...
+
+but cf. its usage in decl 12 (@mult@) eg.
+
+>>> (pp . fromRight' <$>) $  module_ "pitestfiles/Nat.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m)  >>= lineColumn 21 3 >>= upToBinding2 >>= \(old, z) -> renameZ old "predecessor" z >>= toDecl 12 >>= repr
+Parsing File "pitestfiles/Nat.pi"
+mult = \ n m .
+  case n of
+    Zero -> Zero
+    Succ predecessor -> plus m (mult predecessor m)
+<BLANKLINE>
+<BLANKLINE>
+<BLANKLINE>
+
+
+replace @pred@ by @predecessor@ (in both: signature + def) in the non white space aware (regular absy) case:
+
+>>> (pp . fromRight' <$>) $  module' "pitestfiles/Nat.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m)  >>= toDecl 4 >>= left >>= upToBinding2 >>= \(old, z) -> renameZ old "predecessor" z >>= repr
+...
+
+
+likewise in the whitespace aware case (same means of navigation to @pred@ - can navigate there by lineColumn as well, of course, cf. below),
+ie. @pred@ -> @predecessor@, in both: sig+def:
+
+>>> (pp . fromRight' <$>) $  module_ "pitestfiles/Nat.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m)  >>= toDecl 4 >>= left >>= upToBinding2 >>= \(old, z) -> renameZ old "predecessor" z >>= repr
+...
+
+as above, but navigate to @pred@ with lineColumn
+
+>>> (pp . fromRight' <$>) $  module_ "pitestfiles/Nat.pi" >>= \m -> return $ (ezipper $ Mod $ t2s $ nopos m)  >>= lineColumn 21 3 >>= upToBinding2 >>= \(old, z) -> renameZ old "predecessor" z >>= repr
+...
+
+
+-}
+
+
+-- Show at least for debugging with Debug.Trace.trace below
+renameZ :: (Refactoring m, Disp (Expr a a), Disp a, Eq a, MkVisible a, Show a) =>
+            a -> a -> Zipper a -> m (Zipper a)
+
+           
+renameZ old new (Dcl decl, bs) = do {
+  ; decl' <- renameDecl old new decl
+  ; rsucceed (Dcl decl', bs)
+  }
+
+renameZ old new (Exp expr, bs) = do {
+  ; expr' <- renameExpr old new expr
+  ; rsucceed (Exp expr', bs)
+  }
+
+renameZ old new z@(Aa _, _) = do {
+  ; up z >>= \z' -> renameZ old new z'
+  }
+
+
+renameZ old new (Mod (Module nm mimports mdecls mconstrs), bs) = do {
+  ; dcls <- forM mdecls (\decl -> renameDecl old new decl)
+  ; rsucceed (Mod (Module nm mimports dcls mconstrs), bs)
+  }
+
+
+
+renameZ old new (Mod m@(Module_ {..}), bs) = do {
+
+
+  -- any better / simpler - in one line maybe ?
+
+  
+  -- ; dcls <- forM ((^. decls) m) (\decl -> renameDecl old new decl)
+  ; dcls <- forM (_decls) (\decl -> renameDecl old new decl)
+            
+  ; rsucceed $ (Mod $ over (decls) (\_-> dcls)  m, bs)
+
+    
+  }
+
+
+
+
+
+{-|
+
+@renameZ' new z@
+
+rename a name a zipper @z@, to a @new@ one.
+
+this function requires MonadState (RefactorState a) m
+
+idea/requirement: the name encountered has been recorded as the old name in the state,
+@renamaZ'@ thus only needs the @new@ name 
+
+
+continuing with the example above (this time just using the more convenient @module_@ for parsing the @Test@ module):
+moving upwards with @upToBinding@ (that records the name encountered)
+and then using @renameZ'@ for the renameing (that just needs the new name @AAA@)
+
+>>> tst <- module_ "samples/Test" >>= return
+Parsing File "samples/Nat.pi"
+Parsing File "samples/Nat.pi"
+Parsing File "samples/Sample.pi"
+Parsing File "samples/Test.pi"
+>>> pp $ fromRight' $ refactor $ (rzipper $ Mod $ t2s $ tst) >>= lineColumn 21 9 >>= upToBinding  >>= renameZ' "AAA" >>= repr
+<BLANKLINE>
+-- leading ws, module copied from M.pi, do not touch though: used in the doctests
+<BLANKLINE>
+module Main where
+<BLANKLINE>
+import   Nat
+import Sample
+<BLANKLINE>
+AAA = \x . 2
+<BLANKLINE>
+b = \x [ y ] z .  x  2
+<BLANKLINE>
+k = \x . frec x
+<BLANKLINE>
+<BLANKLINE>
+f = \x . AAA x
+g = \x . c x
+<BLANKLINE>
+hh = \ yy . AAA (\a . x a)
+<BLANKLINE>
+j = \y . AAA (\a . x (\a . a))
+frec = \y . frec (\a . x (\a . a))
+<BLANKLINE>
+
+
+TODO think about if it is possible at all now to get an
+"no old name found" error for renameZ, as there is now only
+
+* upToBinding, which does record the name
+
+* upToBinding2, which takes the old name as a param
+
+-}
+
+
+renameZ' :: (Eq a, Show a, MonadState (RefactorState a) m, MkVisible a, Disp a, Disp (Expr a a), Refactoring m) => a -> Zipper a -> m (Zipper a)
+
+
+renameZ' new (Dcl decl, bs) = do {
+  ; Just old <- oldNmFound <$> get
+  ; decl' <- renameDecl old new decl
+  ; rsucceed (Dcl decl', bs)
+  }
+
+renameZ' new (Exp expr, bs) = do {
+  ; Just old <- oldNmFound <$> get
+  ; expr' <- renameExpr old new expr
+  ; rsucceed (Exp expr', bs)
+  }
+
+
+renameZ' new z@(Aa _, _) = do {
+  ; Just old <- oldNmFound <$> get
+  ; up z >>= renameZ old new
+  }
+
+
+renameZ' new (Mod (Module nm mimports mdecls mconstrs), bs) = do {
+  ; Just old <- oldNmFound <$> get
+  ; dcls <- forM mdecls (\decl -> renameDecl old new decl)
+  ; rsucceed (Mod (Module nm mimports dcls mconstrs), bs)
+  }
+
+
+-- reworked in July 2016: consider the possibility of
+-- "no old name found"
+-- but maybe not necessary, as there is only upToBinding/upToBinding2 left
+
+-- renameZ' new (Mod m@(Module_ {..}), bs) = do {
+--   ; Just old <- oldNmFound <$> get
+--   ; dcls <- forM (_decls) (\decl -> renameDecl old new decl)
+--   ; rsucceed $ (Mod $ over (decls) (\_-> dcls)  m, bs)
+--   }
+
+
+renameZ' new (Mod m@(Module_ {..}), bs)
+  = oldNmFound <$> get >>=
+    \o -> maybe (rfail "renameZ' new (Mod m@(Module_ {..}), bs): no old name found")
+          (\old -> do {
+              ; dcls <- forM (_decls) (\decl -> renameDecl old new decl)
+              ; rsucceed $ (Mod $ over (decls) (\_-> dcls)  m, bs)
+              }) o 
+    
+
+
+
+
+
+
+
+
+
+
+#ifdef PiForallInstalled
+
+-- typecheckM m
+
+-- stuff st =
+--   (do
+--       ; silence $ runExceptT $ getModules ["keepme"] "Foo.pi"
+--       ; return ()
+
+--   )
+
+
+-- typecheckM m@(Module {..}) =
+--   (do
+--        ; let m' = untie m
+--        ; r <- runTcMonad emptyEnv (tcModules [m'])
+--        ; return r
+
+--        -- ; case r of
+--        --     Left x ->
+--        --     Right y -> return y
+
+--   )
+
+
+
+-- typecheckM_ m@(Module_ {..}) =
+--   (do
+--        ; let m' = untie m
+--        ; runTcMonad emptyEnv (tcModules [m'])
+
+--        ; return ()
+
+--   )
+
+
+
+
+#endif
+
+
+
+
+
+-- instance Rename (Zipper a) a where
+--   rename = renameZ'
+
+
+
+-- renameTo :: (Eq a, MonadState (RefactorState a) m, Disp a, Refactoring m) =>
+--      a -> Zipper a -> m (Zipper a)
+
+-- renameTo new zipper@(Ex expr, bs) =
+--   (do
+--        ; st <- get
+--        ; case oldNmFound st of
+--          Nothing -> rfail $ "no old name found to rename"
+--          Just old -> renameZ' old new zipper >>= \renamed -> return renamed
+--       )                                                   ;
+
+-- renameTo new zipper@(Mod (Module nm imports decls constrs), bs) =
+--   (do
+--        ; st <- get
+--        ; case oldNmFound st of
+--          Nothing -> rfail $ "no old name found to rename"
+
+--          Just old -> renameZ' old new zipper >>= \renamed -> return renamed
+
+--   )
+
+
+
+
+-- -- rnm :: (Refactoring m, MonadWriter String m)
+-- --        => Module String String -> Path -> String -> m (Module String String)
+-- rnm mdl path new =
+--   (do
+--       ; let zipper = (Mod mdl, [])
+
+
+--       ; when (new `L.elem` topLevelVars mdl)
+
+
+--   )
+

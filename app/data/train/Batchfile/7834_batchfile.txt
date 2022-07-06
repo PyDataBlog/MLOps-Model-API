@@ -1,0 +1,6 @@
+del /s /q "%GBG%\%GAM%\%CONS%\*.bat"
+del /s /q "%GBG%\%GAM%\%CONS%\*.xpadderprofile"
+del /s /q "%GBG%\%GAM%\%CONS%\*.ini"
+del /s /q "%GBG%\%GAM%\%CONS%\*.settings"
+del /s /q "%GBG%\%GAM%\%CONS%\*.conf"
+del /s /q "%GBG%\%GAM%\%CONS%\*.cfg"

@@ -1,8 +1,12 @@
 import os
+import sys
+import pathlib
 import multiprocessing as mp
 from time import time
 from datasets import load_dataset
 from functools import partial
+
+sys.path.append(str(pathlib.Path(__file__).parent.parent))
 from app.utils import supported_langs_dict
 
 
@@ -36,9 +40,9 @@ def build_train_val_test(n: int, lang: str) -> bool:
 
 if __name__ == "__main__":
     start = time()
-    pool = mp.cpu_count()
+    pool = int(mp.cpu_count() / 2)
     n = len(supported_langs_dict.keys())
     with mp.Pool(min(n, pool)) as p:
-        res = p.map(partial(build_train_val_test, 10), supported_langs_dict.keys())
+        res = p.map(partial(build_train_val_test, 10_000), supported_langs_dict.keys())
         print(f"Parallel build took {time() - start} seconds")
         print(res)

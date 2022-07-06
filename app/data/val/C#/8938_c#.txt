@@ -1,0 +1,397 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Windows;
+using System.Windows.Forms;
+using KompressorCore;
+using System.IO;
+using System.Diagnostics;
+using System.Windows.Media;
+using System.Windows.Media.Imaging;
+namespace Kompress
+{
+	/// <summary>
+	/// Interaction logic for MainWindow.xaml
+	/// </summary>
+	public partial class MainWindow : Window
+	{
+		public MainWindow()
+		{
+			InitializeComponent();
+		}
+
+		string loadedDirectory;
+
+		public string ArchiveName { get; internal set; }
+
+		//For UI elements which are not buttons
+		public void OnSelectCompress(object sender, RoutedEventArgs routed)
+		{
+			new Action(() =>
+			{
+				AppOptionsPanel.Visibility = Visibility.Hidden;
+				CompressOptionsPanel.Visibility = Visibility.Visible;
+			}).Invoke();
+		}
+		public void OnSelectExtract(object sender, RoutedEventArgs routed)
+		{
+			new Action(() => 
+			{
+				AppOptionsPanel.Visibility = Visibility.Hidden;
+				DecompressionPanel.Visibility = Visibility.Visible;
+			}).Invoke();
+		}
+		public void OnChangeBackground(object sender, RoutedEventArgs routed)
+		{
+
+		}
+		public void OnHome(object sender, RoutedEventArgs routed)
+		{
+			new Action(() => 
+			{
+				AppOptionsPanel.Visibility = Visibility.Visible;
+				HideAllPanels();
+				ResetAllComboBoxes();
+			}).Invoke();
+		}
+		public void OnSingleFile(object sender, RoutedEventArgs routed)
+		{
+			CompressOptionsPanel.Visibility = Visibility.Hidden;
+			SingleFilePanel.Visibility = Visibility.Visible;
+		}
+		public void OnMultipleFiles(object sender, RoutedEventArgs routed)
+		{
+			CompressOptionsPanel.Visibility = Visibility.Hidden;
+			MultipleFilesPanel.Visibility = Visibility.Visible;
+		}
+		public void OnDirectory(object sender, RoutedEventArgs routed)
+		{
+			CompressOptionsPanel.Visibility = Visibility.Hidden;
+			DirectoryPanel.Visibility = Visibility.Visible;
+		}
+
+		//Button actions
+		public void OnButtonBrowseFileToOpen(object sender, RoutedEventArgs routed)
+		{
+			using (OpenFileDialog fileDialog = new OpenFileDialog())
+			{
+				string toReplace = selectedFileName.Text;
+				selectedFileName.Text = string.Empty;
+				fileDialog.Multiselect = false;
+				fileDialog.ShowDialog();
+				if (!fileDialog.FileName.Equals(string.Empty))
+					selectedFileName.Text = fileDialog.FileName;
+				else
+					selectedFileName.Text = toReplace;
+			}
+		}
+		public void OnButtonCompressSingleFile(object sender, RoutedEventArgs routed)
+		{
+			try
+			{
+				if (selectedFileName.Text.Equals(string.Empty))
+					throw new ArgumentNullException("A file is needed to compress");
+				FileSize compressionResult = new FileSize();
+				Stopwatch s = new Stopwatch();
+				if(( bool )UseLZMAOptn.IsChecked)
+				{
+					s.Start();
+					if (savedFileName.Text.Equals("Where must the file be saved?"))
+						compressionResult = Compressor.CompressLZMA(selectedFileName.Text);
+					else
+						compressionResult = Compressor.CompressLZMA(selectedFileName.Text, savedFileName.Text);
+					s.Stop();
+				}
+				else
+				{
+					s.Start();
+					if (savedFileName.Text.Equals("Where must the file be saved?"))
+						compressionResult = Compressor.Compress(selectedFileName.Text);
+					else
+						compressionResult = Compressor.Compress(selectedFileName.Text, savedFileName.Text);
+					s.Stop();
+				}
+				double compressionRatio = (double)compressionResult.CompressedFileSize / compressionResult.InputFileSize;
+				string result = "File compressed\nInput file size : " + compressionResult.InputFileSize + " bytes\nCompressed file size : "
+					+ compressionResult.CompressedFileSize + " bytes\nCompression ratio : " + compressionRatio + "\nTime taken to compress : " + s.Elapsed; 
+				System.Windows.MessageBox.Show(result, "Success", MessageBoxButton.OK);
+			}
+			catch (ArgumentException argumentNull)
+			{
+				System.Windows.MessageBox.Show(argumentNull.Message, "Failed to compress", MessageBoxButton.OK);
+			}
+			catch (FileNotFoundException fileNotFound)
+			{
+				System.Windows.MessageBox.Show(fileNotFound.Message, "File not found", MessageBoxButton.OK);
+			}
+		}
+		public void OnButtonGetASavePath(object sender, RoutedEventArgs routed)
+		{
+			using (SaveFileDialog fileDialog = new SaveFileDialog())
+			{
+				string toReplace = savedFileName.Text;
+				savedFileName.Text = string.Empty;
+				fileDialog.OverwritePrompt = true;
+				fileDialog.DefaultExt = ".zip";
+				fileDialog.ShowDialog();
+				fileDialog.Filter = "Zip archive (*.zip)|*.zip";
+				fileDialog.SupportMultiDottedExtensions = true;
+				if (!fileDialog.FileName.Equals(string.Empty))
+					savedFileName.Text = fileDialog.FileName;
+				else
+					savedFileName.Text = toReplace;
+			}
+		}
+		public void OnButtonLoadMultipleFiles(object sender, RoutedEventArgs routed)
+		{
+			using (OpenFileDialog fileDialog = new OpenFileDialog())
+			{
+				fileDialog.Multiselect = true;
+				List<string> fileList = new List<string>();
+				fileDialog.ShowDialog();
+				foreach (string fileName in fileDialog.FileNames)
+					fileList.Add(fileName);
+				BindFileListView(fileList);
+			}
+		}
+		public void OnButtonCompressMultipleFiles(object sender, RoutedEventArgs routed)
+		{
+			try
+			{
+				using (SaveFileDialog fileDialog = new SaveFileDialog())
+				{
+					fileDialog.CreatePrompt = true;
+					fileDialog.OverwritePrompt = true;
+					if (( bool )OpnUseLZMA.IsChecked)
+						fileDialog.Filter = "7z archive (*.7z)|*.7z";
+					else
+						fileDialog.Filter = "Zip archive (*.zip)|*.7z";
+					fileDialog.ShowDialog();
+					List<string> loadedFiles = GetLoadedFiles();
+					if (fileDialog.FileName.Equals(String.Empty))
+						throw new InvalidOperationException("There needs to be a save file name for this operation to happen");
+					Stopwatch s = new Stopwatch();
+					FileSize compressionResult = new FileSize();
+					s.Start();
+					if (( bool )OpnUseLZMA.IsChecked)
+						compressionResult = Compressor.CompressLZMA(loadedFiles, fileDialog.FileName);
+					else
+						compressionResult = Compressor.Compress(loadedFiles, fileDialog.FileName);
+					s.Stop();
+					double compressionRatio = ( double )compressionResult.CompressedFileSize / compressionResult.InputFileSize;
+					string result = "Files compressed\nInput file size : " + compressionResult.InputFileSize + " bytes\nCompressed file size : "
+						+ compressionResult.CompressedFileSize + " bytes\nCompression ratio : " + compressionRatio + "\nTime taken to compress : " + s.Elapsed;
+					System.Windows.MessageBox.Show(result, "Success", MessageBoxButton.OK);
+					lbl.Visibility = Visibility.Hidden;
+					ClearList();
+				}
+			}
+			catch (InvalidOperationException invalid)
+			{
+				System.Windows.MessageBox.Show(invalid.Message, "Compression failed", MessageBoxButton.OK);
+			}
+			catch (FileNotFoundException file)
+			{
+				System.Windows.MessageBox.Show(file.Message, "Compression failed", MessageBoxButton.OK);
+			}
+		}
+		public void OnButtonHome(object sender, RoutedEventArgs routed)
+		{			
+			new Action(() =>
+			{
+				ResetAllComboBoxes();
+				AppOptionsPanel.Visibility = Visibility.Visible;
+				CompressOptionsPanel.Visibility = Visibility.Hidden;
+				SingleFilePanel.Visibility = Visibility.Hidden;
+				MultipleFilesPanel.Visibility = Visibility.Hidden;
+				DirectoryPanel.Visibility = Visibility.Hidden;
+				DecompressionPanel.Visibility = Visibility.Hidden;
+			}).Invoke();
+		}
+		public void OnButtonOpenFolder(object sender, RoutedEventArgs routed)
+		{
+			using (FolderBrowserDialog folderBrowser = new FolderBrowserDialog())
+			{
+				new Action(() => 
+				{
+					folderBrowser.ShowNewFolderButton = false;
+					folderBrowser.ShowDialog();
+				}).Invoke();
+				DirectoryInfo selectedFolder = new DirectoryInfo(folderBrowser.SelectedPath);
+				List<string> fileList = new List<string>();
+				foreach (DirectoryInfo subFolder in selectedFolder.GetDirectories())
+					foreach (FileInfo file in subFolder.GetFiles())
+						fileList.Add(file.FullName);
+				loadedDirectory = folderBrowser.SelectedPath;
+				BindFileTreeView(fileList);
+			}
+		}
+		public void OnButtonCompressDirectory(object sender, RoutedEventArgs routed)
+		{
+			try
+			{
+				using (FolderBrowserDialog folderDialog = new FolderBrowserDialog())
+				{
+					Stopwatch s = new Stopwatch();
+					FileSize compressionResult;
+					folderDialog.ShowNewFolderButton = true;
+					Dispatcher.BeginInvoke(new Action(()=> 
+					{
+						folderDialog.ShowDialog();
+						s.Start();
+						if (( bool )OpLZMA.IsChecked)
+							compressionResult = Compressor.CompressLZMA(loadedDirectory, folderDialog.SelectedPath);
+						else
+							compressionResult = Compressor.Compress(loadedDirectory, folderDialog.SelectedPath);
+						s.Stop();
+						double compressionRatio = ( double )compressionResult.CompressedFileSize / compressionResult.InputFileSize;
+						string result = "Files compressed\nInput file size : " + compressionResult.InputFileSize + " bytes\nCompressed file size : "
+							+ compressionResult.CompressedFileSize + " bytes\nCompression ratio : " + compressionRatio + "\nTime taken to compress : " + s.Elapsed;
+						System.Windows.MessageBox.Show(result, "Success", MessageBoxButton.OK);
+					}));
+				}
+			}
+			catch (ArgumentException argumentNull)
+			{
+				System.Windows.MessageBox.Show(argumentNull.Message, "Failed to compress", MessageBoxButton.OK);
+			}
+			catch (FileNotFoundException fileNotFound)
+			{
+				System.Windows.MessageBox.Show(fileNotFound.Message, "File not found", MessageBoxButton.OK);
+			}
+		}
+		public void OnButtonOpenArchive(object sender, RoutedEventArgs routed)
+		{
+			new Action(() => 
+			{
+				using (OpenFileDialog fileDialog = new OpenFileDialog())
+				{
+					fileDialog.Filter = "Zip files (*.zip)|*.zip";
+					fileDialog.Multiselect = false;
+					fileDialog.ShowDialog();
+					FileInfo zipFile = new FileInfo(fileDialog.FileName);
+					List<string> filesInArchive = Decompressor.GetArchivedFiles(zipFile);
+					BindArchiveFileListView(filesInArchive);
+					ArchiveName = zipFile.FullName;
+				}
+			}).Invoke();
+			
+		}
+		public void OnButtonDecompressArchive(object sender, RoutedEventArgs routed)
+		{
+			new Action(() => 
+			{
+				using (FolderBrowserDialog folderBrowser = new FolderBrowserDialog())
+				{
+					folderBrowser.ShowNewFolderButton = true;
+					folderBrowser.ShowDialog();
+					string destinationPath = folderBrowser.SelectedPath;
+					Decompressor.Extract(ArchiveName, destinationPath);
+				}
+			}).Invoke();
+		}
+		public void OnButtonChangeBackground(object sender, RoutedEventArgs routed)
+		{
+			using (OpenFileDialog picSelector = new OpenFileDialog())
+			{
+				picSelector.Filter = "JPEG Images(*.jpg)|*.jpg";
+				picSelector.ShowDialog();
+				Background = new ImageBrush(new BitmapImage(new Uri(picSelector.FileName)));
+			}
+		}
+
+
+		//Data binders and other actions
+		public void BindFileListView(List<string> fileList)
+		{
+			lbl.Visibility = Visibility.Visible;
+			LoadedFilesList.ItemsSource = fileList;
+		}
+		public List<string> GetLoadedFiles()
+		{
+			List<string> loadedFiles = new List<string>();
+			foreach (string fileName in LoadedFilesList.ItemsSource)
+				loadedFiles.Add(fileName);
+			return loadedFiles;
+		}
+		public void ClearList()
+		{
+			LoadedFilesList.ItemsSource = null;
+		}
+		public void BindFileTreeView(List<string> fileList)
+		{
+			LoadedDirectoryList.ItemsSource = fileList;
+		}
+		public void BindArchiveFileListView(List<string> fileList)
+		{
+			archiveFilesList.ItemsSource = fileList;
+		}
+
+		/*
+			Alternative actions for SingleFilePanel
+		*/
+		public void OnClickSelectedFileName(object sender, System.Windows.Input.MouseEventArgs mouseArgs)
+		{
+			using (OpenFileDialog fileDialog = new OpenFileDialog())
+			{
+				string toReplace = selectedFileName.Text;
+				selectedFileName.Text = string.Empty;
+				new Action(() =>
+				{
+					fileDialog.Multiselect = false;
+					Dispatcher.BeginInvoke(new Action(() => 
+					{
+						fileDialog.ShowDialog();
+						selectedFileName.Text = fileDialog.FileName;
+					}));					
+				}).Invoke();				
+			}
+		}
+		public void OnClickSaveFileName(object sender, System.Windows.Input.MouseEventArgs mouseArgs)
+		{
+			using (SaveFileDialog fileDialog = new SaveFileDialog())
+			{
+				string toReplace = savedFileName.Text;
+				savedFileName.Text = string.Empty;				
+				new Action(() =>
+				{
+					fileDialog.OverwritePrompt = true;
+					if(!(bool)UseLZMAOptn.IsChecked)
+					{
+						fileDialog.DefaultExt = ".zip";
+						fileDialog.Filter = "Zip archive (*.zip)|*.zip";
+					}
+					else
+					{
+						fileDialog.DefaultExt = ".7z";
+						fileDialog.Filter = "7z archives (*.7z)|*.7z";
+					}
+					fileDialog.SupportMultiDottedExtensions = true;
+					Dispatcher.BeginInvoke(new Action(()=> 
+					{
+						fileDialog.ShowDialog();
+						if (fileDialog.FileName.Equals(string.Empty))
+							savedFileName.Text = toReplace;
+						else
+							savedFileName.Text = fileDialog.FileName;
+					}));
+				}).Invoke();
+			}
+		}
+
+		//Other actions
+		public void ResetAllComboBoxes()
+		{
+			new Action(()=> 
+			{
+				appOptionsComboBox.SelectedIndex = 0;
+				compressOptionsComboBox.SelectedIndex = 0;
+			}).Invoke();
+		}
+		public void HideAllPanels()
+		{
+			CompressOptionsPanel.Visibility = DecompressionPanel.Visibility = 
+				SingleFilePanel.Visibility = MultipleFilesPanel.Visibility = 
+				DirectoryPanel.Visibility = Visibility.Hidden;
+		}
+	}
+}

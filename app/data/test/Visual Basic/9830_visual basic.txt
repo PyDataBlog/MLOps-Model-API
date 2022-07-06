@@ -1,0 +1,587 @@
+﻿Imports Corale.Colore.Core
+Imports Corale.Colore.Razer.Keyboard
+Imports IWshRuntimeLibrary
+
+Public Class MainWindow
+
+
+    Public keyHoke As KeyboardHook
+    Public MainInstandce As IKeyboard
+    Public MainMemory As Memory
+    Public MainLocation As String
+    Public JsRunners As Dictionary(Of String, JsRunner)
+    Public KeyState As Hashtable
+    Public ForceClose As Boolean
+    Public HideOnStartUp As Boolean
+    Public MainExeLocation As String
+
+    Private Sub MainWindow_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        HideOnStartUp = False
+        For Each str As String In My.Application.CommandLineArgs
+            Select Case str.ToLower
+                Case "-hidden"
+                    HideOnStartUp = True
+                Case "hide"
+                    HideOnStartUp = True
+                Case "-hide"
+                    HideOnStartUp = True
+                Case "hidden"
+                    HideOnStartUp = True
+                Case "disablekeyboard"
+                    keyboardinput.Checked = False
+                Case "-disablekeyboard"
+                    keyboardinput.Checked = False
+            End Select
+        Next
+        keyboardinput_CheckedChanged(Nothing, Nothing)
+        ForceClose = False
+        KeyState = New Hashtable
+        MainInstandce = Keyboard.Instance
+
+        MainLocation = Environment.GetFolderPath(Environment.SpecialFolder.CommonDocuments)
+        If Not System.IO.Directory.Exists(MainLocation & "\razer_js") Then
+            System.IO.Directory.CreateDirectory(MainLocation & "\razer_js")
+        End If
+        MainLocation = MainLocation & "\razer_js"
+        If Not System.IO.File.Exists(MainLocation & "\settings") Then
+            MainMemory = New Memory()
+        Else
+            Try
+                MainMemory = Memory.Open(MainLocation & "\settings")
+            Catch ex As Exception
+                MsgBox("Unable to open Razer.js memory file, A new one will be created, Error Information: " & ex.Message, MsgBoxStyle.Exclamation, "Error")
+                MainMemory = New Memory()
+            End Try
+        End If
+        JsRunners = New Dictionary(Of String, JsRunner)
+        For Each itm As JsScript In MainMemory.allScripts.Values
+            Dim win As JsRunner = New JsRunner(MainInstandce, itm, KeyState, Me)
+            JsRunners.Add(itm.name, win)
+            AllScriptList.Items.Add(itm.name, itm.IsActive)
+            If itm.ShowGUI AndAlso itm.IsActive Then
+                win.Show()
+            End If
+        Next
+        reloadIconContextMenu()
+    End Sub
+
+    Public Sub LoadKeyBoardHoke()
+        keyHoke = New KeyboardHook()
+        AddHandler keyHoke.KeyDown, AddressOf OnComputerKeyDown
+        AddHandler keyHoke.KeyUp, AddressOf OnComputerKeyUp
+    End Sub
+    Private Sub keyboardinput_CheckedChanged(sender As Object, e As EventArgs) Handles keyboardinput.CheckedChanged
+        If keyboardinput.Checked Then
+            If keyHoke Is Nothing Then
+                LoadKeyBoardHoke()
+            End If
+        Else
+            If keyHoke IsNot Nothing Then
+                keyHoke.Dispose()
+                keyHoke = Nothing
+                GC.Collect()
+            End If
+        End If
+    End Sub
+    Public Function EnableScript(name As String) As Boolean
+        If MainMemory.allScripts.ContainsKey(name) Then
+            If MainMemory.allScripts.Item(name).IsActive <> True Then
+                MainMemory.allScripts.Item(name).IsActive = True
+                JsRunners.Item(name).SendScriptStateChange()
+                ReloadListBox()
+                reloadIconContextMenu()
+            End If
+
+            Return True
+        End If
+        Return False
+    End Function
+    Public Function DisableScript(name As String) As Boolean
+        If MainMemory.allScripts.ContainsKey(name) Then
+            If MainMemory.allScripts.Item(name).IsActive <> False Then
+                MainMemory.allScripts.Item(name).IsActive = False
+                JsRunners.Item(name).SendScriptStateChange()
+                ReloadListBox()
+                reloadIconContextMenu()
+            End If
+            Return True
+        End If
+        Return False
+    End Function
+    Public Function getScriptState(name As String) As Boolean
+        If MainMemory.allScripts.ContainsKey(name) Then
+            Return MainMemory.allScripts.Item(name).IsActive
+        End If
+        Return False
+    End Function
+    Public Sub OnComputerKeyDown(keydown As Keys)
+        Dim sendkey As Key = KeyParser(keydown)
+        If sendkey = Key.Invalid Then
+            Return
+        End If
+        If KeyState.ContainsKey(sendkey) AndAlso CType(KeyState.Item(sendkey), Boolean) Then
+            Return
+        Else
+            KeyState.Item(keydown) = True
+        End If
+        For Each runner As JsRunner In JsRunners.Values
+            If runner.isActive Then
+                runner.OnSendKeyDown(sendkey)
+            End If
+        Next
+    End Sub
+    Public Sub OnComputerKeyUp(keyup As Keys)
+        Dim sendkey As Key = KeyParser(keyup)
+        If sendkey = Key.Invalid Then
+            Return
+        End If
+        KeyState.Item(sendkey) = False
+        For Each runner As JsRunner In JsRunners.Values
+            If runner.isActive Then
+                runner.OnSendKeyUp(sendkey)
+            End If
+        Next
+    End Sub
+    Public Sub ReloadListBox()
+        For i As Integer = 0 To AllScriptList.Items.Count - 1 Step 1
+            If AllScriptList.GetItemChecked(i) <> MainMemory.allScripts.Item(AllScriptList.Items(i).ToString()).IsActive Then
+                AllScriptList.SetItemChecked(i, MainMemory.allScripts.Item(AllScriptList.Items(i).ToString()).IsActive)
+            End If
+        Next
+        AllScriptList.Refresh()
+    End Sub
+    Public Sub reloadIconContextMenu()
+        ActiveScripts.DropDownItems.Clear()
+        For Each runner As JsScript In MainMemory.allScripts.Values
+            If runner.IsActive Then
+                ActiveScripts.DropDownItems.Add("[Enabled] " & runner.name)
+            Else
+                ActiveScripts.DropDownItems.Add("[Disabled] " & runner.name)
+            End If
+        Next
+    End Sub
+    Private Sub ActiveScripts_DropDownItemClicked(sender As Object, e As ToolStripItemClickedEventArgs) Handles ActiveScripts.DropDownItemClicked
+        Dim ScriptName As String = e.ClickedItem.Text.Substring(e.ClickedItem.Text.LastIndexOf("]") + 2)
+        MainMemory.allScripts.Item(ScriptName).IsActive = Not MainMemory.allScripts.Item(ScriptName).IsActive
+        JsRunners.Item(ScriptName).SendScriptStateChange()
+        If MainMemory.allScripts.Item(ScriptName).ShowGUI Then
+            JsRunners.Item(ScriptName).Show()
+        End If
+        reloadIconContextMenu()
+        ReloadListBox()
+    End Sub
+    Private Sub ShowRazerjsGUIToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles ShowRazerjsGUIToolStripMenuItem.Click
+        Me.Show()
+        Me.WindowState = FormWindowState.Normal
+    End Sub
+    Private Sub ExitRazerjsToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles ExitRazerjsToolStripMenuItem.Click
+        ForceClose = True
+        Me.Close()
+    End Sub
+    Public Function KeyParser(mainKey As Keys) As Key
+        Select Case mainKey
+            Case Keys.A
+                Return Key.A
+            Case Keys.B
+                Return Key.B
+            Case Keys.Back
+                Return Key.Backspace
+            Case Keys.C
+                Return Key.C
+            Case Keys.CapsLock
+                Return Key.CapsLock
+            Case Keys.D
+                Return Key.D
+            Case Keys.B
+                Return Key.D0
+            Case Keys.D0
+                Return Key.D0
+            Case Keys.D1
+                Return Key.D1
+            Case Keys.D2
+                Return Key.D2
+            Case Keys.D3
+                Return Key.D3
+            Case Keys.D4
+                Return Key.D4
+            Case Keys.D5
+                Return Key.D5
+            Case Keys.D6
+                Return Key.D6
+            Case Keys.D7
+                Return Key.D7
+            Case Keys.D8
+                Return Key.D8
+            Case Keys.D9
+                Return Key.D9
+            Case Keys.Delete
+                Return Key.Delete
+            Case Keys.Down
+                Return Key.Down
+            Case Keys.E
+                Return Key.E
+            Case Keys.End
+                Return Key.End
+            Case Keys.Enter
+                Return Key.Enter
+            Case Keys.Escape
+                Return Key.Escape
+            Case Keys.F
+                Return Key.F
+            Case Keys.F1
+                Return Key.F1
+            Case Keys.F2
+                Return Key.F2
+            Case Keys.F3
+                Return Key.F3
+            Case Keys.F4
+                Return Key.F4
+            Case Keys.F5
+                Return Key.F5
+            Case Keys.F6
+                Return Key.F6
+            Case Keys.F7
+                Return Key.F7
+            Case Keys.F8
+                Return Key.F8
+            Case Keys.F9
+                Return Key.F9
+            Case Keys.F10
+                Return Key.F10
+            Case Keys.F11
+                Return Key.F11
+            Case Keys.F12
+                Return Key.F12
+            Case Keys.G
+                Return Key.G
+            Case Keys.H
+                Return Key.H
+            Case Keys.Home
+                Return Key.Home
+            Case Keys.I
+                Return Key.I
+            Case Keys.Insert
+                Return Key.Insert
+            Case Keys.J
+                Return Key.J
+            Case Keys.K
+                Return Key.K
+            Case Keys.L
+                Return Key.L
+            Case Keys.Left
+                Return Key.Left
+            Case Keys.LMenu
+                Return Key.LeftAlt
+            Case Keys.LControlKey
+                Return Key.LeftControl
+            Case Keys.LShiftKey
+                Return Key.LeftShift
+            Case Keys.LWin
+                Return Key.LeftWindows
+            Case Keys.M
+                Return Key.M
+            Case Keys.N
+                Return Key.N
+            Case Keys.NumPad0
+                Return Key.Num0
+            Case Keys.NumPad1
+                Return Key.Num1
+            Case Keys.NumPad2
+                Return Key.Num2
+            Case Keys.NumPad3
+                Return Key.Num3
+            Case Keys.NumPad4
+                Return Key.Num4
+            Case Keys.NumPad5
+                Return Key.Num5
+            Case Keys.NumPad6
+                Return Key.Num6
+            Case Keys.NumPad7
+                Return Key.Num7
+            Case Keys.NumPad8
+                Return Key.Num8
+            Case Keys.NumPad9
+                Return Key.Num9
+            Case Keys.Add
+                Return Key.NumAdd
+            Case Keys.Decimal
+                Return Key.NumDecimal
+            Case Keys.Divide
+                Return Key.NumDivide
+            Case Keys.Enter
+                Return Key.NumEnter
+            Case Keys.NumLock
+                Return Key.NumLock
+            Case Keys.Multiply
+                Return Key.NumMultiply
+            Case Keys.Subtract
+                Return Key.NumSubtract
+            Case Keys.O
+                Return Key.O
+            Case Keys.Oem7
+                Return Key.OemApostrophe
+            Case Keys.OemBackslash
+                Return Key.OemBackslash
+            Case Keys.Oemcomma
+                Return Key.OemComma
+            Case Keys.Oemplus
+                Return Key.OemEquals
+            Case Keys.OemOpenBrackets
+                Return Key.OemLeftBracket
+            Case Keys.OemMinus
+                Return Key.OemMinus
+            Case Keys.OemPeriod
+                Return Key.OemPeriod
+            Case Keys.Oem6
+                Return Key.OemRightBracket
+            Case Keys.OemSemicolon
+                Return Key.OemSemicolon
+            Case Keys.Oem5
+                Return Key.OemSlash
+            Case Keys.Oemtilde
+                Return Key.OemTilde
+            Case Keys.P
+                Return Key.P
+            Case Keys.PageDown
+                Return Key.PageDown
+            Case Keys.PageUp
+                Return Key.PageUp
+            Case Keys.PrintScreen
+                Return Key.PrintScreen
+            Case Keys.Pause
+                Return Key.Pause
+            Case Keys.Q
+                Return Key.Q
+            Case Keys.R
+                Return Key.R
+            Case Keys.Right
+                Return Key.Right
+            Case Keys.RMenu
+                Return Key.RightAlt
+            Case Keys.RControlKey
+                Return Key.RightControl
+            Case Keys.Apps
+                Return Key.RightMenu
+            Case Keys.RShiftKey
+                Return Key.RightShift
+            Case Keys.S
+                Return Key.S
+            Case Keys.Scroll
+                Return Key.Scroll
+            Case Keys.Space
+                Return Key.Space
+            Case Keys.T
+                Return Key.T
+            Case Keys.Tab
+                Return Key.Tab
+            Case Keys.U
+                Return Key.U
+            Case Keys.Up
+                Return Key.Up
+            Case Keys.V
+                Return Key.V
+            Case Keys.W
+                Return Key.W
+            Case Keys.X
+                Return Key.X
+            Case Keys.Y
+                Return Key.Y
+            Case Keys.Z
+                Return Key.Z
+            Case Keys.OemQuestion
+                Return Key.OemBackslash
+
+        End Select
+        Return Key.Invalid
+    End Function
+    Private Sub Button1_Click_1(sender As Object, e As EventArgs) Handles Button1.Click
+        ForceClose = True
+        Me.Close()
+    End Sub
+    Private Sub Button6_Click(sender As Object, e As EventArgs) Handles Button6.Click
+        Dim tempDialog As New ScriptPaste(Me)
+        If tempDialog.ShowDialog() = DialogResult.OK Then
+            Dim TestName As String = tempDialog.ScriptName.Text
+            Dim Js As String = tempDialog.ScriptBody.Text
+            Dim IsShowGui As Boolean = tempDialog.IsActivate.Checked
+            Dim tempJs As New JsScript(IsShowGui, Js, TestName, True)
+            MainMemory.allScripts.Add(tempJs.name, tempJs)
+            Dim win As JsRunner = New JsRunner(MainInstandce, tempJs, KeyState, Me)
+            JsRunners.Add(tempJs.name, win)
+            AllScriptList.Items.Add(tempJs.name, tempJs.IsActive)
+            If tempJs.ShowGUI Then
+                win.Show()
+            End If
+            reloadIconContextMenu()
+        End If
+    End Sub
+    Private Sub Button7_Click(sender As Object, e As EventArgs) Handles Button7.Click
+        Dim temp As New OpenFileDialog()
+        temp.Filter = "Html (With script) Or Razer.js File|*.html;*.razerjs"
+        If temp.ShowDialog = DialogResult.OK Then
+            Dim filename As String = temp.FileName
+            Dim SaveFileName As String = temp.SafeFileName
+            If SaveFileName.Substring(SaveFileName.LastIndexOf(".")).ToLower = "html" Then
+                If JsRunners.ContainsKey(SaveFileName) Then
+                    Dim count As Integer = 0
+                    While JsRunners.ContainsKey(SaveFileName & "_" & count)
+                        count += 1
+                    End While
+                    SaveFileName = SaveFileName & "_" & count
+                End If
+                Dim res As MsgBoxResult = MsgBox("Do you want to show the GUI on script activation?", MsgBoxStyle.YesNoCancel, "GUI")
+                Dim fileBody As String
+                Dim FileReader As New System.IO.StreamReader(filename)
+                fileBody = FileReader.ReadToEnd()
+                FileReader.Close()
+                If res = MsgBoxResult.Yes Then
+                    Dim tempjs As New JsScript(True, fileBody, SaveFileName, True)
+                    MainMemory.allScripts.Add(tempjs.name, tempjs)
+                    Dim win As JsRunner = New JsRunner(MainInstandce, tempjs, KeyState, Me)
+                    JsRunners.Add(tempjs.name, win)
+                    AllScriptList.Items.Add(tempjs.name, tempjs.IsActive)
+                    win.Show()
+                ElseIf res = MsgBoxResult.No Then
+                    Dim tempjs As New JsScript(False, fileBody, SaveFileName, True)
+                    MainMemory.allScripts.Add(tempjs.name, tempjs)
+                    JsRunners.Add(tempjs.name, New JsRunner(MainInstandce, tempjs, KeyState, Me))
+                    AllScriptList.Items.Add(tempjs.name, tempjs.IsActive)
+                End If
+                reloadIconContextMenu()
+            Else
+                Dim tempjd As JsScript
+                Try
+                    tempjd = JsScript.Open(filename)
+                Catch ex As Exception
+                    MsgBox("Unable to load Razer.js file, Error Information: " & ex.Message, MsgBoxStyle.Critical, "Bad Syntax")
+                    Return
+                End Try
+                If MainMemory.allScripts.ContainsKey(tempjd.name) Then
+                    Dim count As Integer = 0
+                    While MainMemory.allScripts.ContainsKey(tempjd.name & "_" & count)
+                        count += 1
+                    End While
+                    tempjd.name = tempjd.name & "_" & count
+                End If
+                MainMemory.allScripts.Add(tempjd.name, tempjd)
+                Dim win As JsRunner = New JsRunner(MainInstandce, tempjd, KeyState, Me)
+                JsRunners.Add(tempjd.name, win)
+                AllScriptList.Items.Add(tempjd.name, tempjd.IsActive)
+                If tempjd.ShowGUI AndAlso tempjd.IsActive Then
+                    win.Show()
+                End If
+            End If
+            reloadIconContextMenu()
+        End If
+    End Sub
+    Private Sub Button2_Click(sender As Object, e As EventArgs) Handles Button2.Click
+        If AllScriptList.SelectedIndex = -1 Then
+            MsgBox("Script is not selected", MsgBoxStyle.Exclamation, "Not Selected")
+            Return
+        End If
+        Dim index As Integer = AllScriptList.SelectedIndex
+        Dim ScriptName As String = AllScriptList.Items.Item(index).ToString()
+        Dim script As JsScript = MainMemory.allScripts.Item(ScriptName)
+        Dim savefile As New SaveFileDialog()
+        savefile.FileName = script.name
+        savefile.Filter = "Razer.js file|*.razerjs"
+        savefile.DefaultExt = "razerjs"
+        If savefile.ShowDialog() = DialogResult.OK Then
+            script.Save(savefile.FileName)
+            Process.Start("explorer.exe", savefile.FileName.Substring(0, savefile.FileName.LastIndexOf("\")))
+        End If
+    End Sub
+    Private Sub AllScriptList_ItemCheck(sender As Object, e As ItemCheckEventArgs) Handles AllScriptList.ItemCheck
+        Dim ScriptName As String = AllScriptList.Items.Item(e.Index).ToString()
+        If MainMemory.allScripts.Item(ScriptName).IsActive <> (e.NewValue = CheckState.Checked) Then
+            MainMemory.allScripts.Item(ScriptName).IsActive = (e.NewValue = CheckState.Checked)
+            JsRunners.Item(ScriptName).SendScriptStateChange()
+        End If
+
+        If MainMemory.allScripts.Item(ScriptName).ShowGUI AndAlso MainMemory.allScripts.Item(ScriptName).IsActive Then
+            JsRunners.Item(ScriptName).Show()
+        End If
+        If MainMemory.allScripts.Item(ScriptName).IsActive Then
+            e.NewValue = CheckState.Checked
+        Else
+            e.NewValue = CheckState.Unchecked
+        End If
+        reloadIconContextMenu()
+    End Sub
+    Private Sub Button5_Click(sender As Object, e As EventArgs) Handles Button5.Click
+        For i As Integer = 0 To AllScriptList.Items.Count - 1 Step 1
+            AllScriptList.SetItemChecked(i, True)
+        Next
+    End Sub
+    Private Sub Button4_Click(sender As Object, e As EventArgs) Handles Button4.Click
+        For i As Integer = 0 To AllScriptList.Items.Count - 1 Step 1
+            AllScriptList.SetItemChecked(i, False)
+        Next
+    End Sub
+    Private Sub Button9_Click(sender As Object, e As EventArgs) Handles Button9.Click
+        For Each active As Object In AllScriptList.CheckedItems
+            If MainMemory.allScripts.Item(active.ToString()).ShowGUI Then
+                JsRunners.Item(active.ToString).Show()
+            End If
+        Next
+    End Sub
+    Private Sub Button8_Click(sender As Object, e As EventArgs) Handles Button8.Click
+        If AllScriptList.SelectedIndex = -1 Then
+            MsgBox("Script is not selected", MsgBoxStyle.Exclamation, "Not Selected")
+            Return
+        End If
+        Dim index As Integer = AllScriptList.SelectedIndex
+        Dim ScriptName As String = AllScriptList.Items.Item(index).ToString()
+        Dim winRunner As JsRunner = JsRunners.Item(ScriptName)
+        JsRunners.Remove(ScriptName)
+        MainMemory.allScripts.Remove(ScriptName)
+        winRunner.ForceClose = True
+        winRunner.Close()
+        AllScriptList.Items.RemoveAt(index)
+        reloadIconContextMenu()
+    End Sub
+    Private Sub MainWindow_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
+        MainMemory.Save(MainLocation & "\settings")
+        If Not ForceClose Then
+            e.Cancel = True
+            Me.Hide()
+            MainNotifier.BalloonTipIcon = ToolTipIcon.Info
+            MainNotifier.BalloonTipTitle = "Razer.js is running in the background"
+            MainNotifier.BalloonTipText = "You can control Razer.js by its icon in the notification bar."
+            MainNotifier.ShowBalloonTip(8000)
+            Return
+        End If
+        MainNotifier.Visible = False
+    End Sub
+    Private Sub OpenActiveGUIsToolStripMenuItem_Click(sender As Object, e As EventArgs) Handles OpenActiveGUIsToolStripMenuItem.Click
+        For Each active As Object In AllScriptList.CheckedItems
+            If MainMemory.allScripts.Item(active.ToString()).ShowGUI Then
+                JsRunners.Item(active.ToString).Show()
+            End If
+        Next
+    End Sub
+    Private Sub MainWindow_SizeChanged(sender As Object, e As EventArgs) Handles MyBase.SizeChanged
+        If Me.WindowState = FormWindowState.Minimized Then
+            Me.Hide()
+            MainNotifier.BalloonTipIcon = ToolTipIcon.Info
+            MainNotifier.BalloonTipTitle = "Razer.js is running in the background"
+            MainNotifier.BalloonTipText = "You can control Razer.js by its icon in the notification bar."
+            MainNotifier.ShowBalloonTip(8000)
+        End If
+    End Sub
+    Private Sub MainWindow_Shown(sender As Object, e As EventArgs) Handles MyBase.Shown
+        If HideOnStartUp Then
+            Me.Hide()
+        End If
+    End Sub
+
+
+    Private Sub MainNotifier_MouseDoubleClick(sender As Object, e As MouseEventArgs) Handles MainNotifier.MouseDoubleClick
+        Me.Show()
+        Me.WindowState = FormWindowState.Normal
+    End Sub
+
+    Private Sub AllScriptList_SelectedIndexChanged(sender As Object, e As EventArgs) Handles AllScriptList.SelectedIndexChanged
+
+    End Sub
+End Class

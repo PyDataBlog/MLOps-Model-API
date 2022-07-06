@@ -1,0 +1,111 @@
+package fi.ozzi.tapsudraft.service;
+
+import com.google.common.collect.ImmutableMap;
+import fi.ozzi.tapsudraft.model.Player;
+import fi.ozzi.tapsudraft.model.Position;
+import fi.ozzi.tapsudraft.repository.PlayerRepository;
+import lombok.NonNull;
+import lombok.RequiredArgsConstructor;
+import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpClient;
+import org.apache.http.client.methods.HttpGet;
+import org.apache.http.impl.client.HttpClients;
+import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
+import org.jsoup.select.Elements;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Service;
+
+import java.io.IOException;
+import java.io.UnsupportedEncodingException;
+import java.net.URLEncoder;
+import java.util.Map;
+import java.util.Random;
+import java.util.stream.Collectors;
+
+@Service
+@RequiredArgsConstructor(onConstructor = @__(@Autowired))
+public class PlayerFetchService {
+
+  private static final Logger LOG = LoggerFactory.getLogger(PlayerFetchService.class);
+
+  @Value("${service.playerfetch.baseUrl}")
+  private String baseUrl;
+
+  @NonNull
+  private PlayerRepository playerRepository;
+
+  @Scheduled(cron = "${service.playerfetch.cron}")
+  public void fetchPlayers() throws IOException {
+
+    Map<String, String> params = ImmutableMap.<String, String>builder()
+      .put("js", "1")
+      .put("rand", Float.toString(new Random().nextFloat()))
+      .put("player_team", "all")
+      .put("player_value", "all")
+      .put("type", "player_search")
+      .put("phase", "0")
+      .build();
+
+    String url = buildUrlFromMap(baseUrl, params);
+    LOG.debug(url);
+
+    HttpClient httpClient = HttpClients.createDefault();
+    HttpGet httpGet = new HttpGet(url);
+    HttpResponse response = httpClient.execute(httpGet);
+    if (response.getStatusLine().getStatusCode() != 200) {
+      LOG.debug("HTTP resp " + response.getStatusLine().getStatusCode());
+    }
+    Document doc = Jsoup.parse(response.getEntity().getContent(), "UTF-8", url);
+
+    Elements positionGroups = doc.getElementsByTag("tbody");
+
+    for (Element group : positionGroups) {
+      Elements rows = group.getElementsByTag("tr");
+
+      for (Element row : rows) {
+        Element nameData = row.select("td.name_data").first();
+
+        String name = nameData.text().trim();
+        String team = nameData.select("a.logo").first().attr("title");
+        team = team.substring(team.indexOf("(")+1, team.indexOf(")"));
+        String position = nameData.select("input[name=player_position]").first().val();
+        String playerUid = nameData.select("input[name=player_id]").first().val();
+
+        Player player = playerRepository.findByUid(Long.parseLong(playerUid));
+        if (player == null) {
+          playerRepository.save(
+            Player.builder()
+              .name(name)
+              .uid(Long.parseLong(playerUid))
+              .position(Position.fromCharacter(position))
+              .build());
+        }
+
+        String price = row.select("td[id~=.*_player_value]").first().text();
+        String points = row.select("td[title=IS Liigapörssi-pisteet]").first().text();
+
+      }
+    }
+  }
+
+
+  private static String buildUrlFromMap(String baseUrl, Map<String, String> params) {
+    String queryString = params.keySet().stream()
+      .map(key -> {
+        try {
+          return key + "=" + URLEncoder.encode(params.get(key), "UTF-8");
+        } catch (UnsupportedEncodingException e) {
+          e.printStackTrace();
+        }
+        return "Error: could not URL-encode value";
+      }).collect(Collectors.joining("&"));
+
+    return baseUrl + "?" + queryString;
+  }
+}

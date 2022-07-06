@@ -1,0 +1,552 @@
+
+
+
+
+
+
+param([string]$HostName, [string]$UserName2007, [boolean]$Fix, [boolean]$Verbose, [boolean]$Recurse, [string]$UserName2010)
+
+#
+# Update the path below to match the actual path to the EWS managed API DLL.
+#
+
+
+
+
+
+Import-Module -Name "C:\Program Files\Microsoft\Exchange\Web Services\2.0\Microsoft.Exchange.WebServices.dll"
+#start-transcript -Path "d:\scrap\tnef_fix.txt"
+#
+#
+#
+
+if ($HostName -eq "")
+{
+    $HostName = Read-Host "Hostname for EWS endpoint (leave blank to attempt Autodiscover)"
+}
+
+if ($username2007 -eq "")
+{
+    $username2007 = Read-Host "User (UPN format)"
+}
+
+#$password2007 = $host.ui.PromptForCredential("Credentials", "Please enter your password to authenticate to 2007 EWS.", $username2007, "").GetNetworkCredential().Password
+$password2007 = "test2007#"
+
+
+$csv = import-csv -path "d:\scrap\hitlist.csv" -Delimiter "^"
+foreach ($line in $csv) {
+
+
+$Script:id2007 = @()
+$Script:id2010 = @()
+
+
+$exchService = new-object Microsoft.Exchange.WebServices.Data.ExchangeService([Microsoft.Exchange.WebServices.Data.ExchangeVersion]::Exchange2007_sp1) 
+$exchService.Credentials = new-object System.Net.NetworkCredential($username2007, $password2007, "") 
+if ($HostName -ne "") 
+{ 
+    ("Using EWS URL " + "https://" + $HostName + "/EWS/Exchange.asmx") 
+    $exchService.Url = new-object System.Uri(("https://" + $HostName + "/EWS/Exchange.asmx")) 
+} 
+else
+{ 
+    ("Autodiscovering " + $username2007 + "...")
+    $exchService.AutoDiscoverUrl($username2007, {$true}) 
+}
+
+if ($exchService.Url -eq $null) 
+{ 
+    return 
+}
+
+
+
+
+
+
+
+
+$count = 0
+#$folderpath
+$FolderPath = $line.path.Trim(@('\'))
+#$folderpath = $folderpath.replace('/','\')
+$folderPath = $folderpath.Trim()
+#$folderpath = "'" + $folderpath +"'"
+
+
+# If a URL was specified we'll use that; otherwise we'll use Autodiscover 
+
+
+$pfsRoot = [Microsoft.Exchange.WebServices.Data.Folder]::Bind($exchService, [Microsoft.Exchange.WebServices.Data.WellKnownFolderName]::PublicFoldersRoot) 
+$folder = $pfsRoot
+
+if ($FolderPath.Length -gt 0)
+{
+    $tinyView = new-object Microsoft.Exchange.WebServices.Data.FolderView(10) 
+    $displayNameProperty = [Microsoft.Exchange.WebServices.Data.FolderSchema]::DisplayName
+    $folderPathSplits = $FolderPath.Split(@('\'))
+    for ($x = 0; $x -lt $folderPathSplits.Length;$x++) 
+    { 
+        $filter = new-object Microsoft.Exchange.WebServices.Data.SearchFilter+IsEqualTo($displayNameProperty, $folderPathSplits[$x]) 
+        $results = $folder.FindFolders($filter, $tinyView) 
+        if ($results.TotalCount -gt 1) 
+        { 
+             ("Ambiguous name: " + $folderPathSplits[$x]) 
+             return 
+        } 
+        elseif ($results.TotalCount -lt 1) 
+        { 
+             ("Folder not found: " + $folderPathSplits[$x]) 
+             #return
+             Continue
+             
+        } 
+        $folder = $results.Folders[0] 
+    }
+}
+
+function DoFolder($folder, $path)
+{
+      
+ 
+    # Declare the extended property that you want to view
+    
+    #$prop = new-object Microsoft.Exchange.WebServices.Data.ExtendedPropertyDefinition(0x3fe5, [Microsoft.Exchange.WebServices.Data.MapiPropertyType]::BOOLEAN)
+    $itemsubject = [Microsoft.Exchange.WebServices.Data.itemSchema]::Subject
+    $itemid = [Microsoft.Exchange.WebServices.Data.itemSchema]::id
+       
+    #Add the declaired property to the Property set
+    $propset = new-object Microsoft.Exchange.WebServices.Data.PropertySet($ItemSubject, $itemid ) 
+    
+    #Load the propertyset on the folder or item that you want to view
+    $total = 0
+    $offset = 0 
+    $view = new-object Microsoft.Exchange.WebServices.Data.ItemView(100, $offset) 
+    $view.PropertySet = $itemviewPropertySet
+    "Checking folder: " + $path 
+    while (($results = $folder.FindItems($view)).Items.Count -gt 0) 
+    {
+    
+   
+   
+   foreach ($item in $results) 
+        {
+   
+            #$item.Subject |out-default
+            $script:ID2007 += $item.id.uniqueid 
+   
+        }
+   
+    $offset += $results.Items.Count 
+       $view = new-object Microsoft.Exchange.WebServices.Data.ItemView(100, $offset)
+       $view.PropertySet = $itemviewPropertySet
+
+ 
+  
+   
+   }
+   
+    #$ID2007 |fl|out-default
+    #"Messages in 2007 :"+$script:id2007.count 
+  
+        
+    
+}
+
+function DoSubfoldersRecursive($folder, $path)
+{
+    $folderView = new-object Microsoft.Exchange.WebServices.Data.FolderView(2147483647) 
+    $subfolders = $folder.FindFolders($folderView)    
+    foreach ($subfolder in $subfolders) 
+    { 
+        try 
+        {
+            DoFolder $subfolder ($path + "\" + $subfolder.DisplayName)
+            DoSubfoldersRecursive $subfolder ($path + "\" + $subfolder.DisplayName) 
+        } 
+        catch { "Error processing folder: " + $subfolder.DisplayName } 
+    }
+}
+
+if ($Recurse)
+{
+    if ($FolderPath.Length -gt 0)
+    {
+        DoFolder $folder $FolderPath
+    }
+
+    DoSubfoldersRecursive $folder $FolderPath
+}
+else
+{
+    DoFolder $folder $FolderPath
+}
+
+
+
+Function Get2010($path){
+
+"get2010"
+
+
+#$password2010 = $host.ui.PromptForCredential("Credentials", "Please enter your password to authenticate to 2010 EWS.", $username2010, "").GetNetworkCredential().Password
+$password2010 = "test2010#"
+$exchService = new-object Microsoft.Exchange.WebServices.Data.ExchangeService([Microsoft.Exchange.WebServices.Data.ExchangeVersion]::Exchange2010_sp2) 
+$exchService.Credentials = new-object System.Net.NetworkCredential($username2010, $password2010, "") 
+    ("Autodiscovering " + $username2010 + "...")
+    $exchService.AutoDiscoverUrl($username2010, {$true}) 
+
+
+if ($exchService.Url -eq $null) 
+        { 
+            return 
+        }
+
+
+# If a URL was specified we'll use that; otherwise we'll use Autodiscover 
+
+$FolderPath = $path.Trim(@('\'))
+#$folderpath = $folderpath.replace('/','\')
+$folderPath = $folderpath.Trim()
+#$folderpath = "'" + $folderpath +"'"
+
+$pfsRoot = [Microsoft.Exchange.WebServices.Data.Folder]::Bind($exchService, [Microsoft.Exchange.WebServices.Data.WellKnownFolderName]::PublicFoldersRoot) 
+$folder = $pfsRoot
+
+
+if ($FolderPath.Length -gt 0)
+{
+    $tinyView = new-object Microsoft.Exchange.WebServices.Data.FolderView(10) 
+    $displayNameProperty = [Microsoft.Exchange.WebServices.Data.FolderSchema]::DisplayName
+    $folderPathSplits = $FolderPath.Split(@('\'))
+    for ($x = 0; $x -lt $folderPathSplits.Length;$x++) 
+    { 
+        $filter = new-object Microsoft.Exchange.WebServices.Data.SearchFilter+IsEqualTo($displayNameProperty, $folderPathSplits[$x]) 
+        $results = $folder.FindFolders($filter, $tinyView) 
+        if ($results.TotalCount -gt 1) 
+        { 
+             ("Ambiguous name: " + $folderPathSplits[$x]) 
+             return 
+        } 
+        elseif ($results.TotalCount -lt 1) 
+        { 
+             ("Folder not found: " + $folderPathSplits[$x]) 
+             #return
+             Continue
+             
+        } 
+        $folder = $results.Folders[0] 
+    }
+}
+
+function DoFolder2010($folder, $path)
+{
+    # Declare the extended property that you want to view
+    
+    #$prop = new-object Microsoft.Exchange.WebServices.Data.ExtendedPropertyDefinition(0x3fe5, [Microsoft.Exchange.WebServices.Data.MapiPropertyType]::BOOLEAN)
+    $itemsubject = [Microsoft.Exchange.WebServices.Data.itemSchema]::Subject
+    $itemid = [Microsoft.Exchange.WebServices.Data.itemSchema]::id
+       
+    #Add the declaired property to the Property set
+    $propset = new-object Microsoft.Exchange.WebServices.Data.PropertySet($ItemSubject, $itemid ) 
+    
+    #Load the propertyset on the folder or item that you want to view
+    $total = 0
+    $offset = 0 
+    $view = new-object Microsoft.Exchange.WebServices.Data.ItemView(100, $offset) 
+    $view.PropertySet = $itemviewPropertySet
+    "Checking folder: " + $path 
+            while (($results = $folder.FindItems($view)).Items.Count -gt 0) 
+            {
+            
+          
+                   foreach ($item in $results) 
+                        {
+                   
+                            #$item.Subject |out-default
+                            $script:ID2010 += $item.id.uniqueid 
+                   
+                        }
+                   
+                       $offset += $results.Items.Count 
+                       $view = new-object Microsoft.Exchange.WebServices.Data.ItemView(100, $offset)
+                       $view.PropertySet = $itemviewPropertySet
+                      
+         
+          
+           
+           }
+   
+    #$ID2010 |fl|out-default
+    #"Messages in 2010 :"+$script:id2010.count 
+  
+  }      
+    
+
+
+        function DoSubfoldersRecursive2010($folder, $path)
+        {
+            $folderView = new-object Microsoft.Exchange.WebServices.Data.FolderView(2147483647) 
+            $subfolders = $folder.FindFolders($folderView)    
+            foreach ($subfolder in $subfolders) 
+            { 
+                try 
+                {
+                    DoFolder2010 $subfolder ($path + "\" + $subfolder.DisplayName)
+                    DoSubfoldersRecursive2010 $subfolder ($path + "\" + $subfolder.DisplayName) 
+                } 
+                catch { "Error processing folder: " + $subfolder.DisplayName } 
+            }
+        }
+
+        if ($Recurse)
+        {
+            if ($FolderPath.Length -gt 0)
+            {
+                DoFolder2010 $folder $FolderPath
+            }
+
+            DoSubfoldersRecursive2010 $folder $FolderPath
+        }
+        else
+        {
+            DoFolder2010 $folder $FolderPath
+        }
+
+
+}
+get2010 $line.path
+
+
+
+$missingID = @()
+
+"Messages in 2007 :"+$script:id2007.count
+"Messages in 2010 :"+$script:id2010.count
+
+$Script:MissingID = Compare-Object -ReferenceObject $script:id2007 -DifferenceObject $script:id2010 -PassThru
+
+"Missing Messages Total :"+$missingID.count
+#$script:missingID |out-default
+
+
+
+}
+
+
+#*******************************************************************************GetMessages*******************************************************
+
+
+
+
+$exchService = new-object Microsoft.Exchange.WebServices.Data.ExchangeService([Microsoft.Exchange.WebServices.Data.ExchangeVersion]::Exchange2007_sp1) 
+$exchService.Credentials = new-object System.Net.NetworkCredential($username2007, $password2007, "") 
+if ($HostName -ne "") 
+{ 
+    ("Using EWS URL " + "https://" + $HostName + "/EWS/Exchange.asmx") 
+    $exchService.Url = new-object System.Uri(("https://" + $HostName + "/EWS/Exchange.asmx")) 
+} 
+else
+{ 
+    ("Autodiscovering " + $username2007 + "...")
+    $exchService.AutoDiscoverUrl($username2007, {$true}) 
+}
+
+if ($exchService.Url -eq $null) 
+{ 
+    return 
+}
+
+
+
+
+
+
+
+
+$count = 0
+#$folderpath
+$FolderPath = $line.path.Trim(@('\'))
+#$folderpath = $folderpath.replace('/','\')
+$folderPath = $folderpath.Trim()
+#$folderpath = "'" + $folderpath +"'"
+
+
+# If a URL was specified we'll use that; otherwise we'll use Autodiscover 
+
+
+$pfsRoot = [Microsoft.Exchange.WebServices.Data.Folder]::Bind($exchService, [Microsoft.Exchange.WebServices.Data.WellKnownFolderName]::PublicFoldersRoot) 
+$folder = $pfsRoot
+
+if ($FolderPath.Length -gt 0)
+{
+    $tinyView = new-object Microsoft.Exchange.WebServices.Data.FolderView(10) 
+    $displayNameProperty = [Microsoft.Exchange.WebServices.Data.FolderSchema]::DisplayName
+    $folderPathSplits = $FolderPath.Split(@('\'))
+    for ($x = 0; $x -lt $folderPathSplits.Length;$x++) 
+    { 
+        $filter = new-object Microsoft.Exchange.WebServices.Data.SearchFilter+IsEqualTo($displayNameProperty, $folderPathSplits[$x]) 
+        $results = $folder.FindFolders($filter, $tinyView) 
+        if ($results.TotalCount -gt 1) 
+        { 
+             ("Ambiguous name: " + $folderPathSplits[$x]) 
+             return 
+        } 
+        elseif ($results.TotalCount -lt 1) 
+        { 
+             ("Folder not found: " + $folderPathSplits[$x]) 
+             #return
+             Continue
+             
+        } 
+        $folder = $results.Folders[0] 
+    }
+}
+
+function DoFolder($folder, $path)
+{
+      
+ 
+   ("Finding Missing Messages: " + $path) 
+    
+     $script:missingID|%{
+     
+                 $MSGID = $_
+                  
+                  
+                  
+                  
+                  
+                  
+                 
+                   
+                   
+                    $psPropset = new-object Microsoft.Exchange.WebServices.Data.PropertySet([Microsoft.Exchange.WebServices.Data.ItemSchema]::MimeContent)
+                    $msMessage = [Microsoft.Exchange.WebServices.Data.EmailMessage]::Bind($exchService,$MSGID,$psPropset)
+                    $msMessage.MimeContent.Content
+                                                        
+	                $fiFile = new-object System.IO.FileStream(("D:\scrap\emails" + \ + $miMailItems.Subject.ToString()), [System.IO.FileMode]::Create)
+                    #$fiFile = new-object System.IO.FileStream(("D:\scrap\emails\" + $now +"testemail.eml"), [System.IO.FileMode]::Create)
+            		$fiFile.Write($mc.content, 0, $mc.content.Length)
+            		$fiFile.Close()
+            		write-host ("Saved Email : " + "D:\scrap\emails + $now + "testemail.eml")
+   
+                   
+                   
+                   
+                   
+                   
+                   
+                   
+                   
+                   
+                    <#  
+                   try 
+                 { 
+                   
+                  Scan the items in this folder 
+                    $offset = 0;
+                    $firstclass = [Microsoft.Exchange.WebServices.Data.ItemSchema]::FirstClassProperties
+                    $mimecontent = [Microsoft.Exchange.WebServices.Data.ItemSchema]::MimeContent
+                    
+                    $arrayOfPropertiesToLoad = @($firstclass, $mimecontent)
+                    #$psPropset = new-object Microsoft.Exchange.WebServices.Data.PropertySet($mimecontent)
+                    $itemviewPropertySet = new-object Microsoft.Exchange.WebServices.Data.PropertySet($firstclass)
+                    $view = new-object Microsoft.Exchange.WebServices.Data.ItemView(100, $offset)
+                    $view.PropertySet = $itemviewPropertySet 
+                    while (($results = $folder.FindItems($view)).Items.Count -gt 0) 
+                    { 
+                    $itemviewPropertySet = new-object Microsoft.Exchange.WebServices.Data.PropertySet($arrayOfPropertiesToLoad)
+                    $view.PropertySet = $itemviewPropertySet
+                        foreach ($miMailItems in $results) 
+                        { 
+                               if ($miMailItems.ID.UniqueID -eq $msgid)
+                               {                
+                                    $now = $(get-date -f yyyy-MM-dd-HHmmss)
+                                    "   Found Missing Message : " + $miMailItems.Subject
+                                    $miMailItems.load()
+                                    $mc = $mimailitems
+                                    #$mc
+                                    #Then similar to the above attachment example you can write that MIME content out to filestream. Eg
+                                    #$fileName = "D:\scrap\emails\" + $now +"testemail.eml"
+                                    #$fiFile = new-object System.IO.FileStream($fileName, [System.IO.FileMode]::Create) 
+                                    #$fiFile.Write($msMessage.MimeContent.Content, 0,$msMessage.MimeContent.Content.Length)
+                                    #$fiFile.Close()
+                                    
+                                    #$psPropset = new-object Microsoft.Exchange.WebServices.Data.PropertySet([Microsoft.Exchange.WebServices.Data.ItemSchema]::MimeContent)
+                                    #$msMessage = [Microsoft.Exchange.WebServices.Data.EmailMessage]::Bind($exchService,$msgid,$psPropset)
+                                    #$msMessage.MimeContent.Content
+                                                                        
+	                                #$fiFile = new-object System.IO.FileStream(("D:\scrap\emails" + \ + $miMailItems.Subject.ToString()), [System.IO.FileMode]::Create)
+                                    #$fiFile = new-object System.IO.FileStream(("D:\scrap\emails\" + $now +"testemail.eml"), [System.IO.FileMode]::Create)
+                            		#$fiFile.Write($mc.content, 0, $mc.content.Length)
+                            		#$fiFile.Close()
+                            		#write-host ("Saved Email : " + "D:\scrap\emails + $now + "testemail.eml")
+	
+
+                                     
+                                }
+                        
+                        } 
+
+                        $offset += $results.Items.Count 
+                        $view = new-object Microsoft.Exchange.WebServices.Data.ItemView(100, $offset) 
+                    }
+
+                    if ($recurse) 
+                    { 
+                        # Recursively do subfolders 
+                        $folderView = new-object Microsoft.Exchange.WebServices.Data.FolderView(2147483647) 
+                        $subfolders = $folder.FindFolders($folderView)    
+                        foreach ($subfolder in $subfolders) 
+                        { 
+                            try 
+                            { 
+                                DoFolder $subfolder ($path + "\" + $subfolder.DisplayName) 
+                            } 
+                            catch { "Error processing folder: " + $subfolder.DisplayName } 
+                        } 
+                    } 
+                 
+                 } 
+                 
+                 catch 
+                 { 
+                     throw 
+                     DoFolder $pfs "" 
+                 }
+                 #> 
+  
+       } 
+    
+}
+
+function DoSubfoldersRecursive($folder, $path)
+{
+    $folderView = new-object Microsoft.Exchange.WebServices.Data.FolderView(2147483647) 
+    $subfolders = $folder.FindFolders($folderView)    
+    foreach ($subfolder in $subfolders) 
+    { 
+        try 
+        {
+            DoFolder $subfolder ($path + "\" + $subfolder.DisplayName)
+            DoSubfoldersRecursive $subfolder ($path + "\" + $subfolder.DisplayName) 
+        } 
+        catch { "Error processing folder: " + $subfolder.DisplayName } 
+    }
+}
+
+if ($Recurse)
+{
+    if ($FolderPath.Length -gt 0)
+    {
+        DoFolder $folder $FolderPath
+    }
+
+    DoSubfoldersRecursive $folder $FolderPath
+}
+else
+{
+    DoFolder $folder $FolderPath
+}

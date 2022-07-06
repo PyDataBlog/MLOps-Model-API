@@ -1,0 +1,730 @@
+﻿
+Imports System.Data.SqlClient
+
+Public Class Contact
+    Inherits System.Web.UI.Page
+
+    Dim SM As New SMSClass
+    Protected Sub Page_Load(ByVal sender As Object, ByVal e As System.EventArgs) Handles Me.Load
+        If Page.IsPostBack Then
+            TabName.Value = Request.Form(TabName.UniqueID)
+        End If
+        If Not Page.IsPostBack Then
+            hdPreview.Value = False
+            hdFile.Value = Nothing
+
+            Dim UserName As String
+            If User.Identity.IsAuthenticated = False Then
+                UserName = "Anonymous"
+            Else
+                UserName = User.Identity.Name
+            End If
+            Dim itemv As New ListItem
+            itemv.Value = ""
+            itemv.Text = "Select Group"
+
+            ddlGroup.Items.Add(itemv)
+            ddlGroup.Items.Add("Create Group")
+
+            ddlGroupforUpload.Items.Add(itemv)
+            ddlGroupforUpload.Items.Add("Create Group")
+
+            ddlGroupManage.Items.Add(itemv)
+            ddlGroupAdd.Items.Add(itemv)
+
+            Dim ListItems As New Collection
+            ListItems = SM.GroupGetList(UserName)
+
+            For Each item In ListItems
+                Dim it As New ListItem
+                it.Value = item
+                it.Text = item
+                ddlGroup.Items.Add(it)
+                ddlGroupforUpload.Items.Add(it)
+                ddlGroupManage.Items.Add(it)
+                ddlGroupAdd.Items.Add(it)
+            Next
+
+            dsContacts.SelectParameters("UserName").DefaultValue = User.Identity.Name
+            dsContacts.SelectParameters("Lastname").DefaultValue = Nothing
+            dsContacts.SelectParameters("Email").DefaultValue = Nothing
+            dsContacts.SelectParameters("Phone").DefaultValue = Nothing
+            dsContacts.DataBind()
+            gvContacts.DataBind()
+
+        End If
+        If gvContacts.Rows.Count < 1 Then
+            btnCheckAll.Visible = False
+            btnUncheckAll.Visible = False
+            btnAddtoGroup.Visible = False
+            ddlGroupAdd.Visible = False
+        Else
+            btnCheckAll.Visible = True
+            btnUncheckAll.Visible = True
+            btnAddtoGroup.Visible = True
+            ddlGroupAdd.Visible = True
+        End If
+
+    End Sub
+
+    Protected Sub ddlGroup_SelectedIndexChanged(sender As Object, e As EventArgs) Handles ddlGroup.SelectedIndexChanged
+        lblMessage.Text = ""
+        If ddlGroup.SelectedIndex = 0 Then
+            txtGroup.Visible = False
+        ElseIf ddlGroup.SelectedIndex = 1 Then
+            txtGroup.Visible = True
+        Else
+            txtGroup.Visible = False
+        End If
+    End Sub
+
+    Protected Sub btnSave_Click(sender As Object, e As EventArgs) Handles btnSave.Click
+        lblMessage.Text = ""
+
+        Dim ConnectionString As String
+        Dim conn As New System.Data.SqlClient.SqlConnection
+        Dim cmd As New System.Data.SqlClient.SqlCommand
+        Dim reader As System.Data.SqlClient.SqlDataReader
+        Dim UserName As String
+
+        If User.Identity.IsAuthenticated = False Then
+            UserName = "Anonymous"
+        Else
+            UserName = User.Identity.Name
+        End If
+
+        ConnectionString = System.Configuration.ConfigurationManager.ConnectionStrings("APPDB_SMSConnectionString").ConnectionString
+        conn.ConnectionString = ConnectionString
+
+        Try
+            conn.Open()
+            cmd.Connection = conn
+
+            cmd.CommandText = "INSERT INTO dbo.Contacts (ContactId, Firstname, Lastname, Email, Phone, AlternatePhone, Address, UserName, Created_By, Date_Created, Modified_By, Date_Modified)" _
+                          & "VALUES(@ContactId, @Firstname, @Lastname, @Email, @Phone, @AlternatePhone, @Address, @UserName, @Created_By, @Date_Created, @Modified_By, @Date_Modified)"
+            Dim ContactId = Guid.NewGuid
+            cmd.Parameters.AddWithValue("@ContactId", ContactId)
+            cmd.Parameters.AddWithValue("@Firstname", txtFirstname.Text)
+            cmd.Parameters.AddWithValue("@Lastname", txtLastname.Text)
+            cmd.Parameters.AddWithValue("@Email", txtEmail.Text)
+            cmd.Parameters.AddWithValue("@Phone", txtPhone.Text)
+            cmd.Parameters.AddWithValue("@AlternatePhone", txtAltPhone.Text)
+            cmd.Parameters.AddWithValue("@Address", txtAddress.Text)
+            cmd.Parameters.AddWithValue("@UserName", UserName)
+            cmd.Parameters.AddWithValue("@Created_By", UserName)
+            cmd.Parameters.AddWithValue("@Date_Created", Now)
+            cmd.Parameters.AddWithValue("@Modified_By", UserName)
+            cmd.Parameters.AddWithValue("@Date_Modified", Now)
+            cmd.ExecuteNonQuery()
+            conn.Close()
+            lblMessage.Text = "Contact " & txtFirstname.Text & " has been created  <span class='glyphicon glyphicon-floppy-saved'></span><br/>"
+            btnGo.Visible = True
+            Select Case ddlGroup.SelectedIndex
+                Case 0
+
+                Case 1
+                    If SM.GroupCreate(txtGroup.Text, UserName) = True Then
+                        lblMessage.Text &= "Group " & txtGroup.Text & " has been created <span class='glyphicon glyphicon-floppy-saved'></span><br/>"
+                        Dim GroupId As Guid = SM.GroupGetId(txtGroup.Text, UserName)
+                        If SM.GroupAddContact(GroupId, ContactId, UserName) = True Then
+                            lblMessage.Text &= "Contact " & txtFirstname.Text & " has been added to the group " & txtGroup.Text & " <span class='glyphicon glyphicon-floppy-saved'></span><br/><br/>"
+                        Else
+                            lblMessage.Text &= "Contact " & txtFirstname.Text & " was not added to the group" & txtGroup.Text & ". Go to group list page to check if contact is already in list or add to group. <br/>"
+                        End If
+                    End If
+                Case Else
+                    Dim GroupId As Guid = SM.GroupGetId(ddlGroup.SelectedItem.Text, UserName)
+                    If SM.GroupAddContact(GroupId, ContactId, UserName) = True Then
+                        lblMessage.Text &= "Contact " & txtFirstname.Text & " has been added to the group " & ddlGroup.SelectedValue & " <span class='glyphicon glyphicon-floppy-saved'></span><br/><br/>"
+                    Else
+                        lblMessage.Text &= "Contact " & txtFirstname.Text & " was not added to the group" & ddlGroup.SelectedValue & ". Go to group list page to check if contact is already in list or add to group. <br/>"
+                    End If
+            End Select
+            lblMessage.Text &= "Click go to view contact list."
+            LockControls()
+            dsContacts.SelectParameters("UserName").DefaultValue = User.Identity.Name
+            dsContacts.SelectParameters("Lastname").DefaultValue = Nothing
+            dsContacts.SelectParameters("Email").DefaultValue = Nothing
+            dsContacts.SelectParameters("Phone").DefaultValue = Nothing
+            dsContacts.DataBind()
+            gvContacts.DataBind()
+
+        Catch ex As SqlException
+            If ex.Number = 2627 Then
+                lblMessage.Text = "This contact already exist in your contact list.  <span class='glyphicon glyphicon-ban-circle'></span> "
+                btnNew.Visible = True
+            End If
+        Catch ex As Exception
+            lblMessage.Text = ex.Message
+
+        End Try
+
+
+
+    End Sub
+
+    Protected Sub txtGroup_TextChanged(sender As Object, e As EventArgs) Handles txtGroup.TextChanged
+        lblMessage.Text = ""
+        Dim username As String
+        If User.Identity.IsAuthenticated = False Then
+            username = "Anonymous"
+        Else
+            username = User.Identity.Name
+        End If
+
+        If SM.GroupCheck(txtGroup.Text, username) = True Then
+            lblMessage.Text = "You have already created this group in your contact groups."
+        Else
+            lblMessage.Text = "Group " & txtGroup.Text & " will be created in your contact groups."
+        End If
+
+    End Sub
+    Public Sub LockControls()
+        txtFirstname.Enabled = False
+        txtLastname.Enabled = False
+        txtEmail.Enabled = False
+        txtPhone.Enabled = False
+        txtAltPhone.Enabled = False
+        txtAddress.Enabled = False
+        ddlGroup.Enabled = False
+
+        btnNew.Visible = True
+        btnSave.Visible = False
+        btnGo.Visible = True
+    End Sub
+    Public Sub RefreshControls()
+
+        txtFirstname.Enabled = True
+        txtLastname.Enabled = True
+        txtEmail.Enabled = True
+        txtPhone.Enabled = True
+        txtAltPhone.Enabled = True
+        txtAddress.Enabled = True
+        txtGroup.Enabled = True
+        ddlGroup.Enabled = True
+
+        lblMessage.Text = ""
+        txtFirstname.Text = ""
+        txtLastname.Text = ""
+        txtEmail.Text = ""
+        txtPhone.Text = ""
+        txtAltPhone.Text = ""
+        txtAddress.Text = ""
+        txtGroup.Text = ""
+        ddlGroup.SelectedIndex = 0
+
+        btnNew.Visible = False
+        btnSave.Visible = True
+        txtGroup.Visible = False
+        btnGo.Visible = False
+
+    End Sub
+    Protected Sub btnNew_Click(sender As Object, e As EventArgs) Handles btnNew.Click
+
+        Dim UserName As String
+        RefreshControls()
+
+        If User.Identity.IsAuthenticated = False Then
+            UserName = "Anonymous"
+        Else
+            UserName = User.Identity.Name
+        End If
+        Dim item As New ListItem
+        item.Value = ""
+        item.Text = "Select Group"
+
+        ddlGroup.Items.Clear()
+        ddlGroup.Items.Add(item)
+        ddlGroup.Items.Add("Create Group")
+
+        Dim ListItems As New Collection
+        ListItems = SM.GroupGetList(UserName)
+        For Each itemv In ListItems
+            Dim it As New ListItem
+            it.Value = itemv
+            it.Text = itemv
+            ddlGroup.Items.Add(itemv)
+        Next
+
+    End Sub
+
+
+    Protected Sub txtGroupUpload_TextChanged(sender As Object, e As EventArgs) Handles txtGroupUpload.TextChanged
+        lblMessageUpload.Text = ""
+        Dim username As String
+        If User.Identity.IsAuthenticated = False Then
+            username = "Anonymous"
+        Else
+            username = User.Identity.Name
+        End If
+
+        If SM.GroupCheck(txtGroupUpload.Text, username) = True Then
+            lblMessageUpload.Text = "You have already created this group in your contact groups."
+        Else
+            lblMessageUpload.Text = "Group " & txtGroupUpload.Text & " will be created in your contact groups."
+        End If
+    End Sub
+    Protected Sub ddlGroupforUpload_SelectedIndexChanged(sender As Object, e As EventArgs) Handles ddlGroupforUpload.SelectedIndexChanged
+        lblMessageContacts.Text = ""
+        lblMessageManage.Text = ""
+        lblMessageFooter.Text = ""
+        lblMessageUpload.Text = ""
+        lblMessageUpload.Text = ""
+        lblSelectUpload.Text = ""
+        lblMessage.Text = ""
+
+        gvPreview.DataSource = Nothing
+        gvPreview.DataBind()
+        lblMessageUpload.Text = ""
+        If ddlGroupforUpload.SelectedIndex = 0 Then
+            txtGroupUpload.Visible = False
+        ElseIf ddlGroupforUpload.SelectedIndex = 1 Then
+            txtGroupUpload.Visible = True
+        Else
+            txtGroupUpload.Visible = False
+        End If
+    End Sub
+    Protected Sub FileUploadComplete(ByVal sender As Object, ByVal e As EventArgs)
+        Dim filename As String = "sms.csv"
+        Dim source As String = Server.MapPath("~\Files\" & User.Identity.Name)
+        If Not My.Computer.FileSystem.DirectoryExists(source) Then
+            My.Computer.FileSystem.CreateDirectory(source)
+        End If
+        If My.Computer.FileSystem.FileExists(source & "\" & "SMS.csv") Then
+            My.Computer.FileSystem.DeleteFile(source & "\" & "SMS.csv")
+        End If
+        afuTemplate.SaveAs(source + "\" + filename)
+
+        Dim Contacts As List(Of MessageContact) = New List(Of MessageContact)
+        Using MyReader As New Microsoft.VisualBasic.FileIO.TextFieldParser(source & "\" & "SMS.csv")
+            MyReader.TextFieldType = FileIO.FieldType.Delimited
+            MyReader.SetDelimiters(",")
+            Dim currentRow As String()
+            Dim success As Boolean = True
+
+            While Not MyReader.EndOfData
+                Try
+                    currentRow = MyReader.ReadFields()
+                    If currentRow(0) = "firstname" Or currentRow(1) = "lastname" Or currentRow(2) = "phone" Or currentRow(3) = "altephone" Or currentRow(4) = "email" Or currentRow(5) = "address" Then
+                        success = False
+                    Else
+                        success = True
+                    End If
+                    If success = True Then
+                        Dim cont As New MessageContact
+                        cont.FirstName = currentRow(0)
+                        cont.LastName = currentRow(1)
+                        cont.Phone = currentRow(2)
+                        cont.Alternatephone = currentRow(3)
+                        cont.Email = currentRow(4)
+                        cont.Address = currentRow(5)
+                        Contacts.Add(cont)
+                    End If
+                Catch ex As Microsoft.VisualBasic.
+                            FileIO.MalformedLineException
+                    lblMessageUpload.Text &= ("Line " & ex.Message & "Is Not valid And will be skipped.<br/>")
+                End Try
+            End While
+
+
+        End Using
+        gvPreview.DataSource = Contacts
+        gvPreview.DataBind()
+        hdFile.Value = source & "\" & "SMS.csv"
+        hdPreview.Value = True
+
+    End Sub
+
+
+    Protected Sub btnGroupUpload_Click(sender As Object, e As EventArgs) Handles btnGroupUpload.Click
+        lblMessageUpload.Text = ""
+        lblSelectUpload.Text = ""
+        Dim filename As String
+        If hdPreview.Value = True Then
+            filename = hdFile.Value
+        End If
+
+        If afuTemplate.HasFile Then
+            Dim source As String = Server.MapPath("~\Files\" & User.Identity.Name)
+            If Not My.Computer.FileSystem.DirectoryExists(source) Then
+                My.Computer.FileSystem.CreateDirectory(source)
+            End If
+            If My.Computer.FileSystem.FileExists(source & "\" & "SMS.csv") Then
+                My.Computer.FileSystem.DeleteFile(source & "\" & "SMS.csv")
+            End If
+            afuTemplate.SaveAs(source & "\" & "SMS.csv")
+            filename = (source & "\" & "SMS.csv")
+        End If
+
+        If filename Is Nothing Then
+            lblSelectUpload.Text = "Select the contacts template file <span class='glyphicon glyphicon-ban-circle'></span>"
+            Exit Sub
+        End If
+
+
+        If ddlGroupforUpload.SelectedIndex = 1 Then
+            If SM.GroupCreate(txtGroupUpload.Text, User.Identity.Name) = True Then
+                lblMessageUpload.Text &= "Group " & txtGroupUpload.Text & " has been created <span class='glyphicon glyphicon-floppy-saved'></span> <br/>"
+            Else
+                lblMessageUpload.Text &= "Group " & txtGroupUpload.Text & " was not created. &nbsp; <span class='glyphicon glyphicon-ban-circle'></span> <br/>"
+            End If
+        End If
+
+        Using MyReader As New Microsoft.VisualBasic.FileIO.TextFieldParser(filename)
+            MyReader.TextFieldType = FileIO.FieldType.Delimited
+            MyReader.SetDelimiters(",")
+            Dim currentRow As String()
+            While Not MyReader.EndOfData
+                Try
+                    currentRow = MyReader.ReadFields()
+                    Dim currentField As String
+                    Dim success As Boolean = True
+                    If currentRow(0) = "firstname" Or currentRow(1) = "lastname" Or currentRow(2) = "phone" Or currentRow(3) = "altphone" Or currentRow(4) = "email" Or currentRow(5) = "address" Then
+                        success = False
+                    Else
+                        success = True
+                    End If
+                    If success = True Then
+                        If SM.ContactCheck(currentRow(1), currentRow(2), User.Identity.Name) = True Then
+                            lblMessageUpload.Text &= "Contact " & currentRow(0) & " " & currentRow(1) & " already exists in your contact list. &nbsp; <span class='glyphicon glyphicon-ban-circle'></span> <br/>"
+
+                            Dim ContactId As Guid = SM.GetContactId(currentRow(1), currentRow(2), User.Identity.Name)
+                            Select Case ddlGroupforUpload.SelectedIndex
+                                Case 0
+                                Case 1
+                                    If SM.GroupCheck(txtGroupUpload.Text, User.Identity.Name) = True Then
+                                        Dim GroupId As Guid = SM.GroupGetId(txtGroupUpload.Text, User.Identity.Name)
+                                        If SM.GroupAddContact(GroupId, ContactId, User.Identity.Name) = True Then
+                                            lblMessageUpload.Text &= "Contact " & currentRow(0) & " has been added to the group " & txtGroupUpload.Text & " <span class='glyphicon glyphicon-floppy-saved'></span><br/>"
+                                        Else
+                                            lblMessageUpload.Text &= "Contact " & currentRow(0) & " was not added to the group " & txtGroupUpload.Text & ". It already exists in the group.&nbsp; <span class='glyphicon glyphicon-ban-circle'></span> <br/>"
+                                        End If
+                                    End If
+                                Case Else
+                                    Dim GroupId As Guid = SM.GroupGetId(ddlGroupforUpload.SelectedItem.Text, User.Identity.Name)
+                                    If SM.GroupAddContact(GroupId, ContactId, User.Identity.Name) = True Then
+                                        lblMessageUpload.Text &= "Contact " & currentRow(0) & " has been added to the group " & ddlGroupforUpload.SelectedValue & " <span class='glyphicon glyphicon-floppy-saved'></span><br/>"
+                                    Else
+                                        lblMessageUpload.Text &= "Contact " & currentRow(0) & " was not added to the group " & ddlGroupforUpload.SelectedValue & ". It already exists in the group. &nbsp; <span class='glyphicon glyphicon-ban-circle'></span> <br/>"
+                                    End If
+                            End Select
+                        Else
+                            Dim ConnectionString As String
+                            Dim conn As New System.Data.SqlClient.SqlConnection
+                            Dim cmd As New System.Data.SqlClient.SqlCommand
+                            Dim reader As System.Data.SqlClient.SqlDataReader
+
+                            ConnectionString = System.Configuration.ConfigurationManager.ConnectionStrings("APPDB_SMSConnectionString").ConnectionString
+                            conn.ConnectionString = ConnectionString
+                            conn.Open()
+                            Dim ContactId = Guid.NewGuid
+                            cmd.Connection = conn
+                            cmd.CommandText = "INSERT INTO dbo.Contacts (ContactId, Firstname, Lastname, Email, Phone, AlternatePhone, Address, UserName, Created_By, Date_Created, Modified_By, Date_Modified)" _
+                              & "VALUES(@ContactId, @Firstname, @Lastname, @Email, @Phone, @AlternatePhone, @Address, @UserName, @Created_By, @Date_Created, @Modified_By, @Date_Modified)"
+                            cmd.Parameters.AddWithValue("@ContactId", ContactId)
+                            cmd.Parameters.AddWithValue("@Firstname", currentRow(0))
+                            cmd.Parameters.AddWithValue("@Lastname", currentRow(1))
+                            cmd.Parameters.AddWithValue("@Phone", currentRow(2))
+                            cmd.Parameters.AddWithValue("@AlternatePhone", currentRow(3))
+                            cmd.Parameters.AddWithValue("@Email", currentRow(4))
+                            cmd.Parameters.AddWithValue("@Address", currentRow(5))
+                            cmd.Parameters.AddWithValue("@UserName", User.Identity.Name)
+                            cmd.Parameters.AddWithValue("@Created_By", User.Identity.Name)
+                            cmd.Parameters.AddWithValue("@Date_Created", Now)
+                            cmd.Parameters.AddWithValue("@Modified_By", User.Identity.Name)
+                            cmd.Parameters.AddWithValue("@Date_Modified", Now)
+                            cmd.ExecuteNonQuery()
+                            lblMessageUpload.Text &= "Contact " & currentRow(0) & "-" & currentRow(2) & " has been added to your contact list <span class='glyphicon glyphicon-floppy-saved'></span> <br/>"
+                            Select Case ddlGroupforUpload.SelectedIndex
+                                Case 0
+                                Case 1
+                                    If SM.GroupCheck(txtGroupUpload.Text, User.Identity.Name) = True Then
+                                        Dim GroupId As Guid = SM.GroupGetId(txtGroupUpload.Text, User.Identity.Name)
+                                        If SM.GroupAddContact(GroupId, ContactId, User.Identity.Name) = True Then
+                                            lblMessageUpload.Text &= "Contact " & currentRow(0) & " has been added to the group " & txtGroupUpload.Text & " <span class='glyphicon glyphicon-floppy-saved'></span><br/>"
+                                        Else
+                                            lblMessageUpload.Text &= "Contact " & currentRow(0) & " was not added to the group" & txtGroupUpload.Text & ". Go to group list page to check if contact is already in list or add to group.&nbsp; <span class='glyphicon glyphicon-ban-circle'></span>  <br/>"
+                                        End If
+                                    End If
+                                Case Else
+                                    Dim GroupId As Guid = SM.GroupGetId(ddlGroupforUpload.SelectedItem.Text, User.Identity.Name)
+                                    If SM.GroupAddContact(GroupId, ContactId, User.Identity.Name) = True Then
+                                        lblMessageUpload.Text &= "Contact " & currentRow(0) & " has been added to the group " & ddlGroupforUpload.SelectedValue & " <span class='glyphicon glyphicon-floppy-saved'></span><br/>"
+                                    Else
+                                        lblMessageUpload.Text &= "Contact " & currentRow(0) & " was not added to the group" & ddlGroupforUpload.SelectedValue & ". Go to group list page to check if contact is already in list or add to group.&nbsp; <span class='glyphicon glyphicon-ban-circle'></span>  <br/>"
+                                    End If
+                            End Select
+                            conn.Close()
+                        End If
+                    End If
+                Catch ex As Microsoft.VisualBasic.FileIO.MalformedLineException
+                    lblMessageUpload.Text &= ex.Message
+                End Try
+            End While
+        End Using
+        hdPreview.Value = False
+        dsContacts.SelectParameters("UserName").DefaultValue = User.Identity.Name
+        dsContacts.SelectParameters("Lastname").DefaultValue = Nothing
+        dsContacts.SelectParameters("Email").DefaultValue = Nothing
+        dsContacts.SelectParameters("Phone").DefaultValue = Nothing
+        dsContacts.DataBind()
+        gvContacts.DataBind()
+
+    End Sub
+
+    Protected Sub ddlGroupManage_SelectedIndexChanged(sender As Object, e As EventArgs) Handles ddlGroupManage.SelectedIndexChanged
+        lblMessageContacts.Text = ""
+        lblMessageManage.Text = ""
+        lblMessageFooter.Text = ""
+        lblMessageUpload.Text = ""
+        lblMessage.Text = ""
+
+        Dim UserName As String
+        If User.Identity.IsAuthenticated = False Then
+            UserName = "Anonymous"
+        Else
+            UserName = User.Identity.Name
+        End If
+        Dim GID As Guid = SM.GroupGetId(ddlGroupManage.SelectedValue, UserName)
+        dsGroupContacts.SelectParameters("GroupId").DefaultValue = GID.ToString
+        dsGroupContacts.SelectParameters("UserName").DefaultValue = UserName
+        gvGroupContacts.DataBind()
+
+
+    End Sub
+
+    Private Sub gvGroupContacts_RowCommand(sender As Object, e As GridViewCommandEventArgs) Handles gvGroupContacts.RowCommand
+        lblMessageContacts.Text = ""
+        lblMessageManage.Text = ""
+        lblMessageFooter.Text = ""
+        lblMessageUpload.Text = ""
+        lblMessage.Text = ""
+
+        If (e.CommandName = "Remove") Then
+
+            ' Retrieve the row index stored in the CommandArgument property.
+
+            Dim index As Integer = Convert.ToInt32(e.CommandArgument)
+            ' Retrieve the row that contains the button 
+            ' From the Rows collection.
+            Dim row As GridViewRow = gvGroupContacts.Rows(index)
+            Dim CGI = CType(row.FindControl("HFContactGroupId"), HiddenField).Value
+
+            lblMessageManage.Text = CGI
+            Dim ConnectionString As String
+            Dim conn As New System.Data.SqlClient.SqlConnection
+            Dim cmd As New System.Data.SqlClient.SqlCommand
+            Dim reader As System.Data.SqlClient.SqlDataReader
+
+            ConnectionString = System.Configuration.ConfigurationManager.ConnectionStrings("APPDB_SMSConnectionString").ConnectionString
+            conn.ConnectionString = ConnectionString
+            conn.Open()
+            cmd.Connection = conn
+            cmd.CommandText = "DELETE FROM ContactGroup where ContactGroupId= '" & CGI & "'"
+            cmd.ExecuteNonQuery()
+            conn.Close()
+            lblMessageManage.Text = " A contact row was deleted from this group. <span class='glyphicon glyphicon-ok-circle'></span>"
+
+
+        End If
+        gvGroupContacts.DataBind()
+    End Sub
+
+    Protected Sub ddlPageSize_SelectedIndexChanged(sender As Object, e As EventArgs) Handles ddlPageSize.SelectedIndexChanged
+        If ddlPageSize.SelectedIndex = 0 Then
+            gvContacts.PageSize = 50
+        Else
+            gvContacts.PageSize = ddlPageSize.SelectedValue
+        End If
+    End Sub
+    Protected Sub cbContact_CheckedChanged(sender As Object, e As EventArgs)
+
+
+    End Sub
+
+    Private Sub txtLastnameContact_TextChanged(sender As Object, e As EventArgs) Handles txtLastnameContact.TextChanged
+        dsContacts.SelectParameters("UserName").DefaultValue = User.Identity.Name
+        dsContacts.SelectParameters("Lastname").DefaultValue = txtLastnameContact.Text
+        dsContacts.SelectParameters("Phone").DefaultValue = txtPhoneContact.Text
+        dsContacts.SelectParameters("Email").DefaultValue = txtEmailContact.Text
+        dsContacts.DataBind()
+        gvContacts.DataBind()
+    End Sub
+
+    Protected Sub txtEmailContact_TextChanged(sender As Object, e As EventArgs) Handles txtEmailContact.TextChanged
+        dsContacts.SelectParameters("UserName").DefaultValue = User.Identity.Name
+        dsContacts.SelectParameters("Lastname").DefaultValue = txtLastnameContact.Text
+        dsContacts.SelectParameters("Phone").DefaultValue = txtPhoneContact.Text
+        dsContacts.SelectParameters("Email").DefaultValue = txtEmailContact.Text
+        dsContacts.DataBind()
+        gvContacts.DataBind()
+    End Sub
+
+    Private Sub txtPhoneContact_TextChanged(sender As Object, e As EventArgs) Handles txtPhoneContact.TextChanged
+        dsContacts.SelectParameters("UserName").DefaultValue = User.Identity.Name
+        dsContacts.SelectParameters("Lastname").DefaultValue = txtLastnameContact.Text
+        dsContacts.SelectParameters("Phone").DefaultValue = txtPhoneContact.Text
+        dsContacts.SelectParameters("Email").DefaultValue = txtEmailContact.Text
+        dsContacts.DataBind()
+        gvContacts.DataBind()
+    End Sub
+
+    Protected Sub gvContacts_RowCommand(sender As Object, e As GridViewCommandEventArgs) Handles gvContacts.RowCommand
+        lblMessageContacts.Text = ""
+        lblMessageManage.Text = ""
+        lblMessageFooter.Text = ""
+        lblMessageUpload.Text = ""
+        lblMessage.Text = ""
+
+        If e.CommandName = "UpdateContact" Then
+            Dim index As Integer = Convert.ToInt32(e.CommandArgument)
+            Dim row As GridViewRow = gvContacts.Rows(index)
+            Dim CGI As HiddenField = CType(row.FindControl("hfContact"), HiddenField)
+            Dim Firstname As TextBox = CType(row.FindControl("txtFirstname"), TextBox)
+            Dim Lastname As TextBox = CType(row.FindControl("txtLastname"), TextBox)
+            Dim Phone As TextBox = CType(row.FindControl("txtPhone"), TextBox)
+            Dim AlternatePhone As TextBox = CType(row.FindControl("txtAlternatePhone"), TextBox)
+            Dim Address As TextBox = CType(row.FindControl("txtAddress"), TextBox)
+            Dim Email As TextBox = CType(row.FindControl("txtEmail"), TextBox)
+            Dim upd As String = Firstname.Text
+            Dim ConnectionString As String
+            Dim conn As New System.Data.SqlClient.SqlConnection
+            Dim cmd As New System.Data.SqlClient.SqlCommand
+            Dim reader As System.Data.SqlClient.SqlDataReader
+            Dim UserName As String
+
+            If User.Identity.IsAuthenticated = False Then
+                UserName = "Anonymous"
+            Else
+                UserName = User.Identity.Name
+            End If
+
+            ConnectionString = System.Configuration.ConfigurationManager.ConnectionStrings("APPDB_SMSConnectionString").ConnectionString
+            conn.ConnectionString = ConnectionString
+            conn.Open()
+            cmd.Connection = conn
+            cmd.CommandText = "Update Contacts SET " _
+                                  & "Firstname = @Firstname, " _
+                                  & "Lastname = @Lastname," _
+                                  & "Email = @Email, " _
+                                  & "Phone = @Phone, " _
+                                  & "AlternatePhone = @AlternatePhone," _
+                                  & "Address = @Address," _
+                                  & "Modified_By = @Modified_By," _
+                                  & "Date_Modified = @Date_Modified" _
+                                  & " Where ContactId = @ContactId"
+
+            Dim ContactId = CGI.Value
+            cmd.Parameters.AddWithValue("@ContactId", ContactId)
+            cmd.Parameters.AddWithValue("@Firstname", Firstname.Text)
+            cmd.Parameters.AddWithValue("@Lastname", Lastname.Text)
+            cmd.Parameters.AddWithValue("@Email", Email.Text)
+            cmd.Parameters.AddWithValue("@Phone", Phone.Text)
+            cmd.Parameters.AddWithValue("@AlternatePhone", AlternatePhone.Text)
+            cmd.Parameters.AddWithValue("@Address", Address.Text)
+            cmd.Parameters.AddWithValue("@Modified_By", UserName)
+            cmd.Parameters.AddWithValue("@Date_Modified", Now)
+            cmd.ExecuteNonQuery()
+            conn.Close()
+            lblMessageContacts.Text = "Contact " & upd & " has been update &nbsp; <span class='glyphicon glyphicon-floppy-saved'></span>"
+            gvContacts.EditIndex = -1
+
+        ElseIf e.CommandName = "AllContact" Then
+            Dim cbAll As CheckBox = CType(gvContacts.HeaderRow.FindControl("cbAll"), CheckBox)
+            If cbAll.Checked Then
+                For Each row As GridViewRow In gvContacts.Rows
+                    Dim cbContact As CheckBox = CType(row.FindControl("cbContact"), CheckBox)
+                    cbContact.Checked = True
+                Next
+            Else
+            End If
+        ElseIf e.CommandName = "Remove" Then
+            Dim index As Integer = Convert.ToInt32(e.CommandArgument)
+            Dim row As GridViewRow = gvContacts.Rows(index)
+            Dim CGI As HiddenField = CType(row.FindControl("HFContactId"), HiddenField)
+
+            Dim ConnectionString As String
+            Dim conn As New System.Data.SqlClient.SqlConnection
+            Dim cmd As New System.Data.SqlClient.SqlCommand
+            Dim reader As System.Data.SqlClient.SqlDataReader
+
+            ConnectionString = System.Configuration.ConfigurationManager.ConnectionStrings("APPDB_SMSConnectionString").ConnectionString
+            conn.ConnectionString = ConnectionString
+            conn.Open()
+            cmd.Connection = conn
+            cmd.CommandText = "DELETE FROM Contacts WHERE ContactId='" & CGI.Value & "'"
+            cmd.ExecuteNonQuery()
+            conn.Close()
+            dsContacts.DataBind()
+            gvContacts.DataBind()
+
+        End If
+
+        If gvContacts.Rows.Count < 1 Then
+            btnCheckAll.Visible = False
+            btnUncheckAll.Visible = False
+            btnAddtoGroup.Visible = False
+            ddlGroupAdd.Visible = False
+        Else
+            btnCheckAll.Visible = True
+            btnUncheckAll.Visible = True
+            btnAddtoGroup.Visible = True
+            ddlGroupAdd.Visible = True
+        End If
+
+    End Sub
+
+
+    Protected Sub btnCheckAll_Click(sender As Object, e As EventArgs) Handles btnCheckAll.Click
+        lblMessageContacts.Text = ""
+        lblMessageManage.Text = ""
+        lblMessageFooter.Text = ""
+        lblMessageUpload.Text = ""
+        lblMessage.Text = ""
+
+        For Each row As GridViewRow In gvContacts.Rows
+            Dim cbContact As CheckBox = CType(row.FindControl("cbContact"), CheckBox)
+            cbContact.Checked = True
+        Next
+    End Sub
+    Protected Sub btnUncheckAll_Click(sender As Object, e As EventArgs) Handles btnUncheckAll.Click
+        lblMessageContacts.Text = ""
+        lblMessageManage.Text = ""
+        lblMessageFooter.Text = ""
+        lblMessageUpload.Text = ""
+        lblMessage.Text = ""
+
+        For Each row As GridViewRow In gvContacts.Rows
+            Dim cbContact As CheckBox = CType(row.FindControl("cbContact"), CheckBox)
+            cbContact.Checked = False
+        Next
+
+    End Sub
+
+    Protected Sub btnAddtoGroup_Click(sender As Object, e As EventArgs) Handles btnAddtoGroup.Click
+
+        lblMessageContacts.Text = ""
+        lblMessageManage.Text = ""
+        lblMessageFooter.Text = ""
+        lblMessageUpload.Text = ""
+        lblMessage.Text = ""
+
+        For Each row As GridViewRow In gvContacts.Rows
+            Dim cbContact As CheckBox = CType(row.FindControl("cbContact"), CheckBox)
+            If cbContact.Checked = True Then
+                Dim ContactId = CType(row.FindControl("HFContactId"), HiddenField)
+                Dim GroupId As Guid = SM.GroupGetId(ddlGroupAdd.SelectedItem.Text, User.Identity.Name)
+                If SM.GroupAddContact(GroupId, Guid.Parse(ContactId.Value), User.Identity.Name) = True Then
+                    lblMessageFooter.Text &= "Contact " & CType(row.FindControl("lblFirstname"), Label).Text & " has been added to group " & ddlGroupAdd.SelectedValue & "&nbsp; <span class='glyphicon glyphicon-floppy-saved'></span> <br/>"
+                    Dim GID As Guid = SM.GroupGetId(ddlGroupManage.SelectedValue, User.Identity.Name)
+                    dsGroupContacts.SelectParameters("GroupId").DefaultValue = GID.ToString
+                    dsGroupContacts.SelectParameters("UserName").DefaultValue = User.Identity.Name
+                    gvGroupContacts.DataBind()
+                Else
+                    lblMessageFooter.Text &= "Contact " & CType(row.FindControl("lblFirstname"), Label).Text & " was not added to group " & ddlGroupAdd.SelectedValue & ". Contact already exists in group or there was an error adding the contact to group &nbsp; <span class='glyphicon glyphicon-ban-circle'></span> <br/>"
+                End If
+            End If
+        Next
+    End Sub
+
+End Class

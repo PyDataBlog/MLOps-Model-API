@@ -1,0 +1,78 @@
+# 
+# Settings and trigger for the Watermark process
+#
+
+# flag to say whether a watermark is required
+$c->{add_watermark} = 1;
+$c->{watermark_font_name} = "Courier-Bold";
+$c->{watermark_font_size} = 9;
+
+# add a field to record the date of the last watermark for a document
+push @{$c->{fields}->{document}},
+{ name => 'watermark_date', type => 'date', show_in_html => 0, export_as_xml => 0, sql_index=>0, volatile => 1, },
+;
+
+$c->add_trigger( EP_TRIGGER_DOC_URL_REWRITE, sub
+{
+	my( %args ) = @_;
+
+	my( $request, $doc, $relations, $filename ) = @args{qw( request document relations filename )};
+	my $repo = $doc->repository;
+
+	my $debug = 0;
+        my $uri = URI::http->new( $request->unparsed_uri );
+        my %request_args = $uri->query_form();
+
+	if ($request_args{debug})
+	{
+		$debug = 1;
+	}
+
+	print STDERR "watermark:: start add_watermark[".$repo->config( "add_watermark" )."]\n" if $debug;
+	return EP_TRIGGER_OK unless $repo->config( "add_watermark" );
+	return EP_TRIGGER_OK unless defined $doc;
+
+	# check document is a pdf
+	my $format = $doc->value( "format" ); # back compatibility
+	my $mime_type = $doc->value( "mime_type" );
+	return EP_TRIGGER_OK unless( $format eq "application/pdf" || $mime_type eq "application/pdf" || $filename =~ /\.pdf$/i );
+
+	# ignore thumbnails e.g. http://.../8381/1.haspreviewThumbnailVersion/jacqueline-lane.pdf
+	foreach my $rel ( @{$relations || []} )
+	{
+		return EP_TRIGGER_OK if( $rel =~ /^is\w+ThumbnailVersionOf$/ );
+	}
+
+	# ignore watermark and volatile documents
+	return EP_TRIGGER_OK if $doc->has_relation( undef, "isVolatileVersionOf" );
+	return EP_TRIGGER_OK if $doc->has_relation( undef, "isWatermarkVersionOf" );
+
+	my $eprint = $doc->get_eprint;
+
+	print STDERR "watermark:: request is for a pdf apply watermark\n" if $debug;
+
+        my $plugin = $repo->plugin( "Convert::AddWatermark" );
+        unless( defined $plugin )
+        {
+                $repo->log( "[Watermark_Trigger] Couldn't load Convert::AddWatermark plugin\n" );
+		return EPrints::Const::HTTP_NOT_FOUND;
+        }
+	print STDERR "watermark:: got plugin [$plugin] for doc[".$doc->get_id."] \n" if $debug;
+
+	my $watermarkdoc = $plugin->apply_watermark( $doc, $debug ); 
+	print STDERR "watermark:: apply_watermark returned [$watermarkdoc] \n" if $debug;
+	if( defined $watermarkdoc )
+	{
+		print STDERR "watermark:: got watermarked version doc id[".$watermarkdoc->get_id."] \n" if $debug;
+		# return the watermarked version
+		$watermarkdoc->set_value( "security", $doc->get_value( "security" ) );
+		$request->pnotes( filename => $watermarkdoc->get_main );
+		$request->pnotes( document => $watermarkdoc );
+		$request->pnotes( dataobj => $watermarkdoc );
+	}
+
+	# return the original document
+
+	return EP_TRIGGER_DONE;
+
+}, priority => 100 );

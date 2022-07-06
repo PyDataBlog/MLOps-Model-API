@@ -1,0 +1,154 @@
+import {UserService} from "./user.service";
+import {UserMongooseRepository} from "../repository/user-mongoose.repository";
+import {UserRepository} from "../repository/user.repository";
+import * as mongoose from "mongoose";
+import {DummyUsers} from "../repository/user-mongoose.repository.spec";
+import {sign} from "jsonwebtoken";
+import {UserModel} from "../model/user.model";
+import {UserError} from "../errors/user.errors";
+import {PassportService} from "../../passport/service/passport.service";
+import {config} from "../../../../config";
+import {PassportError} from "../../passport/errors/passport.errors.enum";
+
+/**
+ * Created by cturner on 19/09/2016.
+ */
+describe("UserMongooseModel Service", () => {
+    let userRepo: UserRepository = new UserMongooseRepository();
+    let userService: UserService = new UserService(new PassportService(userRepo), userRepo);
+
+    beforeAll( done => {
+        (mongoose as any).Promise = global.Promise;
+
+        mongoose.connect(config.mongo.testUri + "-user-service", config.mongo.options);
+
+        mongoose.connection.once("connected", done);
+    });
+
+    afterAll(done => {
+        mongoose.connection.close();
+
+        mongoose.connection.once("disconnected", done);
+    });
+
+    beforeEach(done => {
+        DummyUsers.create()
+            .then(done);
+    });
+
+    afterEach(done => {
+        mongoose.connection.db.dropDatabase(done);
+    });
+
+    describe("getting users", () => {
+        it("should fail if requesting user is invalid", done => {
+            userService.get("rubbishToken")
+                .catch( (err: PassportError) => {
+                    expect(err).toBe(PassportError.InvalidToken);
+                    done();
+                });
+        });
+
+        it("should succeed if requesting user id valid", done => {
+            userService.get(sign(DummyUsers.normalUserOne.key, config.secrets.sessionToken))
+                .then( (users: UserModel[]) => {
+                    expect(users.length).toBe(DummyUsers.users.length);
+                    done();
+                });
+        });
+    });
+
+    describe("adding a user", () => {
+        it("should fail if requesting user is invalid", done => {
+            userService.add("rubbishToken", DummyUsers.newUserOne)
+                .catch( (err: PassportError) => {
+                    expect(err).toBe(PassportError.InvalidToken);
+                    done();
+                });
+        });
+
+        it(`should fail if requesting user is doesn"t have the right roles`, done => {
+            userService.add(sign(DummyUsers.normalUserOne.key, config.secrets.sessionToken), DummyUsers.newUserOne)
+                .catch((err: UserError[]) => {
+                    expect(err).toEqual([UserError.AddUserOnlyMembershipUsers]);
+                    done();
+                });
+        });
+
+        it(`should fail if user is a duplicate and no name provided`, done => {
+            let user = DummyUsers.normalUserOne;
+            user.key = "";
+            user.name = "";
+            user.password = null;
+
+            userService.add(sign(DummyUsers.membershipUser.key, config.secrets.sessionToken), user)
+                .catch((err: UserError[]) => {
+                    expect(err.length).toBe(2);
+                    expect(err).toContain(UserError.NameRequired);
+                    expect(err).toContain(UserError.EmailNotUnique);
+                    done();
+                });
+        });
+
+        it(`should succeed if all is ok`, done => {
+            userService.add(sign(DummyUsers.membershipUser.key, config.secrets.sessionToken), DummyUsers.newUserOne)
+                .then((model: UserModel) => {
+                    expect(model.name).toEqual(DummyUsers.newUserOne.name);
+                    done();
+                })
+                .catch(err =>  {
+                    console.log(err);
+                    done();
+                });
+        });
+    });
+
+    describe("updating a user", () => {
+        it("should fail if requesting user is invalid", done => {
+            userService.update("rubbishToken", DummyUsers.normalUserOne)
+                .catch( (err: PassportError) => {
+                    expect(err).toBe(PassportError.InvalidToken);
+                    done();
+                });
+        });
+
+        it(`should fail if requesting user is doesn"t have the right roles`, done => {
+            let user = DummyUsers.normalUserTwo;
+            user.password = null;
+            user.name += "Updated";
+
+            userService.update(sign(DummyUsers.normalUserOne.key, config.secrets.sessionToken), user)
+                .catch((err: UserError[]) => {
+                    expect(err).toEqual([UserError.NameEditNotPermitted]);
+                    done();
+                });
+        });
+
+        it(`should fail if user is a duplicate and no name provided`, done => {
+            let user = DummyUsers.normalUserTwo;
+            user.name = "";
+            user.email = DummyUsers.normalUserOne.email;
+
+            userService.update(sign(DummyUsers.normalUserTwo.key, config.secrets.sessionToken), user)
+                .catch((err: UserError[]) => {
+                    expect(err.length).toBe(2);
+                    expect(err).toContain(UserError.NameRequired);
+                    expect(err).toContain(UserError.EmailNotUnique);
+                    done();
+                });
+        });
+
+        it(`expect modified date to be updated`, done => {
+            let user = DummyUsers.normalUserTwo;
+            user.name += "Updated";
+            user.email += "Updated";
+
+            userService.update(sign(DummyUsers.normalUserTwo.key, config.secrets.sessionToken), user)
+                .then((updated: UserModel) => {
+                    expect(DummyUsers.normalUserOne.dateLastModified.isBefore(updated.dateLastModified)).toBe(true);
+                    expect(user.key).toEqual(updated.key);
+                    done();
+                });
+        });
+    });
+});

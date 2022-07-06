@@ -1,0 +1,133 @@
+use std::marker::PhantomData;
+use serde::{de, Deserialize, Deserializer};
+use uuid::Uuid;
+
+/// A report about the outcome of a write.
+#[derive(Debug)]
+pub struct WriteStatus<T> {
+    /// The number of new documents inserted. This counter is zero in case of an update or delete
+    /// operation. In case of a replace operation you can have new documents inserted if you do a
+    /// point-replace on a key that isn't in the table or you do a replace on a selection and one of
+    /// the documents you are replacing has been deleted.
+    pub inserted: u32,
+
+    /// The number of documents that were updated or replaced. This counter is zero in case of a
+    /// delete operation or an insert operation where `conflict` isn't set to "replace" or "update".
+    pub replaced: u32,
+
+    /// The number of documents that would have been modified except the new value was the same as
+    /// the old value. This counter is zero in case of a delete operation or an insert operation
+    /// where `confict` is set to "error".
+    pub unchanged: u32,
+
+    /// The number of documents that were skipped because the document didn't exist. This counter is
+    /// zero in case of an insert or replace operation.
+    pub skipped: u32,
+
+    /// The number of documents that were deleted. This counter is zero in case of an insert or
+    /// update operation.
+    ///
+    /// A replace with `None` increases this counter.
+    pub deleted: u32,
+
+    /// The number of errors encountered while performing the operation.
+    pub errors: u32,
+
+    /// If errors where encountered, contains the text of the first error.
+    pub first_error: String,
+
+    /// A list of generated primary keys for inserted documents whose primary keys were not
+    /// specified (capped to 100,000).
+    pub generated_keys: Vec<Uuid>,
+
+    /// If the field `generated_keys` is truncated, you will get the warning "Too many generated
+    /// keys (<X>), array truncated to 100000".
+    pub warnings: String,
+
+    /// If `return_changes` is set to `true`, this will be an array of objects, one for each
+    /// object affected by the `insert` operation.
+    pub changes: Option<Vec<(T, T)>>,
+}
+
+impl<T: Deserialize> Deserialize for WriteStatus<T> {
+    fn deserialize<D: Deserializer>(deserializer: &mut D) -> Result<Self, D::Error> {
+        field_visitor!(
+            enum Field {
+                "inserted" => Inserted,
+                "replaced" => Replaced,
+                "unchanged" => Unchanged,
+                "skipped" => Skipped,
+                "deleted" => Deleted,
+                "errors" => Errors,
+                "first_error" => FirstError,
+                "generated_keys" => GeneratedKeys,
+                "warnings" => Warnings,
+                "changes" => Changes,
+            },
+            FieldVisitor
+        );
+
+        struct WriteStatusVisitor<T>(PhantomData<T>);
+
+        impl<T> de::Visitor for WriteStatusVisitor<T>
+            where T: Deserialize
+        {
+            type Value = WriteStatus<T>;
+
+            fn visit_map<V>(&mut self, mut visitor: V) -> Result<Self::Value, V::Error>
+                where V: de::MapVisitor
+            {
+                let mut inserted = None;
+                let mut replaced = None;
+                let mut unchanged = None;
+                let mut skipped = None;
+                let mut deleted = None;
+                let mut errors = None;
+                let mut first_error = None;
+                let mut generated_keys = None;
+                let mut warnings = None;
+                let mut changes = None;
+
+                while let Some(key) = try!(visitor.visit_key()) {
+                    match key {
+                        Field::Inserted => inserted = Some(try!(visitor.visit_value())),
+                        Field::Replaced => replaced = Some(try!(visitor.visit_value())),
+                        Field::Unchanged => unchanged = Some(try!(visitor.visit_value())),
+                        Field::Skipped => skipped = Some(try!(visitor.visit_value())),
+                        Field::Deleted => deleted = Some(try!(visitor.visit_value())),
+                        Field::Errors => errors = Some(try!(visitor.visit_value())),
+                        Field::FirstError => first_error = Some(try!(visitor.visit_value())),
+                        Field::GeneratedKeys => generated_keys = Some(try!(visitor.visit_value())),
+                        Field::Warnings => warnings = Some(try!(visitor.visit_value())),
+                        Field::Changes => changes = Some(try!(visitor.visit_value())),
+                    }
+                }
+                try!(visitor.end());
+
+                let inserted = inserted.unwrap_or(0);
+                let replaced = replaced.unwrap_or(0);
+                let unchanged = unchanged.unwrap_or(0);
+                let skipped = skipped.unwrap_or(0);
+                let deleted = deleted.unwrap_or(0);
+                let errors = errors.unwrap_or(0);
+                let first_error = first_error.unwrap_or_default();
+                let generated_keys = generated_keys.unwrap_or_default();
+                let warnings = warnings.unwrap_or_default();
+
+                Ok(WriteStatus {
+                    inserted: inserted,
+                    replaced: replaced,
+                    unchanged: unchanged,
+                    skipped: skipped,
+                    deleted: deleted,
+                    errors: errors,
+                    first_error: first_error,
+                    generated_keys: generated_keys,
+                    warnings: warnings,
+                    changes: changes,
+                })
+            }
+        }
+        deserializer.deserialize(WriteStatusVisitor(PhantomData))
+    }
+}

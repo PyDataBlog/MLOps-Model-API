@@ -1,0 +1,54 @@
+{-# LANGUAGE AllowAmbiguousTypes        #-}
+{-# LANGUAGE CPP                        #-}
+{-# LANGUAGE DataKinds                  #-}
+{-# LANGUAGE FlexibleContexts           #-}
+{-# LANGUAGE FlexibleInstances          #-}
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE InstanceSigs               #-}
+{-# LANGUAGE MultiParamTypeClasses      #-}
+{-# LANGUAGE OverloadedStrings          #-}
+{-# LANGUAGE PolyKinds                  #-}
+{-# LANGUAGE ScopedTypeVariables        #-}
+{-# LANGUAGE TupleSections              #-}
+{-# LANGUAGE TypeFamilies               #-}
+{-# LANGUAGE TypeOperators              #-}
+{-# LANGUAGE UndecidableInstances       #-}
+
+module Zero.KeyFetchToken.Client where
+
+import           GHC.TypeLits
+import           GHCJS.Types (JSVal)
+import           Control.Applicative
+import           Data.Monoid ((<>))
+import           Data.Proxy
+import qualified Data.Text as T
+import           Data.Text (Text)
+import           Data.Maybe (isJust, fromJust)
+import           Data.Either.Extra (eitherToMaybe)
+import           Reflex.Dom.Core
+import           Servant.Reflex
+import           Servant.API hiding (addHeader)
+import           Zero.KeyFetchToken.Internal
+import           Zero.Token
+import           Zero.Hawk (rawHeaderField, rawHeader)
+
+-- For clients with KeyFetchToken routes
+
+-- KnownSymbol path,
+
+instance (HasClient t m api tag, Reflex t)
+  => HasClient t m (KeyFetchToken :> api) tag where
+
+  -- The client passes a HeaderOptions encoded as a raw JSVal in
+  -- order to bypass MonadIO. Not the nicest type for a Dynamically
+  -- varying stream...
+  type Client t m (KeyFetchToken :> api) tag =
+    Dynamic t (Either Text (Text, Text, JSVal)) -> Client t m api tag
+
+  clientWithRoute Proxy q t req baseUrl hawkOpts = do
+    let opts = fmap fromJust $ fmap eitherToMaybe hawkOpts
+    let params = zipDynWith (\url (path, method, opts) -> (url `T.append` path, method, opts)) (showBaseUrl <$> baseUrl) opts
+    let field = fmap Right $ fmap rawHeaderField params
+    clientWithRoute (Proxy :: Proxy api) q t (req' field) baseUrl
+      where
+        req' field = addHeader "Authorization" field req

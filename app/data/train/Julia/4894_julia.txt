@@ -1,0 +1,114 @@
+"""
+**parallel_consensus(objectives, x0; kwargs...)**
+
+Proximal consensus algorithm (Parikh & Boyd, 2014).
+
+Required Arguments:
+-------------------
+
+* **objectives** -- an array specifying the subproblems (fᵢ, above)
+* **x0** -- an array containing the initial guess for the optimization
+
+Keyword Arguments (Optional):
+-----------------------------
+
+* **max_iter** -- number of iteration before the algorithm gives update.
+* **ρ_init** -- initial value of the momentum parameter, ρ.
+* **ρ_inc** -- factor to increase momentum when primal residual gets too big.
+* **ρ_dec** -- factor to decrease momentum when dual residual gets too big.
+* **tol** -- Residual tolerance for assessing convergence. Iterations stop when
+             both primal and dual residuals are less than tol (default: 1e-3).
+
+References:
+-----------
+
+* Parikh N, S Boyd (2014). Proximal Algorithms. Foundations and Trends in
+Optimization, 1(3):123-231.
+"""
+function parallel_consensus(objectives::Vector,
+	               x0::SharedArray{Float64,1};
+	               max_iter::Int=100,
+	               ρ::Float64=1.0,
+	               tol::Float64=1e-3)
+
+	# Problem dimensions
+	num_obj = length(objectives) # number of subproblems, fᵢ(x)
+	num_vars = length(x0) # number of optimization variables
+	@assert num_obj >= 1
+
+	# copy primal vars for each distributed problem
+	primals = SharedArray(Float64,(num_vars,num_obj))
+	primals[:] = repmat(x0,1,num_obj)[:]
+
+	# primal vars averaged across processes
+	primal_avg = x0
+
+	# dual vars for each problem (initialized to zero)
+	duals = Base.shmem_fill(0.0,(num_vars,num_obj))
+
+	# primal and dual residuals, tracked over iterations
+	primal_resid = (Float64)[]
+	dual_resid = (Float64)[]
+
+	# main loop
+	progress = ProgressThresh(tol, "Minimizing:")
+	cur_iter = 0
+	converged = false
+	while !converged && (cur_iter < max_iter)
+
+	    # store the parameters from the previous iteration
+	    primal_prev = deepcopy(primal_avg)
+
+	    # update each primal variable copy by taking a proximal step via each objective
+	    @sync @parallel for i = 1:num_obj
+	        primals[:,i] = prox(objectives[i], primal_prev - duals[:,i], ρ)
+	    end
+
+	    # average primal copies (across subproblems)
+	    primal_avg = vec(mean(primals,2))
+
+	    # update the dual variables (after primal update has finished)
+	    @sync @parallel for i = 1:num_obj
+	        duals[:,i] += primals[:,i] - primal_avg
+	    end
+
+	    # compute primal and dual residuals
+	    pr = @parallel (+) for i = 1:num_obj
+	    	vecnorm(primals[:,i] - primal_avg)
+	    end
+	    push!(primal_resid, pr)
+	    push!(dual_resid, num_obj * (ρ^2) * vecnorm(primal_avg - primal_prev))
+
+	    # check for convergence
+	    update!(progress, max(primal_resid[end],dual_resid[end]))
+	    if (primal_resid[end] <= tol) && (dual_resid[end] <= tol)
+	    	converged = true
+	    end
+
+	    # count iterations
+	    cur_iter += 1
+	end
+
+	# Check for convergence
+	!converged && warn("Result not converged, try increasing max_iter")
+
+	# final solution
+	x = primal_avg
+
+	# final objective value
+	opt_val = 0.0
+	for f in objectives
+		opt_val += f(x)
+	end
+
+	# package results
+	result = ConsensusResult(
+		x,
+		opt_val,
+		converged,
+		cur_iter,
+		primal_resid,
+		dual_resid)
+
+	return result
+end

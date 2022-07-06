@@ -1,0 +1,94 @@
+#!/usr/bin/perl
+
+use lib '/usr/local/seguridad/bin';
+use Net::LDAP;
+use Ix2;
+use SeguUsua;
+
+#
+# Funciones utiles basicas
+#
+sub ask
+{
+	print shift;
+	my $n=<>;
+	chomp($n);
+	return $n;
+}
+
+
+my $existesw=<<EOF
+select u.usuario_oid, u.login
+from usuarios u inner join datos_usr d on u.datosusr_oid=d.datosusr_oid
+where d.nrodoc='%d'
+EOF
+;
+
+my $existesw2=<<EOF
+select u.usuario_oid
+from usuarios u inner join datos_usr d on u.datosusr_oid=d.datosusr_oid
+where u.login='%s'
+EOF
+;
+
+my $buscagrupo=<<EOF
+select grupo_oid,nomgrupo
+from grupos
+where nomgrupo like '%s%%'
+EOF
+;
+
+my $agregagrupo='insert into miembros_grupos(grupo_oid, miembro_oid, tipo_miembro) values (%d, %d, 1)';
+
+
+if (scalar(@ARGV)<1) {
+	print "Parametros: login|NroDoc [id grupo]...\n";
+	exit;
+}
+my $login='';
+
+my $login_doc=shift @ARGV;
+
+
+my @r;
+
+if ($login_doc =~ /^\d+$/) {
+	print "Buscando por DNI\n";
+	@r=Ix2::query(sprintf($existesw,$login_doc));
+} else {
+	print "Buscando por login\n";
+	@r=Ix2::query(sprintf($existesw2,$login_doc));
+}
+
+if (scalar(@r) != 0) {
+	print "Encontrado\n";
+	($usuario_oid,$login)=split(/\|/,$r[0]);
+} else {
+	print "No encontrado\n";
+	exit();		
+}
+
+if (scalar(@ARGV)>0) {
+	do {
+		$grupo=shift @ARGV;
+		Ix2::execute(sprintf($agregagrupo,$grupo,$usuario_oid));
+	} while (scalar(@ARGV)>0);
+	exit();
+
+}
+$grupo=ask('Nombre/ID de grupo (Enter para terminar):');
+
+while ($grupo ne '') {
+
+	if ($grupo !~ /^\d+$/) {
+		@grupos=Ix2::query(sprintf($buscagrupo,$grupo));
+		print "Encontrados:\n";
+		while (scalar(@grupos)>0) {
+			print "$grupos[0]\n"; 
+			shift @grupos;
+		}
+	} else {
+		Ix2::execute(sprintf($agregagrupo,$grupo,$usuario_oid));
+	}
+	$grupo=ask('Nombre/ID de grupo (Enter para terminar):');
+}

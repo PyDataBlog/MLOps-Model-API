@@ -1,0 +1,339 @@
+# coding=utf-8
+import json
+
+from django.utils.translation import ugettext_lazy as _
+from django.http import HttpResponse
+import django.views
+from django.template import defaultfilters as template_filters
+
+from horizon import tables
+from horizon import exceptions
+
+from cloudkittydashboard.api import cloudkitty as api
+
+from openstack_dashboard.api import keystone
+
+from cloudkittydashboard.dashboards.project.billing_overview import tables as project_tables
+import time
+from datetime import date, timedelta, datetime
+import calendar
+
+from django.http import JsonResponse,HttpResponse
+import json
+import xlsxwriter
+import StringIO
+
+import logging
+LOG = logging.getLogger(__name__)
+def detail(request, org_id):
+    if org_id == None:
+      org_id = get_tenant_id(request)
+
+    try:
+      details = api.cloudkittyclient(request).billings.list_services_cost(get_month(request), org_id)
+    except Exception:
+      details = []
+      exceptions.handle(request, _('Unable to retrieve billing list.'))
+    return HttpResponse(json.dumps(details),content_type="application/json")
+
+
+class IndexView(tables.DataTableView):
+    # A very simple class-based view...
+    template_name = "project/billing_overview/index.html"
+    table_class = project_tables.BillingOverviewTable
+    page_title = _("Billing Overview")
+
+    def get_context_data(self, **kwargs):
+        context = super(IndexView, self).get_context_data(**kwargs)
+        context["tenant_id"] = get_tenant_id(self.request)
+        context["selected_month"] = get_month(self.request)
+        context["organizations"] = get_tenant_list(self.request)
+
+        year = time.strftime("%Y",time.localtime())
+        month = time.strftime("%m",time.localtime())
+        if int(month) == 1:
+          last_month = 12
+          last_year = int(year) - 1
+        else:
+          last_month = int(month) - 1
+          last_year = year
+
+        try:
+            context["year_begin"] = str((int(year)-1)) + "/" + str((int(month)))
+            context["year_end"] = str(last_year) + "/" + str(last_month)
+            # get last 12 months total cost
+            total_year = api.cloudkittyclient(self.request).billings.get_consumer_trends("month",
+                                                                                          12,
+                                                                                          get_tenant_id(self.request))
+            year_sum = 0
+            for billing_month in total_year["consumerTrends"]:
+                year_sum += billing_month["cost"]
+            context["billing_year"] = year_sum
+
+
+            #get current month cost
+            context["time_current_month"] = year+"/"+month
+            services_rate_list = api.cloudkittyclient(self.request).billings.list_services_cost(year+"-"+month,
+                                                                                                get_tenant_id(self.request))
+            current_sum = 0
+            for rate in services_rate_list["servicesRate"]:
+                current_sum += rate["rate"]
+            context["billing_current_month"] = current_sum
+
+            #get last month cost
+            context["time_last_month"] = str(last_year)+"/"+str(last_month)
+            context["billing_last_month"] = api.cloudkittyclient(self.request).billings.get_consumer_trends("month",
+                                                                                                                  1,
+                                                                                            get_tenant_id(self.request))["consumerTrends"][0]["cost"]
+        except Exception:
+            exceptions.handle(self.request,_("Unable to retrieve month cost"))
+
+        today = date.today()
+        context["last_12_months"] = last_12_months()
+        return context;
+
+
+    def get_data(self):
+        try:
+          billings = api.cloudkittyclient(self.request).billings.get_total_cost(get_month(self.request), get_tenant_id(self.request))["totals"]
+        except Exception:
+          billings = []
+          exceptions.handle(self.request, _('Unable to retrieve billing list.'))
+        return billings
+
+class ReportView(django.views.generic.TemplateView):
+    def get(self,request,*args,**kwargs):
+      tenant_id = get_tenant_id(self.request)
+      billing_month = get_month(self.request)
+      tenants = get_tenant_list(self.request)
+      for tenant in tenants:
+          if tenant.id == tenant_id:
+              tenant_name = tenant.name
+              break
+      reports = api.cloudkittyclient(self.request).billings.list_month_report(tenant_id,billing_month)
+      output = StringIO.StringIO()
+      workbook = xlsxwriter.Workbook(output)
+      month_sheet = workbook.add_worksheet(tenant_name)
+      #设置列宽度
+      month_sheet.set_column('A:Z',9)
+      #表头
+      head = (u'部门',u'资源',
+              u'1月',u'2月',u'3月', u'1Q合计',
+              u'4月',u'5月',u'6月', u'2Q合计', u'上半年计',
+              u'7月',u'8月',u'9月', u'3Q合计',
+              u'10月',u'11月',u'12月',u'4Q合计',u'下半年计',u'全年合计'
+              )
+
+      # 设置表头字符串和格式
+      head_format = workbook.add_format({
+        'bold':True,
+        'font_size':20,
+        'font_name':'Microsoft YaHei'
+        })
+      row = 1
+      col = 0
+      head_str = billing_month.split('-')[0] + u'年度月别计费一览表'
+      head_str1 = u'资源及使用费用情况'
+      month_sheet.write(row,col,head_str,head_format)
+
+      row += 1
+      month_sheet.write(row,col,u'如需查看季、年度合计，请在月份对应位置取消隐藏')
+
+      row += 2
+      month_sheet.write(row,col,head_str1,head_format)
+      explain_format = workbook.add_format({'align':'right'})
+      year_month = billing_month.split('-')
+      if billing_month == template_filters.date(date.today(), "Y-m"):
+          tab_date = u'制表日期：%d月%d日' %(int(year_month[1]),date.today().day-1)
+      else:
+          tab_date = u'制表日期：%d月%d日' %(int(year_month[1]),calendar.monthrange(int(year_month[0]),int(year_month[1]))[1])
+      month_sheet.write(row,len(head)-1,u'单位：元   ' + tab_date, explain_format)
+
+      row += 1
+      col = 0
+      head2_format = workbook.add_format({
+        'bold':True,
+        'align':'center',
+        'valign':'vcenter',
+        'bg_color':'#D8E4BC',
+        'left':1,
+        'font_name':'Microsoft YaHei'
+        })
+      #设置行高
+      month_sheet.set_row(row,30)
+      for index_str in head:
+          month_sheet.write(row,col,index_str,head2_format)
+          col += 1
+
+      row += 1
+      month_sheet.set_column('A:A',15)
+      #资源和合计所占行数
+      names = ['Compute','Volume',u'合计']
+      even_format = workbook.add_format({
+        'border':1,
+        'font_name':'Microsoft YaHei',
+        'num_format': '#,##0.00'
+        })
+      odd_format=workbook.add_format({
+        'border':1,
+        'font_name':'Microsoft YaHei',
+        'bg_color':'#D9D9D9',
+        'num_format': '#,##0.00'
+        })
+      resource_total_rows = 3
+      # 处理每个部门
+      merge_format = workbook.add_format({
+        'bold':True,
+        'font_name':'Microsoft YaHei',
+        'font_size':14,
+        'align':'center',
+        'valign':'vcenter',
+        'border':1
+        })
+      for depart in reports['departs']:
+          col = 1
+          for index,name in enumerate(names):
+              if index % 2 != 0:
+                  month_sheet.set_row(row+index,None,odd_format)
+              else:
+                  month_sheet.set_row(row+index,None,even_format)
+              month_sheet.write(row+index,col,name)
+          month_sheet.merge_range(row,0,row+resource_total_rows-1,0,depart['tenant_name'],merge_format)
+
+          tmp_row = row
+          write_col = col + 1
+          for month_report in depart['month_reports']:
+              for res_tpye in month_report['res_types']:
+                  if res_tpye['res_type'] == "compute":
+                      write_row = tmp_row
+                  elif res_tpye['res_type'] == "volume":
+                      write_row = tmp_row + 1
+                  month_sheet.write(write_row,write_col,res_tpye['rate'])
+              write_col += 1
+              month = int(month_report["month"].split('-')[1])
+              if month  == 3:
+                  for index in range(resource_total_rows-1):
+                      index_row = tmp_row + index
+                      month_sheet.write(index_row,write_col,'=SUM(C' + str(index_row+1) + ':E' + str(index_row+1) + ')')
+                  write_col += 1
+              elif month == 6:
+                  for index in range(resource_total_rows-1):
+                      index_row = tmp_row + index
+                      month_sheet.write(index_row,write_col,'=SUM(G' + str(index_row+1) + ':I' + str(index_row+1) + ')')
+                      month_sheet.write(index_row,write_col+1,'=SUM(F' + str(index_row+1) + '+J' + str(index_row+1) + ')')
+                  write_col += 2
+              elif month == 9:
+                  for index in range(resource_total_rows-1):
+                      index_row = tmp_row + index
+                      month_sheet.write(index_row,write_col,'=SUM(L' + str(index_row+1) + ':N' + str(index_row+1) + ')')
+                  write_col += 1
+              elif month == 12:
+                  for index in range(resource_total_rows-1):
+                      index_row = tmp_row + index
+                      month_sheet.write(index_row,write_col,'=SUM(P' + str(index_row+1) + ':R' + str(index_row+1) + ')')
+                      month_sheet.write(index_row,write_col+1,'=SUM(O' + str(index_row+1) + '+S' + str(index_row+1) + ')')
+                      month_sheet.write(index_row,write_col+2,'=SUM(K' + str(index_row+1) + '+T' + str(index_row+1) + ')')
+                  write_col += 3
+          #处理后面的年统计和季度统计
+          for month in range(1,13):
+              if month  == 3:
+                  for index in range(resource_total_rows-1):
+                      index_row = tmp_row + index
+                      month_sheet.write(index_row,5,'=SUM(C' + str(index_row+1) + ':E' + str(index_row+1) + ')')
+              elif month == 6:
+                  for index in range(resource_total_rows-1):
+                      index_row = tmp_row + index
+                      month_sheet.write(index_row,9,'=SUM(G' + str(index_row+1) + ':I' + str(index_row+1) + ')')
+                      month_sheet.write(index_row,10,'=SUM(F' + str(index_row+1) + '+J' + str(index_row+1) + ')')
+              elif month == 9:
+                  for index in range(resource_total_rows-1):
+                      index_row = tmp_row + index
+                      month_sheet.write(index_row,14,'=SUM(L' + str(index_row+1) + ':N' + str(index_row+1) + ')')
+              elif month == 12:
+                  for index in range(resource_total_rows-1):
+                      index_row = tmp_row + index
+                      month_sheet.write(index_row,18,'=SUM(P' + str(index_row+1) + ':R' + str(index_row+1) + ')')
+                      month_sheet.write(index_row,19,'=SUM(O' + str(index_row+1) + '+S' + str(index_row+1) + ')')
+                      month_sheet.write(index_row,20,'=SUM(K' + str(index_row+1) + '+T' + str(index_row+1) + ')')
+          month_sheet.write_array_formula('C' + str(tmp_row + resource_total_rows) + ':U' + str(tmp_row + resource_total_rows ),
+                                          '{=C' + str(tmp_row + 1) + ':U' + str(tmp_row + 1) + '+'  \
+                                          + 'C' + str(tmp_row + resource_total_rows - 1) + ':U' + str(tmp_row + resource_total_rows - 1) + '}')
+          #跳过资源种类数目和合计的行
+          row = row + resource_total_rows
+          #部门之间中间隔一行
+          row += 1
+      month_sheet.print_area(0,0,row,len(head)-1)
+      month_sheet.fit_to_pages(1,1)
+      month_sheet.freeze_panes(0,1)
+      month_sheet.hide_zero()
+      month_sheet.set_column('F:F',None,None,{'hidden':1})
+      month_sheet.set_column('J:J',None,None,{'hidden':1})
+      month_sheet.set_column('K:K',None,None,{'hidden':1})
+      month_sheet.set_column('O:O',None,None,{'hidden':1})
+      month_sheet.set_column('S:S',None,None,{'hidden':1})
+      month_sheet.set_column('T:T',None,None,{'hidden':1})
+      month_sheet.set_column('V:XFD',None,None,{'hidden':1})
+      workbook.close()
+      output.seek(0)
+      response = HttpResponse(output.read())
+      response['Content-type']="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+      response['Content-Disposition'] = "attachment; filename=" + str(billing_month) +"-report.xlsx"
+      return response
+
+class TrendsView(django.views.generic.TemplateView):
+    def get(self, request, *args, **kwargs):
+      tenant_id = request.GET.get("tenant_id", request.user.tenant_id)
+      time_series = request.GET.get("time_series", "month")
+      try:
+          trends = api.cloudkittyclient(self.request).billings.get_consumer_trends(time_series,
+                                                                                            12,
+                                                                   get_tenant_id(self.request))
+      except Exception:
+          trends = {}
+          exceptions.handle(request,_("Unable to retrieve trend data"))
+      # convert time and cost to x and y
+      for trend in trends["consumerTrends"]:
+          if time_series == u'month':
+              trend.update(x=time.strftime('%Y-%m-%dT%H:%M:%S%Z',time.strptime(trend.pop("time"),"%Y-%m")),y=trend.pop("cost"))
+          elif time_series == u'day':
+              trend.update(x=time.strftime('%Y-%m-%dT%H:%M:%S%Z',time.strptime(trend.pop("time"),"%Y-%m-%d")),y=trend.pop("cost"))
+      ret = {'series': [{
+        'name': 'admin',
+        'unit': 'CNY',
+        'time_series': time_series,
+        'data': trends["consumerTrends"]
+        }],
+        'settings': {
+        'verbose_date': False
+      }}
+      return HttpResponse(json.dumps(ret), content_type='application/json')
+
+
+def get_month(request):
+  try:
+    month = request.GET.get("month", "%s-%s" % (date.today().year, date.today().month))
+    return month
+  except Exception:
+    return None
+
+
+def get_tenant_id(request):
+  return request.GET.get("tenant_id", request.user.tenant_id)
+
+
+def get_tenant_list(request):
+  return sorted(request.user.authorized_tenants, reverse=False, key=lambda x: getattr(x, "sortNumber", 0))
+
+def last_12_months():
+  def back_months(dt, months):
+        month = (dt.month - months)  or 12
+        year = dt.year - month / 12
+        return dt.replace(year=year, month=month, day=1)
+
+  date = datetime.today()
+  date_choices = [date]
+  for i in range(1, 12):
+    date = back_months(date, 1)
+    date_choices.append(date)
+
+  return date_choices

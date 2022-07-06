@@ -1,0 +1,71 @@
+﻿$DataHubSourcesEventLog     = 'DataHub'
+$DataHubSourcesEventSource  = 'Get-DataHubSMBusinessService.psm1'
+$DataHubSourcesEventID      = 1020 
+
+Function Get-DataHubSMBusinessService
+{
+Begin { 
+}
+Process {
+$SMQuery = @"
+SELECT LOGICAL_NAME AS Tjenestenavn, ASSIGNMENT AS Losningsgruppe, NRK_SUB_ASSIGNMENT AS Subgruppe, NRK_ANSVARLIG_UTENFOR_ARBEIDSTID AS Vakt, PROBLEM_PRIORITY AS Kritikalitet, NRK_TEKNISK_RESSURSPERSON AS Ressursperson, NRK_SYSTEMEIER_SEKSJON AS Systemeier, NRK_SYSTEMADMIN AS Sysadmin, NRK_ID as NRKID, Comments as Beskrivelse
+FROM v_tjeneste_info
+WHERE SUBTYPE = 'Application Service'
+"@
+
+  $SqlConnection = New-Object System.Data.SqlClient.SqlConnection
+  $SqlConnection.ConnectionString = "Server=hpsmsql;Database=ServiceManager;User Id=sm7_query;Password=sm7_query"
+  $SqlCmd = New-Object System.Data.SqlClient.SqlCommand
+  $SqlCmd.Connection = $SqlConnection
+  $SqlCmd.CommandText = $SMQuery
+  $SqlAdapter = New-Object System.Data.SqlClient.SqlDataAdapter
+  $SqlAdapter.SelectCommand = $SqlCmd
+  $DataSet = New-Object System.Data.DataSet
+
+  $SqlConnection.Open()
+  $SqlAdapter.Fill($DataSet) | Out-Null
+  $Tjenester = $DataSet.Tables[0].Rows
+  $SqlConnection.Close()
+
+  Foreach ($Tjeneste in $Tjenester) {
+    If ([string]::IsNullOrEmpty($Tjeneste.Systemeier)) {
+      $NySystemEier = $Tjeneste.Systemeier
+    } Else {
+      $NySystemEier = $Tjeneste.Systemeier.Replace("'","").Replace('"',"")
+    }
+    If ([string]::IsNullOrEmpty($Tjeneste.Beskrivelse)) {
+      $NyBeskrivelse = $Tjeneste.Beskrivelse
+    } Else {
+      $NyBeskrivelse = $Tjeneste.Beskrivelse.Replace("'","").Replace('"',"")
+    }
+    If ([string]::IsNullOrEmpty($Tjeneste.Losningsgruppe)) {
+        $NyLosningsgruppe = $Null
+    } else {
+        $NyLosningsgruppe = $Tjeneste.Losningsgruppe
+    }
+    If ([string]::IsNullOrEmpty($Tjeneste.Subgruppe)) {
+        $NySubgruppe = $Null
+    } else {
+        $NySubgruppe = $Tjeneste.Subgruppe
+    }
+    Try {
+        $PropertyHash = @{Tjenestenavn=$Tjeneste.Tjenestenavn;
+                          Losningsgruppe=$NyLosningsgruppe
+                          Subgruppe=$NySubgruppe
+                          Vakt=$Tjeneste.Vakt;
+                          Kritikalitet=[System.Convert]::ToInt32($Tjeneste.Kritikalitet);
+                          Ressursperson=$Tjeneste.Ressursperson;
+                          Systemeier=$NySystemEier;
+                          NRKID=$Tjeneste.NRKID
+                          Sysadmin=$Tjeneste.Sysadmin
+                          Beskrivelse=$NyBeskrivelse}
+    }
+    Catch {
+        Write-EventLog -LogName $DataHubSourcesEventLog -Source $DataHubSourcesEventSource -EntryType Warning -EventId $DataHubSourcesEventID -Message "$($Tjeneste.Tjenestenavn) : $($_.Exception.Message)"
+    }
+    Write-Output (New-Object -TypeName PSObject -Property $PropertyHash)
+  }
+
+}
+End {  }
+}

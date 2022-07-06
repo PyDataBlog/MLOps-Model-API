@@ -1,0 +1,1 @@
+%systemroot%\Microsoft.NET\Framework\v4.0.30319\MSBuild.exe stfu.sln /t:Clean /p:Configuration=Debug;Platform=x64 /flp:Verbosity=normal;PerformanceSummary;Summary;Append;LogFile=clean-debug-x64.log /m

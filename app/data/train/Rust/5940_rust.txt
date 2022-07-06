@@ -1,0 +1,179 @@
+// Copyright (c) 2016-2018 Bruce Stenning. All rights reserved.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+//
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+//
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+//
+// 3. Neither the name of the copyright holder nor the names of its
+//    contributors may be used to endorse or promote products derived
+//    from this software without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS
+// "AS IS" AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT
+// LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS
+// FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE
+// COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+// INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING,
+// BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS
+// OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED
+// AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+// OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF
+// THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH
+// DAMAGE.
+
+use std::collections::*;
+use std::mem;
+use std::ptr;
+
+use algebra::matrix::Mat4;
+use algebra::vector::Vec3;
+
+#[derive(Clone)]
+pub struct UniformBufferBacking {
+    pub binding: usize,
+    pub size: usize,
+    pub bytes: Vec<u8>,
+    pub offsets: BTreeMap<String, usize>,
+    pub array_strides: BTreeMap<String, usize>,
+}
+
+impl UniformBufferBacking {
+    pub fn new() -> UniformBufferBacking {
+        UniformBufferBacking {
+            binding: 0,
+            size: 0,
+            bytes: vec![],
+            offsets: BTreeMap::new(),
+            array_strides: BTreeMap::new(),
+        }
+    }
+}
+
+impl UniformBufferBacking {
+    /// Set a integer in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// value: The value to set for the uniform
+    pub fn set_int(&mut self, uniform_name: &str, value: i32) {
+        let offset = self.offsets[uniform_name];
+        unsafe {
+            let dst: *const u8 = self.bytes.as_ptr().offset(offset as isize);
+            let dst_i32 = dst as *mut i32;
+            *dst_i32 = value;
+        }
+    }
+
+    /// Set a floating point in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// value: The value to set for the uniform
+    pub fn set_float(&mut self, uniform_name: &str, value: f32) {
+        let offset = self.offsets[uniform_name];
+        unsafe {
+            let dst: *const u8 = self.bytes.as_ptr().offset(offset as isize);
+            let dst_f32 = dst as *mut f32;
+            *dst_f32 = value;
+        }
+    }
+
+    /// Set a 3-component vector in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// value: The value to set for the uniform
+    pub fn set_vec3(&mut self, uniform_name: &str, value: &Vec3<f32>) {
+        let offset = self.offsets[uniform_name];
+        debug_assert!((offset + 3 * mem::size_of::<f32>()) <= self.size);
+        unsafe {
+            let dst: *const u8 = self.bytes.as_ptr().offset(offset as isize);
+            let dst_f32 = dst as *mut f32;
+            let src: *const f32 = mem::transmute(value);
+            ptr::copy_nonoverlapping(src, dst_f32, 3);
+        }
+    }
+
+    /// Set a 4x4-component matrix in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// value: The value to set for the uniform
+    pub fn set_matrix(&mut self, uniform_name: &str, value: &Mat4<f32>) {
+        let offset = self.offsets[uniform_name];
+        debug_assert!((offset + 16 * mem::size_of::<f32>()) <= self.size);
+        unsafe {
+            let dst: *const u8 = self.bytes.as_ptr().offset(offset as isize);
+            let dst_f32 = dst as *mut f32;
+            let src: *const f32 = mem::transmute(value);
+            ptr::copy_nonoverlapping(src, dst_f32, 16);
+        }
+    }
+
+    /// Set a floating point vector in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// value: The vector to set for the uniform
+    pub fn set_float_vector(&mut self, uniform_name: &str, value: &Vec<f32>) {
+        let offset = self.offsets[uniform_name];
+        let stride = self.array_strides[uniform_name];
+        if stride == 0 || stride == 4 {
+            debug_assert!((offset + value.len() * mem::size_of::<f32>()) <= self.size);
+            unsafe {
+                let dst: *const u8 = self.bytes.as_ptr().offset(offset as isize);
+                let dst_f32 = dst as *mut f32;
+                let src: *const f32 = mem::transmute(value.as_ptr());
+                ptr::copy_nonoverlapping(src, dst_f32, value.len());
+            }
+        } else {
+            // This path requires observing the stride
+            debug_assert!((offset + value.len() * stride) <= self.size);
+            unsafe {
+                for i in 0..value.len() {
+                    let dst: *const u8 = self.bytes.as_ptr().offset((i * stride + offset) as isize);
+                    let dst_f32 = dst as *mut f32;
+                    let src: *const f32 = mem::transmute(value.as_ptr().offset(i as isize));
+                    *dst_f32 = *src;
+                }
+            }
+        }
+    }
+}
+
+pub trait UniformBuffer {
+    /// Update the accumulated contents to the named uniform buffer
+    fn synchronise(&self);
+
+    /// Set a integer in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// value: The value to set for the uniform
+    fn set_int(&mut self, uniform_name: &str, value: i32);
+
+    /// Set a floating point in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// value: The value to set for the uniform
+    fn set_float(&mut self, uniform_name: &str, value: f32);
+
+    /// Set a 3-component vector in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// value: The value to set for the uniform
+    fn set_vec3(&mut self, uniform_name: &str, value: &Vec3<f32>);
+
+    /// Set a 4x4-component matrix in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// matrix: The value to set for the uniform
+    fn set_matrix(&mut self, uniform_name: &str, matrix: &Mat4<f32>);
+
+    /// Set a floating point vector in part of the memory put aside for the named uniform buffer
+    ///
+    /// uniform_name: The name of the uniform whose value should be set
+    /// vector: The vector to set for the uniform
+    fn set_float_vector(&mut self, uniform_name: &str, vector: &Vec<f32>);
+}

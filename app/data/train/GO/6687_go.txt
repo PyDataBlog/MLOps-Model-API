@@ -1,0 +1,129 @@
+package cron
+
+import (
+	"context"
+	"log"
+
+	"github.com/aws/aws-lambda-go/events"
+	"gopkg.in/microlith.v0/sam"
+)
+
+// A Job is a Lambda function that runs on a schedule.
+type Job interface {
+	Run(ctx context.Context, evt events.CloudWatchEvent) error
+}
+
+// A JobFunc wraps a function as a Job.
+type JobFunc func(ctx context.Context, evt events.CloudWatchEvent) error
+
+// Run implements the Job interface.
+func (jf JobFunc) Run(ctx context.Context, evt events.CloudWatchEvent) error {
+	return jf(ctx, evt)
+}
+
+type job struct {
+	id       string
+	lambda   Job
+	hooks    *sam.Hooks
+	schedule string
+}
+
+// NewJob constructs a job unattached to any service.  This function panics if
+// the ID is invalid, if the schedule is blank, or if the handler is nil.
+func NewJob(id, schedule string, lambda Job, builders ...JobBuilderFunc) *JobAcceptor {
+	sam.ValidateID(id)
+
+	if schedule == "" {
+		log.Panicf("schedule cannot be blank")
+	}
+
+	if lambda == nil {
+		log.Panicf("handler lambda cannot be nil")
+	}
+
+	job := &job{
+		id:       id,
+		lambda:   lambda,
+		hooks:    new(sam.Hooks),
+		schedule: schedule,
+	}
+
+	builder := newJobBuilder(job)
+	defer builder.build()
+
+	for _, build := range builders {
+		build(builder)
+	}
+
+	return newJobAcceptor(job)
+}
+
+type JobVisitor interface {
+	sam.Visitor
+	VisitJob(job *JobAcceptor)
+}
+
+// A JobAcceptor is a read-only interface to a Job.
+type JobAcceptor struct {
+	job *job
+}
+
+func newJobAcceptor(job *job) *JobAcceptor {
+	return &JobAcceptor{
+		job: job,
+	}
+}
+
+// Accept implements the sam.Acceptor interface
+func (acceptor *JobAcceptor) Accept(visitor sam.Visitor) {
+	visitor.(JobVisitor).VisitJob(acceptor)
+}
+
+// ID implements the sam.Lambda interface.
+func (acceptor *JobAcceptor) ID() string {
+	return acceptor.job.id
+}
+
+// Schedule returns the schedule this job runs on.
+func (acceptor *JobAcceptor) Schedule() string {
+	return acceptor.job.schedule
+}
+
+// Type implements the sam.Lambda interface.
+func (acceptor *JobAcceptor) Type() *sam.LambdaType {
+	return sam.NewLambdaType("job")
+}
+
+// Handler implements the sam.Lambda interface.
+func (acceptor *JobAcceptor) Handler() interface{} {
+	return acceptor.job.lambda.Run
+}
+
+// Hooks implements the sam.Lambda interface.
+func (acceptor *JobAcceptor) Hooks() *sam.HooksAcceptor {
+	return sam.NewHooksAcceptor(acceptor.job.hooks)
+}
+
+type JobBuilderFunc func(job *JobBuilder)
+
+type JobBuilder struct {
+	job *job
+}
+
+func newJobBuilder(job *job) *JobBuilder {
+	return &JobBuilder{
+		job: job,
+	}
+}
+
+func (builder *JobBuilder) ID() string {
+	return builder.job.id
+}
+
+func (builder *JobBuilder) Hooks(builders ...sam.HooksBuilderFunc) {
+	sam.NewHooksBuilder(builder.job.hooks, builders...)
+}
+
+func (builder *JobBuilder) build() {
+	builder.job = nil
+}

@@ -1,0 +1,116 @@
+package xauth
+
+import (
+	"crypto/sha1"
+	"fmt"
+	xauthjwt "github.com/SamuelRamond/xauth/jwt"
+	"github.com/SamuelRamond/xauth/model"
+	"github.com/SamuelRamond/xauth/store"
+)
+
+// New Create a new Authenticator instance
+func New(privateKeyPath string, publicKeyPath string, s store.Store) (*Authenticator, error) {
+	x, err := xauthjwt.New(privateKeyPath, publicKeyPath)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Authenticator{
+		x: x,
+		s: s,
+	}, nil
+}
+
+// Authenticator wire store logic and signed user
+type Authenticator struct {
+	x *xauthjwt.XAuthJWT
+	s store.Store
+}
+
+func (a *Authenticator) hash(s string) string {
+	h := sha1.New()
+	h.Write([]byte(s))
+	bs := h.Sum(nil)
+	return fmt.Sprintf("%x", bs)
+}
+
+// Register a new user in the store
+func (a *Authenticator) Register(username string, password string) error {
+	// @Todo assert username validity ?
+	if a.s.GetUserByUsername(username) != nil {
+		return fmt.Errorf("User already exist")
+	}
+	return a.s.AddUser(&model.User{
+		Username: username,
+		Password: a.hash(password),
+	})
+}
+
+// Login authenticate an user
+func (a *Authenticator) Login(username string, password string) (string, error) {
+	u := a.s.GetUserByUsername(username)
+	if u == nil {
+		return "", fmt.Errorf("No user matching")
+	}
+
+	if u.Password != a.hash(password) {
+		return "", fmt.Errorf("Invalid password")
+	}
+
+	p, err := a.x.GenerateToken(map[string]interface{}{
+		"user_id": u.ID,
+	})
+	return p, err
+}
+
+// Whois return information about given bearer
+func (a *Authenticator) Whois(bearer string) (*model.User, error) {
+	claim, err := a.x.Validate(bearer)
+	if err != nil {
+		return nil, err
+	}
+	v, ok := claim["user_id"]
+	if !ok {
+		return nil, fmt.Errorf("Unable to retrieve user_id")
+	}
+	// @Todo: check type
+	u := a.s.GetUserByID(uint64(v.(float64)))
+	if u == nil {
+		return nil, fmt.Errorf("No such user")
+	}
+	u.Permissions = a.s.GetPermissions(u.ID)
+	return u, nil
+}
+
+// ACL test if one user as access to a given entity
+func (a *Authenticator) ACL(userID uint64, entityType string, entityID string, permission string) bool {
+	ps := a.s.GetPermissions(userID)
+	for _, p := range ps {
+		if p.Match(entityType, entityID, permission) {
+			return true
+		}
+	}
+	return false
+}
+
+// AddPermissions add some permission to a user
+func (a *Authenticator) AddPermissions(userID uint64, entityType string, entityID string, permissions []string) error {
+	// Add merge logic here
+	currentP := a.s.GetPermissions(userID)
+	newEntity := true
+	for _, p := range currentP {
+		if p.EntityType == entityType && p.EntityID == entityID {
+			p.Merge(permissions)
+			newEntity = false
+		}
+	}
+	if newEntity {
+		currentP = append(currentP, &model.Permission{
+			UserID:      userID,
+			EntityType:  entityType,
+			EntityID:    entityID,
+			Permissions: permissions,
+		})
+	}
+	return a.s.UpdatePermissions(userID, currentP)
+}

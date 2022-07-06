@@ -1,0 +1,88 @@
+import Services from '../src/lib/services';
+
+const _ = require('lodash');
+require('db-migrate-mysql');
+const expect = require('unexpected');
+const request = require('./request.func');
+
+let rds;
+
+class Email {
+  // eslint-disable-next-line
+  sendHtml() {
+    return Promise.resolve();
+  }
+}
+
+class Slack {
+  // eslint-disable-next-line
+  sendAppUpdate() {
+    return Promise.resolve();
+  }
+}
+
+export default class FuncTestServices extends Services {
+  // eslint-disable-next-line class-methods-use-this
+  getEmail() {
+    return new Email();
+  }
+
+  // eslint-disable-next-line class-methods-use-this
+  getSlack() {
+    return new Slack();
+  }
+
+  getMysql() {
+    if (!rds) {
+      // eslint-disable-next-line global-require
+      rds = require('serverless-mysql')({
+        config: {
+          host: this.getEnv('RDS_HOST'),
+          user: this.getEnv('RDS_USER'),
+          password: this.getEnv('RDS_PASSWORD'),
+          database: this.getEnv('RDS_DATABASE'),
+          ssl: this.getEnv('RDS_SSL'),
+          port: this.getEnv('RDS_PORT'),
+          multipleStatements: true,
+        },
+      });
+    }
+    return rds;
+  }
+
+  static async initDb() {
+    await rds.query(
+      'INSERT IGNORE INTO vendors SET id=?, name=?, address=?, email=?, isPublic=?',
+      [process.env.FUNC_VENDOR, 'test', 'test', process.env.FUNC_USER_EMAIL, 0],
+    );
+    await rds.query('DELETE FROM appVersions WHERE vendor=?', [process.env.FUNC_VENDOR]);
+  }
+
+  static async login() {
+    const res = await expect(request({
+      method: 'post',
+      url: `${_.get(process.env, 'API_ENDPOINT')}/auth/login`,
+      responseType: 'json',
+      data: {
+        email: process.env.FUNC_USER_EMAIL,
+        password: process.env.FUNC_USER_PASSWORD,
+      },
+    }), 'to be fulfilled');
+    expect(_.get(res, 'status'), 'to be', 200);
+    expect(_.get(res, 'data'), 'to have key', 'token');
+    return _.get(res, 'data.token');
+  }
+
+  static async cleanIconsFromS3(appId) {
+    const s3 = Services.getS3();
+    const data = await s3.listObjects({ Bucket: process.env.S3_BUCKET, Prefix: `${appId}/` }).promise();
+    if (data && _.has(data, 'Contents')) {
+      const promises = [];
+      _.each(data.Contents, (file) => {
+        promises.push(s3.deleteObject({ Bucket: process.env.S3_BUCKET, Key: file.Key }).promise());
+      });
+      return Promise.all(promises);
+    }
+    return Promise.resolve();
+  }
+}

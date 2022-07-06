@@ -1,0 +1,631 @@
+# functions for coupled ABPD and LP Neurons
+# May 26th, 2017
+# Alec Hoyland (ahoyland 'at' brandeis 'dot' edu)
+
+# general functions
+boltz(V::Float64,A::Float64,B::Float64) = 1/(1 + exp((V+A)/B))
+tauX(V::Float64,A::Float64,B::Float64,D::Float64,E::Float64) = A - B/(1+exp((V+D)/E))
+
+## Ionic Current Functions
+# conductive-thermodynamic weight
+function weight(g::Float64,act::Float64,p::Int64,ict::Float64)
+  g*(act^p)*ict
+end
+# ionic Current
+function flux(w::Float64,V::Float64,E::Float64)
+  -w*(V-E)
+end
+# hysteresis
+function hysteresis(inf::Float64,igv::Float64,tau::Float64)
+  (inf-igv)/tau
+end
+
+## IntraCellular Calcium Functions
+# differential intracellular calcium
+function diff_calcium(CaT::Float64,CaS::Float64,Cal::Float64,Cal0::Float64)
+  conversion_factor     = 9.4   # μM•nF/nA
+  #Ca_resting_state      = 0.05  # μM
+  Calinf                = conversion_factor*(CaT + CaS) + Cal0
+  hysteresis(Calinf,Cal,200.0)
+end
+# calcium reveral potential
+function ECal(IntraCal::Float64,Temp::Float64,ExtraCal::Float64)
+  R     = 8.314*1e3       # mV•C / (mol•K)
+  T     = 273.15 + Temp   # K
+  F     = 96485.33        # C/mol
+  z     = 2
+  (R*T)/(z*F)*log(ExtraCal/IntraCal)
+end
+
+## Synaptic Functions
+# uses the exponential euler method to compute the synaptic gating variable
+function synaptic(inf::Float64,sgv::Float64,tau::Float64)
+  inf + (sgv - inf)*exp(-dt/tau)
+end
+
+# simulates the ABPD and LP neurons
+# outputs AB voltage, calcium, LP voltage, calcium as vectors
+function simulateSTG(IappAB::Float64,IappLP::Float64)
+  # initial conditions
+  # AB neuron
+  AB.V            = -70.0
+  AB.Cal          = 0.5
+  # activation variables
+  AB.Na.act.val   = AB.Na.act.inf(AB.V)
+  AB.CaT.act.val  = AB.CaT.act.inf(AB.V)
+  AB.CaS.act.val  = AB.CaS.act.inf(AB.V)
+  AB.A.act.val    = AB.A.act.inf(AB.V)
+  AB.KCa.act.val  = AB.KCa.act.inf(AB.V,AB.Cal)
+  AB.Kd.act.val   = AB.Kd.act.inf(AB.V)
+  AB.H.act.val    = AB.H.act.inf(AB.V)
+  AB.leak.act.val = AB.leak.act.inf(AB.V)
+  AB.MI.act.val   = AB.MI.act.inf(AB.V)
+  AB.glut.syn.val = 0.0
+  AB.chol.syn.val = 0.0
+  # inactivation variables
+  AB.Na.ict.val   = AB.Na.ict.inf(AB.V)
+  AB.CaT.ict.val  = AB.CaT.ict.inf(AB.V)
+  AB.CaS.ict.val  = AB.CaS.ict.inf(AB.V)
+  AB.A.ict.val    = AB.A.ict.inf(AB.V)
+  AB.KCa.ict.val  = AB.KCa.ict.inf(AB.V)
+  AB.Kd.ict.val   = AB.Kd.ict.inf(AB.V)
+  AB.H.ict.val    = AB.H.ict.inf(AB.V)
+  AB.leak.ict.val = AB.leak.ict.inf(AB.V)
+  AB.MI.ict.val   = AB.MI.ict.inf(AB.V)
+  # LP neuron
+  LP.V            = -70.0
+  LP.Cal          = 0.05
+  # activation variables
+  LP.Na.act.val   = LP.Na.act.inf(LP.V)
+  LP.CaT.act.val  = LP.CaT.act.inf(LP.V)
+  LP.CaS.act.val  = LP.CaS.act.inf(LP.V)
+  LP.A.act.val    = LP.A.act.inf(LP.V)
+  LP.KCa.act.val  = LP.KCa.act.inf(LP.V,LP.Cal)
+  LP.Kd.act.val   = LP.Kd.act.inf(LP.V)
+  LP.H.act.val    = LP.H.act.inf(LP.V)
+  LP.leak.act.val = LP.leak.act.inf(LP.V)
+  LP.MI.act.val   = LP.MI.act.inf(LP.V)
+  LP.glut.syn.val = 0.0
+  LP.chol.syn.val = 0.0
+  # inactivation variables
+  LP.Na.ict.val   = LP.Na.ict.inf(LP.V)
+  LP.CaT.ict.val  = LP.CaT.ict.inf(LP.V)
+  LP.CaS.ict.val  = LP.CaS.ict.inf(LP.V)
+  LP.A.ict.val    = LP.A.ict.inf(LP.V)
+  LP.KCa.ict.val  = LP.KCa.ict.inf(LP.V)
+  LP.Kd.ict.val   = LP.Kd.ict.inf(LP.V)
+  LP.H.ict.val    = LP.H.ict.inf(LP.V)
+  LP.leak.ict.val = LP.leak.ict.inf(LP.V)
+  LP.MI.ict.val   = LP.MI.ict.inf(LP.V)
+  # temporary variables
+  ABtempV         = copy(AB.V)
+  ABtempCal       = copy(AB.Cal)
+  LPtempV         = copy(LP.V)
+  LPtempCal       = copy(LP.Cal)
+  # calcium reversal potential
+  AB.CaT.E        = ECal(ABtempCal,Temp,ExtraCal)
+  AB.CaS.E        = ECal(ABtempCal,Temp,ExtraCal)
+  # initialize output vector
+  ABvolt          = zeros(tspan)
+  LPvolt          = zeros(tspan)
+  ABcalcium       = zeros(tspan)
+  LPcalcium       = zeros(tspan)
+  # perform simulation
+  Juno.progress(name = "simulateSTG") do sim
+    for ii in 1:tspan
+      Juno.progress(sim,ii/tspan)
+      # reversal potentials
+      AB.CaT.E        = ECal(ABtempCal,Temp,ExtraCal)
+      AB.CaS.E        = ECal(ABtempCal,Temp,ExtraCal)
+      LP.CaT.E        = ECal(LPtempCal,Temp,ExtraCal)
+      LP.CaS.E        = ECal(LPtempCal,Temp,ExtraCal)
+      # conductive-thermodynamic weights
+      # AB neuron
+      AB.Na.w         = weight(AB.Na.g,AB.Na.act.val,AB.Na.p,AB.Na.ict.val)
+      AB.CaT.w        = weight(AB.CaT.g,AB.CaT.act.val,AB.CaT.p,AB.CaT.ict.val)
+      AB.CaS.w        = weight(AB.CaS.g,AB.CaS.act.val,AB.CaS.p,AB.CaS.ict.val)
+      AB.A.w          = weight(AB.A.g,AB.A.act.val,AB.A.p,AB.A.ict.val)
+      AB.KCa.w        = weight(AB.KCa.g,AB.KCa.act.val,AB.KCa.p,AB.KCa.ict.val)
+      AB.Kd.w         = weight(AB.Kd.g,AB.Kd.act.val,AB.Kd.p,AB.Kd.ict.val)
+      AB.H.w          = weight(AB.H.g,AB.H.act.val,AB.H.p,AB.H.ict.val)
+      AB.leak.w       = weight(AB.leak.g,AB.leak.act.val,AB.leak.p,AB.leak.ict.val)
+      AB.MI.w         = weight(AB.MI.g,AB.MI.act.val,AB.MI.p,AB.MI.ict.val)
+      AB.glut.w       = AB.glut.g * AB.glut.syn.val
+      AB.chol.w       = AB.chol.g * AB.chol.syn.val
+      # LP neuron
+      LP.Na.w         = weight(LP.Na.g,LP.Na.act.val,LP.Na.p,LP.Na.ict.val)
+      LP.CaT.w        = weight(LP.CaT.g,LP.CaT.act.val,LP.CaT.p,LP.CaT.ict.val)
+      LP.CaS.w        = weight(LP.CaS.g,LP.CaS.act.val,LP.CaS.p,LP.CaS.ict.val)
+      LP.A.w          = weight(LP.A.g,LP.A.act.val,LP.A.p,LP.A.ict.val)
+      LP.KCa.w        = weight(LP.KCa.g,LP.KCa.act.val,LP.KCa.p,LP.KCa.ict.val)
+      LP.Kd.w         = weight(LP.Kd.g,LP.Kd.act.val,LP.Kd.p,LP.Kd.ict.val)
+      LP.H.w          = weight(LP.H.g,LP.H.act.val,LP.H.p,LP.H.ict.val)
+      LP.leak.w       = weight(LP.leak.g,LP.leak.act.val,LP.leak.p,LP.leak.ict.val)
+      LP.MI.w         = weight(LP.MI.g,LP.MI.act.val,LP.MI.p,LP.MI.ict.val)
+      LP.glut.w       = LP.glut.g * LP.glut.syn.val
+      LP.chol.w       = LP.chol.g * LP.chol.syn.val
+      # currents
+      # AB neuron
+      AB.Na.phi       = flux(AB.Na.w,ABtempV,AB.Na.E)
+      AB.CaT.phi      = flux(AB.CaT.w,ABtempV,AB.CaT.E)
+      AB.CaS.phi      = flux(AB.CaS.w,ABtempV,AB.CaS.E)
+      AB.A.phi        = flux(AB.A.w,ABtempV,AB.A.E)
+      AB.KCa.phi      = flux(AB.KCa.w,ABtempV,AB.KCa.E)
+      AB.Kd.phi       = flux(AB.Kd.w,ABtempV,AB.Kd.E)
+      AB.H.phi        = flux(AB.H.w,ABtempV,AB.H.E)
+      AB.leak.phi     = flux(AB.leak.w,ABtempV,AB.leak.E)
+      AB.MI.phi       = flux(AB.MI.w,ABtempV,AB.MI.E)
+      AB.glut.phi     = flux(AB.glut.w,ABtempV,AB.glut.E)
+      AB.chol.phi     = flux(AB.chol.w,ABtempV,AB.chol.E)
+      # LP neuron
+      LP.Na.phi       = flux(LP.Na.w,LP.V,LP.Na.E)
+      LP.CaT.phi      = flux(LP.CaT.w,LP.V,LP.CaT.E)
+      LP.CaS.phi      = flux(LP.CaS.w,LP.V,LP.CaS.E)
+      LP.A.phi        = flux(LP.A.w,LP.V,LP.A.E)
+      LP.KCa.phi      = flux(LP.KCa.w,LP.V,LP.KCa.E)
+      LP.Kd.phi       = flux(LP.Kd.w,LP.V,LP.Kd.E)
+      LP.H.phi        = flux(LP.H.w,LP.V,LP.H.E)
+      LP.leak.phi     = flux(LP.leak.w,LP.V,LP.leak.E)
+      LP.MI.phi       = flux(LP.MI.w,LP.V,LP.MI.E)
+      LP.glut.phi     = flux(LP.glut.w,LPtempV,LP.glut.E)
+      LP.chol.phi     = flux(LP.chol.w,LPtempV,LP.chol.E)
+      # update voltage
+      AB.V            += dt*(AB.Na.phi + AB.CaT.phi + AB.CaS.phi + AB.A.phi
+                      + AB.KCa.phi + AB.Kd.phi + AB.H.phi + AB.leak.phi
+                      + AB.MI.phi + AB.glut.phi + AB.chol.phi + IappAB)*(1/AB.Cm)
+      LP.V            += dt*(LP.Na.phi + LP.CaT.phi + LP.CaS.phi + LP.A.phi
+                      + LP.KCa.phi + LP.Kd.phi + LP.H.phi + LP.leak.phi
+                      + LP.MI.phi + LP.glut.phi + LP.chol.phi + IappLP)*(1/LP.Cm)
+      # update calcium
+      AB.Cal          += dt*diff_calcium(AB.CaT.phi,AB.CaS.phi,ABtempCal,Cal0)
+      LP.Cal          += dt*diff_calcium(LP.CaT.phi,LP.CaS.phi,LPtempCal,Cal0)
+      # update ionic gating variables
+      # AB neuron
+      AB.Na.act.val   += dt*hysteresis(AB.Na.act.inf(ABtempV),AB.Na.act.val,AB.Na.act.tau(ABtempV))
+      AB.Na.ict.val   += dt*hysteresis(AB.Na.ict.inf(ABtempV),AB.Na.ict.val,AB.Na.ict.tau(ABtempV))
+      AB.CaT.act.val  += dt*hysteresis(AB.CaT.act.inf(ABtempV),AB.CaT.act.val,AB.CaT.act.tau(ABtempV))
+      AB.CaT.ict.val  += dt*hysteresis(AB.CaT.ict.inf(ABtempV),AB.CaT.ict.val,AB.CaT.ict.tau(ABtempV))
+      AB.CaS.act.val  += dt*hysteresis(AB.CaS.act.inf(ABtempV),AB.CaS.act.val,AB.CaS.act.tau(ABtempV))
+      AB.CaS.ict.val  += dt*hysteresis(AB.CaS.ict.inf(ABtempV),AB.CaS.ict.val,AB.CaS.ict.tau(ABtempV))
+      AB.A.act.val    += dt*hysteresis(AB.A.act.inf(ABtempV),AB.A.act.val,AB.A.act.tau(ABtempV))
+      AB.A.ict.val    += dt*hysteresis(AB.A.ict.inf(ABtempV),AB.A.ict.val,AB.A.ict.tau(ABtempV))
+      AB.KCa.act.val  += dt*hysteresis(AB.KCa.act.inf(ABtempV,ABtempCal),AB.KCa.act.val,AB.KCa.act.tau(ABtempV))
+      AB.KCa.ict.val  += dt*hysteresis(AB.KCa.ict.inf(ABtempV),AB.KCa.ict.val,AB.KCa.ict.tau(ABtempV))
+      AB.Kd.act.val   += dt*hysteresis(AB.Kd.act.inf(ABtempV),AB.Kd.act.val,AB.Kd.act.tau(ABtempV))
+      AB.Kd.ict.val   += dt*hysteresis(AB.Kd.ict.inf(ABtempV),AB.Kd.ict.val,AB.Kd.ict.tau(ABtempV))
+      AB.H.act.val    += dt*hysteresis(AB.H.act.inf(ABtempV),AB.H.act.val,AB.H.act.tau(ABtempV))
+      AB.H.ict.val    += dt*hysteresis(AB.H.ict.inf(ABtempV),AB.H.ict.val,AB.H.ict.tau(ABtempV))
+      AB.leak.act.val += dt*hysteresis(AB.leak.act.inf(ABtempV),AB.leak.act.val,AB.leak.act.tau(ABtempV))
+      AB.leak.ict.val += dt*hysteresis(AB.leak.ict.inf(ABtempV),AB.leak.ict.val,AB.leak.ict.tau(ABtempV))
+      AB.MI.act.val   += dt*hysteresis(AB.MI.act.inf(ABtempV),AB.MI.act.val,AB.MI.act.tau(ABtempV))
+      AB.MI.ict.val   += dt*hysteresis(AB.MI.ict.inf(ABtempV),AB.MI.ict.val,AB.MI.ict.tau(ABtempV))
+      # LP neuron
+      LP.Na.act.val   += dt*hysteresis(LP.Na.act.inf(LPtempV),LP.Na.act.val,LP.Na.act.tau(LPtempV))
+      LP.Na.ict.val   += dt*hysteresis(LP.Na.ict.inf(LPtempV),LP.Na.ict.val,LP.Na.ict.tau(LPtempV))
+      LP.CaT.act.val  += dt*hysteresis(LP.CaT.act.inf(LPtempV),LP.CaT.act.val,LP.CaT.act.tau(LPtempV))
+      LP.CaT.ict.val  += dt*hysteresis(LP.CaT.ict.inf(LPtempV),LP.CaT.ict.val,LP.CaT.ict.tau(LPtempV))
+      LP.CaS.act.val  += dt*hysteresis(LP.CaS.act.inf(LPtempV),LP.CaS.act.val,LP.CaS.act.tau(LPtempV))
+      LP.CaS.ict.val  += dt*hysteresis(LP.CaS.ict.inf(LPtempV),LP.CaS.ict.val,LP.CaS.ict.tau(LPtempV))
+      LP.A.act.val    += dt*hysteresis(LP.A.act.inf(LPtempV),LP.A.act.val,LP.A.act.tau(LPtempV))
+      LP.A.ict.val    += dt*hysteresis(LP.A.ict.inf(LPtempV),LP.A.ict.val,LP.A.ict.tau(LPtempV))
+      LP.KCa.act.val  += dt*hysteresis(LP.KCa.act.inf(LPtempV,LPtempCal),LP.KCa.act.val,LP.KCa.act.tau(LPtempV))
+      LP.KCa.ict.val  += dt*hysteresis(LP.KCa.ict.inf(LPtempV),LP.KCa.ict.val,LP.KCa.ict.tau(LPtempV))
+      LP.Kd.act.val   += dt*hysteresis(LP.Kd.act.inf(LPtempV),LP.Kd.act.val,LP.Kd.act.tau(LPtempV))
+      LP.Kd.ict.val   += dt*hysteresis(LP.Kd.ict.inf(LPtempV),LP.Kd.ict.val,LP.Kd.ict.tau(LPtempV))
+      LP.H.act.val    += dt*hysteresis(LP.H.act.inf(LPtempV),LP.H.act.val,LP.H.act.tau(LPtempV))
+      LP.H.ict.val    += dt*hysteresis(LP.H.ict.inf(LPtempV),LP.H.ict.val,LP.H.ict.tau(LPtempV))
+      LP.leak.act.val += dt*hysteresis(LP.leak.act.inf(LPtempV),LP.leak.act.val,LP.leak.act.tau(LPtempV))
+      LP.leak.ict.val += dt*hysteresis(LP.leak.ict.inf(LPtempV),LP.leak.ict.val,LP.leak.ict.tau(LPtempV))
+      LP.MI.act.val   += dt*hysteresis(LP.MI.act.inf(LPtempV),LP.MI.act.val,LP.MI.act.tau(LPtempV))
+      LP.MI.ict.val   += dt*hysteresis(LP.MI.ict.inf(LPtempV),LP.MI.ict.val,LP.MI.ict.tau(LPtempV))
+
+      # update synaptic gating variables
+      AB.glut.syn.val   = synaptic(AB.glut.syn.inf(LPtempV),AB.glut.syn.val,AB.glut.syn.tau(LPtempV))
+      AB.chol.syn.val   = synaptic(AB.chol.syn.inf(LPtempV),AB.chol.syn.val,AB.chol.syn.tau(LPtempV))
+      LP.glut.syn.val   = synaptic(LP.glut.syn.inf(ABtempV),LP.glut.syn.val,LP.glut.syn.tau(ABtempV))
+      LP.chol.syn.val   = synaptic(LP.chol.syn.inf(ABtempV),LP.chol.syn.val,LP.chol.syn.tau(ABtempV))
+
+      # update output vectors
+      ABvolt[ii]      = copy(AB.V)
+      LPvolt[ii]      = copy(LP.V)
+      ABcalcium[ii]   = copy(AB.Cal)
+      LPcalcium[ii]   = copy(LP.Cal)
+
+      ABtempV         = copy(AB.V)
+      ABtempCal       = copy(AB.Cal)
+      LPtempV         = copy(LP.V)
+      LPtempCal       = copy(LP.Cal)
+    end
+    return (ABvolt, LPvolt)
+    #return ABvolt, LPvolt
+  end
+end
+
+# outputs the currents normalized by the net change in potential
+function decomposeSTG(IappAB::Float64,IappLP::Float64)
+  # initial conditions
+  # AB neuron
+  AB.V            = -70.0
+  AB.Cal          = 0.5
+  # activation variables
+  AB.Na.act.val   = AB.Na.act.inf(AB.V)
+  AB.CaT.act.val  = AB.CaT.act.inf(AB.V)
+  AB.CaS.act.val  = AB.CaS.act.inf(AB.V)
+  AB.A.act.val    = AB.A.act.inf(AB.V)
+  AB.KCa.act.val  = AB.KCa.act.inf(AB.V,AB.Cal)
+  AB.Kd.act.val   = AB.Kd.act.inf(AB.V)
+  AB.H.act.val    = AB.H.act.inf(AB.V)
+  AB.leak.act.val = AB.leak.act.inf(AB.V)
+  AB.MI.act.val   = AB.MI.act.inf(AB.V)
+  AB.glut.syn.val = 0.0
+  AB.chol.syn.val = 0.0
+  # inactivation variables
+  AB.Na.ict.val   = AB.Na.ict.inf(AB.V)
+  AB.CaT.ict.val  = AB.CaT.ict.inf(AB.V)
+  AB.CaS.ict.val  = AB.CaS.ict.inf(AB.V)
+  AB.A.ict.val    = AB.A.ict.inf(AB.V)
+  AB.KCa.ict.val  = AB.KCa.ict.inf(AB.V)
+  AB.Kd.ict.val   = AB.Kd.ict.inf(AB.V)
+  AB.H.ict.val    = AB.H.ict.inf(AB.V)
+  AB.leak.ict.val = AB.leak.ict.inf(AB.V)
+  AB.MI.ict.val   = AB.MI.ict.inf(AB.V)
+  # LP neuron
+  LP.V            = -70.0
+  LP.Cal          = 0.05
+  # activation variables
+  LP.Na.act.val   = LP.Na.act.inf(LP.V)
+  LP.CaT.act.val  = LP.CaT.act.inf(LP.V)
+  LP.CaS.act.val  = LP.CaS.act.inf(LP.V)
+  LP.A.act.val    = LP.A.act.inf(LP.V)
+  LP.KCa.act.val  = LP.KCa.act.inf(LP.V,LP.Cal)
+  LP.Kd.act.val   = LP.Kd.act.inf(LP.V)
+  LP.H.act.val    = LP.H.act.inf(LP.V)
+  LP.leak.act.val = LP.leak.act.inf(LP.V)
+  LP.MI.act.val   = LP.MI.act.inf(LP.V)
+  LP.glut.syn.val = 0.0
+  LP.chol.syn.val = 0.0
+  # inactivation variables
+  LP.Na.ict.val   = LP.Na.ict.inf(LP.V)
+  LP.CaT.ict.val  = LP.CaT.ict.inf(LP.V)
+  LP.CaS.ict.val  = LP.CaS.ict.inf(LP.V)
+  LP.A.ict.val    = LP.A.ict.inf(LP.V)
+  LP.KCa.ict.val  = LP.KCa.ict.inf(LP.V)
+  LP.Kd.ict.val   = LP.Kd.ict.inf(LP.V)
+  LP.H.ict.val    = LP.H.ict.inf(LP.V)
+  LP.leak.ict.val = LP.leak.ict.inf(LP.V)
+  LP.MI.ict.val   = LP.MI.ict.inf(LP.V)
+  # temporary variables
+  ABtempV         = copy(AB.V)
+  ABtempCal       = copy(AB.Cal)
+  LPtempV         = copy(LP.V)
+  LPtempCal       = copy(LP.Cal)
+  # calcium reversal potential
+  AB.CaT.E        = ECal(ABtempCal,Temp,ExtraCal)
+  AB.CaS.E        = ECal(ABtempCal,Temp,ExtraCal)
+  # initialize voltage output vector
+  ABvolt          = zeros(tspan)
+  LPvolt          = zeros(tspan)
+  ABcalcium       = zeros(tspan)
+  LPcalcium       = zeros(tspan)
+  # initialize curent output vector
+  ABamps          = zeros(tspan,12)
+  LPamps          = zeros(tspan,12)
+  # perform simulation
+  Juno.progress(name = "decomposeSTG") do sim
+    for ii in 1:tspan
+      Juno.progress(sim,ii/tspan)
+      # reversal potentials
+      AB.CaT.E        = ECal(ABtempCal,Temp,ExtraCal)
+      AB.CaS.E        = ECal(ABtempCal,Temp,ExtraCal)
+      LP.CaT.E        = ECal(LPtempCal,Temp,ExtraCal)
+      LP.CaS.E        = ECal(LPtempCal,Temp,ExtraCal)
+      # conductive-thermodynamic weights
+      # AB neuron
+      AB.Na.w         = weight(AB.Na.g,AB.Na.act.val,AB.Na.p,AB.Na.ict.val)
+      AB.CaT.w        = weight(AB.CaT.g,AB.CaT.act.val,AB.CaT.p,AB.CaT.ict.val)
+      AB.CaS.w        = weight(AB.CaS.g,AB.CaS.act.val,AB.CaS.p,AB.CaS.ict.val)
+      AB.A.w          = weight(AB.A.g,AB.A.act.val,AB.A.p,AB.A.ict.val)
+      AB.KCa.w        = weight(AB.KCa.g,AB.KCa.act.val,AB.KCa.p,AB.KCa.ict.val)
+      AB.Kd.w         = weight(AB.Kd.g,AB.Kd.act.val,AB.Kd.p,AB.Kd.ict.val)
+      AB.H.w          = weight(AB.H.g,AB.H.act.val,AB.H.p,AB.H.ict.val)
+      AB.leak.w       = weight(AB.leak.g,AB.leak.act.val,AB.leak.p,AB.leak.ict.val)
+      AB.MI.w         = weight(AB.MI.g,AB.MI.act.val,AB.MI.p,AB.MI.ict.val)
+      AB.glut.w       = AB.glut.g * AB.glut.syn.val
+      AB.chol.w       = AB.chol.g * AB.chol.syn.val
+      # LP neuron
+      LP.Na.w         = weight(LP.Na.g,LP.Na.act.val,LP.Na.p,LP.Na.ict.val)
+      LP.CaT.w        = weight(LP.CaT.g,LP.CaT.act.val,LP.CaT.p,LP.CaT.ict.val)
+      LP.CaS.w        = weight(LP.CaS.g,LP.CaS.act.val,LP.CaS.p,LP.CaS.ict.val)
+      LP.A.w          = weight(LP.A.g,LP.A.act.val,LP.A.p,LP.A.ict.val)
+      LP.KCa.w        = weight(LP.KCa.g,LP.KCa.act.val,LP.KCa.p,LP.KCa.ict.val)
+      LP.Kd.w         = weight(LP.Kd.g,LP.Kd.act.val,LP.Kd.p,LP.Kd.ict.val)
+      LP.H.w          = weight(LP.H.g,LP.H.act.val,LP.H.p,LP.H.ict.val)
+      LP.leak.w       = weight(LP.leak.g,LP.leak.act.val,LP.leak.p,LP.leak.ict.val)
+      LP.MI.w         = weight(LP.MI.g,LP.MI.act.val,LP.MI.p,LP.MI.ict.val)
+      LP.glut.w       = LP.glut.g * LP.glut.syn.val
+      LP.chol.w       = LP.chol.g * LP.chol.syn.val
+      # currents
+      # AB neuron
+      AB.Na.phi       = flux(AB.Na.w,ABtempV,AB.Na.E)
+      AB.CaT.phi      = flux(AB.CaT.w,ABtempV,AB.CaT.E)
+      AB.CaS.phi      = flux(AB.CaS.w,ABtempV,AB.CaS.E)
+      AB.A.phi        = flux(AB.A.w,ABtempV,AB.A.E)
+      AB.KCa.phi      = flux(AB.KCa.w,ABtempV,AB.KCa.E)
+      AB.Kd.phi       = flux(AB.Kd.w,ABtempV,AB.Kd.E)
+      AB.H.phi        = flux(AB.H.w,ABtempV,AB.H.E)
+      AB.leak.phi     = flux(AB.leak.w,ABtempV,AB.leak.E)
+      AB.MI.phi       = flux(AB.MI.w,ABtempV,AB.MI.E)
+      AB.glut.phi     = flux(AB.glut.w,ABtempV,AB.glut.E)
+      AB.chol.phi     = flux(AB.chol.w,ABtempV,AB.chol.E)
+      # LP neuron
+      LP.Na.phi       = flux(LP.Na.w,LP.V,LP.Na.E)
+      LP.CaT.phi      = flux(LP.CaT.w,LP.V,LP.CaT.E)
+      LP.CaS.phi      = flux(LP.CaS.w,LP.V,LP.CaS.E)
+      LP.A.phi        = flux(LP.A.w,LP.V,LP.A.E)
+      LP.KCa.phi      = flux(LP.KCa.w,LP.V,LP.KCa.E)
+      LP.Kd.phi       = flux(LP.Kd.w,LP.V,LP.Kd.E)
+      LP.H.phi        = flux(LP.H.w,LP.V,LP.H.E)
+      LP.leak.phi     = flux(LP.leak.w,LP.V,LP.leak.E)
+      LP.MI.phi       = flux(LP.MI.w,LP.V,LP.MI.E)
+      LP.glut.phi     = flux(LP.glut.w,LPtempV,LP.glut.E)
+      LP.chol.phi     = flux(LP.chol.w,LPtempV,LP.chol.E)
+      # update voltage
+      AB.V            += dt*(AB.Na.phi + AB.CaT.phi + AB.CaS.phi + AB.A.phi
+                      + AB.KCa.phi + AB.Kd.phi + AB.H.phi + AB.leak.phi
+                      + AB.MI.phi + AB.glut.phi + AB.chol.phi + IappAB)*(1/AB.Cm)
+      LP.V            += dt*(LP.Na.phi + LP.CaT.phi + LP.CaS.phi + LP.A.phi
+                      + LP.KCa.phi + LP.Kd.phi + LP.H.phi + LP.leak.phi
+                      + LP.MI.phi + LP.glut.phi + LP.chol.phi + IappLP)*(1/LP.Cm)
+      # update calcium
+      AB.Cal          += dt*diff_calcium(AB.CaT.phi,AB.CaS.phi,ABtempCal,Cal0)
+      LP.Cal          += dt*diff_calcium(LP.CaT.phi,LP.CaS.phi,LPtempCal,Cal0)
+      # update ionic gating variables
+      # AB neuron
+      AB.Na.act.val   += dt*hysteresis(AB.Na.act.inf(ABtempV),AB.Na.act.val,AB.Na.act.tau(ABtempV))
+      AB.Na.ict.val   += dt*hysteresis(AB.Na.ict.inf(ABtempV),AB.Na.ict.val,AB.Na.ict.tau(ABtempV))
+      AB.CaT.act.val  += dt*hysteresis(AB.CaT.act.inf(ABtempV),AB.CaT.act.val,AB.CaT.act.tau(ABtempV))
+      AB.CaT.ict.val  += dt*hysteresis(AB.CaT.ict.inf(ABtempV),AB.CaT.ict.val,AB.CaT.ict.tau(ABtempV))
+      AB.CaS.act.val  += dt*hysteresis(AB.CaS.act.inf(ABtempV),AB.CaS.act.val,AB.CaS.act.tau(ABtempV))
+      AB.CaS.ict.val  += dt*hysteresis(AB.CaS.ict.inf(ABtempV),AB.CaS.ict.val,AB.CaS.ict.tau(ABtempV))
+      AB.A.act.val    += dt*hysteresis(AB.A.act.inf(ABtempV),AB.A.act.val,AB.A.act.tau(ABtempV))
+      AB.A.ict.val    += dt*hysteresis(AB.A.ict.inf(ABtempV),AB.A.ict.val,AB.A.ict.tau(ABtempV))
+      AB.KCa.act.val  += dt*hysteresis(AB.KCa.act.inf(ABtempV,ABtempCal),AB.KCa.act.val,AB.KCa.act.tau(ABtempV))
+      AB.KCa.ict.val  += dt*hysteresis(AB.KCa.ict.inf(ABtempV),AB.KCa.ict.val,AB.KCa.ict.tau(ABtempV))
+      AB.Kd.act.val   += dt*hysteresis(AB.Kd.act.inf(ABtempV),AB.Kd.act.val,AB.Kd.act.tau(ABtempV))
+      AB.Kd.ict.val   += dt*hysteresis(AB.Kd.ict.inf(ABtempV),AB.Kd.ict.val,AB.Kd.ict.tau(ABtempV))
+      AB.H.act.val    += dt*hysteresis(AB.H.act.inf(ABtempV),AB.H.act.val,AB.H.act.tau(ABtempV))
+      AB.H.ict.val    += dt*hysteresis(AB.H.ict.inf(ABtempV),AB.H.ict.val,AB.H.ict.tau(ABtempV))
+      AB.leak.act.val += dt*hysteresis(AB.leak.act.inf(ABtempV),AB.leak.act.val,AB.leak.act.tau(ABtempV))
+      AB.leak.ict.val += dt*hysteresis(AB.leak.ict.inf(ABtempV),AB.leak.ict.val,AB.leak.ict.tau(ABtempV))
+      AB.MI.act.val   += dt*hysteresis(AB.MI.act.inf(ABtempV),AB.MI.act.val,AB.MI.act.tau(ABtempV))
+      AB.MI.ict.val   += dt*hysteresis(AB.MI.ict.inf(ABtempV),AB.MI.ict.val,AB.MI.ict.tau(ABtempV))
+      # LP neuron
+      LP.Na.act.val   += dt*hysteresis(LP.Na.act.inf(LPtempV),LP.Na.act.val,LP.Na.act.tau(LPtempV))
+      LP.Na.ict.val   += dt*hysteresis(LP.Na.ict.inf(LPtempV),LP.Na.ict.val,LP.Na.ict.tau(LPtempV))
+      LP.CaT.act.val  += dt*hysteresis(LP.CaT.act.inf(LPtempV),LP.CaT.act.val,LP.CaT.act.tau(LPtempV))
+      LP.CaT.ict.val  += dt*hysteresis(LP.CaT.ict.inf(LPtempV),LP.CaT.ict.val,LP.CaT.ict.tau(LPtempV))
+      LP.CaS.act.val  += dt*hysteresis(LP.CaS.act.inf(LPtempV),LP.CaS.act.val,LP.CaS.act.tau(LPtempV))
+      LP.CaS.ict.val  += dt*hysteresis(LP.CaS.ict.inf(LPtempV),LP.CaS.ict.val,LP.CaS.ict.tau(LPtempV))
+      LP.A.act.val    += dt*hysteresis(LP.A.act.inf(LPtempV),LP.A.act.val,LP.A.act.tau(LPtempV))
+      LP.A.ict.val    += dt*hysteresis(LP.A.ict.inf(LPtempV),LP.A.ict.val,LP.A.ict.tau(LPtempV))
+      LP.KCa.act.val  += dt*hysteresis(LP.KCa.act.inf(LPtempV,LPtempCal),LP.KCa.act.val,LP.KCa.act.tau(LPtempV))
+      LP.KCa.ict.val  += dt*hysteresis(LP.KCa.ict.inf(LPtempV),LP.KCa.ict.val,LP.KCa.ict.tau(LPtempV))
+      LP.Kd.act.val   += dt*hysteresis(LP.Kd.act.inf(LPtempV),LP.Kd.act.val,LP.Kd.act.tau(LPtempV))
+      LP.Kd.ict.val   += dt*hysteresis(LP.Kd.ict.inf(LPtempV),LP.Kd.ict.val,LP.Kd.ict.tau(LPtempV))
+      LP.H.act.val    += dt*hysteresis(LP.H.act.inf(LPtempV),LP.H.act.val,LP.H.act.tau(LPtempV))
+      LP.H.ict.val    += dt*hysteresis(LP.H.ict.inf(LPtempV),LP.H.ict.val,LP.H.ict.tau(LPtempV))
+      LP.leak.act.val += dt*hysteresis(LP.leak.act.inf(LPtempV),LP.leak.act.val,LP.leak.act.tau(LPtempV))
+      LP.leak.ict.val += dt*hysteresis(LP.leak.ict.inf(LPtempV),LP.leak.ict.val,LP.leak.ict.tau(LPtempV))
+      LP.MI.act.val   += dt*hysteresis(LP.MI.act.inf(LPtempV),LP.MI.act.val,LP.MI.act.tau(LPtempV))
+      LP.MI.ict.val   += dt*hysteresis(LP.MI.ict.inf(LPtempV),LP.MI.ict.val,LP.MI.ict.tau(LPtempV))
+
+      # update synaptic gating variables
+      AB.glut.syn.val   = synaptic(AB.glut.syn.inf(LPtempV),AB.glut.syn.val,AB.glut.syn.tau(LPtempV))
+      AB.chol.syn.val   = synaptic(AB.chol.syn.inf(LPtempV),AB.chol.syn.val,AB.chol.syn.tau(LPtempV))
+      LP.glut.syn.val   = synaptic(LP.glut.syn.inf(ABtempV),LP.glut.syn.val,LP.glut.syn.tau(ABtempV))
+      LP.chol.syn.val   = synaptic(LP.chol.syn.inf(ABtempV),LP.chol.syn.val,LP.chol.syn.tau(ABtempV))
+
+      # update output vectors
+      ABvolt[ii]      = copy(AB.V)
+      LPvolt[ii]      = copy(LP.V)
+      ABcalcium[ii]   = copy(AB.Cal)
+      LPcalcium[ii]   = copy(LP.Cal)
+
+      ABtempV         = copy(AB.V)
+      ABtempCal       = copy(AB.Cal)
+      LPtempV         = copy(LP.V)
+      LPtempCal       = copy(LP.Cal)
+
+      ABamps[ii,1]    = AB.Na.phi
+      ABamps[ii,2]    = AB.CaT.phi
+      ABamps[ii,3]    = AB.CaS.phi
+      ABamps[ii,4]    = AB.A.phi
+      ABamps[ii,5]    = AB.KCa.phi
+      ABamps[ii,6]    = AB.Kd.phi
+      ABamps[ii,7]    = AB.H.phi
+      ABamps[ii,8]    = AB.leak.phi
+      ABamps[ii,9]    = AB.MI.phi
+      ABamps[ii,10]   = AB.glut.phi
+      ABamps[ii,11]   = AB.chol.phi
+      ABamps[ii,12]   = IappAB
+
+      LPamps[ii,1]    = LP.Na.phi
+      LPamps[ii,2]    = LP.CaT.phi
+      LPamps[ii,3]    = LP.CaS.phi
+      LPamps[ii,4]    = LP.A.phi
+      LPamps[ii,5]    = LP.KCa.phi
+      LPamps[ii,6]    = LP.Kd.phi
+      LPamps[ii,7]    = LP.H.phi
+      LPamps[ii,8]    = LP.leak.phi
+      LPamps[ii,9]    = LP.MI.phi
+      LPamps[ii,10]   = LP.glut.phi
+      LPamps[ii,11]   = LP.chol.phi
+      LPamps[ii,12]   = IappLP
+
+      ABamps[ii,:]    = ABamps[ii,:]./(dt*(AB.Na.phi + AB.CaT.phi + AB.CaS.phi + AB.A.phi
+                      + AB.KCa.phi + AB.Kd.phi + AB.H.phi + AB.leak.phi
+                      + AB.MI.phi + AB.glut.phi + AB.chol.phi + IappAB)*(1/AB.Cm))
+      LPamps[ii,:]    = LPamps[II,:]./(dt*(LP.Na.phi + LP.CaT.phi + LP.CaS.phi + LP.A.phi
+                      + LP.KCa.phi + LP.Kd.phi + LP.H.phi + LP.leak.phi
+                      + LP.MI.phi + LP.glut.phi + LP.chol.phi + IappLP)*(1/LP.Cm))
+    end
+    return (ABvolt, LPvolt, ABamps, LPamps)
+    #return ABvolt, LPvolt
+  end
+end
+
+## Analysis Functions
+# July 3rd, 2017
+
+# produces a vector of spike-times
+function getSpikes(volt::Array{Float64,1})
+  spikes    = zeros(size(volt))
+  for ii in 1:length(volt)-1
+    # threshold is set to 0 mV
+    if volt[ii] <= 0 && volt[ii+1] > 0
+      spikes[ii]  = 1
+    end
+  end
+  return spikes
+end
+# produces a matrix of spike-times
+function getSpikes(volt::Array{Float64,2})
+  spikes    = zeros(size(volt))
+  for ii in 1:length(volt[1,:])
+    for qq in 1:length(volt[:,1])-1
+      # threshold is set to 0 mV
+      if volt[qq,ii] <= 0 && volt[qq+1,ii]> 0
+        spikes[qq,ii] = 1
+      end
+    end
+  end
+  return spikes
+end
+
+# produces a vector of burst-times
+function getBursts(volt::Array{Float64,1},tol::Int64)
+  # tol is in milliseconds
+  tolerance = convert(Int64,tol/dt)
+  # gets the linear indices of spike-times
+  spk_time  = find(getSpikes(volt))
+  # interspike intervals
+  spk_diff  = push!(diff(spk_time),0.0)
+  bursts    = zeros(length(volt))
+  for ii in 1:length(spk_time)-1
+    if spk_diff[ii] >= tolerance
+      # interburst intervals
+      bursts[spk_time[ii+1]] = 1
+    end
+  end
+  return bursts
+end
+# produces a matrix of burst-times
+function getBursts(volt::Array{Float64,2},tol)
+  # tol is in milliseconds
+  tolerance = convert(Int64,tol/dt)
+  # get the linear indices of spike-times in an array of arrays
+  spk_time  = [find(getSpikes(volt[:,ii])) for ii in 1:length(volt[1,:])]
+  # gets the interspike intervals in an array of arrays
+  spk_diff  = [push!([diff(spk_time[ii]) for ii in 1:length(spk_time)][qq],0.0)
+              for qq in 1:length(spk_time)]
+  bursts    = zeros(size(volt))
+  for ii in 1:length(spk_time)
+    for qq in 1:length(spk_time[ii])-1
+      if spk_diff[ii][qq] >= tolerance
+        # interburst intervals in a 2-D array
+        bursts[spk_time[ii][qq+1],ii] = 1
+      end
+    end
+  end
+  return bursts
+end
+
+# filters the data by taking the mean of fixed bins
+function meanfilter(input::Array{Float64,1},Nbins::Int64)
+  output    = zeros(length(input))
+  scale     = convert(Int64,length(input)/Nbins)
+  for ii = 1:Nbins-1
+    start   = 1 + scale*(ii-1)
+    stop    = scale*(ii+1)
+    output[start:stop] = scale*mean(input[start:stop])
+  end
+  return output
+end
+# filters the data along a mean filter for each series
+function meanfilter(input::Array{Float64,2},Nbins::Int64)
+  output    = zeros(size(input))
+  scale     = convert(Int64,length(input[:,1])/Nbins)
+  for ii in 1:length(input[1,:])
+    for qq in 1:Nbins-1
+      start   = 1 + scale*(qq-1)
+      stop    = scale*(qq+1)
+      output[start:stop,ii]   = scale*mean(input[start:stop,ii])
+    end
+  end
+  return output
+end
+# produces a vector of burst-times from filtered data
+function getBursts(input::Array{Float64,1},Nbins::Int64,tol::Int64,bst_tol::Int64)
+  signal1   = meanfilter(getSpikes(input),Nbins)
+  signal2   = getBursts(input,tol)
+  bst_time  = find(signal2)
+  output    = zeros(length(input))
+  for ii in 1:length(bst_time)
+    if signal1[bst_time[ii]] >= bst_tol
+      output[bst_time[ii]] = 1
+    end
+  end
+  return output
+end
+# produces a matrix of burst-times from filtered data
+function getBursts(input::Array{Float64,2},Nbins::Int64,tol::Int64,bst_tol::Int64)
+  signal1   = meanfilter(getSpikes(input),Nbins)  # returns a matrix
+  signal2   = getBursts(input,tol)                # returns a matrix
+  bst_time  = [find(getBursts(input[:,ii],tol)) for ii in 1:length(input[1,:])]
+  output    = zeros(size(input))
+  for ii in 1:length(bst_time)
+    for qq in 1:length(bst_time[ii])
+      if signal1[bst_time[ii][qq]] >= bst_tol
+        output[bst_time[ii][qq],ii] = 1
+      end
+    end
+  end
+  return output
+end
+
+# gets the interburst interval as a Float
+function getIBI(volt::Array{Float64,1},tol)
+  bst_time  = find(getBursts(volt,tol))
+  bst_diff  = push!(diff(bst_time),0.0)
+  # take the mean of the last 4 interburst intervals
+  IBI       = dt*(mean(bst_diff[end-4:end-1]))
+  return IBI  # ms
+end
+# gets the interburst intervals as a vector
+function getIBI(volt::Array{Float64,2},tol::Int64,burst_steps::Int64)
+  # gets the times of each burst in an array of arrays
+  bst_time  = [find(getBursts(volt[:,ii],tol)) for ii in 1:length(volt[1,:])]
+  # gets the interburst intervals in an array of arrays
+  bst_diff  = [push!([diff(bst_time[ii]) for ii in 1:length(bst_time)][qq],0.0)
+              for qq in 1:length(bst_time)]
+  IBI       = zeros(length(volt[1,:]))
+  for ii in 1:length(IBI)
+    # take the mean of the last 4 interburst intervals
+    IBI[ii] = dt*mean(bst_diff[ii][end-burst_steps:end-1])
+  end
+  return IBI  # ms
+end
+# gets the interburst interval as a Float using the filtered data
+function getIBI(input::Array{Float64,1},Nbins::Int64,tol::Int64,bst_tol::Int64)
+  bursts    = getBursts(input,Nbins,tol,bst_tol)
+  start     = convert(Int64,length(input)*0.25)
+  IBI       = dt*mean(diff(find(bursts[start:end])))
+  return IBI
+end
+# gets the interburst interval as a vector using the filtered data
+function getIBI(input::Array{Float64,2},Nbins::Int64,tol::Int64,bst_tol::Int64)
+  bursts    = [getBursts(input[:,ii],Nbins,tol,bst_tol) for ii in 1:size(input,2)]
+  start     = round(Int64,size(input,1)*0.25)
+  IBI       = [dt*mean(diff(find(bursts[ii][start:end]))) for ii in 1:size(input,2)]
+  return IBI
+end

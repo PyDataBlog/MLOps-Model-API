@@ -1,0 +1,147 @@
+package AUP::Complaints;
+use strict;
+use Scalar::Util 'openhandle';
+use Time::ParseDate;    # libtime-modules-perl
+use AUP::Complaints::GenerateSQL;
+use Email::ARF::Report;
+use Net::CIDR::Lite;
+
+use AUP::Complaints::Parse::HostedEmail;
+
+sub new {
+	my $class = shift;
+	my $options = {
+		dbfn => '/tmp/aup.db',
+		#parser =>  AUP::Complaints::Parse::HostedEmail->new(),
+		@_,
+	};
+
+	AUP::Complaints::GenerateSQL->create( $options->{dbfn} )
+		unless -f $options->{dbfn};
+
+	$options->{dbh} = DBI->connect("dbi:SQLite:dbname=$options->{dbfn}","","");
+
+	return bless $options => $class;
+}
+
+sub parse_complaint {
+	my $self = shift;
+
+	my $complaint = shift;
+	my $complainttxt;
+	my $complaint_filename;
+
+	if( -f $complaint ){
+		open FD, "<$complaint";
+		$complainttxt = do { local $/; <FD>; };
+		$complaint_filename = $complaint;
+	} elsif( my $fh = openhandle( $complaint ) ){
+		$complainttxt = do { local $/; <$fh>; };
+	} else {
+		# Let's assume that a string was passed in which IS the complaint
+		$complainttxt = $complaint;
+	}
+
+	my $report = Email::ARF::Report->new( $complainttxt ) or return undef;;
+	my $evidence = $report->original_email();
+
+	my $auth = $self->{parser}->auth( $evidence ) || return undef;
+
+	my $epoch = $self->{parser}->received( $evidence );
+
+	my ($subject, $from, $to, $replyto );
+	$subject = $_ for ( $evidence->header( "Subject" ) );
+	$from = $_ for ( $evidence->header( "From" ) );
+	$replyto = $_ for ( $evidence->header( "Reply-To" ) );
+	$to = $_ for ( $evidence->header( "To" ) );
+
+	my @ips = join( " ", $evidence->header( "Received" ) ) =~ /(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})/g;
+
+	$self->{complaint} = {
+		filename => $complaint_filename,
+		subject => $subject,
+		from => $from,
+		replyto => $replyto,
+		to => $to,
+		ips => \@ips,
+		auth => $auth,
+		epoch => $epoch,
+	};
+
+	$self->insert_into_sql
+		unless $self->exists;
+
+}
+
+sub insert_into_sql {
+	my $self = shift;
+
+	return unless $self->{complaint};
+
+	my $sth = $self->{dbh}->prepare( "INSERT INTO complaint ( filename, auth, replyto, subject, ips, epoch ) VALUES ( ?, ?, ?, ?, ?, ? )" );
+
+	use Data::Dumper;
+
+	my $array = [ $self->{complaint}->{filename}, 
+		      $self->{complaint}->{auth}, 
+		      $self->{complaint}->{replyto},
+		      $self->{complaint}->{subject},
+		      join( ",", @{$self->{complaint}->{ips}} ),
+		      $self->{complaint}->{epoch},
+	];
+
+	$sth->bind_param_array( 1, $array );
+
+	my $p = 0;
+	for( @$array ){
+		$sth->bind_param( ++$p, $_ );
+	}
+
+	#print "Storing [$self->{complaint}->{filename}] to database..\n";
+	$sth->execute;
+	#DBI::dump_results($sth);
+
+}
+
+sub lookup {
+	my ($self, $clause) = @_;
+
+	my $sth = $self->{dbh}->prepare( "SELECT filename, auth, replyto, subject, ips, epoch FROM complaint " . $clause );
+	$sth->execute;
+	my $results = $sth->fetchall_arrayref(  );
+
+	my @ret;
+	use Data::Dumper;
+	for my $row ( $results ){
+		for( @$row ){
+			my $cidr = Net::CIDR::Lite->new;
+			$cidr->add_any( $_ ) for split( /,/, $_->[4] );
+			push( @ret, {
+				filename => $_->[0],
+				auth => $_->[1],
+				replyto => $_->[2],
+				subject => $_->[3],
+				ips => $cidr,
+				epoch => $_->[5],
+			});
+		}
+	}
+	return \@ret;
+}
+
+sub exists {
+	my $self = shift;
+	my $filename = shift;
+
+	my $sth = $self->{dbh}->prepare( "SELECT * FROM complaint where filename = ?" );
+	$sth->bind_param( 1, $self->{complaint}->{filename} );
+	$sth->execute;
+
+	my @ary = $sth->fetchrow_array ();
+        $sth->finish ();
+	return scalar @ary > 0;
+}
+
+1;
+
+__END__

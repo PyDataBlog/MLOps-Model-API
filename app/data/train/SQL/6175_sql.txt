@@ -1,0 +1,218 @@
+IF ((SELECT count(*) FROM sys.objects WHERE type = 'U' and Name = 'GoalEvaluation') > 0) DROP TABLE [GoalEvaluation]
+IF ((SELECT count(*) FROM sys.objects WHERE type = 'U' and Name = 'Goal') > 0) DROP TABLE [Goal]
+IF ((SELECT count(*) FROM sys.objects WHERE type = 'U' and Name = 'GoalType') > 0) DROP TABLE [GoalType]
+GO
+
+CREATE TABLE [GoalType] (
+	[Id]				INTEGER,
+	[Name]				NVARCHAR(100),
+	CONSTRAINT [PK_GoalType] PRIMARY KEY CLUSTERED ( [Id] ASC ) WITH (IGNORE_DUP_KEY = OFF)
+)
+GO
+
+CREATE TABLE [Goal] (
+	[Id]				INTEGER,
+	[Name]				NVARCHAR(100),
+	[Description]		NVARCHAR(250),
+	[Goal]				INTEGER,
+	[Type]				INTEGER,
+	[PatientId]			NVARCHAR(100),
+	CONSTRAINT [PK_Goal] PRIMARY KEY CLUSTERED ( [Id] ASC ) WITH (IGNORE_DUP_KEY = OFF),
+	CONSTRAINT [GoalType_fk0] FOREIGN KEY ([Type]) REFERENCES [GoalType]([Id]),
+	CONSTRAINT [GoalEvaluation_fk1] FOREIGN KEY ([PatientId]) REFERENCES [Patient]([Id])
+)
+GO
+
+CREATE TABLE [GoalEvaluation] (
+	[Id]				INTEGER,
+	[Date]				DATE,
+	[GoalId]			INTEGER,
+	[Result]			INTEGER
+	CONSTRAINT [PK_GoalEvaluation] PRIMARY KEY CLUSTERED ( [Id] ASC ) WITH (IGNORE_DUP_KEY = OFF),
+	CONSTRAINT [GoalEvaluation_fk0] FOREIGN KEY ([GoalId]) REFERENCES [Goal]([Id])
+)
+
+-- INITIAL DATA
+INSERT INTO [GoalType] values 
+	(1, 'Temporal'),
+	(2, 'Espacial'),
+	(3, 'Repetições'),
+	(4, 'Outro')
+
+UPDATE DbVersion Set Minor = 1
+
+
+GO 
+
+CREATE OR ALTER FUNCTION [dbo].[CalcAppointmentValue]
+(
+    @appointmentId int
+)
+RETURNS FLOAT
+AS
+BEGIN
+
+    RETURN (
+		Select Appointment.Hours * Round(IsNull(IsNull([ServicePack].[Value]/[Contract].Contracted, [Service].[Value]*(1-[Percentage])), 40), 2) From Appointment
+		Left Join Discount On (Appointment.PatientId = Discount.PatientId And Appointment.ServiceId = Discount.ServiceId)
+		Left Join ContractedAppointments On (ContractedAppointments.AppointmentId = Appointment.Id)
+		Left Join [Contract] On ([Contract].Id = ContractedAppointments.ContractId)
+		Left Join [ServicePack] On (ServicePack.Id = [Contract].ServicePackId)
+		Inner Join [Service] On ([service].Id = Appointment.ServiceId)
+		Where Appointment.Id = @appointmentId
+	)
+
+END
+GO
+
+
+
+IF ((SELECT count(*) FROM sys.objects WHERE type = 'U' and Name = 'UserCost') > 0) DROP TABLE [UserCost]
+GO
+
+CREATE TABLE UserCost (
+	UserId				INTEGER,
+	Cost				FLOAT,
+	TypeOfCost			INTEGER
+)
+
+
+GO
+
+CREATE OR ALTER FUNCTION [dbo].[CalculateCost]
+(
+    @userCost	float,
+	@typeOfCost int,
+	@hours		float
+)
+RETURNS float
+AS
+BEGIN
+	IF (@typeOfCost = 1)
+		RETURN @userCost
+	
+	RETURN @hours * @userCost
+END
+GO
+
+
+-- VIEWS
+
+CREATE OR ALTER VIEW APPOINTMENTS_SUMARY_BY_USER
+as
+Select *, Valor - Custo as Lucro, ROUND( Valor / Horas, 2) as ValorHora From (
+	Select 
+		YEAR(StartedAt)												Ano,
+		MONTH(StartedAt)											Mês,
+		Sum([Hours])												Horas,
+		U.[Name]													Utilizador,
+		Sum([dbo].[CalcAppointmentValue](A.Id))						Valor,
+		[dbo].[CalculateCost](UC.Cost, UC.TypeOfCost, Sum([Hours])) Custo
+	From [Appointment] A
+	Inner Join [User] U On (A.UserId = U.Id)
+	Left Join [UserCost] UC On U.Id = UC.UserId
+	Group By
+		YEAR(StartedAt),
+		MONTH(StartedAt),
+		[U].[Name],
+		[UC].[Cost],
+		[UC].[TypeOfCost]
+) as Temp
+GO
+
+CREATE OR ALTER VIEW APPOINTMENTS_SUMARY_BY_USER_WITH_TOTAL
+as
+Select * From APPOINTMENTS_SUMARY_BY_USER
+Union All
+Select 
+	Ano, 
+	Mês, 
+	SUM(Horas) as Horas, 
+	'Total ' + cast(Ano as nvarchar(10)) + '/' + cast(Mês as nvarchar(10)) as Utilizador,
+	Sum(Valor) as Valor,
+	Sum(Custo) as Custo,
+	Sum(Lucro) as Lucro,
+	ROUND(AVG(ValorHora), 2) as ValorHora
+From APPOINTMENTS_SUMARY_BY_USER
+Group By Ano, Mês
+GO
+
+CREATE OR ALTER VIEW APPOINTMENTS_SUMARY_BY_USER_AND_PATIENT
+as
+Select 
+	YEAR(StartedAt)		Ano,
+	MONTH(StartedAt)	Mês,
+	Sum([Hours])		Horas,
+	U.[Name]			Utilizador,
+	P.[Name]			Paciente
+From [Appointment] A
+Inner Join [User] U On (A.UserId = U.Id)
+Inner Join [Patient] P On (A.PatientId = P.Id)
+Group By
+	YEAR(StartedAt),
+	MONTH(StartedAt),
+	[U].[Name],
+	P.[Name]
+GO
+
+CREATE OR ALTER VIEW [dbo].[ACCOUNT_SUMARY]
+as
+SELECT ANO, MES, SUM(FATURADO) [FATURADO], SUM(RECEBIDO) [RECEBIDO] FROM (
+	Select 
+		YEAR([Date])	[Ano], 
+		MONTH([Date])	[Mês],
+		SUM([value])	[Faturado],
+		0				[Recebido]
+	From [Invoice]
+	Group By 
+		YEAR([Date]), 
+		MONTH([Date])
+	UNION ALL
+	Select 
+		YEAR([Date])	[Ano], 
+		MONTH([Date])	[Mês],
+		0				[Faturado],
+		SUM([value])	[Recebido]
+	
+	From [Payment]
+	Group By 
+		YEAR([Date]), 
+		MONTH([Date])
+) T
+GROUP BY
+	ANO, MES
+GO
+
+CREATE OR ALTER VIEW [dbo].[ACCOUNT_SUMARY_BY_PATIENT]
+as
+SELECT [Ano], [Mês], [Paciente], SUM(FATURADO) [Faturado], SUM(RECEBIDO) [Recebido] FROM (
+	Select 
+		YEAR([Date])	[Ano], 
+		MONTH([Date])	[Mês],
+		P.Name			[Paciente],
+		SUM([value])	[Faturado],
+		0				[Recebido]
+	From [Invoice] I
+	Inner Join [Patient] P On (I.PatientId = P.Id)
+	Group By 
+		YEAR([Date]), 
+		MONTH([Date]),
+		P.Name
+	UNION ALL
+	Select 
+		YEAR([Date])	[Ano], 
+		MONTH([Date])	[Mês],
+		P.Name			[Paciente],
+		0				[Faturado],
+		SUM([value])	[Recebido]
+	
+	From [Payment] I
+	Inner Join [Patient] P On (I.PatientId = P.Id)
+	Group By 
+		YEAR([Date]), 
+		MONTH([Date]),
+		P.Name
+) T
+GROUP BY
+	ANO, [Mês], [Paciente]
+GO

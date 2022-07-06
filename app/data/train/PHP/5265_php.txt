@@ -1,0 +1,272 @@
+<?php
+
+namespace app\controllers;
+
+use common\components\XwcController;
+use common\models\AuthAssignment;
+use common\models\Api;
+use common\models\ProjectSearch;
+use common\components\CTools;
+use yii\base\ErrorException;
+use yii\base\Exception;
+use Yii;
+use yii\data\Pagination;
+use yii\web\ForbiddenHttpException;
+
+class ApiController extends XwcController
+{
+    public $topMenu = 'api';
+    public $id_or_name;
+
+    public static function controllerName()
+    {  
+        return '接口管理';
+    }
+
+    public function actionIndex()
+    {  
+
+    }
+
+    /**
+     * 列表
+     *
+     * @return string
+     */
+    public function actionList(){
+        $searchParams = Yii::$app->request->get('search');
+        $model = new Api();
+        $query = $model->find();
+        #过滤
+        if (!empty($searchParams)) {
+            foreach ($searchParams as $key => $value) {
+                if($key != 'fuzzy_param'){
+                    $query->andFilterWhere(['=', $key, $value]);
+                }else{
+                    $query->andwhere([
+                        'or',
+                        ['like','id', $value],
+                        ['like','name', $value],
+                        ['like','file_name', $value],
+                        ['like','remark', $value],
+                    ]);
+                }
+            }
+        }
+        
+        $perPage = Yii::$app->request->get('per-page');
+        $perPage = $perPage ? $perPage : 10;
+        $totalCount = $query->count();
+        $pages = new Pagination(['totalCount' => $totalCount]);
+        $pages->setPageSize($perPage);
+        $page = Yii::$app->request->get('page');
+        $page = $page ? $page : 1;
+
+        $list= $query->orderBy(['id'=> SORT_DESC])
+            ->offset($pages->offset)
+            ->limit($pages->limit)
+            ->all();
+
+        return  $this->render('list', [
+            'model'             => $model,
+            'list'              => $list,
+            'pages'             => $pages,
+            'page'              => $page,
+            'searchParams'      => $searchParams,
+            'attributes'        => $model->attributeLabels(),
+        ]);
+    }
+
+    /**
+     * 重置搜索列表
+     *
+     * @return string
+     */
+    public function actionClearSearch(){
+        $model = new Api();
+        $searchParams = $model;
+        $query = $model->find();
+        $pages = new Pagination(['totalCount' => $query->count()]);
+        $pages->setPageSize(10);
+
+        $list= $query->orderBy(['id'=> SORT_DESC])
+            ->offset($pages->offset)
+            ->limit($pages->limit)
+            ->asArray()->all();
+
+        return  $this->render('list', [
+            'model'             => $model,
+            'list'              => $list,
+            'pages'             => $pages,
+            'searchParams'      => $searchParams,
+            'attributes'        => $model->attributeLabels(),
+        ]);
+    }
+
+    /**
+     * 添加
+     *
+     * @return string
+     */
+    public function actionAdd(){
+        $model = new Api();
+        $model->setDefaultValues();
+        $models = Api::find()->all();
+        $model_indexs = [];
+        $model_o_indexs = [];
+        $index = 1;
+        foreach($models as $o){
+            $model_indexs[$index] = $o->name.' ('.$o->file_name.')';
+            $model_o_indexs[$index] = $o;
+            $index = $index + 1;
+        }
+        $select_model = $model;
+        $temple_select = Yii::$app->request->post('temple_select');
+        if($temple_select){
+            $select_model = $model_o_indexs[$temple_select];
+        }
+        return $this->render('add', [
+            'model'             => $model,
+            'models'           => $models,
+            'select_model'     => $select_model,
+            'model_indexs'     => $model_indexs,
+            'temple_select'     => $temple_select,
+            'attributes'        => $model->attributeLabels(),
+        ]);
+
+    }
+
+    public function actionTest(){
+        return $this->render('test');
+    }
+
+
+    /**
+     * 编辑
+     *
+     * @return string
+     */
+    public function actionEdit($id=1){
+        $id = empty($id) ? Yii::$app->request->post('id') :$id ;
+        $model = Api::findOne($id);
+        $post = Yii::$app->request->post();
+        if(!empty($post)){
+            try{
+                if($model->load($post) && $model->save()){
+                    Yii::$app->getSession()->setFlash('success', '保存成功');
+                    return $this->redictPage(Yii::$app->urlManager->createUrl(['api/list']));
+                }else{
+                    #抛出异常
+                    throw new Exception (CTools::recursiveMultiArray($model->errors));
+                }
+            }catch (Exception $e){
+                #捕获抛出的异�?
+                Yii::$app->getSession()->setFlash('error', $e->getMessage());
+                return $this->redictPage(Yii::$app->urlManager->createUrl(['api/edit','id' => $id]));
+            }
+        }
+        return $this->render('add', [
+            'model'             => $model,
+            'select_model'      => $model,
+            'attributes'        => $model->attributeLabels(),
+        ]);
+    }
+
+    /**
+     * save a record.
+     *
+     * @return 
+     */
+    public function actionSave()
+    {
+        $post = Yii::$app->request->post();
+        if(!empty($post)){
+            try{
+                // if (null  != Api::findOne(['s_id' =>$post['Api']['id']])){
+                //     throw new Exception ("任务已存在");
+                // }
+                $model = new Api();
+                if($model->load($post)){
+                    $model->content_text = CTools::translateRichToText(strip_tags($model->content));
+                    $model->url = \Yii::$app->request->hostInfo.'/'.$model->getFilePathHead().$model->file_name;
+                    if($model->save()){
+                        Yii::$app->getSession()->setFlash('success', '保存成功');
+
+                        // 写入文件
+                        $filepath = $model->getFilePathHead().$model->file_name;
+                        CTools::createDir(dirname($filepath));
+                        $file = fopen($filepath, "w");
+                        fwrite($file, $model->content_text);
+                        fclose($file);
+
+                        return $this->redictPage(Yii::$app->urlManager->createUrl(['api/list']));
+                    }
+                    #抛出异常
+                    throw new Exception (CTools::recursiveMultiArray($model->errors));
+                }else{
+                    #抛出异常
+                    throw new Exception (CTools::recursiveMultiArray($model->errors));
+                }
+            }catch (Exception $e){
+                #捕获抛出的异常
+                Yii::$app->getSession()->setFlash('error', $e->getMessage());
+                return $this->redictPage(Yii::$app->urlManager->createUrl(['api/add']));
+            }
+        }
+    }
+
+    /**
+     * update a record.
+     *
+     * @return 
+     */
+    public function actionUpdate()
+    {
+        $post = Yii::$app->request->post();
+        if(!empty($post)){
+            try{
+                $model = Api::findOne(['id' =>$post['Api']['id']]);
+                if (null == $model){
+                    throw new Exception ("操作失败，记录不存在");
+                }
+                if($model->load($post)){
+                    $model->content_text = CTools::translateRichToText(strip_tags($model->content));
+                    $model->url = \Yii::$app->request->hostInfo.'/'.$model->getFilePathHead().$model->file_name;
+                    if($model->save()){
+                        Yii::$app->getSession()->setFlash('success', '操作成功');
+                        // 写入文件
+                        $filepath = $model->getFilePathHead().$model->file_name;
+                        CTools::createDir(dirname($filepath));
+                        $file = fopen($filepath, "w");
+                        fwrite($file, $model->content_text);
+                        fclose($file);
+
+                        return $this->redictPage(Yii::$app->urlManager->createUrl(['api/list']));
+                    }
+                    #抛出异常
+                    throw new Exception (CTools::recursiveMultiArray($model->errors));
+                }else{
+                    #抛出异常
+                    throw new Exception (CTools::recursiveMultiArray($model->errors));
+                }
+            }catch (Exception $e){
+                #捕获抛出的异常
+                Yii::$app->getSession()->setFlash('error', $e->getMessage());
+                return $this->redictPage(Yii::$app->urlManager->createUrl(['api/edit','id' => $model->id]));
+            }
+        }
+    }
+
+    /**
+     * 测试代码
+     *
+     * @return string
+     */
+    public function actionTestApi(){
+        $model = Yii::$app->request->get('model');
+        $data = Yii::$app->request->get('data');
+        return $this->render('//common/openUrl', [
+            'url' => $model->getFilePathHead().$data['file_name'],
+        ]);
+    }
+}

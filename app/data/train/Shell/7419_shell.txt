@@ -1,0 +1,274 @@
+#!/bin/sh
+#--src REP: Répertoire contenant les images JPEG à miniaturiser.
+#--dest REP: Répertoire cible (où on va générer les vignettes et le fichier HTML).
+#--verbose: mode “verbeux” pour mise au point : on affiche les commandes (convert,
+#cp, ...) appelées par le script avant de les exécuter. 
+#--dry-run: exécution “à sec” : on exécute le script sans aucune création de fichier, mais
+#on produit tout de même des messages d’erreur si besoin — intéressant pour la mise
+#au point, en combinaison avec le paramètre --verbose.
+#--help: Afficher la liste des options disponibles, et quitter.
+#--main-file FICHIER: générer la galerie dans le fichier spécifié au lieu de générer un
+#fichier index.html
+
+#On cherche d'abord a trouver quelles arguments ont été entrés
+
+usage () {
+    cat <<EOF
+Usage: ./galerie-shell.sh --src <REP> --dest <REP> --style <REP> [OPTIONS]
+OPTIONS:
+        --src REP: Répertoire contenant les images JPEG à miniaturiser.
+        
+        --dest REP: Répertoire cible (où on va générer les vignettes et le fichier HTML).
+        
+        --verbose: mode ""verbeux"" pour mise au point : on affiche les commandes (convert,
+                   cp, ...) appelées par le script avant de les exécuter.
+        
+        --dry-run: exécution 'à sec' : on exécute le script sans aucune création de fichier, mais 
+                   on produit tout de même des messages d’erreur si besoin — intéressant pour la mise
+                   au point, en combinaison avec le paramètre --verbose.
+        
+        --help: Afficher la liste des options disponibles, et quitter.
+
+        --main-file FICHIER: générer la galerie dans le fichier spécifié au lieu de générer un
+                             fichier index.html
+
+        --firefox: lance firefox a la fin de la generation, ne fonctionne pas avec --dry-run
+
+        --style FICHIER: rajoute la feuille de style contenu dans le répértoire source
+                         la feuille de style doit contenir 4 classes: imgframe, image, legend, h1
+
+        --pro: La légende des images contients des informations plus completes tirées des 
+               données exifs des photos
+Ecrit par Cyprien Courtot et Thibault Meuret.
+EOF
+}
+
+if [ $# -lt 6 ]; then
+    echo "ERREUR: Pas assez d'arguments"  >&2
+    usage
+fi
+
+#On est maintenant sur qu'il y a plus de 2 arguments et que '--help' n'a pas ete appele.
+#Il faut maintenant verifie ce qui a ete appele.
+
+SRCPATH="init"
+DESTPATH="init"
+STYLENAME="init"
+
+PRO=0
+
+while test $# -ne 0; do
+    case "$1" in
+        "--help"|"-h")
+            usage
+            exit 0
+            ;;
+        "--src")
+            shift; SRCPATH="$1"
+            ;;
+        "--dest")
+            shift; DESTPATH="$1"
+            ;;
+	"--verbose")
+            VERBOSE="1"
+            ;;
+	"--dry-run")
+            DRYRUN="1"
+            ;;
+	"--main-file")
+            shift; MAINFILENAME="$1"
+            ;;
+	"--firefox")
+            FIREFOX="1"
+            ;;
+	"--style")
+            shift; STYLENAME="$1"
+            ;;
+	"--pro")
+            PRO="1"
+            ;;
+        *)
+	    echo ""
+            echo "ERREUR: Argument non reconnu : $1"
+	    echo ""
+            usage
+            exit 1
+            ;;
+    esac
+    shift
+done
+
+#On vérifie que src ET dest ET style ont été initialisés :
+
+if [ "$SRCPATH" = "init" ] || [ "$DESTPATH" = "init" ] || [ "$STYLENAME" = "init" ]; then
+    echo ""
+    echo "ERREUR: il faut utiliser --src, --dest et --style à la fois !" >&2
+    echo ""
+    usage
+    exit 1
+fi
+
+#On verifie que --dry-run ne soit pas lance avec --firefox
+
+if [ "$DRYRUN" = 1 ] && [ "$FIREFOX" = 1 ]; then
+    echo ""
+    echo "ERREUR: --dry-run et --firefox" >&2
+    echo ""
+    usage
+    exit 1
+fi
+
+#On va maintenant transformer tous les chemins relatifs en chemins absolus
+path_changing () {
+    if [ "$VERBOSE" = 1 ]; then
+	echo "-- Transformation des chemins relatifs en chemins absolus"
+    fi
+    
+    LAUNCHPATH=$(pwd)
+    if cd "$SRCPATH"; then
+	SRCPATH=$(pwd)
+    else
+	echo "ERREUR: --src: Dossier invalide ou inexistant" >&2
+	exit 1
+    fi
+    cd "$LAUNCHPATH"
+    if cd "$DESTPATH"; then
+	DESTPATH=$(pwd)
+    else
+	echo "ERREUR: --dest: Dossier invalide ou inexistant" >&2
+	exit 1
+    fi
+
+    if [ "$VERBOSE" = 1 ]; then
+	echo "-- src: $SRCPATH"
+	echo "-- dest: $DESTPATH"
+    fi
+    
+    cd "$LAUNCHPATH"
+}
+path_changing
+
+if [ ! -f "${SRCPATH}/${STYLENAME}" ]; then
+    echo "ERREUR: feuille de style inexistante"
+    exit 1
+fi
+#Les chemins sont maintenants absolus
+#On peut maintenant verifier que si $MAINFILE=1 que le fichier en sortie finisse bien par .html sinon on rajoute l'extension automatiquement
+
+main_file () {
+    if [ "$VERBOSE" = 1 ]; then
+	echo "-- Vérification du Main File..."
+    fi
+    
+    if [ "$MAINFILE" = 1 ] && [ ! "${MAINFILENAME##*.}" = html ]; then
+	MAINFILENAME="${MAINFILENAME}.html"
+    fi
+    
+    #on va arreter d'utiliser $MAINFILE
+    
+    if [ ! "$MAINFILE" = 1 ]; then
+	MAINFILENAME="index.html"
+    fi
+    
+    if [ "$VERBOSE" = 1 ]; then
+	echo "-- Main File : OK."
+	echo "-- Main File -> $MAINFILENAME"
+    fi
+}
+main_file
+
+#Tout a ete verifie on peut commencer a generer la galerie
+#on doit donc utiliser:
+#utilities.sh
+#generate-img-fragment.sh
+#on rajoute les fonctionnalite --dry-run et --verbose
+
+if [ "$DRYRUN" = 1 ]; then
+    exec 3> "/dev/null"
+else
+    exec 3> "${DESTPATH}/${MAINFILENAME}"
+fi
+
+en_tete () {
+    if [ "$VERBOSE" = 1 ]; then
+	echo "-- Creation de l'en-tete du fichier ${MAINFILENAME}..."
+    fi
+    
+    . "$LAUNCHPATH"/utilities.sh
+    (
+	html_head "Galerie d'image"
+	html_style "${SRCPATH}/${STYLENAME}"
+	html_title "Galerie d'image"
+    ) >&3
+    return 0
+}
+
+en_tete
+#le début de notre galerie est donc genere, il ne reste plus qu'a y mettre les images
+galerie () {
+
+    if [ "$VERBOSE" = 1 ]; then
+	echo "-- En-tete: OK."
+	echo "-- Creation de la galerie..."
+    fi
+    
+    cd "$SRCPATH"
+    test=$(find -name "*.jpg")
+
+    if [ ! "$test" = "" ]; then
+
+	images_a_traiter=$(file $test | grep 'JPEG' > gerer_point_slash_script.txt && sed -i -e 's/^..//' gerer_point_slash_script.txt && cut -d : -f1 gerer_point_slash_script.txt |xargs echo $@) #on ne garde que les fichiers en .jpg qui sont de vrais JPEG (qu'ils soient cachés ou non !)
+
+    for i in $images_a_traiter; do
+	if [ ! -f "${DESTPATH}/${i}" ]; then     #on commence par créer les vignettes.
+	    convert -resize 200x200 "$i" "${DESTPATH}/${i}"
+	fi
+	IMAGE="${DESTPATH}/${i}"
+
+	. "$LAUNCHPATH"/generate-img-page.sh
+	(
+	    image "$SRCPATH"/"$i" "$DESTPATH"/Image/"$i" "$LAUNCHPATH" "$SRCPATH"/"$STYLENAME" "$MAINFILENAME"
+	) > /dev/null
+
+	. "$LAUNCHPATH"/generate-img-fragment.sh
+	(
+	    image "${IMAGE}" "${PRO}" "$LAUNCHPATH"
+	) >&3
+
+    done
+    fi
+    return 0
+}
+galerie
+#on cloture notre fichier html
+
+tail () {
+    if [ "$VERBOSE" = 1 ]; then
+	echo "-- Galerie: OK."
+	echo "-- Cloture du fichier $MAINFILENAME..."
+    fi
+    
+    . "$LAUNCHPATH"/utilities.sh
+    (
+	html_tail
+    ) >&3
+
+    #puis on signale que le programme s'est bien execute
+    if [ "$VERBOSE" = 1 ]; then
+	echo "-- Cloture: OK."
+	echo "-- Fin de la generation"
+	echo "-- Fichier genere: ${DESTPATH}/${MAINFILENAME}"
+    fi
+    return 0
+}
+tail
+
+#puis on fait verifier si on doit lancer firefox ou non
+if [ "$FIREFOX" = 1 ]; then
+    if [ "$VERBOSE" = 1 ]; then
+	echo '-- Lancement de firefox...'
+    fi
+    firefox "${DESTPATH}/${MAINFILENAME}" &
+fi
+
+return 0

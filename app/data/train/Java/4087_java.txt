@@ -1,0 +1,343 @@
+package bolianeducation.bolianchild.view;
+
+import android.graphics.Bitmap;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Message;
+import android.support.annotation.Nullable;
+import android.support.v7.widget.LinearLayoutManager;
+import android.support.v7.widget.RecyclerView;
+import android.text.TextUtils;
+import android.view.View;
+import android.widget.EditText;
+import android.widget.TextView;
+
+import com.andview.refreshview.XRefreshView;
+import com.google.gson.reflect.TypeToken;
+
+import java.io.File;
+import java.io.IOException;
+import java.util.ArrayList;
+import java.util.List;
+
+import bolianeducation.bolianchild.R;
+import bolianeducation.bolianchild.adapter.ReplyAdapter;
+import bolianeducation.bolianchild.api.BLService;
+import bolianeducation.bolianchild.camera.CameraActivity;
+import bolianeducation.bolianchild.camera.PopupWindowHelper;
+import bolianeducation.bolianchild.custom.ProgressDialog;
+import bolianeducation.bolianchild.manager.ActivityManage;
+import bolianeducation.bolianchild.manager.InfoManager;
+import bolianeducation.bolianchild.modle.CommentResponse;
+import bolianeducation.bolianchild.modle.PageEntity;
+import bolianeducation.bolianchild.modle.ReplyEntity;
+import bolianeducation.bolianchild.modle.ResponseEntity;
+import bolianeducation.bolianchild.utils.GsonUtils;
+import bolianeducation.bolianchild.utils.LogManager;
+import bolianeducation.bolianchild.utils.ToastUtil;
+import butterknife.BindView;
+import butterknife.ButterKnife;
+import butterknife.OnClick;
+import retrofit2.Call;
+import retrofit2.Callback;
+import retrofit2.Response;
+
+import static bolianeducation.bolianchild.KeyList.IKEY_REPLY_ENTITY;
+import static bolianeducation.bolianchild.KeyList.IKEY_TITLE;
+
+/**
+ * Created by admin on 2017/8/10.
+ * 某个评论的所有回复页
+ */
+
+public class ReplyActivity extends CameraActivity {
+    @BindView(R.id.recycler_view)
+    RecyclerView recyclerView;
+    @BindView(R.id.xrefreshview)
+    XRefreshView xRefreshView;
+    @BindView(R.id.tv_right)
+    TextView tvRight;
+    @BindView(R.id.et_content)
+    EditText etContent;
+
+    List<ReplyEntity> replyList = new ArrayList();
+
+    int pageNo = 1;
+    int pageSize = 15;
+    ReplyAdapter adapter;
+    CommentResponse.Comment taskReply;
+    String title;
+    private ProgressDialog mDialog;
+    PopupWindowHelper popupWindowHelper;
+
+    @Override
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+        setContentView(R.layout.activity_reply);
+        ButterKnife.bind(this);
+
+        if (getIntent() != null) {
+            taskReply = (CommentResponse.Comment) getIntent().getSerializableExtra(IKEY_REPLY_ENTITY);
+            title = getIntent().getStringExtra(IKEY_TITLE);
+        }
+
+        init();
+    }
+
+    @Override
+    public void onPicture(File pictureFile, String picturePath, Bitmap pictureBitmap) {
+        if (picturePath == null) return;
+        requestUploadImg(pictureFile);
+    }
+
+    //定义Handler对象
+    private Handler handler = new Handler() {
+        @Override
+        //当有消息发送出来的时候就执行Handler的这个方法
+        public void handleMessage(Message msg) {
+            super.handleMessage(msg);
+            //处理UI
+            requestAddReply((List) msg.obj);
+        }
+    };
+
+    ArrayList<String> imgIds = new ArrayList<>();
+
+    /**
+     * 上传图片
+     */
+    private void requestUploadImg(final File file) {
+        mDialog.show();
+        imgIds.clear();
+        new Thread() {
+            @Override
+            public void run() {
+                //你要执行的方法
+                Call<ResponseEntity> uploadImg = BLService.getHeaderService().uploadImg(BLService.createFilePart("imgFile", file));
+                try {
+                    ResponseEntity body = uploadImg.execute().body();
+                    if (body != null) {
+                        imgIds.add(body.getEntityId());
+                    }
+                    LogManager.e("tag", GsonUtils.toJson(body));
+                } catch (IOException e) {
+                    e.printStackTrace();
+                }
+
+                //执行完毕后给handler发送消息
+                Message message = new Message();
+                message.obj = imgIds;
+                handler.sendMessage(message);
+            }
+
+        }.start();
+    }
+
+    private void init() {
+        //前个页面携带
+        setTitle(title);
+        setTvBackVisible(true);
+        tvRight.setVisibility(View.VISIBLE);
+        tvRight.setText(R.string.report);
+
+        mDialog = ProgressDialog.createDialog(context, "正在上传图片");
+        initPopupWindow();
+
+        xRefreshView.setAutoRefresh(true);
+        xRefreshView.setPullLoadEnable(true);
+        xRefreshView.setAutoLoadMore(false);
+        xRefreshView.setPinnedTime(500);
+
+        xRefreshView.setXRefreshViewListener(new XRefreshView.SimpleXRefreshListener() {
+            @Override
+            public void onRefresh(boolean isPullDown) {
+                pageNo = 1;
+                requestAllReplyList();
+            }
+
+            @Override
+            public void onLoadMore(boolean isSilence) {
+//                if (pageNo >= dataBeanX.getTotalPages()) {
+//                    return;
+//                }
+                pageNo++;
+                requestAllReplyList();
+            }
+        });
+
+        recyclerView.setLayoutManager(new LinearLayoutManager(this));
+        replyList.add(new ReplyEntity());//占位头部
+        adapter = new ReplyAdapter(context, taskReply, replyList);
+        recyclerView.setAdapter(adapter);
+    }
+
+    /**
+     * 初始化点击头像后的PopupWindow
+     */
+
+
+    public void initPopupWindow() {
+        popupWindowHelper = new PopupWindowHelper(context);
+        popupWindowHelper.initPopup();
+        //拍照
+        popupWindowHelper.setOnTakePhotoListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openCamera();
+            }
+        });
+        //从相册选择
+        popupWindowHelper.setTakeAlbumListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                openAlbum();
+            }
+        });
+
+
+    }
+
+    PageEntity pageEntity;
+
+    //请求某条评论的所有回复
+    private void requestAllReplyList() {
+        Call<ResponseEntity> commentList = BLService.getHeaderService().getAllReplyById(taskReply.getId(), pageNo, pageSize);
+        commentList.enqueue(new Callback<ResponseEntity>() {
+            @Override
+            public void onResponse(Call<ResponseEntity> call, Response<ResponseEntity> response) {
+                ResponseEntity body = response.body();
+                LogManager.e("tag", GsonUtils.toJson(body));
+                if (body == null) return;
+                pageEntity = GsonUtils.fromJson(GsonUtils.toJson(body.getData()), new TypeToken<PageEntity<ReplyEntity>>() {
+                }.getType());
+                updateUI();
+            }
+
+            @Override
+            public void onFailure(Call<ResponseEntity> call, Throwable t) {
+                runOnUiThread(new Runnable() {
+                    @Override
+                    public void run() {
+                        if (pageNo > 1) {
+                            pageNo--;
+                        }
+                        onLoadComplete();
+                    }
+                });
+            }
+        });
+    }
+
+    //更新UI
+    private void updateUI() {
+        runOnUiThread(new Runnable() {
+            @Override
+            public void run() {
+                //设置刷新
+//                if (pageNo >= dataBeanX.getTotalPages()) {
+//                    xRefreshView.setPullLoadEnable(true);
+//                } else {
+//                    xRefreshView.setPullLoadEnable(false);
+//                }
+
+                if (pageNo == 1) {
+                    replyList.clear();
+                    replyList.add(new ReplyEntity());//占位头部
+                }
+                onLoadComplete();
+
+                if (pageEntity.getData() == null) return;
+                replyList.addAll(pageEntity.getData());
+                adapter.notifyDataSetChanged();
+
+            }
+        });
+    }
+
+    //加载完毕
+    protected void onLoadComplete() {
+        new Handler().postDelayed(new Runnable() {
+            @Override
+            public void run() {
+//                ToastUtil.showToast(CommunityWelfareActivity.this, "刷新首页数据了啊。。。");
+                xRefreshView.stopRefresh();
+                xRefreshView.stopLoadMore();
+            }
+        }, 500);
+    }
+
+
+    String content;
+
+    @OnClick({R.id.iv_send, R.id.tv_send, R.id.tv_right})
+    void onClick(View v) {
+        switch (v.getId()) {
+            case R.id.iv_send:
+                if (popupWindowHelper.isShowing()) {
+                    popupWindowHelper.dismiss();
+                } else {
+                    popupWindowHelper.show(v);
+                }
+                break;
+            case R.id.tv_send:
+                content = etContent.getText().toString();
+                if (TextUtils.isEmpty(content)) {
+                    ToastUtil.showToast(this, "请输入回复内容");
+                    return;
+                }
+                requestAddReply(null);
+                break;
+
+            case R.id.tv_right:
+                //举报
+                ActivityManage.startReportActivity(this, taskReply.getId());
+                break;
+        }
+
+    }
+
+    /**
+     * 请求添加评论
+     */
+    private void requestAddReply(List<String> imgs) {
+        final ReplyEntity replyEntity = new ReplyEntity();
+        replyEntity.setTaskActionId(taskReply.getId());
+        replyEntity.setReplyTime(System.currentTimeMillis());
+        replyEntity.setContent(content);
+        replyEntity.setUserId(InfoManager.getUserId());
+        replyEntity.setAttachmentList(imgs);
+
+        Call<ResponseEntity> addReply = BLService.getHeaderService().addReply(replyEntity);
+        addReply.enqueue(new Callback<ResponseEntity>() {
+            @Override
+            public void onResponse(Call<ResponseEntity> call, Response<ResponseEntity> response) {
+                mDialog.dismiss();
+                ResponseEntity body = response.body();
+                if (body == null) return;
+                ToastUtil.showToast(ReplyActivity.this, body.getErrorMessage());
+                pageNo = 1;
+                requestAllReplyList();//刷新数据
+                etContent.setText("");
+                hideKeyBoard();
+            }
+
+            @Override
+            public void onFailure(Call<ResponseEntity> call, Throwable t) {
+                mDialog.dismiss();
+                ToastUtil.showToast(context, t.getMessage());
+            }
+        });
+    }
+
+    @Override
+    public void onDestroy() {
+        super.onDestroy();
+        if (mDialog != null) {
+            mDialog.dismiss();
+        }
+
+        if (popupWindowHelper != null) {
+            popupWindowHelper.dismiss();
+        }
+    }
+}

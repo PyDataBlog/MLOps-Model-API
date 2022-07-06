@@ -1,0 +1,202 @@
+SYSSIZE		EQU		0x3000
+SETUPLEN	EQU		4
+BOOTSEG		EQU		0x07c0
+INITSEG		EQU		0x9000
+SETUPSEG	EQU		0x9020
+SYSSEG		EQU		0x1000
+
+section .text
+;	org	SETUPSEG
+Start:
+;Reset ds and es
+	mov	ax,INITSEG
+	mov	ds,ax
+	mov	es,ax
+
+;0x90000 save cursor position
+	mov	ah,0x03
+	xor	bh,bh
+	int	0x10
+	mov	[0],dx
+	
+;0x90002 save memory size(KB)
+;	mov	ah,0x88
+;	int	15h
+;	mov	[2],ax
+
+;Get video card data
+;0x90004 curent page
+;0x90006 display mode
+;0x90007ַclum of charactor
+	mov	ah,0x0f
+	int	10h
+	mov	[4],bx
+	mov	[6],ax 
+
+;Check for EGA/VGA and some config parameters
+;0x90008 ??
+;0x9000A memory of display card
+;0x9000B display stat
+;0x9000C display parameter
+	mov	ah,0x12
+	mov	bl,0x10
+	int	0x10
+	mov	[8],ax
+	mov	[10],bx
+	mov	[12],cx
+
+;Get hd0 data
+	mov	ax,0
+	mov	ds,ax
+	lds	si,[4*0x41]
+	mov	ax,INITSEG
+	mov	es,ax
+	mov	di,0x0080
+	mov	cx,0x10
+	rep
+	movsb
+;Get hd1 data
+	mov	ax,0
+	mov	ds,ax
+	lds	si,[4*0x46]
+	mov	ax,INITSEG
+	mov	es,ax
+	mov	di,0x0090
+	mov	cx,0x10
+	rep
+	movsb
+	
+;Check that there is a hd1
+	mov	ax,0x1500
+	mov	dl,0x81
+	int	0x13
+	jc	no_disk1
+	cmp	ah,3
+	je	is_disk1
+no_disk1:
+	mov	ax,INITSEG
+	mov	es,ax
+	mov	di,0x0090
+	mov	ax,0x00
+	mov	cx,0x10
+	rep
+	stosb
+	
+is_disk1:
+	mov	ax,SETUPSEG
+	mov	ds,ax
+	mov	es,ax
+	
+	mov	cx,SetupMsgLen
+	mov	bp,SetupMsg
+	mov	ax,01301h
+	mov	bx,0007h
+	mov	dl,0
+	int	10h
+	
+;Prepare to move to protected mode
+;Move code to 0x0:0,then jump to 8:0(0x0:0)
+	cli
+	mov	ax,0x0000
+	cld
+do_move:
+	mov	es,ax
+	add	ax,0x1000
+	cmp	ax,0x9000
+	jz	end_move
+	mov	ds,ax
+	sub	di,di
+	sub	si,si
+	mov	cx,0x8000
+	rep
+	movsw
+	jmp	do_move
+	
+end_move:
+	mov		ax,SETUPSEG
+	mov		ds,ax
+	
+	lidt	[idt_48]
+	lgdt	[gdt_48]
+	
+	call	empty_8042
+	mov		al,0xD1
+	out		0x64,al
+	
+	call	empty_8042
+	mov		al,0xDF
+	out		0x60,al
+	
+	call	empty_8042
+	mov		al,0x11
+	out		0x20,al
+	dw		0x00eb,0x00eb
+	out		0xA0,al
+	dw		0x00eb,0x00eb
+	
+	mov		al,0x20
+	out		0x21,al
+	dw		0x00eb,0x00eb
+	mov		al,0x28
+	out		0xA1,al
+	dw		0x00eb,0x00eb
+	mov		al,0x04
+	out		0x21,al
+	
+	dw		0x00eb,0x00eb
+	mov		al,0x02
+	out		0xA1,al
+	
+	dw		0x00eb,0x00eb
+	mov		al,0x01
+	out		0x21,al
+	
+	dw		0x00eb,0x00eb
+	out		0xA1,al
+	dw		0x00eb,0x00eb
+	mov		al,0xFF
+	out		0x21,al
+	dw		0x00eb,0x00eb
+	out		0xA1,al
+	
+	mov		ax,0x0001
+	;lmsw	ax
+	mov		eax,cr0
+	or		eax,1
+	mov		cr0,eax
+	;jmp		$
+	jmp		8:0
+
+SetupMsg:	db	"Setup start...",0x0d,0x0a
+SetupMsgLen	EQU	$-SetupMsg
+
+empty_8042:
+	dw		0x00eb,0x00eb
+	in		al,0x64			;8042 status port
+	test	al,0x02			;is input buffer full?
+	jnz		empty_8042		; yes - loop
+	ret
+
+gdt:
+	dw	0,0,0,0			; dummy
+
+	dw	0x07FF			; 8Mb - limit=2047 (2048*4096=8Mb)
+	dw	0x0000			; base address=0
+	dw	0x9A00			; code read/exec
+	dw	0x00C0			; granularity=4096, 386
+
+	dw	0x07FF			; 8Mb - limit=2047 (2048*4096=8Mb)
+	dw	0x0000			; base address=0
+	dw	0x9200			; data read/write
+	dw	0x00C0			; granularity=4096, 386
+
+idt_48:
+	dw	0				; idt limit=0
+	dw	0,0				; idt base=0L
+
+gdt_48:
+	dw	0x800			; gdt limit=2048, 256 GDT entries
+	dw	512+gdt,0x9		; gdt base = 0X9xxxx
+
+
+times	512*4-($-$$)	db	0	;Setupռ4ռ

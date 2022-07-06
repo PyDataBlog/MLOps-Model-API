@@ -1,0 +1,60 @@
+local util = require 'src.torch.util'
+require 'torch'
+require 'nn'
+
+-- Init --
+torch.setheaptracking(true)
+torch.manualSeed(123)
+----------
+
+-- State --
+local generator
+-----------
+
+-- Methods --
+function generator_construct(input_size, output_size)
+   generator = nil
+   collectgarbage()
+
+   local nodecnt = {input_size, output_size}
+
+   generator = {}
+   generator.model = nn.Sequential()
+
+   for i = 1, #nodecnt-1 do
+      generator.model:add(nn.Linear(nodecnt[i], nodecnt[i+1]))
+      generator.model:add(nn.Tanh())
+   end
+   generator.model:add(nn.LogSoftMax())
+   generator.criterion = nn.ClassNLLCriterion()
+
+   generator.params, generator.grads = generator.model:getParameters()
+end
+
+function generator_randomize()
+   generator.params:uniform(-0.08, 0.08)
+end
+
+function generator_forward(input, temperature)
+   input = input:double()
+
+   generator.model:evaluate()
+   generator.grads:fill(0)
+
+   local output = generator.model:forward(input)
+   output:div(temperature)
+
+   local probs = torch.exp(output)
+   probs:div(torch.sum(probs))
+
+   local class = torch.multinomial(probs, 1)
+
+   local loss = generator.criterion:forward(output, class)
+   local doutput = generator.criterion:backward(output, class)
+   generator.model:backward(input, doutput)
+
+   return class[1],generator.grads:float()
+end
+-------------
+
+return 0

@@ -1,0 +1,84 @@
+package stor
+
+import (
+	"context"
+	"testing"
+
+	"github.com/aws/aws-lambda-go/events"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"gopkg.in/microlith.v0/sam/tld/strm"
+)
+
+func TestWatcher(t *testing.T) {
+	id := "the-id"
+	handler := WatcherFunc(func(ctx context.Context, evt events.DynamoDBEvent) error { return nil })
+
+	var acceptor *WatcherAcceptor
+
+	t.Run("Constructor", func(t *testing.T) {
+		acceptor = NewWatcher(id, handler)
+
+		assert.Equal(t, id, acceptor.ID())
+		assert.NotNil(t, acceptor.Handler())
+		assert.Nil(t, acceptor.Hooks().Pre())
+		assert.Nil(t, acceptor.Hooks().Pre())
+		assert.Empty(t, acceptor.Watches())
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on invalid ID", func(t *testing.T) {
+				assert.Panics(t, func() { NewWatcher("", handler) })
+				assert.Panics(t, func() { NewWatcher("invalid ID", handler) })
+			})
+			t.Run("on nil handler", func(t *testing.T) {
+				assert.Panics(t, func() { NewWatcher(id, nil) })
+			})
+		})
+	})
+
+	t.Run("Type", func(t *testing.T) {
+		typ := acceptor.Type()
+		assert.Equal(t, "watcher", typ.ID)
+		assert.Equal(t, "Watcher", typ.Discriminator)
+		assert.Equal(t, "W", typ.Short)
+	})
+
+	t.Run("Watch", func(t *testing.T) {
+		table := new(Table)
+		startingPosition := strm.StartingPositionLatest
+
+		acceptor := NewWatcher(id, handler, func(watcher *WatcherBuilder) {
+			watcher.Watch(table, startingPosition)
+		})
+
+		require.Len(t, acceptor.Watches(), 1)
+		assert.Contains(t, acceptor.Watches(), newWatch(acceptor.watcher, table, startingPosition))
+
+		t.Run("Panics", func(t *testing.T) {
+			t.Run("on duplicate tables", func(t *testing.T) {
+				assert.Panics(t, func() {
+					NewWatcher(id, handler, func(watcher *WatcherBuilder) {
+						watcher.Watch(table, startingPosition)
+						watcher.Watch(table, startingPosition)
+					})
+				})
+			})
+		})
+	})
+}
+
+func TestWatch(t *testing.T) {
+	table, tableAcceptor := NewTable("table", String("hash-key"), nil, ChangeTypeNewAndOld)
+	watcher := NewWatcher("watcher", WatcherFunc(func(ctx context.Context, evt events.DynamoDBEvent) error { return nil }))
+	startingPosition := strm.StartingPositionLatest
+
+	var acceptor *WatchAcceptor
+
+	t.Run("Constructor", func(t *testing.T) {
+		acceptor = newWatch(watcher.watcher, table, startingPosition)
+
+		assert.Equal(t, watcher, acceptor.Watcher())
+		assert.Equal(t, tableAcceptor, acceptor.Table())
+		assert.Equal(t, startingPosition, acceptor.StartingPosition())
+	})
+}

@@ -1,0 +1,460 @@
+//________________________________________________________________________________________________
+// statevector.js
+//todo: update description
+//
+// cStateVector object - This is a generic container useful for ...
+//	Every item added to the queue is time stamped for time series analyis, playback, etc.
+//  There are optional functions onAdd[1,2,..]() that the user can define that will be //cp-not right!!!!!
+//		called each time imageUpdate() is called.
+//
+//	Note that the debug statements are commented outin some functions to reduce vpRefresh time.
+//cp-mention that this saves mouse & moves only > a fixed amount... 
+//
+//	history
+//	1106	cperz	created
+//	_______________________________________end_Rel 12.1 __________________________________________
+//
+//	131119	cperz	renamed imageUpdate to viewUpdate to avoid confusion with public interface
+//
+// todo
+//	- could make queue trim on time instead of size (with size max still...)
+//  - add methods for getlast direction, mouse position, etc.... 
+//			much more straightforward, no need to understand internal storage of this object!
+//________________________________________________________________________________________________
+// state types:
+//	image: set by viewUpdate()
+//	mouse: set by mouseUpdate()
+//
+us.eStateTypes = { image: 0, mouse: 1 };
+//________________________________________________________________________________________________
+
+function cStateVector(vpObj) {
+	var thisImg = vpObj; 									// the viewport object - the parent
+	var self = this; 										// local var for closure
+	var imageId_ = thisImg.getImageId();
+	var uScopeIdx_ = thisImg.getImageIdx();
+
+	var imageSizeMax;
+	var mouseSizeMax;
+
+	var idxPrevNext = -1;									// index in image queue
+	var idxPrevNextStart = -1;								// index of starting position of prev/next sequence
+
+	var d = new Date();
+	var dTime = 1. / 10.; 									// get the start time and scale it from millisecs to 1/100th sec
+	var startTime = d.getTime() * dTime;
+
+	var imageQueue = []; 									// the image state vector queue
+	var mouseQueue = []; 									// the mouse state vector queue
+	var cb_imageState = []; 								// array of image state function callbacks 
+	var cb_mouseState = []; 								// array of mouse state function callbacks 
+
+	var stateTypeView = us.eStateTypes.view; 				// for quick access
+	var stateTypeMouse = us.eStateTypes.mouse;
+
+	var minMoveMagnitude_ = 12;  							// the minimum magnitude in pixels of movement to record
+	var slopeLimit = 4;
+	var slopeLimtInv = 0.25;								// 1. / slopeLimit
+
+	var kSVQUEUE_VIEW_SIZE = 500; 							// number of view states to retain in state vector queue
+															// this throttles the responsivity of the state vector!
+
+	//............................................ _sinceStartTime local
+	//	This function is used for all time stamps in this object.
+	//	It converts absolute time from "new Date().getTime()" to a differntial in seconds 
+	//	(to the 3rd decimal place - milliseconds) since the start time of this object.
+	var _sinceStartTime = function (time) {
+		return (time * dTime - startTime).toFixed(3);
+	};
+	//............................................ _setSize local
+	// This function sets the image and mouse queue maximum sizes.
+	var _setSize = function (newSize) {
+		var newMax = (newSize) ? newSize : 200; 	// maximum size for queue
+		if (newMax < 1 || newMax > 2000)			// sanity check on the queue size 
+			return;
+		imageSizeMax = newMax;
+		mouseSizeMax = 100; //  parseInt(newMax / 2); 	// limit the mouse queue to half the size
+
+
+		while (imageQueue.length > imageSizeMax)
+			imageQueue.shift();
+		while (mouseQueue.length > mouseSizeMax)
+			mouseQueue.shift();
+	};
+	//............................................ registerForEvent
+	// This function adds a subscription to state change event.
+	// The imageUpdate() and mouseUpdate() functions call these subscribers.
+	//
+	this.registerForEvent = function (functionString, stateType) {
+		if (typeof functionString === "function") {
+			if (isUnDefined(stateType)) stateType = us.eStateTypes.view;
+			if (us.DBGSTATEVECTOR) thisImg.log("statevector: add callback: (" + functionString + ")  Type: " + stateType);
+			if (stateType === us.eStateTypes.view)
+				cb_imageState.push(functionString);
+			else
+				cb_mouseState.push(functionString);
+		}
+	};
+	//............................................ unRegisterForEvent
+	// This function removes a subscription to state change event.
+	this.unRegisterForEvent = function (functionString) {
+		// find a string match in the call back arrays and remove it.
+		if (typeof functionString === "function") {
+			functionString = functionString.toString();
+			// search image state queue for the event
+			for (var c = 0, len = cb_imageState.length; c < len; c++) {
+				var str = cb_imageState[c].toString();
+				if (str.indexOf(functionString) !== -1) {
+					if (us.DBGSTATEVECTOR) thisImg.log("statevector: remove image callback: (" + functionString + ")");
+					cb_imageState.remove(c);
+					return;
+				}
+			}
+			// search mouse state queue for the event
+			for (var c = 0, len = cb_mouseState.length; c < len; c++) {
+				var str = cb_mouseState[c].toString();
+				if (str.indexOf(functionString) !== -1) {
+					if (us.DBGSTATEVECTOR) thisImg.log("statevector: remove mouse callback: (" + functionString + ")");
+					cb_mouseState.remove(c);
+					return;
+				}
+			}
+		}
+	};
+	//............................................ viewUpdate
+	// This function adds an image state vector to its queue.  
+	// If the state description is a move, the city block distance between this position and the previous state on the queue
+	// must be greater than a threshold.  Otherwise the state is not added to the queue.
+	//
+	// An Image State Vector is a definition of the view state plus:
+	//		time stamp
+	//		+ desc  {"all", "move", "zoom", "focus", "dims", }
+	//		+ viewport's vpView contents {left, top, width, height, zoom, focus, angleDeg} 
+	//		+ dir {"none", "wholeview", "north", "east", "west", "south", northwest, ...} //cp-fill in and define
+	//		+ magpx { magnitude of move in pixels }
+	//
+	//	parameters
+	//		state: is viewport's vpView contents
+	//		changeDesc: {"all", "move", "zoom", "focus", "dims", "rotate"}
+	//
+	//	todo: 
+	//		- I'd like to know if there are listenters, perhaps I don't do all this if not
+
+	var lastViewState_ = new cPoint(0,0);
+	this.viewUpdate = function (state, changeDesc) {
+		var zoom = state.zoom;
+		var x = state.left;
+		var y = state.top;
+		//debug-only thisImg.log("image state: X,Y,ZOOM: " + x + "," + y + "," + zoom);
+
+		if (imageQueue.length == imageSizeMax)			// maintain queue size
+			imageQueue.shift(); 						// remove the top element of the array to make room at the bottom
+
+		var magpx = 0;
+		if (changeDesc == "move") {						// throttle the responsivity to motion
+			var magpx = Math.abs(state.left - lastViewState_.x) + Math.abs(state.top - lastViewState_.y); // city-street magnitude of move in pixels
+			if (magpx < minMoveMagnitude_) {
+				//dbg-only if (us.DBGSTATEVECTOREX) thisImg.log("cStateVector: viewUpdate: magnitude of move (" + magpx + ") < minimum (" + minMoveMagnitude_ + ")");
+				return;
+			}
+			//consoleWrite("cur state: " + state.left + "," + state.top + " last state: " + lastViewState_.toString() + "  magpx: " + magpx);
+		}
+
+		var sv = []; 	 									// add info to new state vector
+		sv.time = _sinceStartTime(new Date().getTime()); // add time stamp
+		sv.desc = changeDesc; 								// add input change description
+		sv.state = jQuery.extend(true, {}, state); 			// add input view state, must clone state first
+		if (changeDesc == "move")							// 
+			sv.magpx = magpx; 								// add magnitude of move (units are pixels)
+		_computeDir(sv); 									// add computed direction 'dir'
+		imageQueue.push(sv); 								// add state vector to the queue
+		lastViewState_.set(state.left, state.top); 			// save last queue view position
+
+		//if (us.DBGSTATEVECTOR) sv.magpx ? thisImg.log("cStateVector: viewUpdate: dir: " + sv.dir + " magpx: " + sv.magpx)
+		//							 : thisImg.log("cStateVector: viewUpdate: desc: " + sv.desc);
+
+		for (var c = 0, len = cb_imageState.length; c < len; c++)	// execute the callbacks to signal a SV update event
+			cb_imageState[c]();
+
+		triggerUScopeEvent(us.evVIEWCHANGE, {				// fire event that the view has changed
+			imageId: imageId_, uScopeIdx: uScopeIdx_, desc: sv.desc,
+			x: thisImg.getViewCenterX(), y: thisImg.getViewCenterY(), zoom: zoom, angleDeg: state.angleDeg
+		});
+	};
+
+	//............................................ mouseUpdate
+	// This function adds an mouse state vector to its queue.  
+	// If the state description is a mousemove, the city block distance between this position and the previous state on the queue
+	// must be greater than a threshold.  Otherwise the state is not added to the queue.
+	//
+	//	A Mouse State Vector is a definition of the mouse state:
+	//		time stamp
+	//		+ desc {"mousemove", "mousedown", ...} 
+	//		+ state   cPoint {x,y} of mouse position in base image coordinates
+	//
+	//	parameters
+	//		state:			cPoint {x,y} of mouse position in base image coordinates
+	//		eventDesc:		{"mousemove", "mousedown",}
+	//		bForce:			boolean, if true the function does not exit when there are no listeners
+	//									so us.evMOUSECHANGE event is fired if mouse move is sufficient
+
+	var lastMouseState_ = new cPoint(0, 0);
+	this.mouseUpdate = function (state, eventDesc, bForce) {
+		if (bForce == false && cb_mouseState.length == 0) 	// do not save state if no one is subscribed 
+			return;
+		//dbg-only if (us.DBGSTATEVECTOREX)	thisImg.log("cStateVector: mouseUpdate: " + state.toString() + "  desc: " + eventDesc);
+
+		if (mouseQueue.length == mouseSizeMax)				// maintain queue size
+			mouseQueue.shift(); 							// remove the top element of the array to make room at the bottom
+
+		var magpx = 0;
+		if (eventDesc == "mousemove") {
+			if (lastMouseState_) {						// throttle the responsivity to motion
+				magpx = lastMouseState_.cityBlockDistance(state);
+				//consoleWrite("cur state: " + state + " last state: " + lastMouseState_.toString() + "  magpx: " + magpx);
+				if (magpx < minMoveMagnitude_) {
+					//dbg-only if (us.DBGSTATEVECTOREX) thisImg.log("cStateVector: mouseUpdate: magnitude of move (" + magpx + ") < minimum (" + minMoveMagnitude_ + ")");
+					return;
+				}
+			}
+		}
+
+		var sv = []; 	 									// add info to new state vector
+		sv.time = _sinceStartTime(new Date().getTime()); // add time stamp
+
+		sv.desc = eventDesc; 								// add input change description
+		sv.state = jQuery.extend(true, {}, state); 			// add input view state, must clone state first
+		mouseQueue.push(sv); 								// add state vector to the queue
+		lastMouseState_.setPoint(sv.state);					// save last queue mouse position
+
+		//dbg-only if (us.DBGSTATEVECTOREX) thisImg.log("cStateVector: mouseUpdate: desc: " + sv.desc + sv.state.toString() + " magnitude: " + magpx);
+
+		for (var c = 0, len = cb_mouseState.length; c < len; c++)	// execute the callbacks to signal a SV update event
+			cb_mouseState[c]();
+
+		triggerUScopeEvent(us.evMOUSECHANGE, { imageId: imageId_, uScopeIdx: uScopeIdx_, uScopeIdx: thisImg.getImageIdx(), x: state.x, y: state.y });
+	};
+
+	//............................................ getLastMousePosition
+	// This function returns the last recorded mouse position or undefined if none have been recorded.
+	this.getLastMousePosition = function () {
+		return (mouseQueue.length > 0) ? mouseQueue[mouseQueue.length - 1].state : undefined;
+	};
+
+	//............................................ getMouseEventsSince
+	//	This function returns an array in ascending order of the mouse events since a specified time.
+	//	The time stamp in the list of events is in this object's format - delta time since the start of the object scaled by dTime;
+	//	Optionally a specific type of mouse event can be selected.
+	//  A maximum number of returned events is enforced but can be overridden.
+	//
+	//	parameters:
+	//		sinceTime	required, time to start collecting the event, sinceTime = new Date().getTime()
+	//		eventDesc	optional, return this mouse event type {"mousemove", "mousedown", ...}  default is all
+	//		maxRtnSize	optional, maximum number of mousestates to return, default is 100
+
+	this.getMouseEventsSince = function (sinceTime, eventDesc, maxRtnSize) {
+		var rtnQueue = [];
+		if (isUnDefined(sinceTime)) return rtnQueue;
+
+		sinceTime = _sinceStartTime(sinceTime); 			// convert to same time format as used here in
+		if (mouseQueue.length > 0) {
+			eventDesc = (eventDesc) ? eventDesc : "all"; 	// set event filter
+			maxRtnSize = (maxRtnSize) ? maxRtnSize + 1 : 101; // set limit of number of items returned 
+
+			var cnt = 0;
+			var startIdx = mouseQueue.length;
+			while (--startIdx > 0 && ++cnt < maxRtnSize) {
+				if (mouseQueue[startIdx].time < sinceTime)	// am I now before my time?
+					break;
+				if (eventDesc == "all" || eventDesc == mouseQueue[startIdx].desc)
+					rtnQueue.unshift(mouseQueue[startIdx]); // add to the begining of the array for ascending order
+			}
+		}
+		return rtnQueue;
+	};
+
+	//............................................ getPrevNext
+	this.getPrevNext = function (incr) {//incr s/b +/-1
+		if (imageQueue.length < 1) return undefined;
+
+		var rtnSV = undefined;
+		if (idxPrevNext == -1) {
+			idxPrevNext = imageQueue.length - 1 + incr;
+			idxPrevNextStart = imageQueue.length - 1;
+		}
+		else {
+			idxPrevNext = idxPrevNext + incr;
+			if (idxPrevNext > idxPrevNextStart) idxPrevNext = idxPrevNextStart; // don't move past starting position
+		}
+
+		/////thisImg.log("getPrevNext: idxPrevNext: " + idxPrevNext);
+		if (idxPrevNext > 0 && idxPrevNext < imageQueue.length)
+			rtnSV = imageQueue[idxPrevNext];
+
+		if (idxPrevNext == idxPrevNextStart) idxPrevNext = -1; //reset
+
+		return rtnSV;
+	};
+	//............................................ getLastDirection
+	// This function returns the last recorded image direction or undefined if none have been recorded.
+	this.getLastDirection = function () {
+		return (imageQueue.length > 0) ? imageQueue[imageQueue.length - 1].dir : undefined;
+	};
+	//............................................ getLastDescription
+	// This function returns the last recorded image description or undefined if none have been recorded.
+	this.getLastDescription = function () {
+		return (imageQueue.length > 0) ? imageQueue[imageQueue.length - 1].desc : undefined;
+	};
+	//............................................ getLast
+	// This function returns the last state vector for the specified state type.
+	this.getLast = function (stateType) {//cp-todo rename to get LastState
+		if (isUnDefined(stateType)) stateType = us.eStateTypes.view;
+		if (stateType === us.eStateTypes.view)
+			return (imageQueue.length > 0) ? imageQueue[imageQueue.length - 1] : undefined;
+		else
+			return (mouseQueue.length > 0) ? mouseQueue[mouseQueue.length - 1] : undefined;
+	};
+	//............................................ reportLast
+	// This function returns a string containing the last state vector report for the specified state type.
+	this.reportLast = function (stateType) {
+		var str = "";
+		var queue = (stateType === us.eStateTypes.view) ? imageQueue : mouseQueue;
+		if (queue.length > 0) {
+			str = (stateType === us.eStateTypes.view) ? "LastViewState: " : "LastMouseState: ";
+			var state = queue[queue.length - 1];
+			str += this.report(state, stateType);
+		}
+		return str;
+	};
+	//............................................ report
+	// This function converts the passed state into a csv string.
+	this.report = function (stateVector, stateType) {
+		var str = "";
+		if (isUnDefined(stateVector)) return str;
+		if (isUnDefined(stateType)) stateType = us.eStateTypes.view;
+
+		if (stateType === us.eStateTypes.view) {
+
+			var zoom = stateVector.state.zoom;
+			var isFit = thisImg.isFitZoom(zoom);
+			var mag = (isFit) ? "Fit" : thisImg.convertToMag(zoom);
+			zoom = (isFit) ? "Fit" : zoom;
+
+			// note that this format is copied into the performance test sequence in cPerformanceTest
+			str = parseInt(stateVector.time) + ', \"' + stateVector.desc + '\", ' + stateVector.state.left + ", " + stateVector.state.top + ", " + zoom + ", " + mag;
+
+			//note: stateVector.dir & stateVector.magpx not reported (yet?)
+		}
+		else {
+			var sv = mouseQueue[mouseQueue.length - 1];
+			str = stateVector.desc;
+			str += stateVector.state.toString();
+			if (stateVector.magpx) str += "  magnitude_px:" + stateVector.magpx;
+		}
+		return str;
+	};
+	this.reportTitle = function (stateType) {
+		var str = "";
+		if (isUnDefined(stateType)) stateType = us.eStateTypes.view;
+
+		str = "Filename: " + thisImg.getFileName() + " Width: " + thisImg.getImageWidth() + " Height:" + thisImg.getImageHeight() + "\n";
+
+		if (stateType === us.eStateTypes.view) {
+			str += "time, desc, centerX, centerY, zoom, mag\n";
+			//note: stateVector.dir & stateVector.magpx not reported (yet?)
+		}
+		else {
+			// not implemented
+		}
+		return str;
+	};
+	//............................................ reportAll
+	this.reportAll = function (stateType, normalize) {
+		var str = this.reportTitle(stateType);
+		if (isUnDefined(stateType)) stateType = us.eStateTypes.view;
+		if (isUnDefined(normalize)) normalize = false;
+
+		var queue = (stateType === us.eStateTypes.view) ? imageQueue : mouseQueue;
+		if (queue.length > 0) {
+			for (var s = 0, len = queue.length; s < len; s++) {
+				var svRef = queue[s]; 						// get state vector at index s 
+				var sv = new cloneObject(svRef); 			// clone the state vector so I can modify it
+				
+				var x = sv.state.left; 						// state reports top left corner, convert to center position
+				var y = sv.state.top;
+				x = parseInt(x + thisImg.getViewWidth() / 2);
+				y = parseInt(y + thisImg.getViewHeight() / 2);
+
+				if (normalize == true) {					// if normalize, x and y are proportion of the image dims
+					x = (x / thisImg.getImageWidth()).toFixed(5);
+					y = (y / thisImg.getImageHeight()).toFixed(5);
+				}
+				sv.state.left = x;
+				sv.state.top = y;
+
+				str += (this.report(sv, stateType) + "\n");
+			}
+		}
+		return str;
+	};
+
+	//............................................ _computeDir
+	// This function evaluates the most recent state change and concludes the view motion direction.
+	//		It then adds that direction to the passed array.
+	var _computeDir = function (ioSV) {
+
+		ioSV.dir = "none";
+		if (imageQueue.length == 0 || ioSV.desc == "all" || ioSV.desc != "move")
+			return;
+
+		var lastState = self.getLast(stateTypeView).state;
+		var dx = ioSV.state.left - lastState.left;
+		var dy = ioSV.state.top - lastState.top;
+
+		if (Math.abs(dx) > lastState.width * 2 || Math.abs(dy) > lastState.height * 2 // if moved N views  //cp-revisit factor of 2
+		|| ioSV.desc == "dim") { 												// or resized view dimensions
+			ioSV.dir = "wholeview"; 												// then indicate whole view change
+			return;
+		}
+		var dr = slopeLimit + 1; 			// slope of motion
+		if (dy != 0)
+			dr = dx / dy;
+
+		if (us.DBGSTATEVECTOREX) ioSV.magpx ? thisImg.log("cStateVector: computeDir: " + dr.toFixed(2) + "  dx dy:" + dx + " " + dy + "  magpx:" + ioSV.magpx)
+								   : thisImg.log("cStateVector: computeDir: " + dr.toFixed(2) + "  dx dy:" + dx + " " + dy);
+
+		var dir = "none"; 								// default direction of move
+		if (Math.abs(dr) > slopeLimit) { 				// if horizontal motion
+			if (dx < 0)									// if moving left
+				dir = "east";
+			else
+				dir = "west";
+		}
+		else if (Math.abs(dr) < slopeLimtInv) {			// if vertical motion
+			if (dy < 0)									// if moving up
+				dir = "south";
+			else
+				dir = "north";
+		}
+		else if (dx < 0) { 								// diagnal motion, moving left
+			if (dy < 0)									// if moving up, too
+				dir = "southeast";
+			else
+				dir = "northeast";
+		}
+		else { 											// diagnal motion, moving right
+			if (dy < 0)									// if moving up, too
+				dir = "southwest";
+			else
+				dir = "northwest";
+		}
+
+		ioSV.dir = dir; 								// add direction to return ioSV
+	};
+
+	//............................................................................................
+	// construction
+	_setSize(kSVQUEUE_VIEW_SIZE); 						// save the max queue size allowed  
+
+};
+//________________________________________________________________________________________________

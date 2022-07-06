@@ -1,0 +1,137 @@
+require 'mustache'
+require 'yaml'
+require 'fileutils'
+require 'pp'
+require_relative '../../lib/blanket'
+
+# vagrant box add precise32 http://files.vagrantup.com/precise32.box
+# vagrant box add precise64 http://files.vagrantup.com/precise64.box
+
+def trim_result(param)
+  param.result.split("\n").map(&:strip)
+end
+
+def check_expected_result(result, expected)
+  puts "check expected result.\nExpected #{expected}.\n Got #{result}\n"
+  fail 'result should not be null' unless result
+  fail 'exected should not be null' unless expected
+  fail "expected (#{result}) to be an array" unless result.is_a?(Array)
+  fail "expected (#{expected}) to be an array" unless expected.is_a?(Array)
+  fail "result (#{result}) size does not match expected (#{expected}) size" unless result.size == expected.size
+  result.size.times do |c|
+    fail "element #{c} from result (#{result[c]}) does not match element from expected (#{expected[c]})" unless result[c] == expected[c]
+  end
+end
+
+#############################
+# command validators        #
+#############################
+def build_command_validators(extra=nil)
+  validators = []
+  validators << {
+    command: 'zz .runtime cli base',
+    validate: proc do |param|
+      check_expected_result([trim_result(param).last], ["Switched dir to: #{extra}/tmp/silvatest/silva"])
+    end
+  }
+  %w(test omega).each do |th|
+    validators << {
+      command: "zz #{th} cmd",
+      validate: proc do |param|
+        check_expected_result(trim_result(param), ['.'])
+      end
+    }
+    validators << {
+      command: "zz #{th} spain cmd",
+      validate: proc do |param|
+        check_expected_result(trim_result(param), ['./spain'])
+      end
+    }
+    validators << {
+      command: "zz #{th} spain 101 cmd",
+      validate: proc do |param|
+        check_expected_result(trim_result(param), ['./spain/101'])
+      end
+    }
+  end
+  validators << {
+    command: 'zz gamma 101 104 999',
+    validate: proc do |param|
+      check_expected_result(trim_result(param), ['101-104-999 battlecruiser operational'])
+    end
+  }
+  validators
+end
+
+def cleanup(path, nofail = true)
+  if nofail
+    CommandExecutor.new("cd #{path} && vagrant destroy -f").run rescue nil
+  else
+    CommandExecutor.new("cd #{path} && vagrant destroy -f").run
+  end
+end
+
+
+####################################
+#  validate running locally first  #
+####################################
+def validate_locally
+  path = '/tmp/silvatest'
+  CommandExecutor.new("rm -rf #{path}").run
+  CommandExecutor.new("mkdir #{path}").run
+  CommandExecutor.new("export VERLABEL=LATEST; cd #{path} && curl -sSL https://raw.githubusercontent.com/mirceal/silva/master/install.sh | bash").run
+  build_command_validators.each do |validator|
+    result = CommandExecutor.new("/bin/bash -c \"source $(#{path}/silva/bin/bootstrap) > /tmp/debug 2>&1; #{validator[:command]}\"").run
+    validator[:validate].call(result)
+  end
+end
+validate_locally
+
+#############################
+# build the vagrant config  #
+#############################
+
+vagrant_template = File.expand_path('../Vagrantfile.stache', __FILE__)
+Mustache.raise_on_context_miss = true
+
+config_file = File.expand_path('../runner.config.yml', __FILE__)
+config = YAML.load(File.read(config_file)).symbolize_keys
+config[:provision_script] = File.expand_path("../#{config[:provision_script]}", __FILE__)
+
+config[:shells].each do |shell|
+  config[:images].each do |image|
+    config[:machines] ||= []
+    # next unless shell.eql?('zsh') && image.eql?('precise64')
+    # next unless shell.eql?('bash') && image.eql?('precise64')
+    config[:machines] << { name: "#{shell}_#{image}", vm_image: image, shell: shell }
+  end
+end
+
+path = File.join(File.expand_path('../vms', __FILE__))
+FileUtils.mkdir_p(path)
+# pre-cleanup - attempt to remove any leftovers from previous runs
+cleanup(path)
+
+vagrant_file_path = File.join(path, 'Vagrantfile')
+File.open(vagrant_file_path, 'w') do |outf|
+  outf.write(Mustache.render(File.read(vagrant_template), config))
+end
+
+#############################
+# start the run             #
+# + validate silva      #
+#############################
+
+begin
+  CommandExecutor.new("cd #{path} && vagrant up").run
+  config[:machines].each do |machine|
+    build_command_validators.each do |validator|
+      result = CommandExecutor.new("cd #{path} && vagrant ssh #{machine[:name]} -- '#{validator[:command]}'").run
+      validator[:validate].call(result)
+    end
+  end
+  cleanup(path, false)
+rescue StandardError => e
+  puts "#{e.message} - #{e.backtrace.join(' | ')}".red
+  cleanup(path)
+end

@@ -1,0 +1,95 @@
+var http = require("http"),
+        url = require("url"),
+        path = require("path"),
+        fs = require("fs"),
+        DS = "/";
+
+var settings = {
+    port: 8080,
+    indexFile: "index.html",
+    folder: {
+        serverside: "serverside",
+        clientside: "clientside",
+        static: "static_server",
+        admin: "admin"
+    }
+};
+
+var paths = {};
+paths.origin = process.cwd();
+paths.base = paths.origin.slice(0, -1 * settings.folder.serverside.length - 1);
+paths.clientside = paths.base + DS + settings.folder.clientside;
+paths.serverside = paths.base + DS + settings.folder.serverside;
+paths.static = paths.base + DS + settings.folder.serverside + DS + settings.folder.static;
+
+clientside_exists = false;
+path.exists(paths.clientside, function(exists) {
+    clientside_exists = exists;
+});
+
+var static_server = http.createServer(function(request, response) {
+
+    var uri = url.parse(request.url).pathname,
+            filename;
+
+    var DS_admin = DS + settings.folder.admin + DS;
+    if (uri.slice(0, DS_admin.length) === DS_admin) {
+        filename = path.join(paths.static, uri);
+    } else if (clientside_exists) {
+        filename = path.join(paths.clientside, uri);
+    } else {
+        filename = path.join(paths.origin, uri);
+    }
+
+    fs.exists(filename, function(exists) {
+        if (!exists) {
+            response.writeHead(404, {"Content-Type": "text/plain"});
+            response.write("404 Not Found\n");
+            response.end();
+            return;
+        }
+
+        if (fs.statSync(filename).isDirectory()) {
+
+            var indexFound = false;
+            var rawlist = fs.readdirSync(filename);
+            var filelist = [];
+
+            rawlist.forEach(function(element) {
+                if (!fs.statSync(path.join(filename, element)).isDirectory() && !indexFound) {
+                    if (element === settings.indexFile) {
+                        indexFound = true;
+                    } else {
+                        filelist.push(element);
+                    }
+                }
+            });
+
+            if (filelist.length > 0 && !indexFound) {
+                response.writeHead(200, {"Content-Type": "text/plain"});
+                response.write(JSON.stringify(filelist));
+                response.end();
+                return;
+            }
+
+            filename = path.join(filename, settings.indexFile);
+        }
+
+        fs.readFile(filename, "binary", function(err, file) {
+            if (err) {
+                response.writeHead(500, {"Content-Type": "text/plain"});
+                response.write(err + "\n");
+                response.end();
+                return;
+            }
+
+            response.writeHead(200);
+            response.write(file, "binary");
+            response.end();
+        });
+    });
+});
+
+static_server.listen(parseInt(settings.port, 10));
+
+module.exports = static_server;

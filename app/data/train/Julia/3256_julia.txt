@@ -1,0 +1,226 @@
+# 21 Jul 2017: Journal version
+#  - 2017.07.21: Keyword arguments in genSig()
+#
+#
+# Version 0.1 (IJCNN submission preparation)
+#
+#  - 06 Nov 2016: - Added function to add noise to the generated signal
+#
+# (A lot of functions are copied from Pccf/ repository)
+module SignalGenerator
+
+#include("recmidpoints.jl")
+
+export genSig, addNoise!, addNoiseRec!
+
+function bisect(v, x, imin::Int, imax::Int)
+    # https://docs.python.org/2/library/bisect.html
+    # The returned insertion point i partitions the sorted vector v into two halves so that
+    # all(val <= x for val in v[1:i]) for the left side and
+    # all(val > x  for val in v[i:hi]) for the right side.
+    if imin == imax
+        x <= v[imin] ? imin : imin + 1
+    else
+        imid = div(imin+imax, 2)
+        if x == v[imid]
+            return imid
+        elseif x > v[imid]
+            bisect(v, x, imid + 1, imax)
+        else
+            bisect(v, x, imin, max(imid - 1, imin))
+        end
+    end
+end
+function bisect(v, x)
+    bisect(v,x,1,length(v))
+end
+
+"""
+Function to generate sequence of elements according to the probabilities proportional to the weights.
+"""
+function genSamples(values, weights::Vector{Float64}, n::Int64)
+    @assert length(values) == length(weights)
+    if sum(weights) == 1.0
+        probs = weights
+    else
+        probs = weights/sum(weights)
+    end
+    cdf = cumsum(probs)
+    samples = []
+    for i in 1:n
+        u   = rand()
+        i   = bisect(cdf, u)
+        push!(samples, values[i])
+    end
+    return samples
+end
+
+
+## ;;;;;;;;;;;;;;;;;Pccf/v1.0/src/recurrency_modelling2/sim3.clj;;;;;;;
+## (defn gen-vals-in-interval-uniform [n from-v to-v]
+##   "Function to generate values within interval inclusive"
+##   (let [rng (inc (- to-v from-v))]
+##     (map #(+ % from-v) (repeatedly n #(rand-int rng)))))
+##
+## (defn gen-vals-in-interval-gauss [n from-v to-v]
+##   (let [mu (/ (+ to-v from-v) 2.0) sigma (inc (- to-v from-v))]
+##     (utils/rnorm n mu sigma)))
+## ;; (gen-vals-in-interval 5 7 8)
+## ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+
+# """
+# Probably it if naive experiments V.1.1 (After https://github.com/av-maslov/Pccf)
+# Function to generate random observations.
+# bootom_level, upper_level - boundaries of the interval defining mean and sigma
+# Boundaries seemed to be more convenient than setting mu and sigma directly.
+# """
+# function genValsInIntervalGauss(n, bootom_level, upper_level)
+#     # old: mu = (n+st)/2
+#     mu = (bootom_level + upper_level)/2
+#     sigma = upper_level - bootom_level + 1.0
+#     randn(n) * sigma + mu
+# end
+
+function calcWidth(mu)
+    1 + round(Int, 1.33 * mu)
+end
+
+
+function gaussPdf(x, mu, sigma)
+    k = 1.0/(sigma * sqrt(2*pi))
+    p = k * exp(-((x-mu)^2/(2*sigma^2)))
+end
+
+
+"Change's locations, all > 0 except the first"
+function changesLocations(n, mu, sigma)
+    locations = vcat(0, filter(x -> x > 0, cumsum(randn(n)*sigma + mu)))
+    locations = map(x -> convert(Int, x), round.(locations))
+end
+
+
+"Length of the signal to be generated."
+function calcTmax(mu, n)
+    round(Int,(mu * (n+1)))
+end
+
+
+function errorsLocations(n,mu,errRate)
+    tMax = calcTmax(mu, n)
+    avgNumOfErrors = errRate * n
+    rand(1:tMax, avgNumOfErrors)
+end
+
+
+"""
+Function to generate the signal with changes and noise.
+n          : length of the signal
+mu         : avg distance between changes
+sigma      : std. dev. of the distance
+changeStep : absolute value of the signal's level change after each changepoint
+sigStd     : signals standard deviation
+"""
+function genSig(;n = 10, mu = 10, sigma = 1, changeStep = 1.1, sigStd = 0.3)
+    tMax    = calcTmax(mu, n)
+    changes = changesLocations(n, mu, sigma)
+    n_chps  = length(changes)
+    levels  = cumsum(rand([-1, 1], n_chps) * changeStep/2.0)
+    sig=zeros(n)
+    @assert length(levels) == n_chps
+    sig_tmp = []
+    for i in 2:n_chps
+        sub_len = changes[i] - changes[i-1]
+        sig_tmp = vcat(sig_tmp, randn(sub_len) * sigStd + levels[i])
+        n_tmp=length(sig_tmp)
+        if n_tmp > n
+            sig[1:n] = sig_tmp[1:n]
+        else
+            sig[1:n_tmp] = sig_tmp[1:n_tmp]
+        end
+    end
+    Dict("sig"=>sig, "changes"=>changes)
+end
+
+
+function updVec(vec, ids::Array{Int,1}, newVals)
+    v=copy(vec)
+    for i in 1:length(ids)
+        v[ids[i]]=newVals[i]
+    end
+    return v
+end
+
+
+"""
+Add noise between changepoinst in the artificially generated signal.
+Just in the middle between changes.
+sig[i] = sig[i] + changeStep
+"""
+function addNoise!(sig, changes, changeStep; width = 5)
+    idx_noise = Array{Int64,1}()
+    n_chp = length(changes)
+    n     = length(sig)
+    @assert n_chp > 3
+    for i in 2 : n_chp
+        c_j = changes[i-1]
+        c_i = changes[i]
+        m = convert(Int, div(c_i+c_j, 2))
+        idx_noise = vcat(idx_noise, collect(m-div(width,2) : m+div(width,2)))
+    end
+    for k in idx_noise
+        sig[k] = sig[k] + changeStep
+    end
+    idx_noise
+end
+
+
+"""
+Use recursive function to add more noise than just in the middle
+"""
+function addNoiseRec!(sig, changes, changeStep; width = 5, min_len = 30)
+    idx_noise = Array{Int64,1}()
+    n_chp = length(changes)
+    n     = length(sig)
+    @assert n_chp > 3
+    for i in 2 : n_chp
+        c_j = changes[i-1]
+        c_i = changes[i]
+        # m = convert(Int, div(c_i+c_j, 2))
+        midpoints = recmidpoints(c_j, c_i, min_len)
+        for m in midpoints
+            idx_noise = vcat(idx_noise, collect(m-div(width,2) : m+div(width,2)))
+        end
+    end
+    sort!(idx_noise)
+    for k in idx_noise
+        sig[k] = sig[k] + changeStep
+    end
+    idx_noise
+end
+
+
+end
+
+# """
+# Function to generate the signal with changes and noise.
+# For changes values are from tvf-tvt; For errors in rvf-evt
+# tvf: 'true values from' / tvt: `true values to`
+# evf: 'error's values from' / evt: 'error's values to'
+# """
+# function genSig_old(n, mu, sigma, errRate, tvf, tvt, evf, evt)
+#     tMax        = calcTmax(mu,n)
+#     changesLoc  = changesLocations(n,mu,sigma)
+#     nChps       = length(changesLoc)
+#     valsChanges = genValsInIntervalGauss(nChps, tvf, tvt)
+#     # ???
+#     vals        = zeros(tMax)
+#
+#     if errRate > 0
+#         errorsLoc   = errorsLocations(n,mu,errRate)
+#         nErrors     = length(errorsLoc)
+#         valsErrors  = genValsInIntervalGauss(nErrors, evf, evt)
+#     end
+#     changes1    = updVec(vals, errorsLoc, valsErrors)
+#     changes2    = updVec(changes1, changesLoc, valsChanges)
+#     Dict("changes"=>changesLoc, "sig"=>changes2)
+# end

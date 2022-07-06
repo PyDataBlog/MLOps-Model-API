@@ -1,0 +1,134 @@
+package me.reminisce.analysis.difficulty
+
+import me.reminisce.analysis.DataTypes.{DataType, PageLikeNumber, PageLikeTime, PageWhichLiked}
+import me.reminisce.analysis.clustering.cluster.{SimpleValClusterer, TimeClusterer}
+import me.reminisce.analysis.clustering.model.{PageLikeTimeClusterable, PageLikesNumberClusterable}
+import me.reminisce.analysis.{AnalysisData, AnalysisResults}
+import me.reminisce.database.MongoDBEntities.{FBPage, FBPageLike}
+
+/**
+  * A difficulty processor for pages
+  * @param userId the considered user
+  */
+class PagesDifficultyProcessor(userId: String) extends DifficultyProcessor {
+
+  override def generateDifficultyMaps(analysisData: AnalysisData, prevResults: AnalysisResults): Map[String, (KindDiffMap, TypeDiffMap, TypeClusterMap)] = {
+    val pageLikeMCDiff =
+      if (analysisData.notLikedPagesCount >= 3) {
+        whichPageLikeDifficulty(analysisData.allPages, analysisData.userLikedPages)
+      } else {
+        List()
+      }
+    val pageOrderDiff = pageLikesNumberDifficulty(analysisData.userLikedPages)
+    val pageTl = pageLikeTimeDifficulty(analysisData.pageLikes, analysisData.userLikedPages)
+
+    formMaps(pageLikeMCDiff ++ pageOrderDiff ++ pageTl)
+  }
+
+  /**
+    * Computes the difficulty of ordering pages according to number of likes
+    * @param analysedPages the pages considered here
+    * @return difficulty mapping
+    */
+  private def pageLikesNumberDifficulty(analysedPages: List[FBPage]): List[(String, TypeDiffWithCluster)] = {
+    val clusters = generateLikeClusters(analysedPages)
+    analysedPages.map {
+      page =>
+        val id = page.pageId
+        clusters.find {
+          case (_, cluster) =>
+            cluster.contains(id)
+        }.fold(id -> TypeDiffWithCluster(PageLikeNumber, 0.5)) {
+          case (clusterId, _) =>
+            id -> TypeDiffWithCluster(PageLikeNumber, 1.0, Some(clusterId))
+        }
+    }
+  }
+
+  /**
+    * Computes the difficulty of determining which page you liked
+    * @param allPages all the known pages
+    * @param analysedPages the considered pages
+    * @return difficulty mapping
+    */
+  private def whichPageLikeDifficulty(allPages: List[FBPage],
+                                      analysedPages: List[FBPage]): List[(String, TypeDiffWithCluster)] = {
+    if (allPages.nonEmpty) {
+      // Logarithm is because the distribution is exponential
+      val maxLikesLog = Math.log(allPages.maxBy(_.likesNumber).likesNumber)
+      analysedPages.map {
+        page =>
+          val diff = Math.log(page.likesNumber.toDouble) / maxLikesLog
+
+          page.pageId -> TypeDiffWithCluster(PageWhichLiked, diff)
+      }
+    } else {
+      List()
+    }
+  }
+
+  /**
+    * Computes difficulty of determining the like time of a page
+    * @param allPageLikes all the liked pages
+    * @param analysedPages the currently analysed pages
+    * @return difficulty mappings
+    */
+  private def pageLikeTimeDifficulty(allPageLikes: List[FBPageLike],
+                                     analysedPages: List[FBPage]): List[(String, TypeDiffWithCluster)] = {
+    val clusters = generatePageTimeClusters(allPageLikes)
+    analysedPages.map {
+      page =>
+        val id = page.pageId
+        clusters.find {
+          case (_, cluster) =>
+            cluster.contains(id)
+        }.fold(id -> TypeDiffWithCluster(PageLikeTime, 0.5)) {
+          case (clusterId, _) =>
+            id -> TypeDiffWithCluster(PageLikeTime, 1.0, Some(clusterId))
+        }
+    }
+  }
+
+  /**
+    * Cluster pages according to number of likes
+    * @param pages considered pages
+    * @return list of clusters
+    */
+  private def generateLikeClusters(pages: List[FBPage]): List[(Int, List[String])] = {
+    val minPts = 3
+    // from a knn plot
+    val eps = 0.43349
+    val clusterer = new SimpleValClusterer(eps, minPts)
+
+    val clusterables = pages.map(page => new PageLikesNumberClusterable(page))
+
+    val clusters = clusterer.cluster(clusterables)
+
+    clusters.zipWithIndex.map {
+      case (cluster, clusterId) =>
+        (clusterId, cluster.map(sVClusterable => sVClusterable.id))
+    }
+  }
+
+  /**
+    * Generates clusters of page likes according to like time
+    * @param pageLikes clustered pages likes
+    * @return list of clusters
+    */
+  private def generatePageTimeClusters(pageLikes: List[FBPageLike]): List[(Int, List[String])] = {
+    val dayMillis = 24L * 60 * 60 * 1000
+    // from a knn graph
+    val eps = dayMillis * 89.22
+
+    val minPts = 3
+    val clusterer = new TimeClusterer(eps, minPts)
+    val clusterables = pageLikes.map(page => new PageLikeTimeClusterable(page))
+    val clusters = clusterer.cluster(clusterables)
+
+    clusters.zipWithIndex.map {
+      case (cluster, clusterId) =>
+        (clusterId, cluster.map(tClusterable => tClusterable.id))
+    }
+  }
+
+}

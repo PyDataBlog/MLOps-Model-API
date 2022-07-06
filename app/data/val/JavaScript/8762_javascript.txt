@@ -1,0 +1,358 @@
+/*
+    Global variables
+*/
+var phonePort = 8666;
+var phoneIp;
+var phone;
+// Holds all the function objects with an id
+var callbacks = [];
+// Array with all the contacts by their id
+var contacts = [];
+// An array with all the favourites and their id
+var favourites = [];
+// An array with all the messages organised by id
+var messages = [];
+// Holds the id of the person with the current thread
+var currentThread;
+// Holds the number of the last message in the thread
+var lastMessageId;
+// Makes sure that the error text is added only one
+var errorText = false;
+// Keeps track whether user is looking at bottom of message box
+var onBottom = true;
+var lastPosition = 0;
+// When debug mode is on, logging will be verbose
+var debugMode = true;
+// Keeps track whether the websocket is open
+var websocketOpen = false;
+// DOM elements
+var container = document.getElementById("container");
+var messageBox = document.getElementById("messages");
+var sidebar = document.getElementById("sidebar");
+var statusBox = document.getElementById("status");
+var newMessageContent = document.getElementById("newMessageContent");
+var ipBox = document.getElementById("ipBox");
+var serverIpBox = document.getElementById("serverIp");
+
+/*
+    Other functions
+*/
+// Will only log to the console if debug mode is on
+console.debugLog = function(message) {
+    if (debugMode) {
+        console.log(message);
+    }
+}
+
+/*
+    DOM functions
+*/
+// Changes the color and text of the status div
+function changeStatusDiv(status) {
+    switch (status) {
+        case "connecting":
+            var message = "Connecting to server...";
+            var background = "yellow";
+            break;
+        case "connected":
+            var message = "Connected to server";
+            var background = "green";
+            break;
+        case "error":
+            var message = "Error when connecting to server. Make sure server is running";
+            var background = "red"
+            break;
+    }
+    statusBox.style.background = background;
+    statusBox.innerHTML = message;
+}
+
+// Loads all the favourites into the sidebar
+function loadFavourites() {
+    console.debugLog("[+] Adding favourites to the sidebar");
+    sidebar.innerHTML = "";
+    // Adds an element for each card
+    for (i in favourites) {
+        id = favourites[i][0];
+        name = favourites[i][1];
+        sidebar.innerHTML += '<div class="contactCard"><p class="contactCardName">' + name + '</p><div class="personId">' + id + '</div></div>';
+
+        // If it is the first time changing the favoutites it'll load a set of messages
+        if (currentThread == undefined) {
+            currentThread = id;
+        }
+    }
+
+    // Adds an event listener for each card
+    var contactCards = document.getElementsByClassName("contactCard");
+    for (i in contactCards) {
+        contactCards[i].onclick = function() {
+            contactCardClick(this);
+        }
+    }
+}
+
+// Adds a single message to the message box
+function addMessage(message, type) {
+    if (type == "r") {
+        messageBox.innerHTML += '<div class="message recieved">' + message + '</div>';
+    } else if (type == "s") {
+        messageBox.innerHTML += '<div class="message sent">' + message + '</div>';
+    }
+    // Will only move to the bottom if the user is looking at the bottom
+    if (onBottom) {
+        lastPosition = messageBox.scrollTop;
+        messageBox.scrollTop = messageBox.scrollHeight;
+    }
+}
+
+// Switches the current thread to the one that was clicked
+function refreshThread(personId) {
+    console.debugLog("[+] Switching thread to person: " + personId);
+    currentThread = personId;
+    messageBox.innerHTML = "";
+    // Add all the messages into the message box
+    for (i in messages[currentThread]) {
+        message = messages[currentThread][i];
+        addMessage(message[0], message[1]);
+    }
+}
+
+/*
+    DOM event listeners
+*/
+function contactCardClick(contactCard) {
+    var personId = contactCard.getElementsByClassName("personId")[0].innerHTML;
+    refreshThread(personId);
+}
+
+function inputKeyUp(event) {
+    if (event.key == "Enter") {
+        sendMessage(currentThread, newMessageContent.value);
+    }
+}
+
+messageBox.onscroll = function(event) {
+    if (messageBox.scrollTop < lastPosition) {
+        onBottom = false;
+    } else {
+        onBottom = true;
+    }
+    lastPosition = messageBox.scrollTop;
+}
+
+// Shows or hides the ip request box
+function showIpBox() {
+    container.classList.add("faded");
+    ipBox.style.display = "";
+    serverIpBox.focus();
+}
+function hideIpBox() {
+    ipBox.style.display = "none";
+    container.classList.remove("faded");
+}
+
+/*
+    Callback functions
+*/
+// Parses the contacts returned and saves them
+function contactListCallback(data) {
+    contacts = data;
+    for (i in contacts) {
+        messages.push([]);
+    }
+    requestFavourites();
+}
+
+// Parses the contacts returned and adds them to the sidebar
+function favouritesCallback(data) {
+    favourites = data;
+    loadFavourites();
+    startMessageLoop();
+}
+
+// Saves the messages and loads the messages into the message box
+function recentMessages(data) {
+    if (data != "no messages") {
+        for (i in data) {
+            for (j in data[i]) {
+                messages[i].push(data[i][j]);
+            }
+        }
+        refreshThread(currentThread);
+    }
+}
+
+// Logs that the message was sent
+function sentMessageCallback(data) {
+    console.debugLog("[+] Message was sent");
+    var personId = data[0];
+    var message = data[1];
+
+    messages[personId].push([message, "s"]);
+
+    // Adds the message to the message box its still on the same person
+    if (currentThread == personId) {
+        addMessage(message, "s");
+    }
+}
+
+/*
+    Phone request functions
+*/
+// Message loop
+function startMessageLoop() {
+    setInterval(function() {
+        requestRecentMessages(50);
+    }, 1000);
+}
+
+// Sends a message
+function sendMessage(personId, message) {
+    console.debugLog("[+] Sending a message to: " + personId);
+    // Clears the content straight away so there's no lag
+    newMessageContent.value = "";
+    phoneRequestData("sendMessage", personId + " " + message, sentMessageCallback);
+}
+
+// Sends a request for the contact list
+function requestContactList() {
+    console.debugLog("[+] Requesting contact list");
+    phoneRequestData("contacts", "", contactListCallback);
+}
+
+// Gets the favourite list
+function requestFavourites() {
+    console.debugLog("[+] Getting favourite list");
+    phoneRequestData("favourites", "", favouritesCallback);
+}
+
+// Sends a request for the recent messages
+function requestRecentMessages(amount) {
+    // So the message is only logged if it needs to be
+    if (websocketOpen) {
+        console.debugLog("[+] Requesting the past " + amount + " messages");
+        phoneRequestData("messages", amount, recentMessages);
+    }
+}
+
+/*
+    Phone interaction
+*/
+// Functions to be run when the first connection is messageSender
+function phoneInit() {
+    console.log("[+] Websocket connected");
+    websocketOpen = true;
+    changeStatusDiv("connected");
+    requestContactList();
+}
+
+// Sends a request to the phone
+function phoneRequestData(request, data, callback) {
+    if (websocketOpen) {
+        // Since an array is 0 based, the length will be the index of the next element
+        var callbackId = callbacks.length;
+        var payload = [];
+        payload.push(callbackId);
+        payload.push(request);
+        payload.push(data);
+        phone.send(JSON.stringify(payload));
+        callbacks.push(callback);
+        console.debugLog("[+] Data sent to server with Callback id: " + callbackId);
+    }
+}
+
+// Deals with incomming data
+function phoneMessage(data) {
+    console.debugLog("[+] Data recieved from server");
+    data = JSON.parse(data);
+    var callbackId = data[0];
+    data = data[1];
+    console.debugLog("[+] Running function with callback id: " + callbackId);
+    callbacks[callbackId](data);
+    console.debugLog("[+] Completed function with callback id: " + callbackId);
+}
+
+// Deals with errors in the connection
+function phoneError(data) {
+    changeStatusDiv("error");
+    console.error("[-] Error: " + data);
+}
+
+// Runs when the websocket closes
+function phoneClose() {
+    console.log("[-] Websocket has closed");
+    websocketOpen = false;
+    changeStatusDiv("error");
+}
+
+/*
+    A persistant function that will get the IP of the server from the user
+*/
+// Callback is a function to run when the ip is found, usually starting the server
+function loadIpBox(callback) {
+    showIpBox();
+    document.getElementById("ipEnter").onclick = function() {
+        ipBoxGo(callback);
+    }
+    ipBox.onkeydown = function(event) {
+        if (event.key == "Enter") {
+            ipBoxGo(callback);
+        }
+    }
+}
+
+// Ran when the box is pressed ok
+function ipBoxGo(callback) {
+    var ipText = serverIpBox.value;
+    var ipRegex = /\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/g;
+    var ipNumber = ipText.match(ipRegex);
+    // An ip address was found in the string
+    if (ipNumber != null) {
+        phoneIp = ipNumber[0];
+        hideIpBox();
+        // Runs the callback if the IP was required
+        callback();
+    } else { // Nothing was in the string
+        if (!errorText) {
+            var errorMessage = document.createElement("p");
+            errorMessage.className = "errorText";
+            errorMessage.innerText = "Please enter a valid IP address";
+            ipBox.append(errorMessage);
+            // Makes sure that the message is only added once
+            errorText = true;
+        }
+    }
+}
+
+/*
+    Phone event functions
+*/
+// Sets up the socket and event listeners
+function initSocket() {
+    console.log("[+] Initialising websocket");
+    changeStatusDiv("connecting");
+    phone = new WebSocket("ws://" + phoneIp + ":" + phonePort);
+
+    // Event listeners
+    phone.onopen = function() {
+        phoneInit();
+    }
+    phone.onmessage = function(event) {
+        phoneMessage(event.data);
+    }
+    phone.onerror = function(event) {
+        phoneError(event);
+    }
+    phone.onclose = function(event) {
+        phoneClose();
+    }
+}
+
+function init() {
+    loadIpBox(function() {
+        initSocket();
+    });
+}
+
+init();

@@ -1,0 +1,136 @@
+import { FindOneOptions } from 'typeorm'
+import { DeepPartialGraph } from 'objection'
+
+import BaseController, { RequestHandler } from './BaseController'
+import * as Models from '../../models/extprod'
+import User from '../../models/extprod/User'
+import { userSchema } from '../../models/extprod/schema'
+import { Builder, BuilderSingle } from '../../services/db/DBService'
+import UserService from '../../services/db/extprod/UserService'
+
+export default class UserController extends BaseController<
+	Models.User,
+	UserService
+> {
+	constructor() {
+		super(Models.User, userSchema)
+		this.service = new UserService()
+	}
+
+	getAll: RequestHandler = async (request, response) => {
+		interface Query {
+			groupId: Models.GroupId
+		}
+		const { groupId }: Query = request.query
+
+		const q = (builder: Builder<Models.User>) =>
+			groupId
+				? builder
+						.whereExists(
+							User.relatedQuery('groups').where('id', groupId)
+						)
+						.eager('groups')
+				: builder.eager('groups')
+
+		try {
+			const instances = await this.service.findAll(q)
+			const normalizedData = this.normalize(instances)
+			return response.send(normalizedData)
+		} catch (err) {
+			console.log(err)
+			return response.status(404).send(err)
+		}
+	}
+
+	get: RequestHandler = async (request, response) => {
+		const id: string = request.params.id as any
+		const q = (builder: BuilderSingle<Models.User>) =>
+			builder.eager(`[
+				notifications.[item.[itemRequest, itemPrototype, itemService]],
+				groups,
+				account,
+				department,
+				substitutes,
+				substituting.[groups],
+				supervisor
+			]`)
+
+		try {
+			let instance = await this.service.findById(id, q)
+			const normalizedData = this.normalize(instance)
+			return response.send(normalizedData)
+		} catch (err) {
+			console.log(err)
+			return response.status(404).send(err)
+		}
+	}
+
+	create: RequestHandler = async (request, response) => {
+		const data: DeepPartialGraph<Models.User> = request.body
+
+		try {
+			let instance = await this.service.patch(
+				{ ...data, siteId: 'prague' },
+				{ insertMissing: true }
+			)
+			const normalizedData = this.normalize(instance)
+			return response.send(normalizedData)
+		} catch (err) {
+			console.log(err)
+			return response.status(404).send(err)
+		}
+	}
+
+	clearNotifications: RequestHandler = async (request, response) => {
+		interface RequestParams {
+			id: string
+		}
+		const { id }: RequestParams = request.params as any
+
+		try {
+			const data = await this.service.patch({ id, notifications: [] })
+			const normalizedData = this.normalize(data)
+			return response.send(normalizedData)
+		} catch (error) {
+			const message = "Can't clear notifications of user"
+			console.log(message)
+			return response.status(400).send(message)
+		}
+	}
+
+	addSubstitute: RequestHandler = async (request, response) => {
+		interface RequestParams {
+			id: string
+			substituteId: string
+		}
+		const { id, substituteId }: RequestParams = request.params as any
+
+		try {
+			const data = await this.service.addSubstitute(id, substituteId)
+			const normalizedData = this.normalize(data)
+			return response.send(normalizedData)
+		} catch (error) {
+			const message = "Can't add user substitute"
+			console.log(message)
+			return response.status(400).send(message)
+		}
+	}
+
+	removeSubstitute: RequestHandler = async (request, response) => {
+		interface RequestParams {
+			id: string
+			substituteId: string
+		}
+		const { id, substituteId }: RequestParams = request.params as any
+
+		try {
+			const data = await this.service.removeSubstitute(id, substituteId)
+			const normalizedData = this.normalize(data)
+			return response.send(normalizedData)
+		} catch (error) {
+			const message = "Can't add user substitute"
+			console.log(message)
+			return response.status(400).send(message)
+		}
+	}
+}

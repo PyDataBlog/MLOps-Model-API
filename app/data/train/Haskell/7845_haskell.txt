@@ -1,0 +1,70 @@
+{-|
+Module      : Graphics.QML.Transient.Signal
+License     : BSD3
+Maintainer  : marcin.jan.mrotek@gmail.com
+Stability   : experimental
+
+Setup QML signals.
+-}
+
+{-# LANGUAGE
+    ConstraintKinds
+  , ExplicitForAll
+  , FlexibleContexts
+  , ScopedTypeVariables
+  , TypeFamilies
+  #-}
+
+module Graphics.QML.Transient.Signal 
+  ( module Graphics.QML.Transient.Signal
+  , GMkSignal
+  ) where
+
+import Graphics.QML.Transient.Internal
+import Graphics.QML.Transient.Internal.Signal
+import Graphics.QML.Transient.Internal.Types
+
+import Control.Monad.IO.Class
+import Control.Monad.Reader
+import Data.Proxy
+import GHC.Generics
+import Graphics.QML
+import Graphics.QML.Objects.ParamNames
+
+-- | A constraint synonym for types that can be used as an argument for a signal.
+type SignalArg t = 
+  ( Generic t
+  , GMkSignal (Rep t) 
+  , (SignalParamNames (Suffix (Rep t) (IO ())))
+  ~ (Params (Rep t) ())
+  , SignalSuffix (Suffix (Rep t) (IO ()))
+  )
+
+signal 
+ :: forall t. SignalArg t
+  => String
+  -> Build (t -> Qml ())
+-- ^Add a signal of with a given name, returning an action to fire it.
+signal name = do 
+  key <- liftIO newSignalKey
+  let (mkParamNames, mkSuffix) = gMkSignal p 
+  addMember 
+    . defSignalNamedParams name key 
+    $ mkParamNames noNames
+  return $ \t -> do
+    o <- ask
+    liftIO 
+      . mkSuffix (fireSignal key o) 
+      $ from t
+ where p :: Proxy (Rep t) = Proxy
+
+nullarySignal 
+  :: String
+  -> Build (Qml ())
+-- ^Add a signal of with a given name that doesn't take any arguments.
+nullarySignal name = do
+  key <- liftIO newSignalKey
+  addMember $ defSignal name key 
+  return $ do
+    o <- ask
+    liftIO $ fireSignal key o

@@ -1,0 +1,220 @@
+//
+//  Cluster.cpp
+//  ginseng
+//
+//  Created by Daniel Shiposha on 16/03/2018.
+//
+
+#include <ginseng/tefri/abstract/Cluster.h>
+#include <ginseng/tefri/abstract/Interactor.h>
+#include <ginseng/tefri/abstract/Source.h>
+#include <ginseng/tefri/Flow.h>
+
+#include <ginseng/tefri/exception/ClusterNotFound.h>
+#include <ginseng/tefri/exception/ClusterFinishingFailed.h>
+
+#include <ginseng/tefri/implementation/MultipleFlowCompleterExecutor.h>
+
+#include <ginseng/util/Util.h>
+
+#include <map>
+#include <vector>
+#include <list>
+
+namespace ginseng::tefri::abstract
+{
+    namespace implementation
+    {
+        std::map<std::string, ::ginseng::tefri::abstract::Cluster> registered_clusters;
+        util::concurrent::Syncable clusters_syncable;
+        
+        class Cluster
+        {
+        public:
+            Cluster()
+            : is_enabled(new bool(true)),
+            eraser(complete([&]
+            {
+                implementation::clusters_syncable.sync([&]
+                {
+                    implementation::registered_clusters.erase(name);
+                });
+
+				is_finished = true;
+            }))
+            {}
+            
+            Root<bool>::Pointer is_enabled;
+            std::string name;
+            
+            ::ginseng::tefri::implementation::MultipleFlowCompleterExecutor eraser;
+            std::vector<::ginseng::tefri::abstract::Interactor *> interactors;
+            std::list<ginseng::tefri::abstract::Source *> sources;
+            
+			bool is_finished = false;
+        };
+        
+        std::map<std::string, ::ginseng::tefri::abstract::Cluster>::iterator get_cluster(const std::string &name)
+        {
+            auto result = registered_clusters.find(name);
+            if (result == registered_clusters.end())
+                throw ::ginseng::tefri::exception::ClusterNotFound(name);
+        
+            return result;
+        }
+
+		bool is_cluster_exists(const std::string &name)
+		{
+			return registered_clusters.count(name) > 0;
+		}
+        
+        util::concurrent::Syncable &get_registered_clusters_syncable()
+        {
+            return clusters_syncable;
+        }
+    }
+    
+    Cluster::Cluster()
+    : self(new implementation::Cluster())
+    {}
+    
+    Cluster::Cluster(const Cluster &other)
+    : self(other.self)
+    {}
+    
+    Cluster::Cluster(Cluster &&other)
+    : self(std::move(other.self))
+    {}
+    
+    Cluster::~Cluster()
+    {}
+    
+    bool Cluster::is_enabled() const
+    {
+        return *self->is_enabled;
+    }
+    
+    bool Cluster::is_disabled() const
+    {
+        return !is_enabled();
+    }
+    
+    void Cluster::enable()
+    {
+        sync([&]
+        {
+            *self->is_enabled = true;
+        });
+    }
+    
+    void Cluster::disable()
+    {
+        sync([&]
+        {
+            *self->is_enabled = false;
+        });
+    }
+    
+    void Cluster::finish()
+    {
+        sync([&]
+        {
+			if (self->is_finished)
+				return;
+
+			if (self->sources.empty())
+			{
+				implementation::clusters_syncable.sync([&]
+				{
+					implementation::registered_clusters.erase(self->name);
+				});
+
+				return;
+			}
+            
+            *self->is_enabled = false;
+            
+            bool is_interactor_removed = true;
+            for (auto &&interactor : self->interactors)
+            {
+                for(auto &&source : self->sources)
+                    if((is_interactor_removed = source->remove_interactor(*interactor)))
+                        break;
+                
+                if(!is_interactor_removed)
+                    throw exception::ClusterFinishingFailed();
+            }
+            
+            self->is_finished = true;
+        });
+        
+        implementation::clusters_syncable.sync([&]
+        {   
+            implementation::registered_clusters.erase(self->name);
+        });
+    }
+    
+    void Cluster::register_cluster(const std::string &name, Cluster &cluster)
+    {
+        implementation::clusters_syncable.sync([&]
+        {
+            auto exist_iterator = implementation::registered_clusters.find(name);
+            if (exist_iterator != implementation::registered_clusters.end())
+            {
+                cluster.self = exist_iterator->second.self;
+                return;
+            }
+            
+            auto iterator = implementation::registered_clusters.insert(std::pair<std::string, Cluster>(name, cluster));
+            
+            if(iterator.first->second.self->name.empty())
+                iterator.first->second.self->name = name;
+        });
+    }
+    
+    void Cluster::add_interactor(Interactor &interactor)
+    {
+        sync([&]
+        {
+            self->interactors.push_back(&interactor);
+        });
+    }
+    
+    void Cluster::add_source(Source &source)
+    {
+        sync([&]
+        {
+            if(std::find(self->sources.begin(), self->sources.end(), &source) != self->sources.end())
+                return;
+            
+            self->sources.push_back(&source);
+            self->eraser.increase_flow_count();
+            auto eraser = self->eraser;
+            
+            auto completer = complete([eraser]() mutable
+            {
+                eraser();
+            });
+            
+			auto self_copy = self;
+            auto source_remover = complete([self_copy, &source]
+            {
+				self_copy->sources.erase
+                (
+                    std::remove(self_copy->sources.begin(), self_copy->sources.end(), &source),
+					self_copy->sources.end()
+                );
+            });
+            
+            self->interactors.push_back(completer.get());
+            self->interactors.push_back(source_remover.get());
+            
+            flow(source) >> completer, source_remover;
+        });
+    }
+    
+    Root<bool>::Pointer Cluster::get_state_variable() const
+    {
+        return self->is_enabled;
+    }
+}

@@ -1,0 +1,53 @@
+Import-Module -Name BurntToast
+Import-Module -Name PSProcess -Force
+$global:testOnly = $false
+$global:OutdatedChocoPackages = '' 
+$global:OutdatedScoopPackages = '' 
+
+function New-PackageManageNotification() {
+  param(
+    [CmdletBinding()]
+    [ValidateSet('Scoop','Choco')]
+    [string] $Manager = 'Choco'
+  )
+  $imagePath = "$env:ChocolateyInstall\lib\choco-cleaner\tools\choco-cleaner.ico"
+  $title = ($global:OutdatedChocoPackages -ne '') ? "Outdated $Manager packages were found" : "Installed $Manager packages are up to date" 
+  Write-Host "[$($MyInvocation.MyCommand.Name)] $title."
+
+  Write-Host "[$($MyInvocation.MyCommand.Name)] Show Toast Notification: $title" -ForegroundColor Blue
+  $head = New-BTHeader -Title "$title" 
+
+  $url="Start-UpdateChoco.ps1 -Manager $Manager -Packages '$global:OutdatedChocoPackages' -WhatIf:`$$global:testOnly"
+  $protokoll_url = [System.Web.HTTPUtility]::UrlEncode($url)
+  $updateBtn = New-BTButton -Content 'Update' -ActivationType Protocol -Arguments "ps1://$protokoll_url"
+  $dismissBtn = New-BTButton -Dismiss
+  $snoozeBtn = New-BTButton -Snooze
+
+  if ($global:OutdatedChocoPackages -ne '') {
+    New-BurntToastNotification -Button @( $updateBtn, $dismissBtn, $snoozeBtn ) -Header $head -AppLogo $imagePath -Text "Click button to update:", "$global:OutdatedChocoPackages" 
+  } else {
+    New-BurntToastNotification -Header $head -AppLogo $imagePath -Text "Nothing to do."
+  }
+  Pop-Location
+}
+
+Write-Host "[$($MyInvocation.MyCommand.Name)] Looking for outdated packages..."
+
+if (-not $global:testOnly) {
+  $outdatedChocos = (choco outdated --limit-output | Select-String '^([^|]+)|.*$').Matches | ForEach-Object {$_.Value}
+
+  $scoopMatch=(scoop status | Select-String '^\s+(.*):.*->.*$' ).Matches
+  $outdatedScoops = $null -ne $scoopMatch ? ($scoopMatches.Groups[1] | ForEach-Object {$_.Value}) : @{} 
+}
+if ($outdatedChocos.count -gt 0) {
+  $global:OutdatedChocoPackages = ($outdatedChocos -join ' ')
+  New-PackageManagerNotification -Manager 'Choco'
+}
+
+if ($outdatedScoops.count -gt 0) {
+  $global:OutdatedScoopPackages = ($outdatedScoops -join ' ')
+  New-PackageManagerNotification -Manager 'Scoop'
+}
+
+
+Write-Host "[$($MyInvocation.MyCommand.Name)] End."

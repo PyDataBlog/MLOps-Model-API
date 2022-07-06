@@ -1,0 +1,45 @@
+﻿import-module hyper-v
+
+$tp = '2012R2'
+$baseName = "@Base1"
+
+$path = Split-Path $MyInvocation.MyCommand.path
+
+get-vm  | ? { $_.name -like "$($BaseName)-$($tp)-*" } | % {
+    $vm = $_
+    $sys = Get-VMHardDiskDrive -VM $vm | ? { (split-path $_.Path -leaf) -like "hdd_system*"}
+
+    $m = Mount-VHD -Path $sys.path -Passthru
+
+    $b = $m | get-disk | Get-Partition | ? { $_.Type -eq "Basic"}
+
+    $d = $b.DriveLetter
+
+    $run = $false
+    if( (Test-Path "$($path)\$($vm.Name)\RunConfig.ps1") ) {
+        get-childitem "$($d):\_root\_setupTools" | remove-item -Force -Confirm:$false -Verbose
+
+        Get-ChildItem  "$($path)\..\_setupTools_$($baseName)" | % {
+            $i = $_
+            copy-item $i.FullName -Destination "$($d):\_root\_setupTools\$($i.Name)" -Force -Confirm:$false -Verbose
+        }
+
+        Copy-Item -path "$($path)\$($vm.Name)\RunConfig.ps1" -Destination "$($d):\_root\_setupTools\RunConfig.ps1" -Force -Confirm:$false
+        $run = $true
+    }
+
+    Dismount-VHD $sys.path
+
+    if($run) {
+
+        start-vm $vm
+    
+        Get-VMIntegrationService -vm $vm | ?{ !$_.enabled } | % { Enable-VMIntegrationService -VM $vm -Name $_.Name}
+
+        while( $vm.State -eq "Running" ) {
+            Start-Sleep -s 10
+        }
+    } else {
+	exit
+    }
+}

@@ -1,0 +1,97 @@
+package ch.bisi.koukan.job;
+
+import ch.bisi.koukan.provider.XMLExchangeRatesProvider;
+import ch.bisi.koukan.repository.DataAccessException;
+import ch.bisi.koukan.repository.ExchangeRatesRepository;
+import java.io.IOException;
+import java.io.InputStream;
+import java.net.URL;
+import javax.xml.stream.XMLInputFactory;
+import javax.xml.stream.XMLStreamException;
+import javax.xml.stream.XMLStreamReader;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.stereotype.Component;
+
+/**
+ * Executes scheduled tasks for updating the in memory exchange rates
+ * by querying the European Central Bank endpoints.
+ */
+@Component
+public class ECBDataLoaderScheduler {
+
+  private static final Logger logger = LoggerFactory.getLogger(ECBDataLoaderScheduler.class);
+
+  private final XMLExchangeRatesProvider xmlExchangeRatesProvider;
+  private final ExchangeRatesRepository exchangeRatesRepository;
+  private final URL dailyEndpoint;
+  private final URL pastDaysEndpoint;
+
+  /**
+   * Instantiates a new {@link ECBDataLoaderScheduler}.
+   *
+   * @param xmlExchangeRatesProvider the provider of exchange rates
+   * @param exchangeRatesRepository the repository
+   * @param dailyEndpoint the ECB daily endpoint {@link URL}
+   * @param pastDaysEndpoint the ECB endpoint {@link URL} for retrieving past days data
+   */
+  @Autowired
+  public ECBDataLoaderScheduler(
+      @Qualifier("ECBProvider") final XMLExchangeRatesProvider xmlExchangeRatesProvider,
+      final ExchangeRatesRepository exchangeRatesRepository,
+      @Qualifier("dailyEndpoint") final URL dailyEndpoint,
+      @Qualifier("pastDaysEndpoint") final URL pastDaysEndpoint) {
+    this.xmlExchangeRatesProvider = xmlExchangeRatesProvider;
+    this.exchangeRatesRepository = exchangeRatesRepository;
+    this.dailyEndpoint = dailyEndpoint;
+    this.pastDaysEndpoint = pastDaysEndpoint;
+  }
+
+  /**
+   * Retrieves the whole exchange rates daily data.
+   *
+   * @throws IOException in case of the problems accessing the ECB endpoint
+   * @throws XMLStreamException in case of problems parsing the ECB XML
+   * @throws DataAccessException in case of problems accessing the underlying data
+   */
+  @Scheduled(initialDelay = 0, fixedRateString = "${daily.rates.update.rate}")
+  public void loadDailyData() throws IOException, XMLStreamException, DataAccessException {
+    try (final InputStream inputStream = dailyEndpoint.openStream()) {
+      logger.info("Updating ECB daily exchange rates data");
+      loadData(inputStream);
+    }
+  }
+
+  /**
+   * Retrieves the whole exchange rates data for past days.
+   *
+   * @throws IOException in case of the problems accessing the ECB endpoint
+   * @throws XMLStreamException in case of problems parsing the ECB XML
+   * @throws DataAccessException in case of problems accessing the underlying data
+   */
+  @Scheduled(initialDelay = 0, fixedRateString = "${past.days.rates.update.rate}")
+  public void loadPastDaysData() throws IOException, XMLStreamException, DataAccessException {
+    try (final InputStream inputStream = pastDaysEndpoint.openStream()) {
+      logger.info("Updating ECB exchange rates data for the past 90 days");
+      loadData(inputStream);
+    }
+  }
+
+  /**
+   * Loads exchange rates data from the given {@link InputStream}.
+   *
+   * @param inputStream the {@link InputStream}
+   * @throws XMLStreamException in case of problems parsing the ECB XML
+   * @throws DataAccessException in case of problems accessing the underlying data
+   */
+  private void loadData(final InputStream inputStream)
+      throws XMLStreamException, DataAccessException {
+    final XMLStreamReader xmlStreamReader = XMLInputFactory.newInstance()
+        .createXMLStreamReader(inputStream);
+    exchangeRatesRepository.save(xmlExchangeRatesProvider.retrieveAll(xmlStreamReader));
+  }
+
+}

@@ -1,0 +1,99 @@
+package page
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/ioutil"
+	"os"
+	"path/filepath"
+	"strings"
+)
+
+type ParsedPage struct {
+	Body       string
+	Variables  map[string]string
+	SourceFile os.FileInfo
+	Err        error
+}
+
+const separator = "\n---\n"
+const numPageParts = 2
+
+func (page ParsedPage) String() string {
+	cleanString := func(toClean string) string {
+		return strings.NewReplacer("\n", "", "\r\n", "").Replace(toClean)
+	}
+
+	cleanedVariables := make(map[string]string)
+	for key, value := range page.Variables {
+		cleanedVariables[key] = cleanString(value)
+	}
+
+	cleanedBody := cleanString(page.Body)
+
+	parts := []string{"Page", "----", "Variables: %v", "Body: %v", "SourceFile: %v"}
+
+	return fmt.Sprintf(strings.Join(parts, "\n"), cleanedVariables, cleanedBody, page.SourceFile)
+}
+
+func ReadPages(pageDir string) ([]ParsedPage, []error) {
+	errorsArray := make([]error, 0)
+
+	pageDirObj, err := os.Open(pageDir)
+	if err != nil {
+		return nil, append(errorsArray, err)
+	}
+
+	pageDirFiles, err := pageDirObj.Readdir(-1)
+	if err != nil {
+		return nil, append(errorsArray, err)
+	}
+
+	numPages := len(pageDirFiles)
+
+	parsedPages := make([]ParsedPage, numPages)
+	parsedPagesChannel := make(chan *ParsedPage, numPages)
+
+	for _, fileInfo := range pageDirFiles {
+		go func(fileInfo os.FileInfo) {
+			var body string
+			var variables map[string]string
+
+			filePath := filepath.Join(pageDir, fileInfo.Name())
+			fileContents, err := ioutil.ReadFile(filePath)
+
+			if err == nil {
+				splitFileContents := bytes.SplitN(fileContents, []byte(separator), numPageParts)
+				if len(splitFileContents) != numPageParts {
+					err = errors.New(fmt.Sprintf("Could not find separator in page %v", fileInfo.Name))
+				} else {
+					variables = make(map[string]string)
+					err = json.Unmarshal(splitFileContents[0], &variables)
+					if err != nil {
+						variables = nil
+					} else {
+						body = string(splitFileContents[1])
+					}
+				}
+			}
+
+			parsedPagesChannel <- &ParsedPage{Body: body, Variables: variables, SourceFile: fileInfo, Err: err}
+		}(fileInfo)
+	}
+
+	for i := 0; i < numPages; i++ {
+		parsedPage := <-parsedPagesChannel
+		parsedPages[i] = *parsedPage
+		if parsedPage.Err != nil {
+			errorsArray = append(errorsArray, parsedPage.Err)
+		}
+	}
+
+	if len(errorsArray) == 0 {
+		errorsArray = nil
+	}
+
+	return parsedPages, errorsArray
+}

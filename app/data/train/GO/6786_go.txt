@@ -1,0 +1,76 @@
+package servicecontrol
+
+import (
+	"log"
+	"os"
+)
+
+var (
+	sshServiceName     = "ssh"
+	disableSshFilename = "/etc/ssh/sshd_not_to_be_run"
+)
+
+type SshService struct {
+	defaults *ServiceControlSettings
+}
+
+func getSshSettings() *ServiceControlSettings {
+	// Determine current state based on existence of the disable file.
+	is_enabled := true
+	info, _ := os.Stat(disableSshFilename)
+	if info != nil {
+		is_enabled = false
+	}
+
+	return &ServiceControlSettings{
+		Enabled: is_enabled,
+	}
+}
+
+func NewSshService() *SshService {
+	return &SshService{
+		defaults: getSshSettings(),
+	}
+}
+
+func (s *SshService) IsAvailable() bool {
+	return true
+}
+
+func (s *SshService) GetDefaults() *ServiceControlSettings {
+	return s.defaults
+}
+
+func (s *SshService) ApplySettings(settings *ServiceControlSettings) error {
+	var action string
+	running, statusErr := isServiceRunning(sshServiceName)
+	if settings.Enabled {
+		if running && statusErr == nil {
+			return nil
+		}
+
+		action = "start"
+		if err := removeFile(disableSshFilename); err != nil {
+			log.Println("Could not enable ssh service", err)
+		}
+	} else {
+		if !running && statusErr == nil {
+			return nil
+		}
+
+		action = "stop"
+		if err := touchFile(disableSshFilename); err != nil {
+			log.Println("Could not disable ssh service", err)
+		}
+	}
+
+	return runServiceCommand(sshServiceName, action)
+}
+
+func (s *SshService) QuerySettings() (*ServiceControlSettings, error) {
+	return getSshSettings(), nil
+}
+
+func init() {
+	RegisterService("ssh", NewSshService())
+}

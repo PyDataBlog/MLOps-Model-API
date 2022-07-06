@@ -1,0 +1,3 @@
+INSERT INTO expenses (expense_Id, expenseList_Id, cost, tax, object, dateIncurred, personclaimed, source, quantity) values ('EX0', 'E008', 9.76, 0, 'Nothing Really' , TO_DATE('4/17/16', 'MM/DD/YYYY'), 'RS0', 'Nowhere', 42 );
+INSERT INTO expenses (expense_Id, expenseList_Id, cost, tax, object, dateIncurred, personclaimed, source, quantity) values ('EX1', 'E008', 10.24, 0, 'Fake Data' , TO_DATE('4/17/16', 'MM/DD/YYYY'), 'RS0', 'Thin Air', 1 );
+INSERT INTO expenses (expense_Id, expenseList_Id, cost, tax, object, dateIncurred, personclaimed, source, quantity) values ('EX2', 'E018', 42.72, 0, 'Unreal Object' , TO_DATE('4/17/16', 'MM/DD/YYYY'), 'RS0', 'Utopia', 1 );

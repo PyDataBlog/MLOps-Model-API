@@ -1,0 +1,93 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Text;
+using System.Windows;
+using System.Management;
+using System.Threading;
+using System.Windows.Forms;
+using CommandLine;
+using CommandLine.Text;
+
+namespace BatteryMonitor
+{
+    class Program
+    {
+        private const uint NotCharging = 1;
+        private const uint Charging = 2;
+
+        class Options
+        {
+            [Option('p', "polling", Required = false, DefaultValue = 60,
+              HelpText = "Time to wait before polling battery level")]
+            public int PollingTime { get; set; }
+
+            [Option('m', "min", Required = false, DefaultValue = 40,
+              HelpText = "Minimum battery level")]
+            public int MinBatteryLevel { get; set; }
+
+            [Option('x', "max", Required = false, DefaultValue = 80,
+              HelpText = "Maximum battery level")]
+            public int MaxBatteryLevel { get; set; }
+
+            [ParserState]
+            public IParserState LastParserState { get; set; }
+
+            [HelpOption]
+            public string GetUsage()
+            {
+                return HelpText.AutoBuild(this,
+                  (HelpText current) => HelpText.DefaultParsingErrorsHandler(this, current));
+            }
+        }
+
+        static void Main(string[] args)
+        {
+            var options = new Options();
+            if (CommandLine.Parser.Default.ParseArguments(args, options))
+            {
+                int pollingTimeMillis = options.PollingTime * 1000;
+                while (true)
+                {
+                    System.Management.ObjectQuery query =
+                        new ObjectQuery("Select EstimatedChargeRemaining, BatteryStatus FROM Win32_Battery");
+                    ManagementObjectSearcher searcher = new ManagementObjectSearcher(query);
+                    ManagementObjectCollection collection = searcher.Get();
+
+                    ushort batteryChargeRemaining = 0;
+                    ushort batteryStatus = 0;
+                    foreach (ManagementObject mo in collection)
+                    {
+                        foreach (PropertyData property in mo.Properties)
+                        {
+                            if (property.Name.Equals("EstimatedChargeRemaining"))
+                            {
+                                batteryChargeRemaining = (ushort) property.Value;
+                            }
+
+                            if (property.Name.Equals("BatteryStatus"))
+                            {
+                                batteryStatus = (ushort) property.Value;
+                            }
+                        }
+                    }
+
+                    if ((batteryChargeRemaining > options.MaxBatteryLevel) && (batteryStatus == Charging))
+                    {
+                        DialogResult result =
+                            System.Windows.Forms.MessageBox.Show(
+                                batteryChargeRemaining + "% is enough. Stop recharging.", "Battery Monitor");
+                    }
+                    else if ((batteryChargeRemaining < options.MinBatteryLevel) && (batteryStatus == NotCharging))
+                    {
+                        DialogResult result =
+                            System.Windows.Forms.MessageBox.Show(
+                                batteryChargeRemaining + "% is too low. Start recharging.", "Battery Monitor");
+                    }
+
+                    // Wait before polling again for battery level
+                    Thread.Sleep(pollingTimeMillis);
+                }
+            }
+        }
+    }
+}
