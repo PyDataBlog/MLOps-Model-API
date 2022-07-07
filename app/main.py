@@ -6,6 +6,7 @@ import logging.config
 import uvicorn
 import yaml
 import tensorflow as tf
+from starlette_prometheus import metrics, PrometheusMiddleware
 from fastapi import FastAPI, Request
 from typing import Dict, Union
 
@@ -14,7 +15,7 @@ from app.utils import lang_mappings, Prediction, Features
 
 
 # Detect if GPU is available
-if tf.test.is_gpu_available():
+if tf.config.list_physical_devices("GPU"):
     os.environ["TF_FORCE_GPU_ALLOW_GROWTH"] = "true"
 
 # Load logging config
@@ -34,6 +35,10 @@ app = FastAPI(
     description="A simple demo API for serving a trained ML model using Minikube",
     version="0.1.0",
 )
+
+# Add Prometheus metrics as middleware
+app.add_middleware(PrometheusMiddleware)
+app.add_route("/metrics", metrics)
 
 
 @app.get("/")

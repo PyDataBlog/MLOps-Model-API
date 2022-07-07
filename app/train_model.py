@@ -1,4 +1,6 @@
 import os
+import sys
+import pathlib
 import logging
 import tensorflow as tf
 from typing import Dict, Tuple
@@ -6,6 +8,7 @@ from tensorflow.keras import layers
 from tensorflow.keras import losses
 from tensorflow.keras.layers import TextVectorization
 
+sys.path.append(str(pathlib.Path(__file__).parent.parent))
 
 logger = logging.getLogger(__name__)
 
@@ -20,7 +23,7 @@ test_ds = tf.keras.utils.text_dataset_from_directory("app/data/test", batch_size
 
 class_mappings = {num: lbl for num, lbl in enumerate(train_ds.class_names)}
 
-vectorizer = TextVectorization(max_tokens=20_000, output_mode="binary", ngrams=1)
+vectorizer = TextVectorization(max_tokens=20_000, output_mode="binary", ngrams=2)
 
 train_text = train_ds.map(lambda text, label: text)
 with tf.device("CPU"):
@@ -55,7 +58,7 @@ def generate_model(train_set: tf.data.Dataset, val_set: tf.data.Dataset, test_se
 
     model.compile(loss=losses.SparseCategoricalCrossentropy(), optimizer="adam", metrics=["accuracy"])
 
-    history = model.fit(train_set, validation_data=val_set, epochs=4)
+    model.fit(train_set, validation_data=val_set, epochs=5)
 
     test_loss, test_acc = model.evaluate(test_set)
     logger.info(f"Vectorization test loss: {test_loss}, Vectorizatio test accuracy: {test_acc}")
