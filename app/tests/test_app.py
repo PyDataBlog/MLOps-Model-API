@@ -15,9 +15,9 @@ def test_root(client):
 
 
 def test_predict(client):
-    response = client.post("/predict", json={"code_snippet": "'#include <string>'"})
+    response = client.post("/predict", json={"code_snippet": "import pandas as pd"})
     assert response.status_code == 200
     results = response.json()
-    assert results["predicted_class"] == 3
-    assert results["predicted_language"] == "C++"
-    assert round(results["predicted_value"], 4) == 0.3762
+    assert results["predicted_class"] == 21
+    assert results["predicted_language"] == "Python"
+    assert round(results["predicted_value"], 4) == 0.5934
