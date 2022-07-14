@@ -5,7 +5,7 @@ FROM nvidia/cuda:11.7.0-base-ubuntu22.04
 WORKDIR /src
 
 # Install pip
-RUN apt-get update && apt-get install -y pip
+# RUN apt-get update && apt-get install -y pip
 
 # Copy the pkg requirements
 COPY requirements.txt .
